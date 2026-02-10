@@ -1,1 +1,0 @@
-All accompanying files in the folder have also been deleted.
