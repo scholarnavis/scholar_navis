@@ -1,0 +1,41 @@
+[project]
+name = "scholar-navis"
+version = "0.1.0"
+description = "Scholar Navis Knowledge Base"
+readme = "README.md"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "chromadb>=1.5.0",
+    "einops>=0.8.2",
+    "langchain>=1.2.9",
+    "langchain-community>=0.4.1",
+    "langchain-huggingface>=1.2.0",
+    "langchain-text-splitters>=1.1.0",
+    "markdown>=3.10.2",
+    "matplotlib>=3.10.8",
+    "networkx>=3.6.1",
+    "openai>=2.18.0",
+    "pymupdf>=1.26.7",
+    "pypdf>=6.7.0",
+    "pyqtdarktheme>=2.1.0",
+    "pyside6>=6.10.2",
+    "scikit-learn>=1.8.0",
+    "sentence-transformers>=5.2.2",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "psutil>=7.2.2",
+    "hf-xet>=1.2.0",
+    "nvidia-ml-py>=13.590.48",
+    "pymupdf4llm>=0.2.9",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
