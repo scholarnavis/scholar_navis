@@ -1,8 +1,11 @@
+import functools
 import json
 import os
 import re
+import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
+import langdetect
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QCheckBox)
@@ -11,6 +14,7 @@ from PySide6.QtGui import QDesktopServices
 
 from huggingface_hub import snapshot_download
 from chromadb.utils import embedding_functions
+from langdetect import detect
 
 from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.rerank_engine import RerankEngine
@@ -29,7 +33,32 @@ from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.pill_button import FollowUpPillButton
 
 
-# ... (AutoResizingTextEdit 和 ChatInputContainer 保持不变，直接看 ChatWorker) ...
+@functools.lru_cache(maxsize=128)
+def get_cached_translation(text, direction="to_en", llm_instance=None):
+    if not llm_instance: return text
+
+    if direction == "to_en":
+        prompt = (
+            "You are an expert bioinformatician and translator. "
+            "Translate the following user query into precise academic English. "
+            "CRITICAL: DO NOT translate or alter any Latin taxonomic names (e.g., Gossypium, Arabidopsis) "
+            "or scientific abbreviations (e.g., scRNA-seq, qPCR). "
+            "Output ONLY the translated English text, nothing else."
+        )
+    else:
+        prompt = (
+            "You are an expert academic translator. Translate the following English text "
+            "into the language of the user's original query. \n"
+            "CRITICAL RULES:\n"
+            "1. KEEP ALL CITATION TAGS INTACT (e.g., [1], [2]).\n"
+            "2. DO NOT translate Latin taxonomic names (e.g., Gossypium) or scientific abbreviations.\n"
+            "3. PRESERVE all Markdown formatting, bolding, and structure.\n"
+        )
+
+    return llm_instance.chat([
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": text}
+    ]).strip()
 
 class AutoResizingTextEdit(QPlainTextEdit):
     sig_send = Signal()
@@ -131,6 +160,20 @@ class ChatInputContainer(QFrame):
         self.btn_stop.setVisible(False)
         self.bottom_bar.addWidget(self.btn_stop)
 
+        # 重试按钮
+        self.btn_retry = QPushButton("🔄 重试")
+        self.btn_retry.setCursor(Qt.PointingHandCursor)
+        self.btn_retry.setFixedSize(70, 32)
+        self.btn_retry.setStyleSheet("""
+                    QPushButton { 
+                        background-color: #ff9800; color: white; border-radius: 6px; 
+                        font-weight: bold; font-family: 'Microsoft YaHei';
+                    }
+                    QPushButton:hover { background-color: #f57c00; }
+                """)
+        self.btn_retry.setVisible(False)
+        self.bottom_bar.addWidget(self.btn_retry)
+
         main_layout.addLayout(self.bottom_bar)
 
         self.btn_send.clicked.connect(self._emit_send)
@@ -165,31 +208,70 @@ class ChatWorker(QObject):
     sig_finished = Signal()
     sig_error = Signal(str)
 
-    def __init__(self, llm_config, messages, kb_id, use_thinking_model=False):
+    def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False,
+                 use_thinking_model=False):
         super().__init__()
-        self.llm_config = llm_config
+        self.main_config = main_config
+        self.trans_config = trans_config
         self.messages = messages
         self.kb_id = kb_id
+        self.requires_translation = requires_translation
+        self.use_thinking_model = use_thinking_model
+
         self.db = DatabaseManager()
         self.kb_manager = KBManager()
         self.reranker = RerankEngine()
         self.full_response_cache = ""
 
+        # 实例长连接缓存
+        self.main_llm = None
+        self.trans_llm = None
+
     def cancel(self):
-        if self.llm_instance: self.llm_instance.cancel()
+        if self.main_llm: self.main_llm.cancel()
+        if self.trans_llm: self.trans_llm.cancel()
+
+    def _init_llms(self):
+        """初始化主模型与翻译模型池"""
+        if self.main_config and not self.main_llm:
+            cfg = self.main_config.copy()
+            if self.use_thinking_model and cfg.get("thinking_model_name"):
+                cfg["model_name"] = cfg["thinking_model_name"]
+            self.main_llm = OpenAICompatibleLLM(cfg)
+
+        if self.requires_translation and self.trans_config and not self.trans_llm:
+            self.trans_llm = OpenAICompatibleLLM(self.trans_config)
 
     def run(self):
         try:
-            user_query = self.messages[-1]['content']
+            self._init_llms()
+            original_user_query = self.messages[-1]['content']
+            search_query = original_user_query
+
             if not self.kb_id:
                 self.sig_error.emit("No Knowledge Base ID provided.")
-                self.sig_finished.emit()
                 return
 
             kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
             if not kb_info: return
 
-            # === 核心修复：显式加载模型，不依赖 DatabaseManager 自动推断 ===
+            # ==========================================
+            # 阶段一：Query 提取与翻译 (缓存加速)
+            # ==========================================
+            if self.requires_translation:
+                self.sig_token.emit("<i>🌐 正在将您的问题翻译为学术英语以进行精准检索...</i>\n\n")
+                try:
+                    search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm)
+                except Exception as e:
+                    self.sig_error.emit(f"翻译模型请求失败，请检查翻译 API 配置。\n详细错误: {e}")
+                    return
+
+            self.sig_token.emit("[CLEAR_SEARCH]")
+            self.sig_token.emit("<i>🔍 正在加载向量模型并检索本地文献...</i>\n\n")
+
+            # ==========================================
+            # 阶段二：显式加载 Embedding 模型并进行向量检索
+            # ==========================================
             model_id = kb_info.get('model_id', 'embed_auto')
             user_pref = ConfigManager().user_settings.get("inference_device", "Auto")
             target_device = DeviceManager().parse_device_string(user_pref)
@@ -202,13 +284,11 @@ class ChatWorker(QObject):
             repo_id = conf.get('hf_repo_id')
 
             try:
-                # 尝试加载路径
                 try:
                     model_path = snapshot_download(repo_id=repo_id, local_files_only=True)
                 except:
                     model_path = snapshot_download(repo_id=repo_id)
 
-                # 显式初始化
                 embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
                     model_name=model_path,
                     device=target_device,
@@ -216,16 +296,14 @@ class ChatWorker(QObject):
                     normalize_embeddings=True
                 )
 
-                # 注入 switch_kb
                 if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
                     self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
                     return
-
             except Exception as e:
                 self.sig_error.emit(f"Critical Model Error: {str(e)}")
                 return
-            # =========================================================
 
+            # 多路召回扩展
             domain = kb_info.get('domain', 'General Academic')
             history_context = ""
             if len(self.messages) >= 3:
@@ -233,13 +311,11 @@ class ChatWorker(QObject):
                 history_context = f" (Context: {prev_assistant})"
 
             expanded_queries = [
-                user_query,
-                f"{user_query}{history_context}",
-                f"{domain} context: {user_query} research details",
-                f"{user_query} references bibliography citations",
+                search_query,
+                f"{search_query}{history_context}",
+                f"{domain} context: {search_query} research details",
+                f"{search_query} references bibliography citations",
             ]
-
-            self.sig_token.emit("<i>🔍 Integrating history & searching database...</i>\n\n")
 
             candidate_docs = []
             seen_contents = set()
@@ -261,9 +337,12 @@ class ChatWorker(QObject):
                                 "v_dist": distances[i]
                             })
 
+            # ==========================================
+            # 阶段三：Reranker 语义重排与 Context 组装
+            # ==========================================
             if candidate_docs:
                 candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:45]
-                final_docs = self.reranker.rerank(user_query, candidate_docs, domain=domain, top_k=15)
+                final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=15)
             else:
                 final_docs = []
 
@@ -273,7 +352,6 @@ class ChatWorker(QObject):
             if final_docs:
                 for doc in final_docs:
                     if doc.get('score', 0) < -5.0: continue
-
                     src_name = doc['metadata'].get('source', 'Unknown')
                     source_counts[src_name] = source_counts.get(src_name, 0) + 1
                     if source_counts[src_name] <= 3:
@@ -299,10 +377,17 @@ class ChatWorker(QObject):
                         f"Content: {content}\n\n"
                     )
 
-            self.sig_token.emit("[CLEAR_SEARCH]")
-
             if not context_str:
                 context_str = "No documents found. Reply strictly based on the lack of internal data."
+
+            # ==========================================
+            # 阶段四：主 LLM 纯英文深度推理
+            # ==========================================
+            self.sig_token.emit("[CLEAR_SEARCH]")
+            if self.requires_translation:
+                self.sig_token.emit("<i>🧠 核心模型正在纯英文语境下深度思考并阅读文献...</i>\n\n")
+            else:
+                self.sig_token.emit("[START_LLM_NETWORK]")
 
             system_prompt = (
                 f"You are a rigorous research assistant specializing in {domain}.\n"
@@ -321,41 +406,49 @@ class ChatWorker(QObject):
                 f"### CONTEXT:\n{context_str}"
             )
 
-            rag_messages = [{"role": "system", "content": system_prompt}] + self.messages
+            # 强制替换用户的原话为翻译后的纯英文 Query，避免主模型精神分裂
+            rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
+            rag_messages.append({"role": "user", "content": search_query})
 
-            if not self.llm_config:
-                self.llm_config = {"id": ConfigManager().user_settings.get("active_llm_id", "openai")}
+            english_response = ""
+            if self.requires_translation:
+                # 后台静默流式接收，不发给 UI
+                for token in self.main_llm.stream_chat(rag_messages):
+                    english_response += token
+            else:
+                # 纯英文模式，直接发给 UI
+                for token in self.main_llm.stream_chat(rag_messages):
+                    english_response += token
+                    self.full_response_cache += token
+                    self.sig_token.emit(token)
 
-            selected_id = self.llm_config.get("id")
-            latest_config = self.llm_config
-            try:
-                config_path = os.path.join(os.getcwd(), "config", "llm_config.json")
-                if os.path.exists(config_path):
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        for c in json.load(f):
-                            if c.get("id") == selected_id:
-                                latest_config = c
-                                break
-            except:
-                pass
+            # ==========================================
+            # 阶段五：结果翻译回母语并流式输出
+            # ==========================================
+            if self.requires_translation:
+                self.sig_token.emit("[CLEAR_SEARCH]")
+                self.sig_token.emit("[START_LLM_NETWORK]")
 
-            if getattr(self, 'use_thinking_model', False):
-                thinking_model = latest_config.get("thinking_model_name", "").strip()
-                if thinking_model:
-                    latest_config["model_name"] = thinking_model
-                else:
-                    self.sig_token.emit(
-                        "<div style='color:#ff9800; font-size:12px; margin-bottom:10px;'><i>Thinking model not found, falling back to standard.</i></div>")
+                trans_out_prompt = (
+                    "You are an expert academic translator. Translate the following English academic response "
+                    "into the language of the user's original query. \n"
+                    "CRITICAL RULES:\n"
+                    "1. KEEP ALL CITATION TAGS INTACT (e.g., [1], [2]).\n"
+                    "2. DO NOT translate Latin taxonomic names (e.g., Gossypium) or scientific abbreviations.\n"
+                    "3. PRESERVE all Markdown formatting, bolding, and structure.\n"
+                    "4. Translate the '💡 Suggested Follow-ups:' section title, but keep the exact format `- [Tag] Question`.\n"
+                )
 
-            self.llm_instance = OpenAICompatibleLLM(latest_config)
+                for token in self.trans_llm.stream_chat([
+                    {"role": "system", "content": trans_out_prompt},
+                    {"role": "user", "content": english_response}
+                ]):
+                    self.full_response_cache += token
+                    self.sig_token.emit(token)
 
-            # 向 UI 发送信号，表示本地检索结束，正式开始连接网络！
-            self.sig_token.emit("[START_LLM_NETWORK]")
-
-            for token in self.llm_instance.stream_chat(rag_messages):
-                self.full_response_cache += token
-                self.sig_token.emit(token)
-
+            # ==========================================
+            # 阶段六：动态挂载参考文献溯源链接
+            # ==========================================
             has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
             if sources_map and has_citation:
                 ref_html = "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'><b>📚 Cited Sources:</b><br>"
@@ -372,9 +465,7 @@ class ChatWorker(QObject):
                     self.sig_token.emit(ref_html)
 
         except Exception as e:
-            import traceback
-            self.sig_error.emit(f"Error: {str(e)}")
-            print(traceback.format_exc())
+            self.sig_error.emit(f"Error: {str(e)}\n{traceback.format_exc()}")
         finally:
             self.sig_finished.emit()
 
@@ -399,7 +490,6 @@ class ChatTool(BaseTool):
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.connect(self.load_llm_configs)
 
-
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
         self.widget = QWidget()
@@ -407,33 +497,57 @@ class ChatTool(BaseTool):
         layout.setSpacing(10)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        top_bar = QHBoxLayout()
-        top_bar.addWidget(QLabel("Model:"))
+        top_bar = QVBoxLayout()
+        top_bar.setSpacing(8)
+
+        row1_layout = QHBoxLayout()
+        row1_layout.addWidget(QLabel("🧠 Main LLM:"))
         self.combo_llm = BaseComboBox(min_width=150)
-        top_bar.addWidget(self.combo_llm)
+        row1_layout.addWidget(self.combo_llm)
+
         self.checkbox_think = QCheckBox("Think Mode")
         self.checkbox_think.setCursor(Qt.PointingHandCursor)
         self.checkbox_think.setStyleSheet("""
-                    QCheckBox { color: #aaaaaa; font-weight: bold; font-family: 'Segoe UI'; font-size: 13px; }
-                    QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #555; background: #333; }
-                    QCheckBox::indicator:checked { background: #007acc; border: 1px solid #007acc; }
-                    QCheckBox:disabled { color: #555555; }
-                """)
-        top_bar.addWidget(self.checkbox_think)
+            QCheckBox { color: #aaaaaa; font-weight: bold; font-family: 'Segoe UI'; font-size: 13px; }
+            QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #555; background: #333; }
+            QCheckBox::indicator:checked { background: #007acc; border: 1px solid #007acc; }
+            QCheckBox:disabled { color: #555555; }
+        """)
+        row1_layout.addWidget(self.checkbox_think)
+
         self.lbl_current_model = QLabel("")
         self.lbl_current_model.setStyleSheet(
             "color: #05B8CC; font-size: 11px; font-weight: bold; font-family: 'Consolas', monospace;")
-        top_bar.addWidget(self.lbl_current_model)
-        self.combo_llm.currentIndexChanged.connect(self._on_llm_changed)
-        self.checkbox_think.stateChanged.connect(self._update_model_display)
-        self.load_llm_configs()
-        top_bar.addSpacing(15)
-        top_bar.addWidget(QLabel("Knowledge Base:"))
-        self.combo_kb = BaseComboBox(min_width=200)
+        row1_layout.addWidget(self.lbl_current_model)
+
+        row1_layout.addSpacing(15)
+
+        # 翻译模型专属选择框
+        row1_layout.addWidget(QLabel("🌐 Translator:"))
+        self.combo_trans_llm = BaseComboBox(min_width=150)
+        row1_layout.addWidget(self.combo_trans_llm)
+        row1_layout.addStretch()
+
+        # 第二行：知识库选择
+        row2_layout = QHBoxLayout()
+        row2_layout.addWidget(QLabel("🗂️ Knowledge Base:"))
+        self.combo_kb = BaseComboBox(min_width=250)
         self.refresh_kb_list()
-        top_bar.addWidget(self.combo_kb, stretch=1)
+        row2_layout.addWidget(self.combo_kb)
+        row2_layout.addStretch()
+
+        top_bar.addLayout(row1_layout)
+        top_bar.addLayout(row2_layout)
         layout.addLayout(top_bar)
 
+        # --- 绑定模型切换事件 ---
+        self.combo_llm.currentIndexChanged.connect(self._on_llm_changed)
+        self.checkbox_think.stateChanged.connect(self._update_model_display)
+
+        # 加载本地配置文件并填充两个下拉框
+        self.load_llm_configs()
+
+        # --- 对话展示区 ---
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("""
@@ -449,10 +563,13 @@ class ChatTool(BaseTool):
         self.scroll_area.setWidget(self.chat_container)
         layout.addWidget(self.scroll_area, stretch=1)
 
+        # --- 输入区 ---
         self.input_container = ChatInputContainer()
         self.input_container.sig_send_clicked.connect(self.process_send)
         self.input_container.sig_export_clicked.connect(self.export_chat_history)
         self.input_container.sig_clear_clicked.connect(self.clear_chat_history)
+        self.input_container.btn_retry.clicked.connect(self.trigger_retry)
+
         layout.addWidget(self.input_container)
         return self.widget
 
@@ -548,32 +665,109 @@ class ChatTool(BaseTool):
 
         path = os.path.join(os.getcwd(), "config", "llm_config.json")
         self.combo_llm.clear()
+        self.combo_trans_llm.clear()
+
+        # 翻译下拉框默认插入第一个选项：关闭翻译
+        self.combo_trans_llm.addItem("❌ None (Disable)", None)
+
         active_id = ConfigManager().user_settings.get("active_llm_id", "openai")
+        # 假设我们也在 settings 里存了一个 trans_llm_id
+        trans_id = ConfigManager().user_settings.get("trans_llm_id", "")
+
         target_idx = 0
+        trans_target_idx = 0
+
         if os.path.exists(path):
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     configs = json.load(f)
                     for i, cfg in enumerate(configs):
+                        # 填充主模型
                         self.combo_llm.addItem(cfg['name'], cfg)
                         if cfg.get("id") == active_id: target_idx = i
+
+                        # 填充翻译模型 (索引 + 1 因为 0 是 Disable)
+                        trans_name = f"{cfg['name']} ({cfg.get('model_name', 'Unknown')})"
+                        self.combo_trans_llm.addItem(trans_name, cfg)
+                        if cfg.get("id") == trans_id: trans_target_idx = i + 1
             except:
                 pass
+
         if self.combo_llm.count() > 0: self.combo_llm.setCurrentIndex(target_idx)
+        if self.combo_trans_llm.count() > 0: self.combo_trans_llm.setCurrentIndex(trans_target_idx)
+
         self._on_llm_changed()
 
-    def process_send(self, text):
+    def process_send(self, text, is_retry=False):
         kb_data = self.combo_kb.currentData()
         if not kb_data:
-            ToastManager().show("Attempted to send message without selecting a KB！", "error")
+            from src.ui.components.toast import ToastManager
+            ToastManager().show("无法发送：请先在右上角选择一个知识库！", "error")
             self.logger.warning("Attempted to send message without selecting a KB.")
             return
+
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-        self.logger.info(f"🗣️ User asked: {text[:50]}... (KB: {kb_id})")
-        self.input_container.clear_text()
-        self.add_bubble(text, is_user=True)
-        self.history.append({"role": "user", "content": text})
-        self.start_ai_response(kb_id)
+
+        trans_config = self.combo_trans_llm.currentData()
+        is_english = True  # 默认假设是英语
+
+        try:
+            # 即使全是 ASCII 字符，langdetect 也能精准识别出法语 (fr)、德语 (de) 等
+            detected_lang = detect(text)
+            is_english = (detected_lang == 'en')
+            self.logger.debug(f"Detected language: {detected_lang}")
+        except langdetect.lang_detect_exception.LangDetectException:
+            is_english = True
+
+
+        from src.ui.components.toast import ToastManager
+        if not is_english and not trans_config:
+            # 场景 A：非英语，但没开翻译模型
+            ToastManager().show("检测到非英文输入，但未开启翻译模型。这可能导致检索准确率严重下降！", "warning")
+            self.logger.warning("Non-English input detected but Translator is disabled.")
+
+        elif not is_english and trans_config:
+            # 场景 B：非英语，开启了翻译模型 -> 正常走翻译流水线，静默放行 (可以不弹 Toast 烦人)
+            self.logger.info("Non-English input detected. Translation pipeline activated.")
+
+        elif is_english and trans_config:
+            # 场景 C：英语，但开了翻译模型 -> 提示加速，后台将跳过翻译层
+            ToastManager().show("检测为纯英文环境，已自动为您关闭翻译层以达到最高响应速度。", "info")
+            self.logger.info("English input detected. Bypassing translation pipeline.")
+
+        # 场景 D：英语且没开翻译 -> 完美状态，静默放行
+        requires_translation = (not is_english) and (trans_config is not None)
+
+
+        # 隐藏重试和发送按钮，显示停止按钮
+        self.input_container.btn_retry.setVisible(False)
+        self.input_container.btn_send.setVisible(False)
+        self.input_container.btn_stop.setVisible(True)
+
+        if not is_retry:
+            self.logger.info(f"🗣️ User asked: {text[:50]}... (KB: {kb_id})")
+            self.input_container.clear_text()
+            self.add_bubble(text, is_user=True)
+            self.history.append({"role": "user", "content": text})
+
+
+        self.start_ai_response(kb_id, requires_translation)
+
+    def trigger_retry(self):
+        """用户点击重试按钮触发"""
+        if not self.history: return
+
+        # 寻找最后一次 user 的提问
+        last_user_text = ""
+        for i in range(len(self.history) - 1, -1, -1):
+            if self.history[i]['role'] == 'user':
+                last_user_text = self.history[i]['content']
+                break
+
+        if last_user_text:
+            # 直接走重试通道，不新增气泡
+            self.process_send(last_user_text, is_retry=True)
+
 
     def add_bubble(self, text, is_user):
         if self.chat_layout.count() > 0:
@@ -604,7 +798,10 @@ class ChatTool(BaseTool):
         sb = self.scroll_area.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    def start_ai_response(self, kb_id):
+    def start_ai_response(self, kb_id, requires_translation=False):
+        main_config = self.combo_llm.currentData()
+        trans_config = self.combo_trans_llm.currentData()
+
         llm_config = self.combo_llm.currentData()
         use_think = getattr(self, 'checkbox_think', None) and self.checkbox_think.isChecked()
         thinking_model = llm_config.get("thinking_model_name", "").strip()
@@ -619,8 +816,16 @@ class ChatTool(BaseTool):
         self.input_container.btn_stop.setVisible(True)
         use_think = getattr(self, 'checkbox_think', None) and self.checkbox_think.isChecked()
         self.thread = QThread()
-        self.worker = ChatWorker(llm_config, list(self.history), kb_id, use_thinking_model=use_think)
+        self.worker = ChatWorker(
+            main_config=main_config,
+            trans_config=trans_config,
+            messages=list(self.history),
+            kb_id=kb_id,
+            requires_translation=requires_translation,
+            use_thinking_model=use_think
+        )
         self.worker.moveToThread(self.thread)
+
         try:
             self.input_container.btn_stop.clicked.disconnect()
         except:
@@ -638,36 +843,42 @@ class ChatTool(BaseTool):
     def _show_slow_connection_warning(self):
         if self.current_ai_bubble and getattr(self, '_is_waiting_llm', False):
             idx = getattr(self.current_ai_bubble, 'index', -1)
-            base_html = self._format_response(self.current_ai_text, idx)  # 👈 经过格式化
+            base_html = self._format_response(self.current_ai_text.lstrip(), idx)
             self.current_ai_bubble.set_content(
                 base_html +
-                "<br><div style='color:#05B8CC;'><i>🔌 仍在连接...</i></div>"
+                "<br><div style='color:#05B8CC;'><i>Still connecting...</i></div>"
                 "<div style='color:#e6a23c; font-size:12px; margin-top:5px; padding:8px; border:1px solid #e6a23c; border-radius:4px;'>"
-                "⚠️ 连接时间比预期的长。请检查您的<b>网络代理 (Proxy)</b> 或 <b>API Endpoint (URL)</b> 是否配置正确。"
+                "Warning: The connection is taking longer than expected. Please check your <b>Network Proxy</b> or <b>API Endpoint (URL)</b>."
                 "</div>"
             )
             self.scroll_to_bottom()
 
     def update_ai_bubble(self, token):
+        """Updates the AI chat bubble with streaming tokens and handles status clearing."""
         if not self.current_ai_bubble: return
         sb = self.scroll_area.verticalScrollBar()
         is_at_bottom = (sb.maximum() - sb.value()) <= 15
 
         idx = getattr(self.current_ai_bubble, 'index', -1)
 
+        # 1. Handle clearing of status prompts via Regex
         if token == "[CLEAR_SEARCH]":
-            self.current_ai_text = self.current_ai_text.replace(
-                "<i>🔍 Integrating history & searching database...</i>\n\n", "")
+            import re
+            # Removes any italicized status messages and trailing newlines to prevent Markdown block errors
+            self.current_ai_text = re.sub(r'<i>.*?</i>(?:\n\n)?', '', self.current_ai_text, flags=re.DOTALL)
+            self.current_ai_text = self.current_ai_text.lstrip()
             self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
             if is_at_bottom: self.scroll_to_bottom()
             return
 
+        # 2. Handle LLM connection start
         if token == "[START_LLM_NETWORK]":
             self._is_waiting_llm = True
-            base_html = self._format_response(self.current_ai_text, idx)
+            # Ensure text is stripped to prevent <div> from being treated as a code block
+            base_html = self._format_response(self.current_ai_text.lstrip(), idx)
             self.current_ai_bubble.set_content(
                 base_html +
-                "<br><div style='color:#05B8CC;'><i>正在连接 LLM 服务商，请稍候...</i></div>"
+                "<br><div style='color:#05B8CC;'><i>Connecting to LLM provider, please wait...</i></div>"
             )
             from PySide6.QtCore import QTimer
             self.slow_conn_timer = QTimer(self)
@@ -677,6 +888,7 @@ class ChatTool(BaseTool):
             if is_at_bottom: self.scroll_to_bottom()
             return
 
+        # 3. Stop waiting and clear timer once real content arrives
         if getattr(self, '_is_waiting_llm', False):
             self._is_waiting_llm = False
             if hasattr(self, 'slow_conn_timer'):
@@ -685,15 +897,15 @@ class ChatTool(BaseTool):
                 self.current_ai_bubble.set_loading(False)
 
         self.current_ai_text += token
-        self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
+        self.current_ai_bubble.set_content(self._format_response(self.current_ai_text.lstrip(), idx))
         if is_at_bottom: self.scroll_to_bottom()
 
     def _format_response(self, text, index):
-        """将原始的 <think> 标签动态渲染为可交互的折叠 UI"""
-        import re
+
+        text = text.lstrip()
 
         def replacer(match):
-            content = match.group(1)
+            content = match.group(1).strip()
             is_closed = match.group(2) == "</think>"
 
             if index in getattr(self, 'user_toggled_thinks', set()):
@@ -703,43 +915,63 @@ class ChatTool(BaseTool):
 
             action = "collapse" if is_expanded else "expand"
             icon = "🔽" if is_expanded else "▶️"
+            status = "AI Thinking Process" if is_closed else "AI Thinking..."
 
-            link = f"<a href='think://{action}?index={index}' style='color:#05B8CC; text-decoration:none; white-space:nowrap;'><nobr>{icon} <b>AI Thinking Process</b></nobr></a>"
+            link = f"<a href='think://{action}?index={index}' style='color:#05B8CC; text-decoration:none;'><nobr>{icon} <b>{status}</b></nobr></a>"
 
             if not is_expanded:
-                return f"<div style='background:#222; border-left: 3px solid #555; padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px; white-space: nowrap;'>{link}</div>"
+                return f"<div style='background:#222; border-left: 3px solid #555; padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px;'>{link}</div>"
             else:
                 safe_content = content.replace('\n', '<br>')
                 suffix = "" if is_closed else " <span style='color:#05B8CC;'><i>...</i></span>"
-                return f"<div style='background:#222; border-left: 3px solid #05B8CC; padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px; color: #aaa;'>{link}<br><br>{safe_content}{suffix}</div>"
+                return (f"<div style='background:#222; border-left: 3px solid #05B8CC; padding: 8px 12px; "
+                        f"margin: 10px 0; border-radius: 4px; font-size: 13px; color: #aaa;'>"
+                        f"{link}<br><br><div style='color:#999;'>{safe_content}{suffix}</div></div>")
 
         return re.sub(r'<think>(.*?)(</think>|$)', replacer, text, flags=re.DOTALL)
 
 
     def cancel_generation(self):
         if hasattr(self, 'worker') and self.worker: self.worker.cancel()
-        ToastManager().show("User forcibly halted the LLM generation.", "warning")
-        self.logger.info("User forcibly halted the LLM generation.")
+        ToastManager().show("已手动终止生成。您可以修改参数后重试。", "warning")
+
+        self.input_container.btn_stop.setVisible(False)
+        self.input_container.btn_retry.setVisible(True)
+        self.input_container.btn_send.setVisible(True)
+
 
     def on_chat_error(self, msg):
         self.logger.error(f"Chat generation encountered an error: {msg}")
-        # 发生错误时停止计时器
         if hasattr(self, 'slow_conn_timer'): self.slow_conn_timer.stop()
         self._is_waiting_llm = False
 
-        # 识别网络错误并美化提示
-        if "time" in msg.lower() or "connect" in msg.lower() or "api" in msg.lower():
-            display_error = "网络连接失败，请检查配置。\n" + msg
-        else:
-            display_error = msg
+        # --- 翻译或生成失败处理 ---
+        # 显示重试按钮
+        self.input_container.btn_stop.setVisible(False)
+        self.input_container.btn_retry.setVisible(True)
+        self.input_container.btn_send.setVisible(True)
 
-        if self.current_ai_bubble and self.current_ai_bubble.is_loading: self.current_ai_bubble.set_loading(False)
-        self.current_ai_text += f"\n\n<div style='color:#ff6b6b; font-weight:bold;'>[⚠️ AI Communication Error]</div>\n<div style='color:#888; font-size:12px;'>{display_error}</div>"
-        if self.current_ai_bubble: self.current_ai_bubble.set_content(self.current_ai_text)
+        display_error = msg
+        if "translation" in msg.lower() or "translator" in msg.lower():
+            ToastManager().show(f"翻译模型出现异常，对话已终止: {msg}", "error")
+            display_error = f"翻译中断: {msg}"
+        elif "time" in msg.lower() or "connect" in msg.lower():
+            ToastManager().show("网络连接失败，请检查 API 配置或网络代理。", "error")
+            display_error = "网络或 API 连接超时。"
+
+        if self.current_ai_bubble and self.current_ai_bubble.is_loading:
+            self.current_ai_bubble.set_loading(False)
+
+        self.current_ai_text += f"\n\n<div style='color:#ff6b6b; font-weight:bold;'>[⚠️ AI Error]</div>\n<div style='color:#888; font-size:12px;'>{display_error}</div>"
+
+        if self.current_ai_bubble:
+            self.current_ai_bubble.set_content(self.current_ai_text)
+
         self.scroll_to_bottom()
 
     def on_chat_finished(self):
-        if not self.current_ai_bubble: return
+        if not self.current_ai_bubble:
+            return
 
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
@@ -747,15 +979,20 @@ class ChatTool(BaseTool):
             self.input_container.btn_stop.clicked.disconnect()
         except:
             pass
-        if self.current_ai_bubble and self.current_ai_bubble.is_loading: self.current_ai_bubble.set_loading(False)
+
+        if self.current_ai_bubble and self.current_ai_bubble.is_loading:
+            self.current_ai_bubble.set_loading(False)
+
         full_text = self.current_ai_text
+
         match = re.search(r'(💡\s*Suggested Follow-ups:.*?(?=<br><hr|$))', full_text, flags=re.IGNORECASE | re.DOTALL)
         questions = []
+
         if match:
             follow_up_block = match.group(1)
             clean_text = full_text.replace(follow_up_block, "").strip()
-            self.current_ai_bubble.set_content(clean_text)
             self.current_ai_text = clean_text
+
             for line in follow_up_block.split('\n'):
                 line = line.strip()
                 if line.startswith('-'):
@@ -767,14 +1004,22 @@ class ChatTool(BaseTool):
                             questions.append({"tag": tag.strip(), "text": text.strip()})
                         else:
                             questions.append({"tag": "General", "text": q})
-            if questions: self.render_follow_up_buttons(questions)
+
+            idx = getattr(self.current_ai_bubble, 'index', -1)
+            final_html = self._format_response(self.current_ai_text, idx)
+            self.current_ai_bubble.set_content(final_html)
+
+            if questions:
+                self.render_follow_up_buttons(questions)
         else:
             idx = getattr(self.current_ai_bubble, 'index', -1)
             final_html = self._format_response(self.current_ai_text, idx) if self.current_ai_text else "No response."
             self.current_ai_bubble.set_content(final_html)
 
         self.history.append({"role": "assistant", "content": self.current_ai_text})
+
         self.current_ai_bubble = None
+        self.logger.info("AI response generation finished and UI updated.")
 
     def render_follow_up_buttons(self, questions):
         if self.chat_layout.count() > 0:

@@ -151,7 +151,7 @@ class SettingsTool(BaseTool):
         # 3. 模型管理 (Embedding & Reranker)
         self.init_model_section()
 
-        # 🌟 4. LLM API 配置 (动态 JSON 管理)
+        # 4. LLM API 配置 (动态 JSON 管理)
         self.init_llm_section()
 
         # 5. 系统设置
@@ -346,11 +346,11 @@ class SettingsTool(BaseTool):
         config_path = os.path.join(os.getcwd(), "config", "llm_config.json")
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
-        # 🚀 2026年最新默认配置池
         default_config = [
             {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "gpt-4o", "thinking_model_name": "o3", "api_key": ""},
             {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1", "model_name": "deepseek-chat", "thinking_model_name": "deepseek-reasoner", "api_key": ""},
             {"id": "gemini", "name": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "gemini-3-pro", "thinking_model_name": "gemini-3-pro-thinking", "api_key": ""},
+            {"id":"Zhipu","name":"Zhipu GLM","base_url":"https://open.bigmodel.cn/api/coding/paas/v4/","model_name":"glm-5","thinking_model_name":"glm-5", "api_key": ""},
             {"id": "anthropic", "name": "Anthropic", "base_url": "https://api.anthropic.com/v1", "model_name": "claude-3-5-sonnet-latest", "thinking_model_name": "claude-3-7-sonnet-thinking", "api_key": ""},
             {"id": "nvidia", "name": "Nvidia Build", "base_url": "https://integrate.api.nvidia.com/v1", "model_name": "meta/llama-3.1-70b-instruct", "thinking_model_name": "", "api_key": ""},
             {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model_name": "qwen-plus", "thinking_model_name": "qwen-max", "api_key": ""},
@@ -493,6 +493,17 @@ class SettingsTool(BaseTool):
 
         self.combo_llm_preset.setCurrentIndex(idx_to_select)
         self._on_llm_preset_changed(idx_to_select)
+
+        # 独立的翻译层模型
+        trans_layout = QHBoxLayout()
+        self.combo_trans_preset = BaseComboBox()
+        self.combo_trans_model = QComboBox()
+        self.combo_trans_model.setEditable(True)
+
+        # 提示语防呆
+        lbl_trans_hint = QLabel(
+            "⚡ <b>Tip:</b> 请选择响应速度快的小型模型（如 gpt-4o-mini, qwen-plus）作为翻译器。<br><span style='color:#ff6b6b;'>强烈建议不要使用思考模型（如 DeepSeek-R1）</span>，否则会严重拖慢对话响应速度。")
+        lbl_trans_hint.setWordWrap(True)
 
     def _on_llm_preset_changed(self, index):
         if index < 0 or index >= len(self.llm_configs): return

@@ -59,43 +59,72 @@ class OpenAICompatibleLLM:
 
     def stream_chat(self, messages: List[Dict[str, str]]) -> Generator[str, None, None]:
         try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                stream=True,
-                temperature=0.7,
-                max_tokens=4096
-            )
+            # 1. 基础参数
+            kwargs = {
+                "model": self.model_name,
+                "messages": messages,
+                "stream": True,
+                "temperature": 0.7,
+                "max_tokens": 16384
+            }
 
-            is_thinking = False  # 💡 新增状态追踪
+            # 2. 动态注入 Nvidia 专属思考激活参数
+            # 通过检测 base_url 判断是否为 Nvidia 服务商
+            if "nvidia.com" in self.base_url.lower():
+                kwargs["extra_body"] = {
+                    "chat_template_kwargs": {
+                        "enable_thinking": True,
+                        "clear_thinking": False
+                    }
+                }
+
+            self.logger.debug(f"Calling LLM API with kwargs: {kwargs.keys()}")
+            response = self.client.chat.completions.create(**kwargs)
+
+            is_thinking = False
 
             for chunk in response:
                 if self._is_cancelled:
+                    if is_thinking: yield "\n</think>\n"
                     yield "\n\n[⛔ Generation halted by user.]"
                     break
 
-                if hasattr(chunk.choices[0], 'delta'):
-                    delta = chunk.choices[0].delta
-                    reasoning = getattr(delta, 'reasoning_content', None)
-                    content = getattr(delta, 'content', None)
+                if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
+                    continue
 
-                    if reasoning:
-                        if not is_thinking:
-                            yield "<think>\n"
-                            is_thinking = True
-                        yield reasoning
+                delta = getattr(chunk.choices[0], "delta", None)
+                if not delta: continue
 
-                    if content:
-                        if is_thinking:
-                            yield "\n</think>\n"
-                            is_thinking = False
-                        yield content
+                # 1. 处理思考内容 (Reasoning)
+                reasoning = getattr(delta, 'reasoning_content', None)
+                if reasoning:
+                    if not is_thinking:
+                        yield "<think>\n"
+                        is_thinking = True
+                    yield reasoning
+
+                # 2. 处理正式内容 (Content)
+                content = getattr(delta, 'content', None)
+                if content:
+                    if is_thinking:
+                        # 只有当正式内容出现时，才闭合思考标签
+                        yield "\n</think>\n"
+                        is_thinking = False
+                    yield content
+
+                # 异常中断补全标签
+            if is_thinking:
+                yield "\n</think>\n"
 
         except Exception as e:
             error_msg = str(e).lower()
             if self._is_cancelled or "closed" in error_msg or "cancelled" in error_msg:
                 self.logger.info("LLM Socket connection closed by user cancellation.")
+                if 'is_thinking' in locals() and is_thinking:
+                    yield "\n</think>\n"
                 yield "\n\n[⛔ Generation halted by user.]"
             else:
                 self.logger.error(f"LLM Stream Error: {error_msg}")
+                if 'is_thinking' in locals() and is_thinking:
+                    yield "\n</think>\n"
                 yield f"\n\n[⚠System Error: {str(e)}]\n"

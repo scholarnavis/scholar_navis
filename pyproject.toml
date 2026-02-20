@@ -28,6 +28,7 @@ dependencies = [
     "hf-xet>=1.2.0",
     "nvidia-ml-py>=13.590.48",
     "pymupdf4llm>=0.2.9",
+    "langdetect>=1.0.9",
 ]
 
 [[tool.uv.index]]
