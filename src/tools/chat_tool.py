@@ -345,7 +345,7 @@ class ChatWorker(QObject):
                     latest_config["model_name"] = thinking_model
                 else:
                     self.sig_token.emit(
-                        "<div style='color:#ff9800; font-size:12px; margin-bottom:10px;'>⚠️ <i>Thinking model not found, falling back to standard.</i></div>")
+                        "<div style='color:#ff9800; font-size:12px; margin-bottom:10px;'><i>Thinking model not found, falling back to standard.</i></div>")
 
             self.llm_instance = OpenAICompatibleLLM(latest_config)
 
@@ -354,11 +354,6 @@ class ChatWorker(QObject):
 
             for token in self.llm_instance.stream_chat(rag_messages):
                 self.full_response_cache += token
-                if "<think>" in token:
-                    token = token.replace("<think>",
-                                          "<div style='color:#888888; border-left: 3px solid #555555; padding-left: 10px; margin-bottom: 10px; font-size: 13px;'><i>🤔 AI Thinking Process...<br>")
-                elif "</think>" in token:
-                    token = token.replace("</think>", "</i></div><br>")
                 self.sig_token.emit(token)
 
             has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
@@ -394,12 +389,16 @@ class ChatTool(BaseTool):
         self.current_ai_text = ""
         self.current_ai_bubble = None
         self.pdf_viewer = None
+        self.expanded_thinks = set()
+        self.user_toggled_thinks = set()
+
         GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
         GlobalSignals().kb_switched.connect(self.on_global_kb_switched)
         GlobalSignals().kb_modified.connect(self.on_kb_modified)
 
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.connect(self.load_llm_configs)
+
 
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
@@ -412,7 +411,7 @@ class ChatTool(BaseTool):
         top_bar.addWidget(QLabel("Model:"))
         self.combo_llm = BaseComboBox(min_width=150)
         top_bar.addWidget(self.combo_llm)
-        self.checkbox_think = QCheckBox("Deep Think")
+        self.checkbox_think = QCheckBox("Think Mode")
         self.checkbox_think.setCursor(Qt.PointingHandCursor)
         self.checkbox_think.setStyleSheet("""
                     QCheckBox { color: #aaaaaa; font-weight: bold; font-family: 'Segoe UI'; font-size: 13px; }
@@ -586,8 +585,11 @@ class ChatTool(BaseTool):
                 if item and item.widget():
                     w = item.widget()
                     if isinstance(w, ChatBubbleWidget) and w.is_user: w.disable_edit()
+
         index = len(self.history)
         bubble = ChatBubbleWidget(text, is_user, index)
+        bubble.index = index
+
         if is_user:
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
         else:
@@ -634,10 +636,11 @@ class ChatTool(BaseTool):
         self.thread.start()
 
     def _show_slow_connection_warning(self):
-        """网络连接超时警告"""
         if self.current_ai_bubble and getattr(self, '_is_waiting_llm', False):
+            idx = getattr(self.current_ai_bubble, 'index', -1)
+            base_html = self._format_response(self.current_ai_text, idx)  # 👈 经过格式化
             self.current_ai_bubble.set_content(
-                self.current_ai_text +
+                base_html +
                 "<br><div style='color:#05B8CC;'><i>🔌 仍在连接...</i></div>"
                 "<div style='color:#e6a23c; font-size:12px; margin-top:5px; padding:8px; border:1px solid #e6a23c; border-radius:4px;'>"
                 "⚠️ 连接时间比预期的长。请检查您的<b>网络代理 (Proxy)</b> 或 <b>API Endpoint (URL)</b> 是否配置正确。"
@@ -645,29 +648,27 @@ class ChatTool(BaseTool):
             )
             self.scroll_to_bottom()
 
-
     def update_ai_bubble(self, token):
         if not self.current_ai_bubble: return
         sb = self.scroll_area.verticalScrollBar()
         is_at_bottom = (sb.maximum() - sb.value()) <= 15
 
-        # 处理清除搜索动画
+        idx = getattr(self.current_ai_bubble, 'index', -1)
+
         if token == "[CLEAR_SEARCH]":
             self.current_ai_text = self.current_ai_text.replace(
                 "<i>🔍 Integrating history & searching database...</i>\n\n", "")
-            self.current_ai_bubble.set_content(self.current_ai_text)
+            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
             if is_at_bottom: self.scroll_to_bottom()
             return
 
-        # 🌟 处理网络连接动画开始
         if token == "[START_LLM_NETWORK]":
             self._is_waiting_llm = True
-            # 只设置气泡显示内容，不写入 self.current_ai_text (避免污染历史记录)
+            base_html = self._format_response(self.current_ai_text, idx)
             self.current_ai_bubble.set_content(
-                self.current_ai_text +
+                base_html +
                 "<br><div style='color:#05B8CC;'><i>正在连接 LLM 服务商，请稍候...</i></div>"
             )
-            # 开启 8 秒超时检测
             from PySide6.QtCore import QTimer
             self.slow_conn_timer = QTimer(self)
             self.slow_conn_timer.setSingleShot(True)
@@ -676,7 +677,6 @@ class ChatTool(BaseTool):
             if is_at_bottom: self.scroll_to_bottom()
             return
 
-        # 🌟 收到第一个真实的 LLM Token，关闭动画和计时器
         if getattr(self, '_is_waiting_llm', False):
             self._is_waiting_llm = False
             if hasattr(self, 'slow_conn_timer'):
@@ -685,8 +685,36 @@ class ChatTool(BaseTool):
                 self.current_ai_bubble.set_loading(False)
 
         self.current_ai_text += token
-        self.current_ai_bubble.set_content(self.current_ai_text)
+        self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
         if is_at_bottom: self.scroll_to_bottom()
+
+    def _format_response(self, text, index):
+        """将原始的 <think> 标签动态渲染为可交互的折叠 UI"""
+        import re
+
+        def replacer(match):
+            content = match.group(1)
+            is_closed = match.group(2) == "</think>"
+
+            if index in getattr(self, 'user_toggled_thinks', set()):
+                is_expanded = index in self.expanded_thinks
+            else:
+                is_expanded = not is_closed
+
+            action = "collapse" if is_expanded else "expand"
+            icon = "🔽" if is_expanded else "▶️"
+
+            link = f"<a href='think://{action}?index={index}' style='color:#05B8CC; text-decoration:none; white-space:nowrap;'><nobr>{icon} <b>AI Thinking Process</b></nobr></a>"
+
+            if not is_expanded:
+                return f"<div style='background:#222; border-left: 3px solid #555; padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px; white-space: nowrap;'>{link}</div>"
+            else:
+                safe_content = content.replace('\n', '<br>')
+                suffix = "" if is_closed else " <span style='color:#05B8CC;'><i>...</i></span>"
+                return f"<div style='background:#222; border-left: 3px solid #05B8CC; padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px; color: #aaa;'>{link}<br><br>{safe_content}{suffix}</div>"
+
+        return re.sub(r'<think>(.*?)(</think>|$)', replacer, text, flags=re.DOTALL)
+
 
     def cancel_generation(self):
         if hasattr(self, 'worker') and self.worker: self.worker.cancel()
@@ -741,7 +769,10 @@ class ChatTool(BaseTool):
                             questions.append({"tag": "General", "text": q})
             if questions: self.render_follow_up_buttons(questions)
         else:
-            self.current_ai_bubble.set_content(self.current_ai_text if self.current_ai_text else "No response.")
+            idx = getattr(self.current_ai_bubble, 'index', -1)
+            final_html = self._format_response(self.current_ai_text, idx) if self.current_ai_text else "No response."
+            self.current_ai_bubble.set_content(final_html)
+
         self.history.append({"role": "assistant", "content": self.current_ai_text})
         self.current_ai_bubble = None
 
@@ -822,6 +853,35 @@ class ChatTool(BaseTool):
         layout.addStretch()
 
     def handle_link_click(self, url_str):
+        if url_str.startswith("think://"):
+            parsed = urlparse(url_str)
+            action = parsed.netloc
+            params = parse_qs(parsed.query)
+            idx = int(params.get('index', [-1])[0])
+
+            if idx != -1:
+                if not hasattr(self, 'user_toggled_thinks'):
+                    self.user_toggled_thinks = set()
+                self.user_toggled_thinks.add(idx)
+
+                if action == 'expand':
+                    self.expanded_thinks.add(idx)
+                else:
+                    self.expanded_thinks.discard(idx)
+
+                # 寻找对应的气泡重绘
+                for i in range(self.chat_layout.count()):
+                    item = self.chat_layout.itemAt(i)
+                    if item and item.widget():
+                        w = item.widget()
+                        if isinstance(w, ChatBubbleWidget) and getattr(w, 'index', -1) == idx:
+                            raw_text = self.current_ai_text if w == getattr(self, 'current_ai_bubble', None) else (
+                                self.history[idx]['content'] if idx < len(self.history) else "")
+                            if raw_text:
+                                w.set_content(self._format_response(raw_text, idx))
+                            break
+            return
+
         if url_str.startswith("cite://"):
             parsed = urlparse(url_str)
             params = parse_qs(parsed.query)
@@ -836,6 +896,7 @@ class ChatTool(BaseTool):
                 ToastManager().show(f"未找到文件: {file_path}", "error")
         else:
             QDesktopServices.openUrl(QUrl(url_str))
+
 
     def refresh_kb_list(self):
         self.load_llm_configs()

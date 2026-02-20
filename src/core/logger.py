@@ -26,22 +26,30 @@ class QtLogHandler(logging.Handler, QObject):
 # 全局单例
 _qt_handler = QtLogHandler()
 
-def setup_logger():
-    """配置全局日志"""
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
 
-    # 1. 清理已有的 Handlers 防止重复
+def setup_logger():
+    """Configure global logging"""
+    root_logger = logging.getLogger()
+
+    log_level = logging.INFO
+    try:
+        from src.core.config_manager import ConfigManager
+        config_mgr = ConfigManager()
+        level_str = config_mgr.user_settings.get("log_level", "INFO")
+        log_level = getattr(logging, level_str.upper(), logging.INFO)
+    except Exception:
+        pass
+
+    root_logger.setLevel(log_level)
+
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
 
     formatter = logging.Formatter('%(asctime)s | %(name)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
 
-    # 2. 挂载 UI Handler
     _qt_handler.setFormatter(formatter)
     root_logger.addHandler(_qt_handler)
 
-    # 3. 挂载文件 Handler
     log_dir = os.path.join(os.getcwd(), "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_filename = f"scholar_navis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -51,10 +59,20 @@ def setup_logger():
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
 
-    # 4. 挂载控制台 Handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
+
+    def global_exception_handler(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        root_logger.critical("UNCAUGHT FATAL EXCEPTION", exc_info=(exc_type, exc_value, exc_traceback))
+
+    sys.excepthook = global_exception_handler
+
+    root_logger.info(f"Logger initialized. Log file: {log_path}")
+    return root_logger
 
     # 全局异常捕获
     def global_exception_handler(exc_type, exc_value, exc_traceback):

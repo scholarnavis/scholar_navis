@@ -196,7 +196,11 @@ class ImportFilesTask(BackgroundTask):
 
                     ids = [f"{source_name}_{k}_{uuid.uuid4().hex[:6]}" for k in range(len(chunks))]
                     metadatas = [{"source": source_name, "chunk_id": k} for k in range(len(chunks))]
-                    db_mgr.add_documents(documents=chunks, metadatas=metadatas, ids=ids)
+                    for j in range(0, len(chunks), opt_batch):
+                        batch_chunks = chunks[j:j + opt_batch]
+                        batch_ids = ids[j:j + opt_batch]
+                        batch_metas = metadatas[j:j + opt_batch]
+                        db_mgr.add_documents(documents=batch_chunks, metadatas=batch_metas, ids=batch_ids)
                     success_count += 1
 
             except Exception as e:
@@ -204,13 +208,19 @@ class ImportFilesTask(BackgroundTask):
 
         # 6. 收尾工作：更新时间戳、强制 WAL 落盘
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
-        self.send_log("INFO", f"✅ Indexing complete. Processed {success_count}/{total} files.")
+        self.send_log("INFO", f"Indexing complete. Processed {success_count}/{total} files.")
 
         if getattr(db_mgr, 'client', None):
             try:
                 db_mgr.client._system.stop()
             except Exception:
                 pass
+
+        # 释放模型显存
+        del embed_fn
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 class DeleteFilesTask(BackgroundTask):

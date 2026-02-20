@@ -248,7 +248,7 @@ class SettingsTool(BaseTool):
         self.layout.addWidget(group)
 
     def init_network_section(self):
-        group = QGroupBox("🌐 Network & Proxy")
+        group = QGroupBox("Network & Proxy")
         group.setStyleSheet(
             "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
         layout = QFormLayout(group)
@@ -275,18 +275,13 @@ class SettingsTool(BaseTool):
         self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
         self.input_mirror.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
-        self.combo_speed = BaseComboBox()
-        self.combo_speed.addItems(["Unlimited", "1 MB/s", "2 MB/s", "5 MB/s"])
-        self.combo_speed.setCurrentText(self.config.user_settings.get("download_speed_limit", "Unlimited"))
-
-        # 联动逻辑：只有选 Custom 才允许编辑地址
         self.combo_proxy_mode.currentIndexChanged.connect(self._on_proxy_mode_changed)
         self._on_proxy_mode_changed(self.combo_proxy_mode.currentIndex())
 
         layout.addRow("Proxy Mode:", self.combo_proxy_mode)
         layout.addRow("Proxy URL:", self.input_proxy)
         layout.addRow("HF Mirror:", self.input_mirror)
-        layout.addRow("Speed Limit:", self.combo_speed)
+
 
         self.layout.addWidget(group)
 
@@ -570,7 +565,9 @@ class SettingsTool(BaseTool):
         self.net_pd.sig_canceled.connect(self.net_worker.cancel)
 
         # 启动线程执行请求
-        self.net_thread.started.connect(lambda: self.net_worker.fetch_models(base_url, api_key))
+        self.net_worker.base_url = base_url
+        self.net_worker.api_key = api_key
+        self.net_thread.started.connect(self.net_worker.do_fetch_models)
         self.net_worker.sig_models_fetched.connect(self._on_models_fetched)
 
         # 线程安全回收闭环
@@ -649,7 +646,10 @@ class SettingsTool(BaseTool):
         self.net_pd.sig_canceled.connect(self.test_worker.cancel)
 
         # 启动线程执行请求
-        self.test_thread.started.connect(lambda: self.test_worker.test_api(base_url, api_key, model_name))
+        self.test_worker.base_url = base_url
+        self.test_worker.api_key = api_key
+        self.test_worker.model_name = model_name
+        self.test_thread.started.connect(self.test_worker.do_test_api)
         self.test_worker.sig_test_finished.connect(self._on_test_finished)
 
         # 线程安全回收闭环
@@ -854,7 +854,7 @@ class SettingsTool(BaseTool):
             "proxy_mode": mode_str,  # 🌟 保存模式
             "proxy_url": self.input_proxy.text().strip(),
             "hf_mirror": self.input_mirror.text().strip(),
-            "download_speed_limit": self.combo_speed.currentText(),
+            "download_speed_limit": self.combo_embed.currentText(),
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),

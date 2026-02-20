@@ -3,12 +3,13 @@ import logging
 import traceback
 import uuid
 import time
+import gc
 
-# 引入 PyMuPDF 的 LLM 专用解析库
 import pymupdf4llm
 from langchain_core.documents import Document
 from langchain_text_splitters import MarkdownTextSplitter
 from src.core.database import DatabaseManager
+
 
 class PDFEngine:
     def __init__(self):
@@ -30,7 +31,6 @@ class PDFEngine:
             return 0
 
         try:
-            # 1. Load and parse using PyMuPDF4LLM (Extracts directly to clean Markdown)
             self.logger.debug("Calling PyMuPDF4LLM for Markdown conversion...")
             md_text = pymupdf4llm.to_markdown(file_path)
 
@@ -39,18 +39,24 @@ class PDFEngine:
                 return 0
 
             total_raw_chars = len(md_text)
-            self.logger.debug(f"Successfully loaded and converted to Markdown. Total {total_raw_chars} characters. Preparing to split...")
+            self.logger.debug(
+                f"Successfully loaded and converted to Markdown. Total {total_raw_chars} characters. Preparing to split...")
 
             # 2. Wrap into a Langchain Document object
             raw_doc = Document(page_content=md_text, metadata={"source": display_name})
 
-            # 3. Split using MarkdownTextSplitter (Context-aware splitting based on headers and paragraphs)
+            del md_text
+
             text_splitter = MarkdownTextSplitter(
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap
             )
 
             splits = text_splitter.split_documents([raw_doc])
+
+            del raw_doc
+            gc.collect()
+
             total_chunks = len(splits)
             self.logger.debug(f"Successfully split into {total_chunks} chunks.")
 
@@ -66,10 +72,10 @@ class PDFEngine:
                     "created_at": creation_time
                 })
 
-            # 4. Vectorize and insert into Database
             processed_count = 0
 
-            self.logger.debug(f"Preparing to inject into vector DB. Does current DB instance contain a collection?: {hasattr(self.db, 'collection') and self.db.collection is not None}")
+            self.logger.debug(
+                f"Preparing to inject into vector DB. Does current DB instance contain a collection?: {hasattr(self.db, 'collection') and self.db.collection is not None}")
 
             if hasattr(self.db, 'collection') and self.db.collection is not None:
                 for i in range(0, total_chunks, batch_size):

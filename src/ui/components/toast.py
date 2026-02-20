@@ -1,34 +1,77 @@
-from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QVBoxLayout, QGraphicsOpacityEffect
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint
+from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QGraphicsOpacityEffect
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, Signal
 
 
 class ToastManager:
-    """全局单例，用于管理 Toast 显示"""
+    """全局单例，用于管理 Toast 显示（支持多消息向上堆叠排队）"""
     _instance = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(ToastManager, cls).__new__(cls)
             cls._instance.parent_widget = None
+            cls._instance.active_toasts = []  # 记录当前画面中存活的 Toast
         return cls._instance
 
     def set_parent(self, widget):
         self.parent_widget = widget
 
     def show(self, message, level="info"):
-        if not self.parent_widget: return
+        if not self.parent_widget:
+            print("ToastManager: 未设置 parent_widget")
+            return
+
         toast = ToastWidget(self.parent_widget, message, level)
+        self.active_toasts.append(toast)
+
+        # 监听 Toast 的彻底关闭信号，将其从队列中移除并触发重新排版
+        toast.sig_closed.connect(self._remove_toast)
+
+        self._update_positions()
         toast.show_animation()
+
+    def _remove_toast(self, toast_obj):
+        if toast_obj in self.active_toasts:
+            self.active_toasts.remove(toast_obj)
+        # 有 Toast 消失后，剩下的 Toast 会自动向下滑落填补空缺
+        self._update_positions()
+
+    def _update_positions(self):
+        if not self.parent_widget: return
+
+        parent_rect = self.parent_widget.rect()
+        base_y = parent_rect.height() - 100
+        spacing = 15  # Toast 之间的上下间距
+
+        # 倒序遍历：最新出现的在最下面，旧的会被动态顶到上面去
+        for toast in reversed(self.active_toasts):
+            x = (parent_rect.width() - toast.width()) // 2
+            target_pos = QPoint(x, base_y)
+
+            if not toast.isVisible():
+                # 对于刚创建的 Toast：让它在目标位置偏下 20px 处，配合透明度产生“向上浮出”的视觉效果
+                toast.move(x, base_y + 20)
+
+            # 触发平滑位移动画
+            toast.slide_to(target_pos)
+
+            # 更新下一个 Toast 的 Y 坐标
+            base_y -= (toast.height() + spacing)
 
 
 class ToastWidget(QWidget):
+    # 自定义信号：在动画彻底结束、组件销毁前通知 Manager
+    sig_closed = Signal(object)
+
     def __init__(self, parent, text, level="info"):
         super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow)  # SubWindow 保证在父窗口内部
+
+        # SubWindow 保证它相对于主窗口定位，且不溢出窗口边界
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)  # 鼠标穿透
 
-        # 样式配置
         colors = {
             "info": "#333333",
             "success": "#2e7d32",
@@ -37,8 +80,9 @@ class ToastWidget(QWidget):
         }
         bg_color = colors.get(level, "#333333")
 
-        # 布局
         layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)  # 消除默认边距
+
         self.lbl = QLabel(text)
         self.lbl.setStyleSheet(f"""
             QLabel {{
@@ -51,21 +95,32 @@ class ToastWidget(QWidget):
             }}
         """)
         layout.addWidget(self.lbl)
-
-        # 调整大小并定位（底部居中）
         self.adjustSize()
-        parent_rect = parent.geometry()
-        x = (parent_rect.width() - self.width()) // 2
-        y = parent_rect.height() - 100  # 距离底部 100px
-        self.move(x, y)
 
-        # 透明度效果
         self.opacity_effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(0.0)
 
+        # 保持对动画对象的类级别引用，防止被 Python 的垃圾回收机制 (GC) 吞掉导致动画卡死
+        self.anim_in = None
+        self.anim_out = None
+        self.anim_pos = None
+
+    def slide_to(self, target_pos):
+        """控制 Toast 平滑移动到指定坐标"""
+        if self.pos() == target_pos: return
+
+        self.anim_pos = QPropertyAnimation(self, b"pos")
+        self.anim_pos.setDuration(300)
+        self.anim_pos.setStartValue(self.pos())
+        self.anim_pos.setEndValue(target_pos)
+        self.anim_pos.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim_pos.start()
+
     def show_animation(self):
-        # 1. 淡入
+        self.show()
+        self.raise_()  # 强制将其层级提到最高，防止被 QSplitter 或滚动条遮挡
+
         self.anim_in = QPropertyAnimation(self.opacity_effect, b"opacity")
         self.anim_in.setDuration(300)
         self.anim_in.setStartValue(0.0)
@@ -73,13 +128,21 @@ class ToastWidget(QWidget):
         self.anim_in.setEasingCurve(QEasingCurve.OutCubic)
         self.anim_in.start()
 
-        # 2. 停留 2秒 后淡出
-        QTimer.singleShot(2500, self.hide_animation)
+        # 停留 3 秒后自动执行淡出 (稍作延长，以免多条连续消息来不及看)
+        QTimer.singleShot(3000, self.hide_animation)
 
     def hide_animation(self):
+        # 拦截机制：防止被手动或多次重复调用
+        if self.anim_out and self.anim_out.state() == QPropertyAnimation.Running:
+            return
+
         self.anim_out = QPropertyAnimation(self.opacity_effect, b"opacity")
         self.anim_out.setDuration(300)
         self.anim_out.setStartValue(1.0)
         self.anim_out.setEndValue(0.0)
-        self.anim_out.finished.connect(self.close)  # 动画结束后销毁
+        self.anim_out.finished.connect(self._on_hide_finished)
         self.anim_out.start()
+
+    def _on_hide_finished(self):
+        self.sig_closed.emit(self)
+        self.close()

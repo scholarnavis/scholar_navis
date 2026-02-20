@@ -10,10 +10,27 @@ class OpenAICompatibleLLM:
     def __init__(self, config: Optional[Dict] = None):
         self.logger = logging.getLogger("LLM.Provider")
         self._is_cancelled = False
-        self._httpx_client = httpx.Client(timeout=60.0)
 
+        sys_cfg = ConfigManager().user_settings
+        proxy_mode = sys_cfg.get("proxy_mode", "system")
+        proxy_url = sys_cfg.get("proxy_url", "").strip()
+
+        httpx_kwargs = {"timeout": 60.0}
+        if proxy_mode == "custom" and proxy_url:
+            httpx_kwargs["proxy"] = proxy_url
+            httpx_kwargs["trust_env"] = False
+        elif proxy_mode == "off":
+            httpx_kwargs["trust_env"] = False
+
+        try:
+            self._httpx_client = httpx.Client(**httpx_kwargs)
+        except TypeError:
+            if "proxy" in httpx_kwargs:
+                httpx_kwargs["proxies"] = httpx_kwargs.pop("proxy")
+            self._httpx_client = httpx.Client(**httpx_kwargs)
+
+        # --- 配置回显 ---
         if not config:
-            sys_cfg = ConfigManager().user_settings
             self.api_key = sys_cfg.get("llm_api_key", "sk-placeholder")
             self.base_url = sys_cfg.get("llm_base_url", "http://localhost:11434/v1")
             self.model_name = sys_cfg.get("llm_model_name", "llama3")
@@ -25,7 +42,7 @@ class OpenAICompatibleLLM:
         if not self.api_key:
             self.api_key = "sk-no-key-required"
 
-        self.logger.info(f"Initializing LLM Client: [{self.model_name}] @ {self.base_url}")
+        self.logger.info(f"Initializing LLM Client: [{self.model_name}] @ {self.base_url} (Proxy Mode: {proxy_mode})")
 
         self.client = OpenAI(
             api_key=self.api_key,
@@ -50,6 +67,8 @@ class OpenAICompatibleLLM:
                 max_tokens=4096
             )
 
+            is_thinking = False  # 💡 新增状态追踪
+
             for chunk in response:
                 if self._is_cancelled:
                     yield "\n\n[⛔ Generation halted by user.]"
@@ -57,11 +76,20 @@ class OpenAICompatibleLLM:
 
                 if hasattr(chunk.choices[0], 'delta'):
                     delta = chunk.choices[0].delta
-                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                        yield f"<think>{delta.reasoning_content}</think>"
-                    if hasattr(delta, 'content') and delta.content:
-                        yield delta.content
+                    reasoning = getattr(delta, 'reasoning_content', None)
+                    content = getattr(delta, 'content', None)
 
+                    if reasoning:
+                        if not is_thinking:
+                            yield "<think>\n"
+                            is_thinking = True
+                        yield reasoning
+
+                    if content:
+                        if is_thinking:
+                            yield "\n</think>\n"
+                            is_thinking = False
+                        yield content
 
         except Exception as e:
             error_msg = str(e).lower()

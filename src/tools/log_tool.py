@@ -77,9 +77,14 @@ class LogTool(BaseTool):
             color = "#ff5555"
 
         html = f'<div style="color:{color}; margin-bottom: 2px; white-space: pre-wrap;">[{level}] {msg}</div>'
-        self.log_viewer.appendHtml(html)
+
         sb = self.log_viewer.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        is_at_bottom = sb.value() >= (sb.maximum() - 15)
+
+        self.log_viewer.appendHtml(html)
+
+        if is_at_bottom:
+            sb.setValue(sb.maximum())
 
     def clear_logs(self):
         if self.log_viewer:

@@ -99,10 +99,30 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentRow(0)
         self.perform_startup_checks()
 
+        self.clean_old_logs()
+
+    def clean_old_logs(self):
+        """保留最近的 30 个日志文件，删除更早的"""
+        log_dir = os.path.join(os.getcwd(), "logs")
+        if not os.path.exists(log_dir):
+            return
+
+        logs = [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.endswith(".log")]
+        logs.sort(key=os.path.getmtime)
+
+        if len(logs) > 30:
+            for old_log in logs[:-30]:
+                try:
+                    os.remove(old_log)
+                except Exception:
+                    pass
+
     def perform_startup_checks(self):
         is_first = self.check_first_run()
         if not is_first:
             self.check_model_integrity()
+
+
 
     def add_tool(self, tool):
         self.tools.append(tool)
@@ -172,3 +192,4 @@ class MainWindow(QMainWindow):
             cfg.save_settings()
             return True
         return False
+

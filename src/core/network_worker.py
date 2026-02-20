@@ -35,6 +35,19 @@ def setup_global_network_env():
         os.environ.pop("NO_PROXY", None)
 
 
+def _get_explicit_proxy_kwargs():
+    """读取配置，生成请求库所需的显式代理参数"""
+    cfg = ConfigManager().user_settings
+    proxy_mode = cfg.get("proxy_mode", "system")
+    proxy_url = cfg.get("proxy_url", "").strip()
+
+    if proxy_mode == "custom" and proxy_url:
+        return {"proxy": proxy_url}
+    elif proxy_mode == "off":
+        return {"trust_env": False}
+    return {}
+
+
 class LightNetworkWorker(QObject):
     sig_models_fetched = Signal(bool, list, str)
     sig_test_finished = Signal(bool, str)
@@ -59,16 +72,21 @@ class LightNetworkWorker(QObject):
                 pass
 
     def fetch_models(self, base_url, api_key):
-        """Asynchronously fetch model list"""
         self._is_cancelled = False
         self._req_session = requests.Session()
+
+        # 显式注入 requests 代理
+        proxy_cfg = _get_explicit_proxy_kwargs()
+        if "trust_env" in proxy_cfg:
+            self._req_session.trust_env = False
+        elif "proxy" in proxy_cfg:
+            self._req_session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
+
         try:
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             clean_url = base_url.rstrip('/')
             url = f"{clean_url}/models"
 
-            # Use the bound session to send the request.
-            # Once self.cancel() is called, this will immediately raise an exception.
             res = self._req_session.get(url, headers=headers, timeout=8)
             res.raise_for_status()
 
@@ -91,11 +109,14 @@ class LightNetworkWorker(QObject):
             self._req_session.close()
 
     def test_api(self, base_url, api_key, model_name):
-        """Test LLM connectivity"""
         self._is_cancelled = False
-        self._httpx_client = httpx.Client(timeout=15.0)
+
+        # 显式注入 httpx 代理
+        httpx_kwargs = {"timeout": 15.0}
+        httpx_kwargs.update(_get_explicit_proxy_kwargs())
+        self._httpx_client = httpx.Client(**httpx_kwargs)
+
         try:
-            # Pass the custom http_client to the OpenAI client
             client = OpenAI(
                 api_key=api_key or "sk-test",
                 base_url=base_url,
@@ -108,9 +129,22 @@ class LightNetworkWorker(QObject):
                 max_tokens=5
             )
 
-            reply = response.choices[0].message.content.strip()
+            msg_obj = response.choices[0].message
+            raw_content = msg_obj.content
+
+            if raw_content is None:
+                # 兼容 1：检查是不是“纯思考模型”把内容放到了 reasoning_content 里
+                if hasattr(msg_obj, 'reasoning_content') and msg_obj.reasoning_content:
+                    raw_content = f"[Thinking Process] {msg_obj.reasoning_content}"
+                else:
+                    # 兼容 2：如果啥都没有，说明被 Nvidia 官方安全护栏拦截，或者纯粹返回了空值
+                    raw_content = "[Empty Response / Filtered by Provider]"
+
+            reply = raw_content.strip()
+
             self.sig_test_finished.emit(True,
-                                        f"✅ API connectivity is excellent!\nModel '{model_name}' responded successfully: '{reply}'")
+                                        f"✅ API connectivity is excellent!\nModel '{model_name}' responded successfully:\n'{reply}'")
+
 
         except Exception as e:
             if self._is_cancelled or "closed" in str(e).lower():
@@ -119,3 +153,11 @@ class LightNetworkWorker(QObject):
                 self.sig_test_finished.emit(False, f"Test failed: {str(e)}")
         finally:
             self._httpx_client.close()
+
+    def do_fetch_models(self):
+        self.fetch_models(getattr(self, 'base_url', ''), getattr(self, 'api_key', ''))
+
+    def do_test_api(self):
+        self.test_api(getattr(self, 'base_url', ''), getattr(self, 'api_key', ''), getattr(self, 'model_name', ''))
+
+
