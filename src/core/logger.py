@@ -1,6 +1,8 @@
 import logging
 import os
+import socket
 import sys
+import threading
 from datetime import datetime
 from PySide6.QtCore import QObject, Signal
 
@@ -63,6 +65,35 @@ def setup_logger():
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
+    # 启动 UDP 日志接收隧道
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(('127.0.0.1', 0))
+        udp_port = sock.getsockname()[1]
+        os.environ["SCHOLAR_NAVIS_LOG_PORT"] = str(udp_port)
+
+        def udp_listener():
+            mcp_logger = logging.getLogger("MCP.Plugin")
+            while True:
+                try:
+                    data, _ = sock.recvfrom(65535)
+                    msg = data.decode('utf-8')
+                    parts = msg.split('|', 1)
+                    if len(parts) == 2:
+                        level_str, text = parts
+                        level_val = getattr(logging, level_str.upper(), logging.INFO)
+                        # 将收到的日志重新注入主程序的日志系统
+                        mcp_logger.log(level_val, text)
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=udp_listener, daemon=True, name="UDPLogListener")
+        t.start()
+        root_logger.info(f"Subprocess UDP Log IPC listening on port {udp_port} For local MCP Server.")
+    except Exception as e:
+        root_logger.error(f"Failed to start UDP log server: {e}")
+
+
     def global_exception_handler(exc_type, exc_value, exc_traceback):
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
@@ -70,19 +101,6 @@ def setup_logger():
         root_logger.critical("UNCAUGHT FATAL EXCEPTION", exc_info=(exc_type, exc_value, exc_traceback))
 
     sys.excepthook = global_exception_handler
-
-    root_logger.info(f"Logger initialized. Log file: {log_path}")
-    return root_logger
-
-    # 全局异常捕获
-    def global_exception_handler(exc_type, exc_value, exc_traceback):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
-        root_logger.critical("🔥 UNCAUGHT FATAL EXCEPTION", exc_info=(exc_type, exc_value, exc_traceback))
-
-    sys.excepthook = global_exception_handler
-
     root_logger.info(f"Logger initialized. Log file: {log_path}")
     return root_logger
 

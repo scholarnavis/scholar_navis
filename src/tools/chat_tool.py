@@ -1,11 +1,11 @@
 import functools
 import json
+import logging
 import os
 import re
 import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
-import langdetect
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QCheckBox)
@@ -211,6 +211,9 @@ class ChatWorker(QObject):
     def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False,
                  use_thinking_model=False):
         super().__init__()
+
+        self.logger = logging.getLogger("ChatWorker")
+
         self.main_config = main_config
         self.trans_config = trans_config
         self.messages = messages
@@ -414,7 +417,6 @@ class ChatWorker(QObject):
             rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
             rag_messages.append({"role": "user", "content": search_query})
 
-            # --- Tool Calling 拦截逻辑保持不变 (这是接入 NCBI 的核心) ---
             if mcp_tools:
                 try:
                     pre_flight_response = self.main_llm.client.chat.completions.create(
@@ -433,13 +435,25 @@ class ChatWorker(QObject):
                         for tool_call in response_msg.tool_calls:
                             tool_name = tool_call.function.name
                             try:
-                                import json
                                 tool_args = json.loads(tool_call.function.arguments)
                                 self.sig_token.emit(f"<i>📡 正在请求 NCBI 远程数据库: {tool_name}...</i>\n\n")
+                                # 执行 MCP 工具
                                 tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
+
+                                try:
+                                    res_dict = json.loads(tool_result)
+                                    if isinstance(res_dict, dict) and res_dict.get("status") == "error":
+                                        error_msg = res_dict.get("message", "Unknown error")
+                                        GlobalSignals().sig_toast.emit(f"NCBI 数据库请求失败: {error_msg}", "warning")
+                                        # 替换结果，强制 LLM 放弃使用该工具数据并回退到本地知识库
+                                        tool_result = "Action failed. The NCBI tool encountered a network or API limit error. Please strictly inform the user that real-time retrieval failed, and answer using ONLY local context."
+                                except Exception:
+                                    pass # JSON解析失败说明返回的是正常字符串，放行
+
                             except Exception as e:
                                 self.logger.error(f"NCBI MCP tool {tool_name} failed: {e}")
-                                tool_result = json.dumps({"status": "error", "message": str(e)})
+                                GlobalSignals().sig_toast.emit(f"NCBI 插件连接异常: {str(e)}", "error")
+                                tool_result = "Tool execution failed due to a system exception. Proceed using ONLY local context."
 
                             rag_messages.append({
                                 "role": "tool",
@@ -877,6 +891,8 @@ class ChatTool(BaseTool):
         self.worker.sig_finished.connect(self.thread.quit)
         self.worker.sig_finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
+        GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
+        self.sig_finished.connect(self.thread.quit)
         self.thread.start()
 
     def _show_slow_connection_warning(self):

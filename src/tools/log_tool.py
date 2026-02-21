@@ -1,3 +1,5 @@
+import html
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPlainTextEdit,
                                QHBoxLayout, QPushButton, QLabel)
 from src.tools.base_tool import BaseTool
@@ -76,12 +78,15 @@ class LogTool(BaseTool):
         elif level in ["ERROR", "CRITICAL"]:
             color = "#ff5555"
 
-        html = f'<div style="color:{color}; margin-bottom: 2px; white-space: pre-wrap;">[{level}] {msg}</div>'
+        # 🌟 防御性转义：将 < 转换为 &lt; 防止 HTML 注入导致的渲染崩溃
+        safe_msg = html.escape(str(msg))
+
+        html_str = f'<div style="color:{color}; margin-bottom: 2px; white-space: pre-wrap;">[{level}] {safe_msg}</div>'
 
         sb = self.log_viewer.verticalScrollBar()
         is_at_bottom = sb.value() >= (sb.maximum() - 15)
 
-        self.log_viewer.appendHtml(html)
+        self.log_viewer.appendHtml(html_str)
 
         if is_at_bottom:
             sb.setValue(sb.maximum())

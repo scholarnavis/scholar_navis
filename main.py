@@ -20,6 +20,7 @@ os.environ["SCARF_NO_ANALYTICS"] = "true"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 
+
 def init_mcp(logger):
     """
     Initialize MCP servers:
@@ -29,6 +30,7 @@ def init_mcp(logger):
 
     os.environ["NCBI_API_EMAIL"] = config.get("ncbi_email", "")
     os.environ["NCBI_API_KEY"] = config.get("ncbi_api_key", "")
+    os.environ["S2_API_KEY"] = config.get("s2_api_key", "")
 
     logger.info("Starting MCP subsystem initialization.")
 
@@ -38,15 +40,15 @@ def init_mcp(logger):
         logger.info("Attempting to load internal biological MCP server.")
         mcp_mgr.connect_sync(
             python_path=sys.executable,
-            args=["-c", "from plugins.bio_server import mcp; mcp.run(transport='stdio')"]
+            args=["-c", "from plugins.common_server import mcp; mcp.run(transport='stdio')"]
         )
-        logger.info("Internal biological MCP server initialized successfully.")
+        logger.info("Internal Common MCP server initialized successfully.")
 
         mcp_mgr.connect_sync(
             python_path=sys.executable,
-            args=["-c", "from plugins.bio_ncbi_server import mcp; mcp.run(transport='stdio')"]
+            args=["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
         )
-        logger.info("Internal NCBI biological MCP server initialized successfully.")
+        logger.info("Internal Academic MCP server initialized successfully.")
 
 
         logger.info("All biological MCP servers initialized.")
@@ -91,7 +93,6 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
 
-    # Initialize MCP subsystem after the UI event loop is ready
     init_mcp(logger)
 
     sys.exit(app.exec())

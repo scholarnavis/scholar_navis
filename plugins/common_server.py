@@ -1,4 +1,4 @@
-# plugins/bio_server.py
+# plugins/common_server.py
 import json
 import logging
 import os

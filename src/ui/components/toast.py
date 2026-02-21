@@ -1,6 +1,9 @@
+import logging
+
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QGraphicsOpacityEffect
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, Signal
 
+logger = logging.getLogger("UI.Toast")
 
 class ToastManager:
     """全局单例，用于管理 Toast 显示（支持多消息向上堆叠排队）"""
@@ -18,22 +21,28 @@ class ToastManager:
 
     def show(self, message, level="info"):
         if not self.parent_widget:
-            print("ToastManager: 未设置 parent_widget")
+            logger.debug("未设置 parent_widget")
             return
+
+        if level == "error":
+            logger.error(f"{message}")
+        elif level == "warning":
+            logger.warning(f"{message}")
+        elif level == "success":
+            logger.info(f"{message}")
+        else:
+            logger.info(f"{message}")
 
         toast = ToastWidget(self.parent_widget, message, level)
         self.active_toasts.append(toast)
 
-        # 监听 Toast 的彻底关闭信号，将其从队列中移除并触发重新排版
         toast.sig_closed.connect(self._remove_toast)
-
         self._update_positions()
         toast.show_animation()
 
     def _remove_toast(self, toast_obj):
         if toast_obj in self.active_toasts:
             self.active_toasts.remove(toast_obj)
-        # 有 Toast 消失后，剩下的 Toast 会自动向下滑落填补空缺
         self._update_positions()
 
     def _update_positions(self):
@@ -43,13 +52,11 @@ class ToastManager:
         base_y = parent_rect.height() - 100
         spacing = 15  # Toast 之间的上下间距
 
-        # 倒序遍历：最新出现的在最下面，旧的会被动态顶到上面去
         for toast in reversed(self.active_toasts):
             x = (parent_rect.width() - toast.width()) // 2
             target_pos = QPoint(x, base_y)
 
             if not toast.isVisible():
-                # 对于刚创建的 Toast：让它在目标位置偏下 20px 处，配合透明度产生“向上浮出”的视觉效果
                 toast.move(x, base_y + 20)
 
             # 触发平滑位移动画

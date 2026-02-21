@@ -251,39 +251,47 @@ class SettingsTool(BaseTool):
         self.layout.addWidget(group)
 
     def init_ncbi_section(self):
-        group = QGroupBox("🧬 Biological Databases (NCBI)")
+        group = QGroupBox("Academic Databases (NCBI & Semantic Scholar)")
         group.setStyleSheet(
             "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }"
         )
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
-        # 邮箱输入框
+        # [保留 NCBI 邮箱和 Key 的代码]
         self.input_ncbi_email = QLineEdit()
         self.input_ncbi_email.setPlaceholderText("Required: e.g. user@university.edu")
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
         self.input_ncbi_email.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
-        # API Key 输入框 (使用 PasswordEchoOnEdit 保护隐私，编辑时可见，失去焦点隐藏)
         self.input_ncbi_api_key = QLineEdit()
         self.input_ncbi_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
-        self.input_ncbi_api_key.setPlaceholderText("Optional but highly recommended")
+        self.input_ncbi_api_key.setPlaceholderText("NCBI Key (Optional but recommended)")
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
         self.input_ncbi_api_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
-        # 注意事项与申请链接 (支持富文本与外部链接跳转)
+        # 🆕 新增 Semantic Scholar API Key 输入框
+        self.input_s2_api_key = QLineEdit()
+        self.input_s2_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
+        self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
+        self.input_s2_api_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+
+        # 🆕 更新提示信息，包含 S2 的申请链接
         lbl_hint = QLabel(
-            "💡 <b>Important Notice:</b> NCBI strictly requires a valid email address to track usage. "
-            "Without an API Key, E-utilities requests are limited to <b>3 per second</b>. "
-            "With an API Key, the limit increases to <b>10 per second</b>, significantly improving stability during bulk retrieval.<br><br>"
-            "👉 <a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:#05B8CC; text-decoration:none;'>Click here to log in to NCBI and generate an API Key in Account Settings</a>."
+            "💡 <b>Important Notice:</b><br>"
+            "• <b>NCBI:</b> API Key increases limits from 3 to 10 requests/sec. "
+            "<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:#05B8CC; text-decoration:none;'>Get NCBI Key</a>.<br>"
+            "• <b>Semantic Scholar:</b> Prevents '429 Too Many Requests' errors during deep academic RAG tasks. "
+            "<a href='https://www.semanticscholar.org/product/api' style='color:#05B8CC; text-decoration:none;'>Get S2 Key</a>."
         )
         lbl_hint.setWordWrap(True)
-        lbl_hint.setOpenExternalLinks(True)  # 允许点击直接调用系统浏览器打开链接
-        lbl_hint.setStyleSheet("color: #aaa; font-size: 11px; margin-top: 5px; margin-bottom: 5px;")
+        lbl_hint.setOpenExternalLinks(True)
+        lbl_hint.setStyleSheet("color: #aaa; font-size: 11px; margin-top: 5px; margin-bottom: 5px; line-height: 1.4;")
 
         layout.addRow("NCBI Email:", self.input_ncbi_email)
         layout.addRow("NCBI API Key:", self.input_ncbi_api_key)
+        layout.addRow("S2 API Key:", self.input_s2_api_key)
         layout.addRow("", lbl_hint)
 
         self.layout.addWidget(group)
@@ -905,12 +913,34 @@ class SettingsTool(BaseTool):
     def on_save_clicked(self):
         self._save_llm_config()
 
+        old_email = self.config.user_settings.get("ncbi_email", "")
+        old_key = self.config.user_settings.get("ncbi_api_key", "")
+        # 🆕 提取旧的 S2 Key
+        old_s2_key = self.config.user_settings.get("s2_api_key", "")
+        old_proxy_mode = self.config.user_settings.get("proxy_mode", "system")
+        old_proxy_url = self.config.user_settings.get("proxy_url", "")
+
+        new_email = self.input_ncbi_email.text().strip()
+        new_key = self.input_ncbi_api_key.text().strip()
+        # 🆕 提取新的 S2 Key
+        new_s2_key = self.input_s2_api_key.text().strip()
+
         mode_idx = self.combo_proxy_mode.currentIndex()
-        mode_str = ["system", "off", "custom"][mode_idx]
+        new_proxy_mode = ["system", "off", "custom"][mode_idx]
+        new_proxy_url = self.input_proxy.text().strip()
+
+        # 🆕 将 S2 Key 变化也加入重启判断条件
+        needs_mcp_restart = (
+                (old_email != new_email) or
+                (old_key != new_key) or
+                (old_s2_key != new_s2_key) or
+                (old_proxy_mode != new_proxy_mode) or
+                (old_proxy_url != new_proxy_url)
+        )
 
         self.config.user_settings.update({
-            "proxy_mode": mode_str,
-            "proxy_url": self.input_proxy.text().strip(),
+            "proxy_mode": new_proxy_mode,
+            "proxy_url": new_proxy_url,
             "hf_mirror": self.input_mirror.text().strip(),
             "download_speed_limit": self.combo_embed.currentText(),
             "current_model_id": self.combo_embed.currentData(),
@@ -918,22 +948,52 @@ class SettingsTool(BaseTool):
             "active_llm_id": self._get_active_llm_id(),
             "theme": self.combo_theme.currentText(),
             "log_level": self.combo_log.currentText(),
-            "ncbi_email": self.input_ncbi_email.text().strip(),
-            "ncbi_api_key": self.input_ncbi_api_key.text().strip(),
+            "ncbi_email": new_email,
+            "ncbi_api_key": new_key,
+            "s2_api_key": new_s2_key,  # 🆕 存入配置字典
             "external_python_path": self.input_ext_python.text().strip()
         })
         self.config.save_settings()
         self.logger.info("Configuration saved successfully.")
+
         setup_global_network_env()
+        os.environ["NCBI_API_EMAIL"] = new_email
+        os.environ["NCBI_API_KEY"] = new_key
+        os.environ["S2_API_KEY"] = new_s2_key
+
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.emit()
-        self.logger.info(f"Settings Saved. Proxy Mode: {mode_str}")
 
+        self.logger.info(f"Settings Saved. Proxy Mode: {new_proxy_mode}")
 
         # 应用主题和日志级别
         qdarktheme.setup_theme(self.combo_theme.currentText().lower())
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
+        # 🆕 4. 按需重启 MCP 服务器，并接入 ProgressDialog 动画
+        if needs_mcp_restart:
+            from src.core.mcp_manager import MCPManager
+            from src.ui.components.dialog import ProgressDialog
+            from PySide6.QtWidgets import QApplication
+
+            self.logger.info("Network or NCBI credentials changed. Restarting MCP Server...")
+
+            # 弹出一个不可取消的进度框（因为重启过程是同步且很快的，只是给个视觉缓冲）
+            pd = ProgressDialog(self.widget, "Restarting Plugin",
+                                "Applying new network and API settings to NCBI Plugin...", telemetry_config={})
+            pd.btn_cancel.setVisible(False)
+            pd.show()
+            QApplication.processEvents()  # 强制刷新 UI，确保弹窗立刻渲染
+
+            try:
+                MCPManager.get_instance().restart_sync()
+                self.logger.info("MCP Server successfully hot-restarted.")
+            except Exception as e:
+                self.logger.error(f"Failed to hot-restart MCP server: {e}")
+            finally:
+                pd.close_safe()
+
+        # 5. 检查并提示模型下载（保持原逻辑不变）
         dev = self.dev_mgr.get_optimal_device()
 
         embed_id = self.combo_embed.currentData()
