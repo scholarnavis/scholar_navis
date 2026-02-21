@@ -3,6 +3,7 @@ import httpx
 from typing import Generator, List, Dict, Optional
 from openai import OpenAI
 from src.core.config_manager import ConfigManager
+from src.core.network_worker import _get_explicit_proxy_kwargs
 
 
 class OpenAICompatibleLLM:
@@ -13,23 +14,19 @@ class OpenAICompatibleLLM:
 
         sys_cfg = ConfigManager().user_settings
         proxy_mode = sys_cfg.get("proxy_mode", "system")
-        proxy_url = sys_cfg.get("proxy_url", "").strip()
 
         httpx_kwargs = {"timeout": 60.0}
-        if proxy_mode == "custom" and proxy_url:
-            httpx_kwargs["proxy"] = proxy_url
-            httpx_kwargs["trust_env"] = False
-        elif proxy_mode == "off":
-            httpx_kwargs["trust_env"] = False
+        proxy_cfg = _get_explicit_proxy_kwargs()
+        httpx_kwargs.update(proxy_cfg)
 
         try:
             self._httpx_client = httpx.Client(**httpx_kwargs)
         except TypeError:
+            # 兼容低版本/不同系统的 httpx 代理参数名差异
             if "proxy" in httpx_kwargs:
                 httpx_kwargs["proxies"] = httpx_kwargs.pop("proxy")
             self._httpx_client = httpx.Client(**httpx_kwargs)
 
-        # --- 配置回显 ---
         if not config:
             self.api_key = sys_cfg.get("llm_api_key", "sk-placeholder")
             self.base_url = sys_cfg.get("llm_base_url", "http://localhost:11434/v1")

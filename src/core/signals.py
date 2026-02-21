@@ -10,7 +10,7 @@ class GlobalSignals(QObject):
     kb_modified = Signal(str)  # 知识库发生了实质性更改 (参数: kb_id)
     file_queue_updated = Signal()  # 下载队列变动
     llm_config_changed = Signal() # LLM 配置变更信号
-
+    sig_invoke_translator = Signal(str)  # 唤醒全局翻译器并传入文本
     navigate_to_tool = Signal(str)  # 触发主窗口左侧导航切换 (参数: tool_name)
     request_model_download = Signal(str, str)  # 触发设置页面的下载逻辑 (参数: model_id, model_type)
 

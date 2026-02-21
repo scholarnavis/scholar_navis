@@ -28,6 +28,8 @@ from src.core.kb_manager import KBManager
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.ui.components.combo import BaseComboBox
+from src.ui.components.model_selector import ModelSelectorWidget
+from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
 from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
@@ -562,29 +564,12 @@ class ChatTool(BaseTool):
         top_bar = QVBoxLayout()
         top_bar.setSpacing(8)
 
+        #  1: 模型选择组件
         row1_layout = QHBoxLayout()
-        row1_layout.addWidget(QLabel("🧠 Main LLM:"))
-        self.combo_llm = BaseComboBox(min_width=150)
-        row1_layout.addWidget(self.combo_llm)
-
-        self.checkbox_think = QCheckBox("Think Mode")
-        self.checkbox_think.setCursor(Qt.PointingHandCursor)
-        self.checkbox_think.setStyleSheet("""
-            QCheckBox { color: #aaaaaa; font-weight: bold; font-family: 'Segoe UI'; font-size: 13px; }
-            QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #555; background: #333; }
-            QCheckBox::indicator:checked { background: #007acc; border: 1px solid #007acc; }
-            QCheckBox:disabled { color: #555555; }
-        """)
-        row1_layout.addWidget(self.checkbox_think)
-
-        self.lbl_current_model = QLabel("")
-        self.lbl_current_model.setStyleSheet(
-            "color: #05B8CC; font-size: 11px; font-weight: bold; font-family: 'Consolas', monospace;")
-        row1_layout.addWidget(self.lbl_current_model)
+        self.model_selector = ModelSelectorWidget()
+        row1_layout.addWidget(self.model_selector)
 
         row1_layout.addSpacing(15)
-
-        # 翻译模型专属选择框
         row1_layout.addWidget(QLabel("🌐 Translator:"))
         self.combo_trans_llm = BaseComboBox(min_width=150)
         row1_layout.addWidget(self.combo_trans_llm)
@@ -602,9 +587,6 @@ class ChatTool(BaseTool):
         top_bar.addLayout(row2_layout)
         layout.addLayout(top_bar)
 
-        # --- 绑定模型切换事件 ---
-        self.combo_llm.currentIndexChanged.connect(self._on_llm_changed)
-        self.checkbox_think.stateChanged.connect(self._update_model_display)
 
         # 加载本地配置文件并填充两个下拉框
         self.load_llm_configs()
@@ -635,33 +617,7 @@ class ChatTool(BaseTool):
         layout.addWidget(self.input_container)
         return self.widget
 
-    def _on_llm_changed(self):
-        llm_config = self.combo_llm.currentData()
-        if not llm_config: return
-        has_think = bool(llm_config.get("thinking_model_name", "").strip())
-        self.checkbox_think.blockSignals(True)
-        if not has_think:
-            self.checkbox_think.setChecked(False)
-            self.checkbox_think.setEnabled(False)
-            self.checkbox_think.setToolTip("Current provider has no thinking model configured.")
-        else:
-            self.checkbox_think.setEnabled(True)
-            self.checkbox_think.setToolTip(f"Enable {llm_config.get('thinking_model_name')}")
-        self.checkbox_think.blockSignals(False)
-        self._update_model_display()
 
-    def _update_model_display(self):
-        if not hasattr(self, 'lbl_current_model'): return
-        llm_config = self.combo_llm.currentData()
-        if not llm_config: return
-        use_think = self.checkbox_think.isChecked()
-        thinking_model = llm_config.get("thinking_model_name", "").strip()
-        standard_model = llm_config.get("model_name", "").strip()
-        actual_model = thinking_model if (use_think and thinking_model) else standard_model
-        if actual_model:
-            self.lbl_current_model.setText(f"[{actual_model}]")
-        else:
-            self.lbl_current_model.setText("[No Model Configured]")
 
     def on_kb_modified(self, kb_id):
         if not self.history: return
@@ -723,20 +679,14 @@ class ChatTool(BaseTool):
         self.logger.info("Chat history cleared by user.")
 
     def load_llm_configs(self):
-        if not hasattr(self, 'combo_llm'): return
+        if not hasattr(self, 'combo_trans_llm'): return
 
         path = os.path.join(os.getcwd(), "config", "llm_config.json")
-        self.combo_llm.clear()
         self.combo_trans_llm.clear()
-
-        # 翻译下拉框默认插入第一个选项：关闭翻译
         self.combo_trans_llm.addItem("❌ None (Disable)", None)
 
-        active_id = ConfigManager().user_settings.get("active_llm_id", "openai")
-        # 假设我们也在 settings 里存了一个 trans_llm_id
+        from src.core.config_manager import ConfigManager
         trans_id = ConfigManager().user_settings.get("trans_llm_id", "")
-
-        target_idx = 0
         trans_target_idx = 0
 
         if os.path.exists(path):
@@ -744,21 +694,20 @@ class ChatTool(BaseTool):
                 with open(path, 'r', encoding='utf-8') as f:
                     configs = json.load(f)
                     for i, cfg in enumerate(configs):
-                        # 填充主模型
-                        self.combo_llm.addItem(cfg['name'], cfg)
-                        if cfg.get("id") == active_id: target_idx = i
-
-                        # 填充翻译模型 (索引 + 1 因为 0 是 Disable)
                         trans_name = f"{cfg['name']} ({cfg.get('model_name', 'Unknown')})"
                         self.combo_trans_llm.addItem(trans_name, cfg)
-                        if cfg.get("id") == trans_id: trans_target_idx = i + 1
+                        if cfg.get("id") == trans_id:
+                            trans_target_idx = i + 1
             except:
                 pass
 
-        if self.combo_llm.count() > 0: self.combo_llm.setCurrentIndex(target_idx)
-        if self.combo_trans_llm.count() > 0: self.combo_trans_llm.setCurrentIndex(trans_target_idx)
+        if self.combo_trans_llm.count() > 0:
+            self.combo_trans_llm.setCurrentIndex(trans_target_idx)
 
-        self._on_llm_changed()
+        # 同步刷新独立的模型选择器组件
+        if hasattr(self, 'model_selector'):
+            self.model_selector.load_llm_configs()
+
 
     def process_send(self, text, is_retry=False):
         from src.core.model_manager import ModelManager
@@ -858,22 +807,26 @@ class ChatTool(BaseTool):
         sb.setValue(sb.maximum())
 
     def start_ai_response(self, kb_id, requires_translation=False):
-        main_config = self.combo_llm.currentData()
+        #获取最新的主模型配置与 Think 模式状态
+        main_config = self.model_selector.get_current_config()
+        use_think = self.model_selector.is_think_mode()
         trans_config = self.combo_trans_llm.currentData()
 
-        llm_config = self.combo_llm.currentData()
-        use_think = getattr(self, 'checkbox_think', None) and self.checkbox_think.isChecked()
-        thinking_model = llm_config.get("thinking_model_name", "").strip()
-        standard_model = llm_config.get("model_name", "").strip()
-        actual_model = thinking_model if (use_think and thinking_model) else standard_model
-        self.logger.info(
-            f" Starting AI response | Model: [{actual_model}] | Provider: [{llm_config.get('name', 'Unknown')}] | Deep Think: {use_think}")
+        if main_config:
+            thinking_model = main_config.get("thinking_model_name", "").strip()
+            standard_model = main_config.get("model_name", "").strip()
+            actual_model = thinking_model if (use_think and thinking_model) else standard_model
+            self.logger.info(
+                f" Starting AI response | Model: [{actual_model}] | Provider: [{main_config.get('name', 'Unknown')}] | Deep Think: {use_think}")
+
+        # 初始化聊天气泡与 UI 状态
         self.current_ai_text = ""
         self.current_ai_bubble = self.add_bubble("", is_user=False)
         self.current_ai_bubble.set_loading(True)
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
-        use_think = getattr(self, 'checkbox_think', None) and self.checkbox_think.isChecked()
+
+        # 实例化后台 Worker
         self.thread = QThread()
         self.worker = ChatWorker(
             main_config=main_config,
@@ -890,6 +843,7 @@ class ChatTool(BaseTool):
         except:
             pass
         self.input_container.btn_stop.clicked.connect(self.cancel_generation)
+
         self.thread.started.connect(self.worker.run)
         self.worker.sig_token.connect(self.update_ai_bubble)
         self.worker.sig_finished.connect(self.on_chat_finished)
@@ -897,8 +851,10 @@ class ChatTool(BaseTool):
         self.worker.sig_finished.connect(self.thread.quit)
         self.worker.sig_finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
+
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
         self.sig_finished.connect(self.thread.quit)
+
         self.thread.start()
 
     def _show_slow_connection_warning(self):
@@ -962,43 +918,9 @@ class ChatTool(BaseTool):
         if is_at_bottom: self.scroll_to_bottom()
 
     def _format_response(self, text, index):
-
-        text = text.lstrip()
-
-        def replacer(match):
-            content = match.group(1).strip()
-            is_closed = match.group(2) == "</think>"
-
-            if index in getattr(self, 'user_toggled_thinks', set()):
-                is_expanded = index in self.expanded_thinks
-            else:
-                is_expanded = not is_closed
-
-            action = "collapse" if is_expanded else "expand"
-            icon = "🔽" if is_expanded else "▶️"
-            status = "AI Thinking Process" if is_closed else "AI Thinking..."
-
-            link = f"<a href='think://{action}?index={index}' style='color:#05B8CC; text-decoration:none;'><nobr>{icon} <b>{status}</b></nobr></a>"
-
-            if not is_expanded:
-                return f"<div style='background:#222; border-left: 3px solid #555; padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px;'>{link}</div>"
-            else:
-                safe_content = content.replace('\n', '<br>')
-                suffix = "" if is_closed else " <span style='color:#05B8CC;'><i>...</i></span>"
-                return (f"<div style='background:#222; border-left: 3px solid #05B8CC; padding: 8px 12px; "
-                        f"margin: 10px 0; border-radius: 4px; font-size: 13px; color: #aaa;'>"
-                        f"{link}<br><br><div style='color:#999;'>{safe_content}{suffix}</div></div>")
-
-        return re.sub(r'<think>(.*?)(</think>|$)', replacer, text, flags=re.DOTALL)
-
-
-    def cancel_generation(self):
-        if hasattr(self, 'worker') and self.worker: self.worker.cancel()
-        ToastManager().show("已手动终止生成。您可以修改参数后重试。", "warning")
-
-        self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_retry.setVisible(True)
-        self.input_container.btn_send.setVisible(True)
+        return TextFormatter.format_chat_text(
+            text, index, getattr(self, 'expanded_thinks', set()), getattr(self, 'user_toggled_thinks', set())
+        )
 
 
     def on_chat_error(self, msg):

@@ -1,15 +1,19 @@
 import os
 import shutil
 import sys
+
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
-                               QStackedWidget, QSplitter)
-from PySide6.QtCore import Qt, QSize
+                               QStackedWidget, QSplitter, QPushButton, QHBoxLayout, QGraphicsOpacityEffect, QLabel)
+from PySide6.QtCore import Qt, QSize, QEasingCurve, QAbstractAnimation, QPropertyAnimation
 
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.logger import get_qt_log_handler
 from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf
+from src.tools.rss_tool import RSSTool
 from src.ui.components.dialog import StandardDialog
+from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
 
 # 引入所有工具
@@ -26,7 +30,7 @@ from src.tools.log_tool import LogTool
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Scholar Navis Pro - Research Assistant")
+        self.setWindowTitle("Scholar Navis - Research Assistant")
         self.resize(1280, 800)
 
         # Toast
@@ -38,44 +42,91 @@ class MainWindow(QMainWindow):
         main_splitter.setStyleSheet("QSplitter::handle { background-color: #333; }")
         self.setCentralWidget(main_splitter)
 
-        # --- 左侧面板 ---
+        # 左侧面板构建 (收窄宽度、更紧凑的边距)
         left_panel = QWidget()
-        left_panel.setMinimumWidth(240)
-        left_panel.setMaximumWidth(300)
+        left_panel.setMaximumWidth(220)
 
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(5, 10, 5, 10)
+        left_layout.setSpacing(10)
 
+        # 1. Logo
+        logo_label = QLabel("🧠 Scholar Navis")
+        logo_label.setStyleSheet("""
+            QLabel {
+                color: #05B8CC;
+                font-size: 18px;
+                font-weight: bold;
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+                padding: 10px 5px;
+            }
+        """)
+        left_layout.addWidget(logo_label)
+
+        # 2. 导航栏
         self.sidebar = QListWidget()
+        self.sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sidebar.setStyleSheet("""
             QListWidget { 
                 border: none; 
-                background-color: #252526; 
+                background-color: transparent; 
                 font-family: 'Segoe UI', sans-serif;
                 font-size: 14px; 
                 outline: none; 
             }
             QListWidget::item { 
-                padding: 15px 20px; 
+                padding: 12px 15px; 
                 border-left: 3px solid transparent;
                 color: #cccccc;
+                border-radius: 6px;
+                margin-bottom: 2px;
             }
             QListWidget::item:selected { 
                 background-color: #37373d; 
                 color: white; 
-                border-left: 3px solid #007acc;
+                border-left: 3px solid #05B8CC;
                 font-weight: bold;
             }
-            QListWidget::item:hover { 
+            QListWidget::item:hover:!selected { 
                 background-color: #2a2d2e; 
             }
         """)
         self.sidebar.currentRowChanged.connect(self.switch_tool)
-
         left_layout.addWidget(self.sidebar)
+
+
+        # 灵动翻译入口
+        self.btn_quick_trans = QPushButton("🌐")
+        self.btn_quick_trans.setToolTip("Quick Translate (Ctrl+Shift+T)")
+        self.btn_quick_trans.setCursor(Qt.PointingHandCursor)
+        self.btn_quick_trans.setStyleSheet("""
+                    QPushButton {
+                        background-color: transparent;
+                        border: none;
+                        color: #555555; 
+                        font-size: 26px; 
+                        padding: 6px;
+                        margin-left: 5px;
+                        border-radius: 8px; 
+                    }
+                    QPushButton:hover {
+                        color: #05B8CC; 
+                        background-color: rgba(5, 184, 204, 0.1);
+                    }
+                    QPushButton:pressed {
+                        color: #0497A7;
+                        background-color: rgba(5, 184, 204, 0.2);
+                    }
+                """)
+        self.btn_quick_trans.clicked.connect(self.toggle_quick_translator)
+
+        # 靠左下角对齐
+        left_layout.addWidget(self.btn_quick_trans, alignment=Qt.AlignLeft | Qt.AlignBottom)
+
         main_splitter.addWidget(left_panel)
 
-        # --- 右侧面板 ---
+        # 右侧主面板构建
         self.tool_stack = QStackedWidget()
         self.tool_stack.setStyleSheet("background-color: #1e1e1e;")
         main_splitter.addWidget(self.tool_stack)
@@ -91,6 +142,11 @@ class MainWindow(QMainWindow):
         self.add_tool(GraphTool())
         self.add_tool(GapMinerTool())
         self.add_tool(RadarTool())
+
+        # 挂载 RSS 工具
+        self.rss_tool = RSSTool()
+        self.add_tool(self.rss_tool)
+
         self.add_tool(SettingsTool())
 
         self.log_tool = LogTool()
@@ -98,8 +154,25 @@ class MainWindow(QMainWindow):
 
         self.sidebar.setCurrentRow(0)
         self.perform_startup_checks()
-
         self.clean_old_logs()
+
+        # 注册全局翻译快捷键
+        self.translator_dialog = None
+        self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
+        self.shortcut_translate.activated.connect(self.toggle_quick_translator)
+
+    # 新增唤醒翻译窗口的方法
+    def toggle_quick_translator(self):
+        if self.translator_dialog is None:
+            self.translator_dialog = QuickTranslatorWindow(None)
+
+        if self.translator_dialog.isHidden():
+            self.translator_dialog.show()
+            self.translator_dialog.activateWindow()
+            self.translator_dialog.input_box.setFocus()
+        else:
+            self.translator_dialog.hide()
+
 
     def clean_old_logs(self):
         """保留最近的 30 个日志文件，删除更早的"""
