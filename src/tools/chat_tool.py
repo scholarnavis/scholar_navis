@@ -3,12 +3,14 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
-                               QScrollArea, QFrame, QFileDialog, QCheckBox)
+                               QScrollArea, QFrame, QFileDialog, QCheckBox, QApplication)
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl
 from PySide6.QtGui import QDesktopServices
 
@@ -28,7 +30,7 @@ from src.core.device_manager import DeviceManager
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.toast import ToastManager
 
-from src.ui.components.pdf_viewer import InternalPDFViewer
+from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.pill_button import FollowUpPillButton
 
@@ -514,7 +516,11 @@ class ChatWorker(QObject):
                     if rid in used_indices:
                         safe_path = quote(info['path'])
                         safe_text = quote(info['search_text'])
-                        link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}"
+                        safe_name = quote(info['name'])  # <-- Encode the actual filename
+
+                        # Add the name parameter to the citation URL payload
+                        link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}&name={safe_name}"
+
                         ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']} (Page {info['page']})</a></div>"
                         displayed += 1
                 if displayed > 0:
@@ -1188,12 +1194,52 @@ class ChatTool(BaseTool):
             file_path = params.get('path', [''])[0]
             page_num = int(params.get('page', ['1'])[0]) - 1
             text_snippet = params.get('text', [''])[0]
-            if os.path.exists(file_path):
-                if self.pdf_viewer is None: self.pdf_viewer = InternalPDFViewer(None)
-                self.pdf_viewer.load_document(file_path, page_num, text_snippet)
-                ToastManager().show(f"已打开文档，位于第 {page_num + 1} 页", "success")
+            source_name = params.get('name', [''])[0]
+
+            kb_data = self.combo_kb.currentData()
+            kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
+
+            real_path = ""
+            if kb_id and source_name:
+                kb_meta = self.kb_manager.get_kb_by_id(kb_id)
+                if kb_meta:
+                    file_map = kb_meta.get("file_map", {})
+                    reverse_map = {v: k for k, v in file_map.items()}
+                    obf_name = reverse_map.get(source_name)
+                    if obf_name:
+                        real_path = os.path.join(self.kb_manager.WORKSPACE_DIR, kb_id, "documents", obf_name)
+
+            target_path = real_path if real_path and os.path.exists(real_path) else file_path
+
+            if os.path.exists(target_path):
+                ext = source_name.lower().split('.')[-1] if '.' in source_name else ""
+
+                # === 路由分发 ===
+                if ext == 'pdf':
+                    if self.pdf_viewer is None: self.pdf_viewer = InternalPDFViewer(None)
+                    self.pdf_viewer.load_document(target_path, page_num, text_snippet, display_name=source_name)
+                    ToastManager().show(f"已打开文档，位于第 {page_num + 1} 页", "success")
+                elif ext in ['md', 'txt', 'csv', 'json', 'py']:  # 常见纯文本格式拦截
+                    if not hasattr(self, 'text_viewer') or self.text_viewer is None:
+                        self.text_viewer = InternalTextViewer(None)
+                    self.text_viewer.load_document(target_path, text_snippet, display_name=source_name)
+                    ToastManager().show(f"已打开文档片段", "success")
+                else:
+                    # 对于图片或我们无法渲染的格式，降级交给操作系统处理
+                    import tempfile
+                    import shutil
+                    temp_dir = tempfile.gettempdir()
+                    safe_name = source_name if source_name else "document.bin"
+                    temp_file_path = os.path.join(temp_dir, f"scholar_navis_view_{safe_name}")
+
+                    try:
+                        shutil.copy2(target_path, temp_file_path)
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(temp_file_path))
+                        ToastManager().show(f"已调用系统程序打开: {safe_name}", "success")
+                    except Exception as e:
+                        ToastManager().show(f"外部程序调用失败: {str(e)}", "error")
             else:
-                ToastManager().show(f"未找到文件: {file_path}", "error")
+                ToastManager().show(f"未找到文件: {source_name or file_path}", "error")
         else:
             QDesktopServices.openUrl(QUrl(url_str))
 
