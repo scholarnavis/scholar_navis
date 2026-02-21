@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QMessageBox,
                                QScrollArea, QHBoxLayout, QComboBox)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
+from huggingface_hub import constants
 
 from src.core.core_task import TaskState, TaskManager
 from src.core.device_manager import DeviceManager
@@ -50,21 +51,20 @@ class BatchDownloadWorker(QObject):
                 pass
 
     def _nuke_cache(self, repo_id):
-        hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+        hf_home = constants.HF_HOME
         folder_name = "models--" + repo_id.replace("/", "--")
         target_dir = os.path.join(hf_home, "hub", folder_name)
 
         if os.path.exists(target_dir):
             try:
                 shutil.rmtree(target_dir)
-                print(f"🧹 Cache strictly nuked: {target_dir}")
+                print(f"Cache nuked: {target_dir}")
             except Exception as e:
-                print(f"⚠️ Failed to wipe cache: {e}")
+                print(f"Failed to wipe cache: {e}")
 
     def run(self):
         try:
             env = os.environ.copy()
-            env["HF_HOME"] = env.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
             env["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 
             total = len(self.download_list)
@@ -142,19 +142,22 @@ class SettingsTool(BaseTool):
         self.layout = QVBoxLayout(content)
         self.layout.setSpacing(20)
 
-        # 1. 硬件详情
+        # 硬件详情
         self.init_hardware_section()
 
-        # 2. 网络设置
+        # 网络设置
         self.init_network_section()
 
-        # 3. 模型管理 (Embedding & Reranker)
+        # 模型管理 (Embedding & Reranker)
         self.init_model_section()
 
-        # 4. LLM API 配置 (动态 JSON 管理)
+        # LLM API 配置 (动态 JSON 管理)
         self.init_llm_section()
 
-        # 5. 系统设置
+        #  生物学数据库配置
+        self.init_ncbi_section()
+
+        # 系统设置
         self.init_system_section()
 
         # Save Button
@@ -246,6 +249,45 @@ class SettingsTool(BaseTool):
         lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(lbl)
         self.layout.addWidget(group)
+
+    def init_ncbi_section(self):
+        group = QGroupBox("🧬 Biological Databases (NCBI)")
+        group.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }"
+        )
+        layout = QFormLayout(group)
+        layout.setLabelAlignment(Qt.AlignRight)
+
+        # 邮箱输入框
+        self.input_ncbi_email = QLineEdit()
+        self.input_ncbi_email.setPlaceholderText("Required: e.g. user@university.edu")
+        self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
+        self.input_ncbi_email.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+
+        # API Key 输入框 (使用 PasswordEchoOnEdit 保护隐私，编辑时可见，失去焦点隐藏)
+        self.input_ncbi_api_key = QLineEdit()
+        self.input_ncbi_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_ncbi_api_key.setPlaceholderText("Optional but highly recommended")
+        self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
+        self.input_ncbi_api_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+
+        # 注意事项与申请链接 (支持富文本与外部链接跳转)
+        lbl_hint = QLabel(
+            "💡 <b>Important Notice:</b> NCBI strictly requires a valid email address to track usage. "
+            "Without an API Key, E-utilities requests are limited to <b>3 per second</b>. "
+            "With an API Key, the limit increases to <b>10 per second</b>, significantly improving stability during bulk retrieval.<br><br>"
+            "👉 <a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:#05B8CC; text-decoration:none;'>Click here to log in to NCBI and generate an API Key in Account Settings</a>."
+        )
+        lbl_hint.setWordWrap(True)
+        lbl_hint.setOpenExternalLinks(True)  # 允许点击直接调用系统浏览器打开链接
+        lbl_hint.setStyleSheet("color: #aaa; font-size: 11px; margin-top: 5px; margin-bottom: 5px;")
+
+        layout.addRow("NCBI Email:", self.input_ncbi_email)
+        layout.addRow("NCBI API Key:", self.input_ncbi_api_key)
+        layout.addRow("", lbl_hint)
+
+        self.layout.addWidget(group)
+
 
     def init_network_section(self):
         group = QGroupBox("Network & Proxy")
@@ -773,9 +815,10 @@ class SettingsTool(BaseTool):
     # =========================================================================
 
     def init_system_section(self):
-        group = QGroupBox("⚙️ System Preferences")
+        group = QGroupBox("System Preferences")
         group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
+            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }"
+        )
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
@@ -787,8 +830,15 @@ class SettingsTool(BaseTool):
         self.combo_log.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
 
+        # 新增：外部 Python 解释器路径配置
+        self.input_ext_python = QLineEdit()
+        self.input_ext_python.setPlaceholderText("e.g. /usr/bin/python3 or C:/Python310/python.exe")
+        self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
+        self.input_ext_python.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+
         layout.addRow("Theme:", self.combo_theme)
         layout.addRow("Log Level:", self.combo_log)
+        layout.addRow("External Python Path:", self.input_ext_python)
         self.layout.addWidget(group)
 
     def _get_req_html(self, conf):
@@ -853,16 +903,13 @@ class SettingsTool(BaseTool):
             self.lbl_rerank_status.setText(f"❌ Not Found | {msg_r} (Will Download){req_html_r}")
 
     def on_save_clicked(self):
-        # 1. 保存 LLM 配置
         self._save_llm_config()
 
-        # 2. 转换 Proxy Mode UI 到 字符串
         mode_idx = self.combo_proxy_mode.currentIndex()
         mode_str = ["system", "off", "custom"][mode_idx]
 
-        # 3. 更新设置
         self.config.user_settings.update({
-            "proxy_mode": mode_str,  # 🌟 保存模式
+            "proxy_mode": mode_str,
             "proxy_url": self.input_proxy.text().strip(),
             "hf_mirror": self.input_mirror.text().strip(),
             "download_speed_limit": self.combo_embed.currentText(),
@@ -870,10 +917,14 @@ class SettingsTool(BaseTool):
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
             "theme": self.combo_theme.currentText(),
-            "log_level": self.combo_log.currentText()
+            "log_level": self.combo_log.currentText(),
+            "ncbi_email": self.input_ncbi_email.text().strip(),
+            "ncbi_api_key": self.input_ncbi_api_key.text().strip(),
+            "external_python_path": self.input_ext_python.text().strip()
         })
         self.config.save_settings()
-        setup_global_network_env() # 应用
+        self.logger.info("Configuration saved successfully.")
+        setup_global_network_env()
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.emit()
         self.logger.info(f"Settings Saved. Proxy Mode: {mode_str}")
@@ -919,10 +970,13 @@ class SettingsTool(BaseTool):
         return ""
 
     def check_models_download_needed(self):
-        # 提取原 on_save_clicked 后半部分逻辑
+        """Self-check default cache and prompt download if missing"""
+        from huggingface_hub import constants
         dev = self.dev_mgr.get_optimal_device()
+
         embed_id = self.combo_embed.currentData()
         if embed_id == "embed_auto": embed_id = resolve_auto_model("embedding", dev)
+
         rerank_id = self.combo_rerank.currentData()
         if rerank_id == "rerank_auto": rerank_id = resolve_auto_model("reranker", dev)
 
@@ -930,21 +984,25 @@ class SettingsTool(BaseTool):
         e_conf = get_model_conf(embed_id, "embedding")
         if e_conf and not check_model_exists(e_conf.get('hf_repo_id')):
             to_download.append(e_conf['hf_repo_id'])
+
         r_conf = get_model_conf(rerank_id, "reranker")
         if r_conf and not check_model_exists(r_conf.get('hf_repo_id')):
             to_download.append(r_conf['hf_repo_id'])
 
         if not to_download:
-            StandardDialog(self.widget, "Success", "Settings saved. All Ready.").exec()
+            StandardDialog(self.widget, "Ready", "All models verified in system cache.").exec()
             self.check_models_status()
             return
 
-        msg = "The following models need to be downloaded:\n"
+        # 🌟 Path is now dynamically resolved from constants.HF_HOME
+        msg = "The following models are missing from your system cache:\n"
         for m in to_download: msg += f"• {m}\n"
+        msg += f"\nDownload to cache location ({constants.HF_HOME}) now?"
 
         dlg = StandardDialog(self.widget, "Download Required", msg, show_cancel=True)
         if dlg.exec():
             self.start_download(to_download)
+
 
     def start_download(self, repo_list):
         if not repo_list: return
@@ -957,7 +1015,6 @@ class SettingsTool(BaseTool):
         if not self.pending_downloads:
             self.pd.show_success_state(title="Complete", message="All downloads finished.")
             self.check_models_status()
-            # 🌟 关键：下载完强制刷新一次全局状态，避免UI显示不一致
             GlobalSignals().kb_list_changed.emit()
             return
 
@@ -970,37 +1027,28 @@ class SettingsTool(BaseTool):
         self.task_mgr.sig_state_changed.connect(self.on_task_state_changed)
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
 
-        # 🌟 核心修复：显式传递 HF_HOME 到子进程
-        # 确保子进程知道我们要下载到 D:\xxx\models 而不是 C盘
-        real_hf_home = os.environ.get("HF_HOME", os.path.join(os.getcwd(), "models"))
 
         self.task_mgr.start_task(
             RealTimeHFDownloadTask,
             task_id="hf_dl",
-            repo_id=self.current_repo,
-            hf_home=real_hf_home  # <--- 传参
+            repo_id=self.current_repo
         )
 
     def on_task_state_changed(self, state, msg):
-        """处理下载状态：单步成功后静默跳转下一个"""
         if state == TaskState.SUCCESS.value:
-            self.logger.info(f"✅ 模型分段下载完成: {self.current_repo}")
-
-            # 💡 核心修复：彻底断开信号，防止重入导致 0xC0000409 崩溃
+            self.logger.info(f"Model download complete: {self.current_repo}")
             if hasattr(self, 'task_mgr') and self.task_mgr:
                 try:
                     self.task_mgr.sig_state_changed.disconnect()
                     self.task_mgr.sig_progress.disconnect()
                 except:
                     pass
-
-            # 💡 关键：延迟 500ms 启动下一个，避开信号死锁
             QTimer.singleShot(500, self._download_next)
 
         elif state == TaskState.FAILED.value:
             self.pd.pbar.setRange(0, 100)
-            self.pd.lbl_message.setText(f"❌ 下载 {self.current_repo} 失败:\n{msg}")
-            self.pd.btn_cancel.setText("关闭")
+            self.pd.lbl_message.setText(f"❌ Failed to download {self.current_repo}:\n{msg}")
+            self.pd.btn_cancel.setText("Close")
             self.pd.btn_cancel.setEnabled(True)
 
 

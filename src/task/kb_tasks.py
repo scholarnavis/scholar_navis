@@ -9,20 +9,29 @@ import uuid
 
 from src.core.core_task import BackgroundTask, TaskState
 
+logger = logging.getLogger("Task.kb")
 
 def _setup_worker_env():
-    if getattr(sys, 'frozen', False): base_dir = os.path.dirname(sys.executable)
-    else: base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    import os
+    import sys
 
-    hf_home_abs = os.path.abspath(os.environ.get("HF_HOME", os.path.join(base_dir, "models")))
-    hub_dir = os.path.join(hf_home_abs, "hub")
-    os.environ["HF_HOME"] = hf_home_abs
-    os.environ["HF_HUB_CACHE"] = hub_dir
-    os.environ["SENTENCE_TRANSFORMERS_HOME"] = hub_dir
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     os.environ["ANONYMIZED_TELEMETRY"] = "False"
-    return base_dir
 
+    try:
+        from src.core.network_worker import setup_global_network_env
+        setup_global_network_env()
+    except Exception as e:
+        import logging
+        logging.getLogger("WorkerEnv").warning(f"Failed to setup network env in child process: {e}")
+
+    return base_dir
 
 
 def _worker_load_model(kb_id):
@@ -31,27 +40,43 @@ def _worker_load_model(kb_id):
     from src.core.kb_manager import KBManager
     from src.core.device_manager import DeviceManager
     from src.core.models_registry import get_model_conf
+    import logging
+
+    logger = logging.getLogger("Worker.ModelLoader")
+
 
     kb_mgr = KBManager()
     dev_mgr = DeviceManager()
     kb_data = kb_mgr.get_kb_by_id(kb_id)
+    if not kb_data:
+        raise RuntimeError(f"未找到 KB ID: {kb_id} 的元数据")
+
     model_id = kb_data.get('model_id', 'embed_auto')
     conf = get_model_conf(model_id, "embedding")
+
     device_info = dev_mgr.get_optimal_device()
     device = device_info.get('type', 'cpu') if isinstance(device_info, dict) else str(device_info)
     repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
 
     try:
-        try: model_path = snapshot_download(repo_id=repo_id, local_files_only=True)
-        except: model_path = snapshot_download(repo_id=repo_id)
+        model_path = snapshot_download(
+            repo_id=repo_id,
+            local_files_only=True
+        )
+
+        logger.info(f"Cache verification successful. Path: {model_path}")
 
         embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=model_path, device=device, normalize_embeddings=True
+            model_name=model_path,
+            device=device,
+            normalize_embeddings=True
         )
         return embed_fn
-    except Exception as e:
-        raise RuntimeError(f"Failed to load AI model '{repo_id}'. Error: {e}")
 
+    except Exception as e:
+        error_info = f"FATAL: Model {repo_id} not found in system default cache."
+        logger.error(f"{error_info} | {e}")
+        raise RuntimeError(error_info)
 
 class ImportFilesTask(BackgroundTask):
     def _execute(self):

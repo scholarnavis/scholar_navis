@@ -284,10 +284,10 @@ class ChatWorker(QObject):
             repo_id = conf.get('hf_repo_id')
 
             try:
-                try:
-                    model_path = snapshot_download(repo_id=repo_id, local_files_only=True)
-                except:
-                    model_path = snapshot_download(repo_id=repo_id)
+                model_path = snapshot_download(
+                    repo_id=repo_id,
+                    local_files_only=True,
+                )
 
                 embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
                     model_name=model_path,
@@ -381,17 +381,21 @@ class ChatWorker(QObject):
                 context_str = "No documents found. Reply strictly based on the lack of internal data."
 
             # ==========================================
-            # 阶段四：主 LLM 纯英文深度推理
+            # 阶段四：混合 Agentic RAG (本地知识库 + NCBI MCP 外部工具)
             # ==========================================
             self.sig_token.emit("[CLEAR_SEARCH]")
             if self.requires_translation:
-                self.sig_token.emit("<i>🧠 核心模型正在纯英文语境下深度思考并阅读文献...</i>\n\n")
+                self.sig_token.emit("<i>🧠 核心模型正在分析检索需求并评估 NCBI 工具调用...</i>\n\n")
             else:
                 self.sig_token.emit("[START_LLM_NETWORK]")
 
+            from src.core.mcp_manager import MCPManager
+            mcp_mgr = MCPManager.get_instance()
+            mcp_tools = mcp_mgr.get_openai_tools_schema()
+
             system_prompt = (
                 f"You are a rigorous research assistant specializing in {domain}.\n"
-                "Answer EXCLUSIVELY based on the provided Context.\n\n"
+                "Answer based on the provided Context. If the information is missing, use the available NCBI tools to retrieve real-time biological data.\n\n"
                 "### CORE DIRECTIVES:\n"
                 "1. **NO HALLUCINATION**: If the answer is not in the context, say 'I cannot answer this based on the provided documents.'\n"
                 "2. **CITATIONS**: Append `[1]`, `[2]` directly after sentences using that document's facts.\n"
@@ -406,37 +410,75 @@ class ChatWorker(QObject):
                 f"### CONTEXT:\n{context_str}"
             )
 
-            # 强制替换用户的原话为翻译后的纯英文 Query，避免主模型精神分裂
+
             rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
             rag_messages.append({"role": "user", "content": search_query})
 
+            # --- Tool Calling 拦截逻辑保持不变 (这是接入 NCBI 的核心) ---
+            if mcp_tools:
+                try:
+                    pre_flight_response = self.main_llm.client.chat.completions.create(
+                        model=self.main_llm.model_name,
+                        messages=rag_messages,
+                        tools=mcp_tools,
+                        tool_choice="auto",
+                        temperature=0.2
+                    )
+
+                    response_msg = pre_flight_response.choices[0].message
+
+                    if getattr(response_msg, 'tool_calls', None):
+                        rag_messages.append(response_msg)
+
+                        for tool_call in response_msg.tool_calls:
+                            tool_name = tool_call.function.name
+                            try:
+                                import json
+                                tool_args = json.loads(tool_call.function.arguments)
+                                self.sig_token.emit(f"<i>📡 正在请求 NCBI 远程数据库: {tool_name}...</i>\n\n")
+                                tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
+                            except Exception as e:
+                                self.logger.error(f"NCBI MCP tool {tool_name} failed: {e}")
+                                tool_result = json.dumps({"status": "error", "message": str(e)})
+
+                            rag_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "content": tool_result
+                            })
+
+                        self.sig_token.emit("<i>✅ NCBI 数据获取成功，正在进行综合学术分析...</i>\n\n")
+                except Exception as e:
+                    self.logger.warning(f"Tool calling failed: {e}")
+
+            # --- 后续输出逻辑 ---
             english_response = ""
             if self.requires_translation:
-                # 后台静默流式接收，不发给 UI
                 for token in self.main_llm.stream_chat(rag_messages):
                     english_response += token
             else:
-                # 纯英文模式，直接发给 UI
                 for token in self.main_llm.stream_chat(rag_messages):
                     english_response += token
                     self.full_response_cache += token
                     self.sig_token.emit(token)
 
             # ==========================================
-            # 阶段五：结果翻译回母语并流式输出
+            # 阶段五：结果翻译回母语并流式输出 (增强版生物学学术翻译)
             # ==========================================
             if self.requires_translation:
                 self.sig_token.emit("[CLEAR_SEARCH]")
                 self.sig_token.emit("[START_LLM_NETWORK]")
 
                 trans_out_prompt = (
-                    "You are an expert academic translator. Translate the following English academic response "
-                    "into the language of the user's original query. \n"
-                    "CRITICAL RULES:\n"
-                    "1. KEEP ALL CITATION TAGS INTACT (e.g., [1], [2]).\n"
-                    "2. DO NOT translate Latin taxonomic names (e.g., Gossypium) or scientific abbreviations.\n"
-                    "3. PRESERVE all Markdown formatting, bolding, and structure.\n"
-                    "4. Translate the '💡 Suggested Follow-ups:' section title, but keep the exact format `- [Tag] Question`.\n"
+                    "You are an expert academic translator specializing in bioinformatics and molecular biology. "
+                    "Translate the following English academic response into the language of the user's original query.\n\n"
+                    "### CRITICAL TRANSLATION RULES:\n"
+                    "1. **PRESERVE NOMENCLATURE**: DO NOT translate Latin taxonomic names (e.g., Gossypium hirsutum, Arabidopsis thaliana), Gene/Protein symbols (e.g., GhChr01, NAC1), NCBI Accession IDs (e.g., NM_100000), or database names (e.g., PubMed, NCBI, TAIR, CottonFGD).\n"
+                    "2. **PRESERVE SEQUENCES**: If there are any FASTA sequences, DNA/RNA sequences (A, T, C, G, U), or technical code blocks, leave them EXACTLY as they are. Do not alter their spacing, formatting, or characters.\n"
+                    "3. **PRESERVE CITATIONS**: KEEP ALL CITATION TAGS INTACT exactly as they appear (e.g., [1], [2]). Do not move them away from the sentences they support.\n"
+                    "4. **PRESERVE FORMATTING**: Strictly maintain all Markdown formatting, bolding, italics, tables, and structural elements. If the input has a Markdown table for NCBI search results, the translated output MUST have the exact same table structure.\n"
+                    "5. **FOLLOW-UPS**: Translate the '💡 Suggested Follow-ups:' section content, but strictly keep the exact format `- [Tag] Question`.\n"
                 )
 
                 for token in self.trans_llm.stream_chat([
@@ -699,47 +741,45 @@ class ChatTool(BaseTool):
         self._on_llm_changed()
 
     def process_send(self, text, is_retry=False):
+        from src.core.model_manager import ModelManager
+        from src.ui.components.dialog import StandardDialog
+        from src.ui.components.toast import ToastManager
+
+        # 1. 基础校验
         kb_data = self.combo_kb.currentData()
         if not kb_data:
-            from src.ui.components.toast import ToastManager
             ToastManager().show("无法发送：请先在右上角选择一个知识库！", "error")
-            self.logger.warning("Attempted to send message without selecting a KB.")
             return
-
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
 
-        trans_config = self.combo_trans_llm.currentData()
-        is_english = True  # 默认假设是英语
+        ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(kb_id)
+        if not ready:
+            msg = (
+                f"<b>⚠️ Model Missing - Action Blocked</b><br><br>"
+                f"Required offline model is not installed: <br>"
+                f"<font color='#ff6b6b'>• {missing_label}</font><br><br>"
+                f"Please go to <b>[Global Settings]</b> and click 'Save' to download required models."
+            )
+            StandardDialog(self.widget, "Offline Security Intercept", msg, show_cancel=False).exec()
 
+            # 触发下载信号并自动跳转
+            from src.core.signals import GlobalSignals
+            GlobalSignals().request_model_download.emit(missing_id, m_type)
+            # (MainWindow 会捕获此信号并跳转到设置页)
+            return
+
+        # 2. 语言检测逻辑 (保持原样)
+        trans_config = self.combo_trans_llm.currentData()
+        is_english = True
         try:
-            # 即使全是 ASCII 字符，langdetect 也能精准识别出法语 (fr)、德语 (de) 等
             detected_lang = detect(text)
             is_english = (detected_lang == 'en')
-            self.logger.debug(f"Detected language: {detected_lang}")
-        except langdetect.lang_detect_exception.LangDetectException:
+        except:
             is_english = True
 
-
-        from src.ui.components.toast import ToastManager
-        if not is_english and not trans_config:
-            # 场景 A：非英语，但没开翻译模型
-            ToastManager().show("检测到非英文输入，但未开启翻译模型。这可能导致检索准确率严重下降！", "warning")
-            self.logger.warning("Non-English input detected but Translator is disabled.")
-
-        elif not is_english and trans_config:
-            # 场景 B：非英语，开启了翻译模型 -> 正常走翻译流水线，静默放行 (可以不弹 Toast 烦人)
-            self.logger.info("Non-English input detected. Translation pipeline activated.")
-
-        elif is_english and trans_config:
-            # 场景 C：英语，但开了翻译模型 -> 提示加速，后台将跳过翻译层
-            ToastManager().show("检测为纯英文环境，已自动为您关闭翻译层以达到最高响应速度。", "info")
-            self.logger.info("English input detected. Bypassing translation pipeline.")
-
-        # 场景 D：英语且没开翻译 -> 完美状态，静默放行
         requires_translation = (not is_english) and (trans_config is not None)
 
-
-        # 隐藏重试和发送按钮，显示停止按钮
+        # 3. UI 切换与历史记录
         self.input_container.btn_retry.setVisible(False)
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
@@ -749,7 +789,6 @@ class ChatTool(BaseTool):
             self.input_container.clear_text()
             self.add_bubble(text, is_user=True)
             self.history.append({"role": "user", "content": text})
-
 
         self.start_ai_response(kb_id, requires_translation)
 

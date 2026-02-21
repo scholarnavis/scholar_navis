@@ -1,9 +1,10 @@
+import logging
 import os
 import shutil
 import sys
 import json
 
-from huggingface_hub import scan_cache_dir, snapshot_download
+from huggingface_hub import scan_cache_dir, snapshot_download, constants
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -13,6 +14,8 @@ else:
 CONFIG_DIR = os.path.join(BASE_DIR, "config")
 EXTERNAL_MODELS_FILE = os.path.join(CONFIG_DIR, "external_models.json")
 
+
+logger =logging.getLogger("ModelRegistry")
 
 EMBEDDING_MODELS = [
     {
@@ -252,7 +255,7 @@ def load_external_models():
 
 load_external_models()
 
-def _get_hf_home(): return os.environ.get("HF_HOME", os.path.join(os.getcwd(), "models"))
+def _get_hf_home(): return os.environ.get("HF_HOME", constants.HF_HOME)
 def _is_file_valid(path):
     if not os.path.exists(path): return False
     try:
@@ -279,7 +282,7 @@ def _manual_check(repo_id):
     return False
 
 def _repair_model_links(repo_id):
-    print(f"🔧 [Auto-Repair] Detecting broken links for {repo_id}. Fixing...")
+    logger.info(f"Detecting broken links for {repo_id}. Fixing...")
     repo_dir = os.path.join(_get_hf_home(), "hub", "models--" + repo_id.replace("/", "--"))
     if not os.path.exists(repo_dir): return False
     try:

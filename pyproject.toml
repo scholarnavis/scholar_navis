@@ -29,6 +29,8 @@ dependencies = [
     "nvidia-ml-py>=13.590.48",
     "pymupdf4llm>=0.2.9",
     "langdetect>=1.0.9",
+    "mcp[cli]>=1.26.0",
+    "biopython>=1.86",
 ]
 
 [[tool.uv.index]]

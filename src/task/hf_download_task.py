@@ -67,11 +67,6 @@ class RealTimeHFDownloadTask(BackgroundTask):
 
         repo_id = self.kwargs.get("repo_id")
 
-        target_hf_home = self.kwargs.get("hf_home")
-        if target_hf_home:
-            os.environ["HF_HOME"] = target_hf_home
-            os.environ["SENTENCE_TRANSFORMERS_HOME"] = target_hf_home
-            constants.HF_HOME = target_hf_home
 
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
@@ -84,7 +79,7 @@ class RealTimeHFDownloadTask(BackgroundTask):
             })
 
         try:
-            self.send_log("INFO", f"Downloading {repo_id} to {target_hf_home}")
+            self.send_log("INFO", f"Downloading {repo_id}...")
 
             with DownloadCapture(tqdm_callback):
                 snapshot_download(
