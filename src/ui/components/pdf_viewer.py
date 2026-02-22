@@ -79,10 +79,6 @@ class InternalPDFViewer(QMainWindow):
         self.scroll_area.setWidget(self.lbl_page)
         self.setCentralWidget(self.scroll_area)
 
-        # 监听划词并设置右键菜单
-        self.lbl_page.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.lbl_page.customContextMenuRequested.connect(self._show_context_menu)
-
         self._setup_toolbar()
 
     def _setup_toolbar(self):
@@ -150,15 +146,7 @@ class InternalPDFViewer(QMainWindow):
         self.zoom_factor = view_w / page.rect.width
         if self.doc.is_open: self.render_page()
 
-    # --- 翻译桥接 ---
-    def _show_context_menu(self, pos):
-        if self.lbl_page.selected_text:
-            menu = QMenu(self)
-            menu.setStyleSheet("QMenu { background-color: #2d2d30; color: white; border: 1px solid #444; }")
-            trans_action = menu.addAction("🌐 Send to Translator (Space)")
-            action = menu.exec(self.lbl_page.mapToGlobal(pos))
-            if action == trans_action:
-                self._invoke_translator()
+
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Space and self.lbl_page.selected_text:
@@ -309,10 +297,6 @@ class InternalTextViewer(QMainWindow):
         """)
         self.setCentralWidget(self.text_browser)
 
-        # 1. 设置自定义右键菜单策略
-        self.text_browser.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.text_browser.customContextMenuRequested.connect(self._show_context_menu)
-
         # 2. 安装事件过滤器，捕获空格键快捷翻译
         self.text_browser.installEventFilter(self)
 
@@ -339,7 +323,7 @@ class InternalTextViewer(QMainWindow):
         tb2.addAction("🖥️ Open in System", self.open_system_app)
         tb2.addAction("📥 Export Original File", self.export_file)
 
-        hint = QLabel("  (💡 Tip: Select text and press Space or Right-Click to Translate)")
+        hint = QLabel("  (💡 Tip: Select text and press Space to Translate)")
         hint.setStyleSheet("color: #aaa; font-style: italic; font-size: 13px; padding-left: 10px;")
         tb2.addWidget(hint)
 
@@ -353,21 +337,7 @@ class InternalTextViewer(QMainWindow):
                     return True  # 拦截事件，防止文本框向下滚动
         return super().eventFilter(obj, event)
 
-    # --- 右键菜单融合 ---
-    def _show_context_menu(self, pos):
-        # 复用 QTextBrowser 原生的标准菜单（包含 Copy, Select All 等）
-        menu = self.text_browser.createStandardContextMenu()
-        menu.setStyleSheet("QMenu { background-color: #2d2d30; color: white; border: 1px solid #444; }")
 
-        selected_text = self.text_browser.textCursor().selectedText()
-        if selected_text:
-            menu.addSeparator()
-            trans_action = menu.addAction("🌐 Send to Translator (Space)")
-            action = menu.exec(self.text_browser.mapToGlobal(pos))
-            if action == trans_action:
-                self._invoke_translator(selected_text)
-        else:
-            menu.exec(self.text_browser.mapToGlobal(pos))
 
     # --- 呼出全局翻译 ---
     def _invoke_translator(self, text):

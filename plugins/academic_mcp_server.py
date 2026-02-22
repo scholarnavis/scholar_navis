@@ -1,38 +1,30 @@
 # plugins/bio_ncbi_server.py
-import os
 import json
 import logging
+import os
 import socket
-import sys
-import traceback
 import urllib
-from datetime import datetime
 
 import requests
 from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
 
-
 logger = logging.getLogger("Academic.Server")
 
 
-# Load NCBI credentials from environment variables injected by the main process
-Entrez.email = os.environ.get("NCBI_API_EMAIL", "scholar.navis.admin@example.com")
-api_key = os.environ.get("NCBI_API_KEY", "")
-if api_key:
-    Entrez.api_key = api_key
-    logger.info("NCBI API Key successfully authenticated.")
-else:
-    logger.warning("No NCBI API Key detected. Performance may be restricted by rate limits.")
-
-Entrez.tool = "ScholarNavis"
-mcp = FastMCP("ScholarNavis-Academic-Plugin")
-
-
-ncbi_email = os.environ.get("NCBI_API_EMAIL", "").strip()
+ncbi_email = os.environ.get("NCBI_API_EMAIL", "scholar.navis.admin@example.com").strip()
 ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
 s2_api_key = os.environ.get("S2_API_KEY", "").strip()
 
+Entrez.email = ncbi_email
+Entrez.tool = "ScholarNavis"
+if ncbi_api_key:
+    Entrez.api_key = ncbi_api_key
+    logger.info("NCBI API Key authenticated.")
+else:
+    logger.warning("No NCBI API Key. Rate limits apply.")
+
+mcp = FastMCP("ScholarNavis-Academic-Plugin")
 
 class UDPLogHandler(logging.Handler):
     def __init__(self, port):
@@ -63,7 +55,7 @@ if log_port_str.isdigit():
     logger.info(f"Connected to Main UI Log System via UDP port {log_port_str}.")
 
 if ncbi_email:
-    logger.info(f"NCBI Email detected ({ncbi_email}). Enabling NCBI MCP tools.")
+    logger.info(f"NCBI Email detected. Enabling NCBI MCP tools.")
     Entrez.email = ncbi_email
     if ncbi_api_key:
         Entrez.api_key = ncbi_api_key
@@ -73,8 +65,8 @@ if ncbi_email:
     @mcp.tool()
     def search_pubmed_literature(query: str, max_results: int = 5) -> str:
         """
-        Search PubMed for scientific literature.
-        Returns highly detailed metadata including PMID, Title, Abstract, DOI, publisher link (paywall), and PMC (free full-text) links.
+        [Requires API Key] Search PubMed for scientific literature.
+        Returns metadata including PMID, Title, Abstract, DOI, and PMC links.
         """
         logger.info(f"Task: PubMed Search | Query: '{query}'")
         try:
@@ -83,9 +75,7 @@ if ncbi_email:
             search_handle.close()
 
             ids = search_results.get("IdList", [])
-            if not ids:
-                logger.info("No records found in PubMed.")
-                return json.dumps({"status": "success", "results": [], "count": 0})
+            if not ids: return json.dumps({"status": "success", "results": [], "count": 0})
 
             summary_handle = Entrez.esummary(db="pubmed", id=",".join(ids))
             summaries = Entrez.read(summary_handle)
@@ -93,47 +83,25 @@ if ncbi_email:
 
             parsed_results = []
             for doc in summaries:
-                # 1. 安全提取 DOI 和 PMCID
-                article_ids = doc.get("ArticleIds", [])
-                doi_val = ""
-                pmc_val = ""
-
-                if isinstance(article_ids, list):
-                    for aid in article_ids:
-                        id_type = aid.get("IdType", "")
-                        if id_type == "doi":
-                            doi_val = aid.get("Value", "")
-                        elif id_type == "pmc":
-                            pmc_val = aid.get("Value", "")
-
+                doi_val = next(
+                    (aid.get("Value", "") for aid in doc.get("ArticleIds", []) if aid.get("IdType") == "doi"), "")
+                pmc_val = next(
+                    (aid.get("Value", "") for aid in doc.get("ArticleIds", []) if aid.get("IdType") == "pmc"), "")
                 final_doi = doc.get("DOI", "") or doi_val
 
-                # 2. 构造各类跳转链接
-                pmid = str(doc.get("Id", ""))
-                pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-                pmc_free_url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmc_val}/" if pmc_val else ""
-
-                # 🆕 构造出版商的 Paywall 官方链接
-                doi_url = f"https://doi.org/{final_doi}" if final_doi else ""
-
                 parsed_results.append({
-                    "pmid": pmid,
+                    "pmid": str(doc.get("Id", "")),
                     "title": doc.get("Title", ""),
                     "authors": list(doc.get("AuthorList", [])),
                     "journal": doc.get("Source", ""),
                     "pub_date": doc.get("PubDate", ""),
                     "doi": final_doi,
-                    "pmc_id": pmc_val,
-                    "pubmed_url": pubmed_url,
-                    "doi_url": doi_url,  # 出版商 Paywall 链接
-                    "pmc_free_url": pmc_free_url  # PMC 免费全文链接
+                    "pmc_id": pmc_val
                 })
-
-            logger.info(f"Retrieved {len(parsed_results)} PubMed records.")
-            return json.dumps({"status": "success", "results": parsed_results, "count": len(parsed_results)})
+            return json.dumps({"status": "success", "results": parsed_results})
         except Exception as e:
-            logger.error(f"PubMed search failed: {str(e)}")
             return json.dumps({"status": "error", "message": str(e)})
+
 
 
     @mcp.tool()
@@ -418,123 +386,263 @@ else:
 
 
 
-
 if s2_api_key:
     logger.info("Semantic Scholar API Key detected. Enabling S2 MCP tool.")
+
 
     @mcp.tool()
     def search_semantic_scholar(query: str, max_results: int = 5) -> str:
         """
-        Search the Semantic Scholar database for global academic papers.
-        Returns highly structured metadata including title, authors, year, abstract, citation count, and paper URL.
-        This is the primary tool for general literature retrieval across all scientific domains.
+        [Requires API Key] Search Semantic Scholar for global academic papers.
+        Useful for cross-disciplinary queries and citation counts.
         """
-        logger.info(f"Task: Semantic Scholar Search | Query: '{query}'")
+        logger.info(f"Task: S2 Search | Query: '{query}'")
         try:
             base_url = "https://api.semanticscholar.org/graph/v1/paper/search"
-            params = {
-                "query": query,
-                "limit": max_results,
-                "fields": "title,authors,year,abstract,citationCount,isOpenAccess,url"
-            }
-
-            headers = {}
-            s2_api_key = os.environ.get("S2_API_KEY", "")
-            if s2_api_key:
-                headers["x-api-key"] = s2_api_key
-                logger.info("Using authenticated Semantic Scholar request.")
-            else:
-                logger.warning("No Semantic Scholar API Key found. 429 limits may apply.")
+            headers = {"x-api-key": s2_api_key}
+            params = {"query": query, "limit": max_results,
+                      "fields": "title,authors,year,abstract,citationCount,isOpenAccess,url"}
 
             response = requests.get(base_url, params=params, headers=headers, timeout=15)
             response.raise_for_status()
-
             data = response.json()
-            if not data.get("data"):
-                return json.dumps({"status": "success", "results": [], "message": "No papers found."})
 
             parsed_results = []
-            for paper in data["data"]:
-                authors = [author["name"] for author in paper.get("authors", [])]
-
+            for p in data.get("data", []):
                 parsed_results.append({
-                    "title": paper.get("title", ""),
-                    "year": paper.get("year", "Unknown"),
-                    "authors": authors[:5],
-                    "citation_count": paper.get("citationCount", 0),
-                    "is_open_access": paper.get("isOpenAccess", False),
-                    "abstract": paper.get("abstract", "No abstract available.")[:600] + "...",
-                    "url": paper.get("url", "")
+                    "title": p.get("title", ""),
+                    "year": p.get("year", "Unknown"),
+                    "authors": [a["name"] for a in p.get("authors", [])][:5],
+                    "citation_count": p.get("citationCount", 0),
+                    "abstract": p.get("abstract", "No abstract")[:600] + "...",
+                    "url": p.get("url", "")
                 })
-
             return json.dumps({"status": "success", "results": parsed_results})
         except Exception as e:
-            logger.error(f"Semantic Scholar search failed: {str(e)}")
             return json.dumps({"status": "error", "message": str(e)})
 
 
+    # =========================================================================
+    # 📥 OA 全文下载统一兜底 (PDF Retrieval Cascade)
+    # =========================================================================
     @mcp.tool()
     def fetch_open_access_pdf(doi: str) -> str:
         """
-        Attempt to find a direct Open Access PDF download link for a given DOI.
-        Uses the Unpaywall API, the academic standard for legally accessing free full-text papers.
-        When the user wants to read or download a paper, use this tool with the paper's DOI.
+        [Always Enabled] Find a direct Open Access PDF download link for a DOI.
+        Cascade Strategy: Semantic Scholar (if Key) -> Unpaywall -> PubMed OA Web Service (PMC).
+        If the paper is Non-OA (Paywalled), it returns the publisher landing page.
         """
-        logger.info(f"Task: Fetch Open Access PDF | DOI: '{doi}'")
+        logger.info(f"Task: Fetch OA PDF | DOI: '{doi}'")
         try:
-            # 巧妙复用已有的 NCBI 邮箱配置，无需用户额外设置
-            email = os.environ.get("NCBI_API_EMAIL", "scholar.navis.user@example.com")
-            if not email:
-                email = "scholar.navis.default@example.com"
-
-            # 清理 DOI 字符串（去除可能包含的 https://doi.org/ 前缀）
             clean_doi = doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip()
+            encoded_doi = urllib.parse.quote(clean_doi)
+            landing_url = f"https://doi.org/{clean_doi}"  # 默认跳转链接
 
-            # Unpaywall REST API
-            url = f"https://api.unpaywall.org/v2/{urllib.parse.quote(clean_doi)}?email={email}"
+            # --- 1. Semantic Scholar (S2) 优先级最高 ---
+            if s2_api_key:
+                try:
+                    s2_url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}?fields=isOpenAccess,openAccessPdf"
+                    res = requests.get(s2_url, headers={"x-api-key": s2_api_key}, timeout=5)
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get("isOpenAccess") and data.get("openAccessPdf"):
+                            pdf_url = data["openAccessPdf"].get("url", "")
+                            if pdf_url:
+                                return json.dumps({
+                                    "status": "success", "is_oa": True,
+                                    "pdf_url": pdf_url, "landing_page_url": landing_url,
+                                    "source": "Semantic Scholar"
+                                })
+                except Exception as e:
+                    logger.warning(f"S2 PDF fetch failed/missed: {e}")
 
-            # Unpaywall 响应通常很快，设置 10 秒超时
-            response = requests.get(url, timeout=10)
+            # --- 2. Unpaywall (免 Key，覆盖极广) ---
+            try:
+                unpaywall_url = f"https://api.unpaywall.org/v2/{encoded_doi}?email={ncbi_email}"
+                response = requests.get(unpaywall_url, timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("is_oa"):
+                        best_oa = data.get("best_oa_location", {})
+                        if best_oa and best_oa.get("url_for_pdf"):
+                            return json.dumps({
+                                "status": "success", "is_oa": True,
+                                "pdf_url": best_oa.get("url_for_pdf"),
+                                "landing_page_url": best_oa.get("url_for_landing_page", landing_url),
+                                "source": "Unpaywall"
+                            })
+            except Exception as e:
+                logger.warning(f"Unpaywall PDF fetch failed/missed: {e}")
 
-            if response.status_code == 404:
-                return json.dumps({
-                    "status": "success",
-                    "is_oa": False,
-                    "message": "Paper not found in Unpaywall database or DOI is invalid."
-                })
+            # --- 3. PubMed OA Web Service (PMC 官方极客保底) ---
+            logger.info("Falling back to PubMed OA Web Service API...")
+            try:
+                conv_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={encoded_doi}&format=json&email={ncbi_email}"
+                conv_res = requests.get(conv_url, timeout=5)
 
-            response.raise_for_status()
-            data = response.json()
+                if conv_res.status_code == 200:
+                    conv_data = conv_res.json()
+                    records = conv_data.get("records", [])
+                    if records and "pmcid" in records[0]:
+                        pmcid = records[0]["pmcid"]
 
-            is_oa = data.get("is_oa", False)
-            best_oa_location = data.get("best_oa_location", {})
+                        # 真正调用 PubMed OA API 获取官方直链
+                        oa_api_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}"
+                        oa_res = requests.get(oa_api_url, timeout=5)
 
-            # 优先提取直接指向 PDF 的链接
-            pdf_url = best_oa_location.get("url_for_pdf", "") if best_oa_location else ""
-            landing_page_url = best_oa_location.get("url_for_landing_page", "") if best_oa_location else ""
+                        if oa_res.status_code == 200 and "<OA>" in oa_res.text:
+                            import re
+                            official_pdf_url = ""
+                            # 正则解析 XML 中官方给定的 PDF 下载节点
+                            match = re.search(r'<link[^>]+format="pdf"[^>]+href="([^"]+)"', oa_res.text)
 
-            if is_oa and (pdf_url or landing_page_url):
-                return json.dumps({
-                    "status": "success",
-                    "is_oa": True,
-                    "pdf_url": pdf_url,
-                    "landing_page_url": landing_page_url,
-                    "publisher": data.get("publisher", "Unknown"),
-                    "oa_status": data.get("oa_status", "Unknown")
-                })
-            else:
-                return json.dumps({
-                    "status": "success",
-                    "is_oa": False,
-                    "message": "The paper is paywalled (Closed Access). No legal Open Access PDF found."
-                })
+                            if match:
+                                # NCBI 的 FTP 现在支持 HTTPS 直连，替换以兼容更多下载器
+                                official_pdf_url = match.group(1).replace("ftp://", "https://")
+                            else:
+                                # 极端情况：OA 存在但 API 没给 pdf_url，用网页拼接保底
+                                official_pdf_url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
+
+                            return json.dumps({
+                                "status": "success", "is_oa": True,
+                                "pdf_url": official_pdf_url,
+                                "landing_page_url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/",
+                                "source": "PubMed_OA_WebService"
+                            })
+            except Exception as e:
+                logger.warning(f"PMC fetch failed: {e}")
+
+            # --- 最终结果：非 OA，仅提供跳转 ---
+            return json.dumps({
+                "status": "success",
+                "is_oa": False,
+                "landing_page_url": landing_url,
+                "message": "The paper is paywalled (Closed Access). Only publisher redirect link is available."
+            })
 
         except Exception as e:
-            logger.error(f"Unpaywall PDF fetch failed: {str(e)}")
             return json.dumps({"status": "error", "message": str(e)})
 
 else:
     logger.warning("S2_API_KEY is missing. Semantic Scholar MCP tool is disabled and hidden from LLM.")
+
+
+
+# 3. PubMed Central 保底检索
+@mcp.tool()
+def search_pmc_literature_fallback(query: str, max_results: int = 5) -> str:
+    """
+    [Always Enabled / Fallback] Search PubMed Central (PMC) for Open Access literature.
+    Use this if specific API keys for other search tools are missing or fail.
+    """
+    logger.info(f"Task: PMC Fallback Search | Query: '{query}'")
+    try:
+        search_handle = Entrez.esearch(db="pmc", term=query, retmax=max_results)
+        search_results = Entrez.read(search_handle)
+        search_handle.close()
+
+        ids = search_results.get("IdList", [])
+        if not ids: return json.dumps({"status": "success", "results": []})
+
+        summary_handle = Entrez.esummary(db="pmc", id=",".join(ids))
+        summaries = Entrez.read(summary_handle)
+        summary_handle.close()
+
+        parsed_results = []
+        for doc in summaries:
+            doi_val = next((aid.get("Value", "") for aid in doc.get("ArticleIds", []) if aid.get("IdType") == "doi"), "")
+            parsed_results.append({
+                "pmcid": str(doc.get("Id", "")),
+                "title": doc.get("Title", ""),
+                "authors": list(doc.get("AuthorList", [])),
+                "journal": doc.get("Source", ""),
+                "pub_date": doc.get("PubDate", ""),
+                "doi": doi_val
+            })
+        return json.dumps({"status": "success", "results": parsed_results})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# =========================================================================
+# 📥 OA 全文下载统一兜底 (PDF Retrieval)
+# =========================================================================
+@mcp.tool()
+def fetch_open_access_pdf(doi: str) -> str:
+    """
+    [Always Enabled] Find a direct Open Access PDF download link for a DOI.
+    Strategy: Unpaywall -> PubMed OA Web Service API (Ultimate fallback).
+    """
+    logger.info(f"Task: Fetch OA PDF | DOI: '{doi}'")
+    try:
+        clean_doi = doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip()
+        encoded_doi = urllib.parse.quote(clean_doi)
+
+        # 1. 尝试 Unpaywall
+        try:
+            unpaywall_url = f"https://api.unpaywall.org/v2/{encoded_doi}?email={ncbi_email}"
+            response = requests.get(unpaywall_url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("is_oa"):
+                    best_oa = data.get("best_oa_location", {})
+                    if best_oa and best_oa.get("url_for_pdf"):
+                        return json.dumps({
+                            "status": "success", "is_oa": True,
+                            "pdf_url": best_oa.get("url_for_pdf"),
+                            "source": "Unpaywall"
+                        })
+        except Exception:
+            pass
+
+        # 2. 尝试 PubMed OA Web Service 官方保底
+        logger.info("Unpaywall failed/missed. Falling back to PubMed OA Web Service API...")
+        conv_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={encoded_doi}&format=json&email={ncbi_email}"
+        conv_res = requests.get(conv_url, timeout=5)
+
+        if conv_res.status_code == 200:
+            conv_data = conv_res.json()
+            records = conv_data.get("records", [])
+            if records and "pmcid" in records[0]:
+                pmcid = records[0]["pmcid"]
+
+                # 请求 PubMed OA API 验证它是否在开放获取子集中
+                oa_api_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}"
+                oa_res = requests.get(oa_api_url, timeout=5)
+
+                # 如果 XML 中包含 <OA> 标签，证明是彻底合法的免费文献
+                if oa_res.status_code == 200 and "<OA>" in oa_res.text:
+                    return json.dumps({
+                        "status": "success", "is_oa": True,
+                        "pdf_url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/",
+                        "landing_page_url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/",
+                        "source": "PubMed_OA_WebService"
+                    })
+
+        return json.dumps({"status": "success", "is_oa": False, "message": "The paper is paywalled. No OA PDF found."})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# 生物学基础数据工具 (基因、物种、组学等)
+@mcp.tool()
+def fetch_gene_information(gene_symbol: str, organism: str = "") -> str:
+    """Query NCBI Gene database for gene info."""
+    try:
+        term = f"{gene_symbol}[Gene Name]" + (f" AND {organism}[Organism]" if organism else "")
+        search_handle = Entrez.esearch(db="gene", term=term, retmax=3)
+        ids = Entrez.read(search_handle).get("IdList", [])
+        search_handle.close()
+        if not ids: return json.dumps({"status": "success", "results": []})
+
+        summary_handle = Entrez.esummary(db="gene", id=",".join(ids))
+        summaries = Entrez.read(summary_handle).get("DocumentSummarySet", {}).get("DocumentSummary", [])
+        summary_handle.close()
+
+        res = [{"symbol": d.get("Name"), "summary": d.get("Summary")} for d in summaries]
+        return json.dumps({"status": "success", "results": res})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
 
 if __name__ == "__main__":
     logger.info("Academic MCP Server initialized.")
