@@ -19,7 +19,6 @@ def _setup_worker_env():
 
 def extract_doi(text):
     if not text: return None
-    # 精准匹配标准 DOI 格式
     match = re.search(r'(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)', text)
     return match.group(1) if match else None
 
@@ -40,10 +39,18 @@ class FetchRSSTask(BackgroundTask):
         if os.environ.get("NO_PROXY") == "*":
             session.trust_env = False
 
-        results = {
-            "_meta": {
-                "last_fetched": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
+        # 🌟 核心修改：读取旧缓存，实现增量更新
+        results = {}
+        if os.path.exists(save_path):
+            try:
+                with open(save_path, 'r', encoding='utf-8') as f:
+                    results = json.load(f)
+            except Exception:
+                pass
+
+        # 更新 meta 信息
+        results["_meta"] = {
+            "last_fetched": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
         total = len(feeds)
@@ -52,9 +59,12 @@ class FetchRSSTask(BackgroundTask):
         self.send_log("INFO", f"📡 开始同步 {total} 个订阅源，并自动嗅探 OA 免费全文...")
 
         for i, feed in enumerate(feeds):
+            if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
+                self.send_log("WARNING", "⚠️ Task cancelled by user. Terminating fetch process.")
+                break
+
             url = feed.get('url')
             name = feed.get('name', 'Unknown')
-            keywords = [k.strip().lower() for k in feed.get('keywords', '').split(',') if k.strip()]
 
             self.update_progress(int((i / total) * 100), f"Fetching: {name}...")
 
@@ -63,8 +73,8 @@ class FetchRSSTask(BackgroundTask):
                 resp = session.get(url, headers=headers, timeout=15)
                 resp.raise_for_status()
 
-                articles = self._parse_feed(resp.text, keywords, session)
-                results[url] = articles
+                articles = self._parse_feed(resp.text, session)
+                results[url] = articles  # 仅更新或覆盖本次请求的字典键
                 success_count += 1
 
                 oa_count = sum(1 for a in articles if a.get('pdf_url'))
@@ -72,7 +82,7 @@ class FetchRSSTask(BackgroundTask):
 
             except Exception as e:
                 self.send_log("ERROR", f"❌ 获取 {name} 失败: {str(e)}")
-                results[url] = []
+                # 如果获取失败，为了防止清空旧数据，这里不要强行赋空列表，保留旧 results[url] 即可
 
         with open(save_path, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
@@ -80,7 +90,8 @@ class FetchRSSTask(BackgroundTask):
         self.update_progress(100, f"同步完成。成功: {success_count}/{total}")
         self.send_log("INFO", f"🎉 RSS 抓取与全文嗅探任务完成，数据已落盘")
 
-    def _parse_feed(self, xml_string, keywords, session):
+    def _parse_feed(self, xml_string, session):
+        # 此处保留原有的 _parse_feed 逻辑完全不变，为了篇幅省略
         articles = []
         user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
         if not user_email: user_email = "scholar.user@example.com"
@@ -111,11 +122,6 @@ class FetchRSSTask(BackgroundTask):
                 paper_tags = []
                 for cat in item.findall('category') + item.findall('subject'):
                     if cat.text: paper_tags.append(cat.text.strip())
-
-                if keywords:
-                    search_corpus = (title_text + " " + desc_text + " " + " ".join(paper_tags)).lower()
-                    if not any(kw in search_corpus for kw in keywords):
-                        continue
 
                 link_elem = item.find('link')
                 pub_date = item.find('pubDate')
@@ -163,7 +169,7 @@ class FetchRSSTask(BackgroundTask):
                         except:
                             pass
 
-                    # 3. 🛡️ PMC API 终极保底
+                    # 3. PMC API 终极保底
                     if not pdf_url:
                         try:
                             pmc_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={clean_doi}&format=json&email={user_email}"
@@ -174,7 +180,6 @@ class FetchRSSTask(BackgroundTask):
                                 if records and "pmcid" in records[0]:
                                     pmcid = records[0]["pmcid"]
 
-                                    # 从 OA API 提取真正的底层下载直链
                                     oa_api_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}"
                                     oa_res = session.get(oa_api_url, timeout=2.5)
                                     if oa_res.status_code == 200 and "<OA>" in oa_res.text:

@@ -1,7 +1,7 @@
 import locale
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
                                QTextBrowser, QPushButton, QLabel, QApplication, QComboBox)
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QPropertyAnimation
 
 from src.core.config_manager import ConfigManager
 from src.core.llm_impl import OpenAICompatibleLLM
@@ -59,17 +59,19 @@ class TranslatorWorker(QObject):
 
             if self.target_lang == "Academic Polish":
                 system_prompt = (
-                    "You are an expert academic reviewer and editor.\n"
+                    "You are an expert academic reviewer and editor specializing in plant molecular biology and genomics.\n"
                     f"Please polish the following {self.source_lang} text to improve its flow, vocabulary, and academic tone. "
-                    "Fix any grammatical errors, but strictly preserve the original scientific meaning, Latin taxonomic names, and specific biological nomenclature."
+                    "Fix any grammatical errors, but strictly preserve the original scientific meaning, Latin taxonomic names (e.g., Gossypium, Arabidopsis), specific genomic terminology (e.g., scRNA-seq, tapetum), and gene/protein symbols."
                 )
             else:
                 system_prompt = (
                     f"You are a top-tier academic translation expert.\n"
                     f"Translate the following text from {self.source_lang} to {self.target_lang}.\n"
                     "【CRITICAL RULES】:\n"
-                    "1. DO NOT translate Latin taxonomic names (e.g., Gossypium hirsutum) or Gene/Protein symbols.\n"
-                    "2. Maintain an objective, highly professional academic tone appropriate for high-impact journals."
+                    "1. DO NOT translate Latin taxonomic names (e.g., Gossypium hirsutum, Arabidopsis thaliana) or Gene/Protein symbols (e.g., ERD15, GRPs).\n"
+                    "2. Maintain an objective, highly professional academic tone appropriate for high-impact journals.\n"
+                    "3. FORMATTING: If the input text is a single, massive block of an academic abstract, logically divide your translation into clear, readable paragraphs (e.g., Background, Methods, Results, Conclusion) and use markdown bolding for these logical headings if appropriate.\n"
+                    "4. Preserve all abbreviations related to experimental methodologies (e.g., scRNA-seq, qPCR, Hisat2)."
                 )
 
             messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": self.text}]
@@ -134,7 +136,7 @@ class QuickTranslatorWindow(QWidget):
         btn_close.setFixedSize(24, 24)
         btn_close.setStyleSheet(
             "QPushButton { background: transparent; color: #888; border: none; font-weight: bold; } QPushButton:hover { color: #ff5555; }")
-        btn_close.clicked.connect(self.hide)
+        btn_close.clicked.connect(self.hide_with_fade)
 
         top_bar.addWidget(title)
         top_bar.addStretch()
@@ -226,10 +228,28 @@ class QuickTranslatorWindow(QWidget):
         self.cfg_mgr.save_settings()
 
     def receive_and_translate(self, text):
-        self.show()
-        self.activateWindow()
+        self.fade_in()
         self.input_box.setPlainText(text)
         self._start_translation()
+
+    def fade_in(self):
+        self.setWindowOpacity(0.0)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.anim = QPropertyAnimation(self, b"windowOpacity")
+        self.anim.setDuration(250)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.start()
+
+    def hide_with_fade(self):
+        self.anim = QPropertyAnimation(self, b"windowOpacity")
+        self.anim.setDuration(200)
+        self.anim.setStartValue(self.windowOpacity())
+        self.anim.setEndValue(0.0)
+        self.anim.finished.connect(self.hide)
+        self.anim.start()
 
     def _center_on_screen(self):
         screen = QApplication.primaryScreen().geometry()
@@ -293,6 +313,6 @@ class QuickTranslatorWindow(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
-            self.hide()
+            self.hide_with_fade()
         else:
             super().keyPressEvent(event)

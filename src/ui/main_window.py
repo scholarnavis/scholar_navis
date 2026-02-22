@@ -157,21 +157,19 @@ class MainWindow(QMainWindow):
         self.clean_old_logs()
 
         # 注册全局翻译快捷键
-        self.translator_dialog = None
+        self.translator_dialog = QuickTranslatorWindow(None)
         self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
         self.shortcut_translate.activated.connect(self.toggle_quick_translator)
 
     # 新增唤醒翻译窗口的方法
     def toggle_quick_translator(self):
-        if self.translator_dialog is None:
-            self.translator_dialog = QuickTranslatorWindow(None)
-
-        if self.translator_dialog.isHidden():
+        if self.translator_dialog.isHidden() or self.translator_dialog.windowOpacity() == 0.0:
+            self.translator_dialog.setWindowOpacity(1.0)
             self.translator_dialog.show()
             self.translator_dialog.activateWindow()
             self.translator_dialog.input_box.setFocus()
         else:
-            self.translator_dialog.hide()
+            self.translator_dialog.hide_with_fade()
 
 
     def clean_old_logs(self):

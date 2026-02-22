@@ -1,13 +1,16 @@
+import html
 import os
 import json
+import re
+
 import requests
 from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                               QLabel, QListWidget, QSplitter, QInputDialog,
+                               QLabel, QListWidget, QSplitter, QComboBox,
                                QTextBrowser, QListWidgetItem, QDialog, QLineEdit, QFormLayout,
                                QCheckBox, QScrollArea, QFileDialog, QTableWidget, QHeaderView,
-                               QTableWidgetItem, QFrame, QAbstractItemView)
+                               QTableWidgetItem, QFrame, QAbstractItemView, QMessageBox, QMenu)
 from PySide6.QtCore import Qt, QUrl, QEvent, QThread, Signal
 from PySide6.QtGui import QDesktopServices, QTextDocument
 from PySide6.QtPrintSupport import QPrinter
@@ -16,32 +19,226 @@ from src.tools.base_tool import BaseTool
 from src.core.core_task import TaskManager, TaskState
 from src.task.rss_tasks import FetchRSSTask
 from src.ui.components.toast import ToastManager
-from src.ui.components.dialog import ProgressDialog, StandardDialog
+from src.ui.components.dialog import ProgressDialog
 from src.core.signals import GlobalSignals
 
 # ==========================================
-# 📚 内置核心期刊与数据库源
+# 📚 内置核心期刊与数据库源体系 (字典形式按期刊归类)
 # ==========================================
-BUILT_IN_FEEDS = [
-    {"name": "Nature (Biological Sciences)", "url": "https://www.nature.com/subjects/biological-sciences.rss",
-     "tags": "Biology, Top Tier"},
-    {"name": "Science (Current Issue)", "url": "https://science.org/rss/current.xml", "tags": "General, Top Tier"},
-    {"name": "Cell (Current Issue)",
-     "url": "https://marlin-prod.literatumonline.com/action/showFeed?jc=cell&type=etoc&feed=rss",
-     "tags": "Biology, Top Tier"},
-    {"name": "Nucleic Acids Research", "url": "https://academic.oup.com/rss/site_5361/3196.xml",
-     "tags": "Bioinformatics"},
-    {"name": "Bioinformatics", "url": "https://academic.oup.com/rss/site_5134/3041.xml", "tags": "Bioinformatics"},
-    {"name": "The Plant Cell", "url": "https://academic.oup.com/rss/site_5368/3224.xml", "tags": "Plant Biology"},
-    {"name": "Plant Physiology", "url": "https://academic.oup.com/rss/site_5431/3282.xml", "tags": "Plant Biology"},
-    {"name": "eLife (Latest)", "url": "https://elifesciences.org/rss/recent.xml", "tags": "Biology, OA"},
-    {"name": "PLOS Biology", "url": "https://journals.plos.org/plosbiology/feed/atom", "tags": "Biology, OA"},
-    {"name": "bioRxiv (Plant Biology)", "url": "https://connect.biorxiv.org/biorxiv_xml.php?subject=plant_biology",
-     "tags": "Preprint, Plant"},
-    {"name": "bioRxiv (Bioinformatics)", "url": "https://connect.biorxiv.org/biorxiv_xml.php?subject=bioinformatics",
-     "tags": "Preprint, Bioinfo"},
-]
+DEFAULT_FEEDS_DICT = {
+    "Nature (Main Subjects)": [
+        {"name": "Biochemistry", "url": "https://www.nature.com/subjects/biochemistry.rss"},
+        {"name": "Biological Techniques", "url": "https://www.nature.com/subjects/biological-techniques.rss"},
+        {"name": "Biotechnology", "url": "https://www.nature.com/subjects/biotechnology.rss"},
+        {"name": "Cell Biology", "url": "https://www.nature.com/subjects/cell-biology.rss"},
+        {"name": "Biophysics", "url": "https://www.nature.com/subjects/biophysics.rss"},
+        {"name": "Genetics", "url": "https://www.nature.com/subjects/genetics.rss"},
+        {"name": "Microbiology", "url": "https://www.nature.com/subjects/microbiology.rss"},
+        {"name": "Molecular Biology", "url": "https://www.nature.com/subjects/molecular-biology.rss"},
+        {"name": "Physiology", "url": "https://www.nature.com/subjects/physiology.rss"},
+        {"name": "Diseases", "url": "https://www.nature.com/subjects/diseases.rss"},
+        {"name": "Ecology", "url": "https://www.nature.com/subjects/ecology.rss"},
+        {"name": "Climate Sciences", "url": "https://www.nature.com/subjects/climate-sciences.rss"},
+        {"name": "Environmental Sciences", "url": "https://www.nature.com/subjects/environmental-sciences.rss"},
+        {"name": "Health Care", "url": "https://www.nature.com/subjects/health-care.rss"},
+        {"name": "Anatomy", "url": "https://www.nature.com/subjects/anatomy.rss"},
+        {"name": "Astronomy and Planetary Science",
+         "url": "https://www.nature.com/subjects/astronomy-and-planetary-science.rss"},
+        {"name": "Chemistry", "url": "https://www.nature.com/subjects/chemistry.rss"},
+        {"name": "Engineering", "url": "https://www.nature.com/subjects/engineering.rss"},
+        {"name": "Materials Science", "url": "https://www.nature.com/subjects/materials-science.rss"},
+        {"name": "Mathematics and Computing", "url": "https://www.nature.com/subjects/mathematics-and-computing.rss"}
+    ],
+    "Nature (Sub-journals)": [
+        {"name": "Nature Cell Biology", "url": "https://www.nature.com/ncb.rss"},
+        {"name": "Nature Biotechnology", "url": "https://www.nature.com/nbt.rss"},
+        {"name": "Nature Methods", "url": "https://www.nature.com/nmeth.rss"},
+        {"name": "Nature Genetics", "url": "https://www.nature.com/ng.rss"},
+        {"name": "Nature Neuroscience", "url": "https://www.nature.com/neuro.rss"},
+        {"name": "Nature Communications", "url": "https://www.nature.com/ncomms.rss"},
+        {"name": "Nature Reviews Genetics", "url": "https://www.nature.com/nrg.rss"},
+        {"name": "Nature Reviews Molecular Cell Biology", "url": "https://www.nature.com/nrm.rss"},
+        {"name": "Nature Plants", "url": "https://www.nature.com/nplants.rss"},
+        {"name": "Nature Medicine", "url": "https://www.nature.com/nm.rss"}
+    ],
+    "Science": [
+        {"name": "Science Table of Contents",
+         "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science"},
+        {"name": "Science Podcast", "url": "https://feeds.megaphone.fm/AAAS8717073854"},
+        {"name": "Science First Release",
+         "url": "https://www.science.org/action/showFeed?type=axatoc&feed=rss&jc=science"},
+        {"name": "Science Daily News Feeds", "url": "https://www.science.org/rss/news_current.xml"},
+        {"name": "Science Signaling", "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=signaling"},
+        {"name": "Science Translational Medicine",
+         "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=stm"},
+        {"name": "Science Advances", "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciadv"},
+        {"name": "Science Immunology",
+         "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciimmunol"},
+        {"name": "Science Robotics",
+         "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scirobotics"},
+        {"name": "Science Careers", "url": "https://www.science.org/digital-feed/careers-articles"},
+        {"name": "Science In the Pipeline", "url": "https://www.science.org/blogs/pipeline/feed"}
+    ],
+    "Cell": [
+        {"name": "Cell (Online now)", "url": "https://www.cell.com/cell/inpress.rss"},
+        {"name": "Cell (Current issue)", "url": "https://www.cell.com/cell/current.rss"},
+        {"name": "Molecular Cell (Online now)", "url": "https://www.cell.com/molecular-cell/inpress.rss"},
+        {"name": "Molecular Cell (Current issue)", "url": "https://www.cell.com/molecular-cell/current.rss"},
+        {"name": "Developmental Cell (Online now)", "url": "https://www.cell.com/developmental-cell/inpress.rss"},
+        {"name": "Developmental Cell (Current issue)", "url": "https://www.cell.com/developmental-cell/current.rss"},
+        {"name": "Molecular Plant (Articles in press)", "url": "https://www.cell.com/molecular-plant/inpress.rss"},
+        {"name": "Molecular Plant (Latest issue)", "url": "https://www.cell.com/molecular-plant/current.rss"},
+        {"name": "Cell Reports (Online now)", "url": "https://www.cell.com/cell-reports/inpress.rss"},
+        {"name": "Cell Reports (Current issue)", "url": "https://www.cell.com/cell-reports/current.rss"},
+        {"name": "Trends in Plant Science (Online now)",
+         "url": "https://www.cell.com/trends/plant-science/inpress.rss"},
+        {"name": "Trends in Plant Science (Current issue)",
+         "url": "https://www.cell.com/trends/plant-science/current.rss"},
+        {"name": "Trends in Genetics (Online now)", "url": "https://www.cell.com/trends/genetics/inpress.rss"},
+        {"name": "Trends in Genetics (Current issue)", "url": "https://www.cell.com/trends/genetics/current.rss"}
+    ],
+    "PNAS": [
+        {"name": "PNAS Applied Mathematics",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=app-math"},
+        {"name": "PNAS Chemistry",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=chem"},
+        {"name": "PNAS Mathematics",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=math"},
+        {"name": "PNAS Applied Physical Sciences",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=app-phys"},
+        {"name": "PNAS Physics",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=phys"},
+        {"name": "PNAS Computer Sciences",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=comp-sci"},
+        {"name": "PNAS Engineering",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=eng"},
+        {"name": "PNAS Environmental Sciences",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCodeOr=env-sci-bio&tagCodeOr=env-sci-soc&tagCodeOr=env-sci-phys"},
+        {"name": "PNAS Agricultural Sciences",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=ag-sci"},
+        {"name": "PNAS Ecology",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=eco"},
+        {"name": "PNAS Physiology",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=physio"},
+        {"name": "PNAS Plant Biology",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=plant-bio"},
+        {"name": "PNAS Genetics",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=genetics"},
+        {"name": "PNAS Biochemistry",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=biochem"},
+        {"name": "PNAS Medical Sciences",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=med-sci"},
+        {"name": "PNAS Biophysics and Computational Biology",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCodeOr=biophys-bio&tagCodeOr=biophys-phys"},
+        {"name": "PNAS Cell Biology",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=cell-bio"},
+        {"name": "PNAS Microbiology",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=microbio"},
+        {"name": "PNAS Neuroscience",
+         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=neuro"}
+    ],
+    "bioRxiv": [
+        {"name": "bioRxiv Plant Biology", "url": "https://connect.biorxiv.org/biorxiv_xml.php?subject=plant_biology"},
+        {"name": "bioRxiv Bioinformatics", "url": "https://connect.biorxiv.org/biorxiv_xml.php?subject=bioinformatics"},
+        {"name": "bioRxiv Genomics", "url": "https://connect.biorxiv.org/biorxiv_xml.php?subject=genomics"},
+        {"name": "bioRxiv Cell Biology", "url": "https://connect.biorxiv.org/biorxiv_xml.php?subject=cell_biology"}
+    ],
+    "Annual Reviews": [
+        {"name": "Animal Biosciences",
+         "url": "https://www.annualreviews.org/rss/content/journals/animal/latestarticles?fmt=rss"},
+        {"name": "Biochemistry",
+         "url": "https://www.annualreviews.org/rss/content/journals/biochem/latestarticles?fmt=rss"},
+        {"name": "Biomedical Engineering",
+         "url": "https://www.annualreviews.org/rss/content/journals/bioeng/latestarticles?fmt=rss"},
+        {"name": "Biomedical Data Science",
+         "url": "https://www.annualreviews.org/rss/content/journals/biodatasci/latestarticles?fmt=rss"},
+        {"name": "Biophysics",
+         "url": "https://www.annualreviews.org/rss/content/journals/biophys/latestarticles?fmt=rss"},
+        {"name": "Cancer Biology",
+         "url": "https://www.annualreviews.org/rss/content/journals/cancerbio/latestarticles?fmt=rss"},
+        {"name": "Cell and Developmental Biology",
+         "url": "https://www.annualreviews.org/rss/content/journals/cellbio/latestarticles?fmt=rss"},
+        {"name": "Chemical and Biomolecular Engineering",
+         "url": "https://www.annualreviews.org/rss/content/journals/chembioeng/latestarticles?fmt=rss"},
+        {"name": "Ecology, Evolution, and Systematics",
+         "url": "https://www.annualreviews.org/rss/content/journals/ecolsys/latestarticles?fmt=rss"},
+        {"name": "Food Science and Technology",
+         "url": "https://www.annualreviews.org/rss/content/journals/food/latestarticles?fmt=rss"},
+        {"name": "Genetics", "url": "https://www.annualreviews.org/rss/content/journals/genet/latestarticles?fmt=rss"},
+        {"name": "Genomics and Human Genetics",
+         "url": "https://www.annualreviews.org/rss/content/journals/genom/latestarticles?fmt=rss"},
+        {"name": "Immunology",
+         "url": "https://www.annualreviews.org/rss/content/journals/immunol/latestarticles?fmt=rss"},
+        {"name": "Medicine", "url": "https://www.annualreviews.org/rss/content/journals/med/latestarticles?fmt=rss"},
+        {"name": "Microbiology",
+         "url": "https://www.annualreviews.org/rss/content/journals/micro/latestarticles?fmt=rss"},
+        {"name": "Neuroscience",
+         "url": "https://www.annualreviews.org/rss/content/journals/neuro/latestarticles?fmt=rss"},
+        {"name": "Pathology: Mechanisms of Disease",
+         "url": "https://www.annualreviews.org/rss/content/journals/pathmechdis/latestarticles?fmt=rss"},
+        {"name": "Pharmacology and Toxicology",
+         "url": "https://www.annualreviews.org/rss/content/journals/pharmtox/latestarticles?fmt=rss"},
+        {"name": "Physical Chemistry",
+         "url": "https://www.annualreviews.org/rss/content/journals/physchem/latestarticles?fmt=rss"},
+        {"name": "Physiology",
+         "url": "https://www.annualreviews.org/rss/content/journals/physiol/latestarticles?fmt=rss"},
+        {"name": "Phytopathology",
+         "url": "https://www.annualreviews.org/rss/content/journals/phyto/latestarticles?fmt=rss"},
+        {"name": "Plant Biology",
+         "url": "https://www.annualreviews.org/rss/content/journals/arplant/latestarticles?fmt=rss"},
+        {"name": "Virology",
+         "url": "https://www.annualreviews.org/rss/content/journals/virology/latestarticles?fmt=rss"}
+    ],
+    "Other Journals": [
+        {"name": "Journal of Cell Biology (Recent issues)", "url": "https://rupress.org/rss/site_1000001/1000003.xml"},
+        {"name": "Journal of Cell Biology (Latest Articles)",
+         "url": "https://rupress.org/rss/site_1000001/LatestArticles_1000003.xml"},
+        {"name": "Bioinformatics (Latest Issue)", "url": "https://academic.oup.com/rss/site_5139/3001.xml"},
+        {"name": "Bioinformatics (Advance Articles)",
+         "url": "https://academic.oup.com/rss/site_5139/advanceAccess_3001.xml"},
+        {"name": "Bioinformatics (Open Access)", "url": "https://academic.oup.com/rss/site_5139/OpenAccess.xml"},
+        {"name": "Nucleic Acids Research (Latest Issue)", "url": "https://academic.oup.com/rss/site_5127/3091.xml"},
+        {"name": "Nucleic Acids Research (Advance Articles)",
+         "url": "https://academic.oup.com/rss/site_5127/advanceAccess_3091.xml"},
+        {"name": "Nucleic Acids Research (Open Access)",
+         "url": "https://academic.oup.com/rss/site_5127/OpenAccess.xml"},
+        {"name": "The Plant Cell (Latest Issue)", "url": "https://academic.oup.com/rss/site_6317/4077.xml"},
+        {"name": "The Plant Cell (Advance Articles)",
+         "url": "https://academic.oup.com/rss/site_6317/advanceAccess_4077.xml"},
+        {"name": "The Plant Cell (Open Access)", "url": "https://academic.oup.com/rss/site_6317/OpenAccess.xml"},
+        {"name": "Plant Physiology (Latest Issue)", "url": "https://academic.oup.com/rss/site_6323/4080.xml"},
+        {"name": "Plant Physiology (Advance Articles)",
+         "url": "https://academic.oup.com/rss/site_6323/advanceAccess_4080.xml"},
+        {"name": "Plant Physiology (Open Access)", "url": "https://academic.oup.com/rss/site_6323/OpenAccess.xml"},
+        {"name": "Ecology Letters (Most recent)", "url": "https://onlinelibrary.wiley.com/feed/14610248/most-recent"},
+        {"name": "Ecology Letters (Most cited)", "url": "https://onlinelibrary.wiley.com/feed/14610248/most-cited"},
+        {"name": "New Phytologist", "url": "https://onlinelibrary.wiley.com/feed/14698137/most-recent"}
+    ]
+}
 
+
+
+# --- 为所有默认源打上 is_default 标签 ---
+for category, feeds in DEFAULT_FEEDS_DICT.items():
+    for f in feeds:
+        f['is_default'] = True
+        f['category'] = category
+
+# 获取所有内置源列表（平铺格式）
+ALL_BUILTIN_FEEDS = [f for feeds in DEFAULT_FEEDS_DICT.values() for f in feeds]
+
+def clean_html_text(raw_text):
+    """更优雅的 HTML 文本清洗器"""
+    if not raw_text: return ""
+    # 1. 替换常见的分块标签为换行符，防止单词粘连
+    text = re.sub(r'</?(p|br|div|li|tr|h\d)[^>]*>', '\n', raw_text, flags=re.IGNORECASE)
+    # 2. 剥离剩余所有 HTML 标签
+    text = re.sub(r'<[^>]+>', '', text)
+    # 3. 反转义 HTML 实体 (如 &amp; &nbsp; &#39;)
+    text = html.unescape(text)
+    # 4. 清理多余的连续空白，将多个空行压缩为最多两个
+    text = re.sub(r'\n\s*\n', '\n\n', text).strip()
+    return text
 
 # --- 独立下载线程 (防假死) ---
 class DownloadWorker(QThread):
@@ -71,42 +268,89 @@ class DownloadWorker(QThread):
 class FeedLibraryDialog(QDialog):
     def __init__(self, parent=None, current_feeds=None):
         super().__init__(parent)
-        self.setWindowTitle("📚 Discover Academic Feeds")
-        self.resize(750, 500)
+        self.setWindowTitle("📚 Subscription Manager")
+        self.resize(800, 550)
         self.setStyleSheet("background-color: #1e1e1e; color: white;")
         layout = QVBoxLayout(self)
 
-        lbl = QLabel("Select predefined journals or databases to add to your tracker:")
-        lbl.setStyleSheet("color: #888; margin-bottom: 5px;")
-        layout.addWidget(lbl)
+        # 全局记录用户已经订阅的 URLs
+        self.current_user_feeds = current_feeds if current_feeds else []
+        self.subscribed_urls = {f["url"] for f in self.current_user_feeds}
 
-        # 🌟 新增：全选多选框
-        self.chk_select_all = QCheckBox("☑ Select All Valid Feeds")
-        self.chk_select_all.setCursor(Qt.PointingHandCursor)
-        self.chk_select_all.setStyleSheet("color: #05B8CC; font-weight: bold; margin-bottom: 5px;")
-        self.chk_select_all.clicked.connect(self._toggle_all)
-        layout.addWidget(self.chk_select_all)
+        # 构建展示的全部源字典 (合并内置与用户自定义)
+        self.display_dict = {}
+        for cat, feeds in DEFAULT_FEEDS_DICT.items():
+            self.display_dict[cat] = [f.copy() for f in feeds]
 
-        self.table = QTableWidget(len(BUILT_IN_FEEDS), 4)
-        self.table.setHorizontalHeaderLabels(["Add?", "Journal / Source", "Tags", "RSS URL"])
+        # 将用户的自定义源归类展示
+        for f in self.current_user_feeds:
+            if not f.get("is_default", False):
+                cat = f.get("category", "Custom Sources")
+                if cat not in self.display_dict:
+                    self.display_dict[cat] = []
+                self.display_dict[cat].append(f.copy())
+
+        # 顶栏布局
+        top_bar = QHBoxLayout()
+        lbl_cat = QLabel("📂 Category / Journal:")
+        lbl_cat.setStyleSheet("color: #05B8CC; font-weight: bold;")
+        self.combo_category = QComboBox()
+        self.combo_category.addItems(list(self.display_dict.keys()))
+        self.combo_category.setStyleSheet("padding: 5px; background: #252526; border: 1px solid #444;")
+        self.combo_category.currentTextChanged.connect(self._render_table)
+
+        btn_add_custom = QPushButton("➕ Add Custom Source")
+        btn_add_custom.setStyleSheet("background-color: #333; color: white; padding: 5px 15px; border-radius: 4px;")
+        btn_add_custom.clicked.connect(self._on_add_custom)
+
+        top_bar.addWidget(lbl_cat)
+        top_bar.addWidget(self.combo_category, stretch=1)
+        top_bar.addWidget(btn_add_custom)
+        layout.addLayout(top_bar)
+
+        # 表格布局
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Subscribe", "Journal / Source", "RSS URL"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setStyleSheet("QTableWidget { background-color: #252526; gridline-color: #333; }")
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.table)
 
-        existing_urls = [f.get("url") for f in current_feeds] if current_feeds else []
-        self.checkboxes = []
+        # 底部栏
+        btn_box = QHBoxLayout()
+        self.lbl_status = QLabel(f"Selected: {len(self.subscribed_urls)}")
+        self.lbl_status.setStyleSheet("color: #888;")
 
-        for i, feed in enumerate(BUILT_IN_FEEDS):
+        btn_save = QPushButton("💾 Save Subscriptions")
+        btn_save.setStyleSheet(
+            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+        btn_save.clicked.connect(self.accept)
+
+        btn_box.addWidget(self.lbl_status)
+        btn_box.addStretch()
+        btn_box.addWidget(btn_save)
+        layout.addLayout(btn_box)
+
+        # 渲染初始分类
+        self.checkboxes_map = {}  # 记录当前显示的 checkbox
+        self._render_table(self.combo_category.currentText())
+
+    def _render_table(self, category):
+        self.table.setRowCount(0)
+        self.checkboxes_map.clear()
+        feeds = self.display_dict.get(category, [])
+        self.table.setRowCount(len(feeds))
+
+        for i, feed in enumerate(feeds):
             chk = QCheckBox()
-            if feed["url"] in existing_urls:
-                chk.setEnabled(False)
-                chk.setToolTip("Already exists in your tracker.")
-            else:
-                chk.setChecked(False)
-            self.checkboxes.append((chk, feed))
+            chk.setChecked(feed["url"] in self.subscribed_urls)
+
+            # 🌟 修复关键：改用 toggled 信号，它直接传递 bool 值 (True/False)，避免强类型比较失败
+            chk.toggled.connect(lambda checked, url=feed["url"]: self._on_checkbox_toggled(url, checked))
 
             chk_widget = QWidget()
             chk_layout = QHBoxLayout(chk_widget)
@@ -114,141 +358,122 @@ class FeedLibraryDialog(QDialog):
             chk_layout.setAlignment(Qt.AlignCenter)
             chk_layout.setContentsMargins(0, 0, 0, 0)
 
-            self.table.setCellWidget(i, 0, chk_widget)
-            self.table.setItem(i, 1, QTableWidgetItem(feed['name']))
-            self.table.setItem(i, 2, QTableWidgetItem(feed['tags']))
-            self.table.setItem(i, 3, QTableWidgetItem(feed['url']))
-
-        layout.addWidget(self.table)
-
-        btn_box = QHBoxLayout()
-        btn_add = QPushButton("➕ Add Selected")
-        btn_add.setStyleSheet("background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px;")
-        btn_add.clicked.connect(self.accept)
-
-        btn_custom = QPushButton("Custom Entry...")
-        btn_custom.clicked.connect(self.reject_with_custom)
-
-        btn_box.addWidget(btn_custom)
-        btn_box.addStretch()
-        btn_box.addWidget(btn_add)
-        layout.addLayout(btn_box)
-
-        self.custom_trigger = False
-
-    def _toggle_all(self):
-        state = self.chk_select_all.isChecked()
-        for chk, feed in self.checkboxes:
-            if chk.isEnabled():
-                chk.setChecked(state)
-
-    def reject_with_custom(self):
-        self.custom_trigger = True
-        self.reject()
-
-    def get_selected_feeds(self):
-        return [{
-            "name": feed["name"],
-            "url": feed["url"],
-            "keywords": ""
-        } for chk, feed in self.checkboxes if chk.isChecked() and chk.isEnabled()]
-
-
-class RestoreFeedsDialog(QDialog):
-    def __init__(self, parent=None, current_feeds=None):
-        super().__init__(parent)
-        self.setWindowTitle("🔁 Restore Built-in Feeds")
-        self.resize(600, 400)
-        self.setStyleSheet("background-color: #1e1e1e; color: white;")
-        layout = QVBoxLayout(self)
-
-        lbl = QLabel("Select default academic feeds to restore:")
-        lbl.setStyleSheet("color: #888; margin-bottom: 5px;")
-        layout.addWidget(lbl)
-
-        # 🌟 新增：全选多选框
-        self.chk_select_all = QCheckBox("☑ Select All Valid Feeds")
-        self.chk_select_all.setCursor(Qt.PointingHandCursor)
-        self.chk_select_all.setStyleSheet("color: #05B8CC; font-weight: bold; margin-bottom: 5px;")
-        self.chk_select_all.setChecked(True)  # 恢复界面默认全选比较好
-        self.chk_select_all.clicked.connect(self._toggle_all)
-        layout.addWidget(self.chk_select_all)
-
-        self.table = QTableWidget(len(BUILT_IN_FEEDS), 2)
-        self.table.setHorizontalHeaderLabels(["Restore?", "Journal / Source"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setStyleSheet("QTableWidget { background-color: #252526; gridline-color: #333; }")
-
-        existing_urls = [f.get("url") for f in current_feeds] if current_feeds else []
-        self.checkboxes = []
-
-        for i, feed in enumerate(BUILT_IN_FEEDS):
-            chk = QCheckBox()
-            if feed["url"] in existing_urls:
-                chk.setEnabled(False)
-                chk.setToolTip("Already exists in your tracker.")
+            name_item = QTableWidgetItem(feed["name"])
+            if feed.get("is_default"):
+                name_item.setToolTip("Built-in Default Source")
+                name_item.setForeground(Qt.white)
             else:
-                chk.setChecked(True)
-            self.checkboxes.append((chk, feed))
-
-            chk_widget = QWidget()
-            chk_layout = QHBoxLayout(chk_widget)
-            chk_layout.addWidget(chk)
-            chk_layout.setAlignment(Qt.AlignCenter)
-            chk_layout.setContentsMargins(0, 0, 0, 0)
+                name_item.setToolTip("Custom Source")
+                name_item.setForeground(Qt.cyan)
 
             self.table.setCellWidget(i, 0, chk_widget)
-            self.table.setItem(i, 1, QTableWidgetItem(feed['name']))
+            self.table.setItem(i, 1, name_item)
+            self.table.setItem(i, 2, QTableWidgetItem(feed["url"]))
 
-        layout.addWidget(self.table)
+    def _on_checkbox_toggled(self, url, is_checked):
+        if is_checked:
+            self.subscribed_urls.add(url)
+        else:
+            self.subscribed_urls.discard(url)
+        self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
 
-        btn_box = QHBoxLayout()
-        btn_add = QPushButton("🔁 Restore Selected")
-        btn_add.setStyleSheet("background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px;")
-        btn_add.clicked.connect(self.accept)
-        btn_box.addStretch()
-        btn_box.addWidget(btn_add)
-        layout.addLayout(btn_box)
+    def refresh_all_feeds(self):
+        if not self.feeds:
+            ToastManager().show("Your tracker list is empty. Add a source first.", "warning")
+            return
 
-    def _toggle_all(self):
-        state = self.chk_select_all.isChecked()
-        for chk, feed in self.checkboxes:
-            if chk.isEnabled():
-                chk.setChecked(state)
+        # 🌟 关闭所有遥测参数
+        telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
+        self.pd = ProgressDialog(self.widget, "Fetching Literature", "Connecting to servers and detecting OA...",
+                                 telemetry_config=telemetry_off)
+        self.pd.show()
 
-    def get_feeds_to_restore(self):
-        return [feed for chk, feed in self.checkboxes if chk.isChecked() and chk.isEnabled()]
+        self.task_mgr.sig_progress.connect(self.pd.update_progress)
+        self.task_mgr.sig_state_changed.connect(self._on_fetch_done)
+        self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
+
+        self.task_mgr.start_task(FetchRSSTask, "rss_fetch", feeds=self.feeds, save_path=self.cache_file)
+
+
+    def _on_add_custom(self):
+        dlg = FeedEditorDialog(self)
+        if dlg.exec():
+            new_feed = dlg.get_data()
+            if new_feed["url"]:
+                new_feed["is_default"] = False
+                cat = new_feed.get("category", "Custom Sources")
+
+                if cat not in self.display_dict:
+                    self.display_dict[cat] = []
+                    self.combo_category.addItem(cat)
+
+                self.display_dict[cat].append(new_feed)
+                self.subscribed_urls.add(new_feed["url"])  # 自动勾选
+                self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
+
+                # 切换到对应分类并渲染
+                self.combo_category.setCurrentText(cat)
+
+    def get_final_feeds(self):
+        """返回用户所有处于选中状态的 feeds 的完整定义"""
+        final_list = []
+        for cat, feeds in self.display_dict.items():
+            for f in feeds:
+                if f["url"] in self.subscribed_urls:
+                    final_list.append(f)
+
+        # 简单去重 (以 URL 为准)
+        unique_feeds = {f["url"]: f for f in final_list}
+        return list(unique_feeds.values())
+
 
 class FeedEditorDialog(QDialog):
-    def __init__(self, parent=None, feed_data=None):
+    def __init__(self, parent=None, feed_data=None, is_default=False):
         super().__init__(parent)
-        self.setWindowTitle("Edit Tracker Rule")
-        self.setFixedSize(500, 220)
+        self.setWindowTitle("Edit Tracker Rule" if is_default else "Custom Feed Settings")
+        self.setFixedSize(450, 180)
         self.setStyleSheet("background-color: #252526; color: white;")
         layout = QFormLayout(self)
 
         self.inp_name = QLineEdit(feed_data.get('name', '') if feed_data else '')
         self.inp_url = QLineEdit(feed_data.get('url', '') if feed_data else '')
-        self.inp_keywords = QLineEdit(feed_data.get('keywords', '') if feed_data else '')
-        self.inp_keywords.setPlaceholderText("e.g. scRNA-seq, cotton (Leave blank for all)")
 
-        for inp in [self.inp_name, self.inp_url, self.inp_keywords]:
-            inp.setStyleSheet("background:#1e1e1e; border:1px solid #444; padding:5px; border-radius:3px;")
+        self.inp_category = QComboBox()
+        self.inp_category.setEditable(True)
+        self.inp_category.addItems(list(DEFAULT_FEEDS_DICT.keys()) + ["Custom Sources"])
+        if feed_data and feed_data.get('category'):
+            self.inp_category.setCurrentText(feed_data['category'])
+        else:
+            self.inp_category.setCurrentText("Custom Sources")
+
+        # ：默认订阅源不允许修改文本内容
+        if is_default:
+            for inp in [self.inp_name, self.inp_url]:
+                inp.setReadOnly(True)
+                inp.setStyleSheet("background:#222; border:1px solid #333; padding:5px; border-radius:3px; color:#888;")
+            self.inp_category.setEnabled(False)
+            self.inp_category.setStyleSheet(
+                "background:#222; border:1px solid #333; padding:5px; border-radius:3px; color:#888;")
+            layout.addRow("", QLabel("🔒 Built-in source: Read-only."))
+        else:
+            for inp in [self.inp_name, self.inp_url]:
+                inp.setStyleSheet("background:#1e1e1e; border:1px solid #444; padding:5px; border-radius:3px;")
+            self.inp_category.setStyleSheet(
+                "background:#1e1e1e; border:1px solid #444; padding:5px; border-radius:3px;")
 
         layout.addRow("Source Name:", self.inp_name)
-        layout.addRow("RSS XML URL:", self.inp_url)
-        layout.addRow("Keyword Filter:", self.inp_keywords)
-
-        hint = QLabel("Only papers containing these keywords in Title/Abstract will be kept.")
-        hint.setStyleSheet("color:#888; font-size:11px;")
-        layout.addRow("", hint)
+        layout.addRow("RSS URL:", self.inp_url)
+        layout.addRow("Category:", self.inp_category)
 
         btn_box = QHBoxLayout()
-        btn_save = QPushButton("Save Rule")
-        btn_save.setStyleSheet("background-color: #007acc; color: white; padding: 6px; border-radius: 4px;")
-        btn_save.clicked.connect(self.accept)
+        btn_save = QPushButton("Save")
+        if is_default:
+            btn_save.setEnabled(False)
+            btn_save.setStyleSheet("background-color: #444; color: #888; padding: 6px; border-radius: 4px;")
+        else:
+            btn_save.setStyleSheet("background-color: #007acc; color: white; padding: 6px; border-radius: 4px;")
+            btn_save.clicked.connect(self.accept)
+
         btn_box.addStretch()
         btn_box.addWidget(btn_save)
         layout.addRow(btn_box)
@@ -257,13 +482,11 @@ class FeedEditorDialog(QDialog):
         return {
             "name": self.inp_name.text().strip(),
             "url": self.inp_url.text().strip(),
-            "keywords": self.inp_keywords.text().strip()
+            "category": self.inp_category.currentText().strip()
         }
 
 
-# ==========================================
 # 独立文章卡片组件
-# ==========================================
 class ArticleWidget(QFrame):
     def __init__(self, article_data, parent=None):
         super().__init__(parent)
@@ -297,15 +520,15 @@ class ArticleWidget(QFrame):
             "color: #888; font-size: 12px; border: none; background: transparent; padding-left: 25px;")
         layout.addWidget(lbl_meta)
 
-        self.text_browser = QTextBrowser()
+        self.text_browser = QLabel()
         self.text_browser.setOpenExternalLinks(True)
-        self.text_browser.setHtml(article_data.get('summary', ''))
+        self.text_browser.setTextFormat(Qt.RichText)
+        self.text_browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.text_browser.setWordWrap(True)
+        self.text_browser.setText(article_data.get('summary', ''))
         self.text_browser.setStyleSheet("""
-            QTextBrowser { background: transparent; color: #d4d4d4; border: none; font-size: 13px; line-height: 1.5; selection-background-color: #05B8CC; padding-left: 20px;}
-        """)
-        self.text_browser.document().setTextWidth(600)
-        doc_height = self.text_browser.document().size().height()
-        self.text_browser.setFixedHeight(int(max(50, min(doc_height + 20, 600))))
+                    QLabel { background: transparent; color: #d4d4d4; border: none; font-size: 13px; line-height: 1.5; selection-background-color: #05B8CC; padding-left: 20px;}
+                """)
         self.text_browser.installEventFilter(self)
         layout.addWidget(self.text_browser)
 
@@ -318,6 +541,13 @@ class ArticleWidget(QFrame):
             "QPushButton { background-color: #333; color: #e0e0e0; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: 1px solid #555; } QPushButton:hover { background-color: #05B8CC; color: white; border: 1px solid #05B8CC; }")
         btn_trans.clicked.connect(self._send_to_translator)
         btn_layout.addWidget(btn_trans)
+
+        btn_chat = QPushButton("💬 Send to Chat")
+        btn_chat.setCursor(Qt.PointingHandCursor)
+        btn_chat.setStyleSheet(
+            "QPushButton { background-color: #333; color: #e0e0e0; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: 1px solid #555; } QPushButton:hover { background-color: #007acc; color: white; border: 1px solid #007acc; }")
+        btn_chat.clicked.connect(self._send_to_chat)
+        btn_layout.insertWidget(1, btn_chat)
 
         if article_data.get('pdf_url'):
             btn_dl = QPushButton("⬇️ Download OA PDF")
@@ -337,23 +567,26 @@ class ArticleWidget(QFrame):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
+    def _send_to_chat(self):
+        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
+            clean_summary = clean_html_text(self.article_data.get('summary', ''))
+            context_text = f"Title: {self.article_data['title']}\nAbstract: {clean_summary}\nURL: {self.article_data.get('link', '')}"
+            GlobalSignals().sig_send_to_chat.emit(context_text,
+                                                  "Please review this article. What are the core methodologies and potential implications?")
+
     def eventFilter(self, obj, event):
         if obj == self.text_browser and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Space:
-                selected_text = self.text_browser.textCursor().selectedText()
+                selected_text = self.text_browser.selectedText()
                 if selected_text and hasattr(GlobalSignals(), 'sig_invoke_translator'):
                     GlobalSignals().sig_invoke_translator.emit(selected_text)
-                    cursor = self.text_browser.textCursor()
-                    cursor.clearSelection()
-                    self.text_browser.setTextCursor(cursor)
                     return True
         return super().eventFilter(obj, event)
 
     def _send_to_translator(self):
         if hasattr(GlobalSignals(), 'sig_invoke_translator'):
-            text = f"{self.article_data['title']}\n\n{self.article_data.get('summary', '')}"
-            import re
-            clean_text = re.sub(r'<[^>]+>', '', text)
+            raw_text = f"{self.article_data['title']}\n\n{self.article_data.get('summary', '')}"
+            clean_text = clean_html_text(raw_text)
             GlobalSignals().sig_invoke_translator.emit(clean_text)
 
     def is_checked(self):
@@ -391,30 +624,28 @@ class RSSTool(BaseTool):
         layout.setContentsMargins(15, 15, 15, 15)
 
         toolbar = QHBoxLayout()
-        self.btn_lib = QPushButton("📚 Add Source")
-        self.btn_lib.setStyleSheet("background-color: #007acc; color: white; padding: 6px 12px; border-radius: 4px;")
-        self.btn_lib.clicked.connect(self.open_feed_library)
+        self.btn_manage = QPushButton("📚 Manage Subscriptions")
+        self.btn_manage.setStyleSheet(
+            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+        self.btn_manage.clicked.connect(self.open_subscription_manager)
 
-        self.btn_edit = QPushButton("✏️ Edit")
+        self.btn_edit = QPushButton("✏️ Edit Source")
         self.btn_edit.clicked.connect(self.edit_feed)
-        self.btn_del = QPushButton("🗑️ Remove")
-        self.btn_del.clicked.connect(self.remove_feed)
 
-        self.btn_restore = QPushButton("🔁 Restore")
-        self.btn_restore.clicked.connect(self.restore_default_feeds)
+        self.btn_unsub = QPushButton("❌ Unsubscribe Selected")
+        self.btn_unsub.clicked.connect(lambda: self._batch_action("unsubscribe"))
 
         self.lbl_time = QLabel("Last Fetched: Never")
         self.lbl_time.setStyleSheet("color: #888; font-style: italic; margin-left: 10px;")
 
-        self.btn_refresh = QPushButton("🔄 Sync Latest Papers")
+        self.btn_refresh = QPushButton("🔄 Sync Selected / All")
         self.btn_refresh.setStyleSheet(
             "background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
-        self.btn_refresh.clicked.connect(self.refresh_all_feeds)
+        self.btn_refresh.clicked.connect(lambda: self._batch_action("fetch"))
 
-        toolbar.addWidget(self.btn_lib)
+        toolbar.addWidget(self.btn_manage)
         toolbar.addWidget(self.btn_edit)
-        toolbar.addWidget(self.btn_del)
-        toolbar.addWidget(self.btn_restore)
+        toolbar.addWidget(self.btn_unsub)
         toolbar.addWidget(self.lbl_time)
         toolbar.addStretch()
         toolbar.addWidget(self.btn_refresh)
@@ -422,12 +653,51 @@ class RSSTool(BaseTool):
 
         splitter = QSplitter(Qt.Horizontal)
 
+        # ==========================================
+        # 🌟 修复 7：修正左侧布局，确保全选按钮正常显示
+        # ==========================================
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        left_action_bar = QHBoxLayout()
+        self.btn_feed_sel_all = QPushButton("☑ Select All")
+        self.btn_feed_sel_inv = QPushButton("🔲 Invert")
+
+        for btn in [self.btn_feed_sel_all, self.btn_feed_sel_inv]:
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                        QPushButton { background-color: #333; color: #ccc; border-radius: 3px; padding: 4px 8px; font-size: 11px; border: 1px solid #444; } 
+                        QPushButton:hover { background-color: #444; color: white; }
+                    """)
+
+        self.btn_feed_sel_all.clicked.connect(lambda: self._batch_select_feeds(True))
+        self.btn_feed_sel_inv.clicked.connect(lambda: self._batch_select_feeds("invert"))
+
+        left_action_bar.addWidget(self.btn_feed_sel_all)
+        left_action_bar.addWidget(self.btn_feed_sel_inv)
+        left_action_bar.addStretch()
+        left_layout.addLayout(left_action_bar)
+
         self.feed_list = QListWidget()
         self.feed_list.currentRowChanged.connect(self._on_feed_selected)
-        self.feed_list.setStyleSheet(
-            "background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; padding: 5px;")
-        splitter.addWidget(self.feed_list)
+        self.feed_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.feed_list.customContextMenuRequested.connect(self._show_feed_context_menu)
+        self.feed_list.setSelectionMode(QAbstractItemView.ExtendedSelection)  # 支持 Shift/Ctrl 多选
 
+        # 开启自动换行，并关闭横向滚动条，防止文字被截断
+        self.feed_list.setWordWrap(True)
+        self.feed_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.feed_list.setStyleSheet("""
+                    QListWidget { background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; padding: 5px; }
+                    QListWidget::indicator { width: 15px; height: 15px; }
+                    QListWidget::item { padding: 4px 0px; border-bottom: 1px dashed #333; }
+                """)
+        left_layout.addWidget(self.feed_list)
+        splitter.addWidget(left_panel)
+
+        # 右侧新增批量分析按钮
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -437,6 +707,10 @@ class RSSTool(BaseTool):
         self.btn_sel_inv = QPushButton("🔲 Invert")
         self.btn_sel_all.clicked.connect(lambda: self._batch_select(True))
         self.btn_sel_inv.clicked.connect(lambda: self._batch_select("invert"))
+
+        self.btn_batch_chat = QPushButton("💬 Analyze Selected")
+        self.btn_batch_chat.setStyleSheet("color: #8be9fd;")
+        self.btn_batch_chat.clicked.connect(self.batch_send_to_chat)
 
         self.btn_export_pdf = QPushButton("📤 Export to PDF")
         self.btn_export_pdf.setStyleSheet("color: #ffb86c;")
@@ -453,6 +727,7 @@ class RSSTool(BaseTool):
         action_bar.addWidget(self.btn_sel_inv)
         action_bar.addStretch()
         action_bar.addWidget(hint)
+        action_bar.addWidget(self.btn_batch_chat)
         action_bar.addWidget(self.btn_export_pdf)
         action_bar.addWidget(self.btn_batch_dl)
         right_layout.addLayout(action_bar)
@@ -471,7 +746,7 @@ class RSSTool(BaseTool):
         right_layout.addWidget(self.scroll_area)
         splitter.addWidget(right_panel)
 
-        splitter.setSizes([280, 800])
+        splitter.setSizes([340, 860])
         layout.addWidget(splitter, stretch=1)
 
         self._load_cache()
@@ -480,83 +755,132 @@ class RSSTool(BaseTool):
 
         return self.widget
 
-    # --- 交互逻辑 ---
-    def open_feed_library(self):
-        try:
-            # 💡 核心修改：传入 self.feeds 给弹窗用于排重判断
-            dlg = FeedLibraryDialog(self.widget, self.feeds)
-            if dlg.exec():
-                selected = dlg.get_selected_feeds()
-                if selected:
-                    self.feeds.extend(selected)
-                    self._save_config()
-                    self._refresh_feed_ui()
-                    ToastManager().show(f"Added {len(selected)} sources. Click 'Sync Latest Papers' to fetch.",
-                                        "success")
-            elif dlg.custom_trigger:
-                self._add_custom_feed()
-        except Exception as e:
-            ToastManager().show(f"Error opening library: {str(e)}", "error")
+    def batch_send_to_chat(self):
+        selected = [w.article_data for w in self.current_article_widgets if w.is_checked()]
+        if not selected:
+            ToastManager().show("Please check at least one article to analyze.", "warning")
+            return
 
+        context = "### Selected Literature for Analysis ###\n\n"
+        for i, art in enumerate(selected):
+            clean_summary = clean_html_text(art.get('summary', ''))
+            context += f"[{i + 1}] Title: {art['title']}\nAbstract: {clean_summary}\nURL: {art.get('link', '')}\n\n"
 
-    def _add_custom_feed(self):
-        dlg = FeedEditorDialog(self.widget)
-        if dlg.exec():
-            new_data = dlg.get_data()
-            if new_data['url']:
-                self.feeds.append(new_data)
-                self._save_config()
-                self._refresh_feed_ui()
+        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
+            GlobalSignals().sig_send_to_chat.emit(
+                context,
+                "Please analyze the provided articles. Summarize their core contributions, compare their methodologies or findings, and highlight the overall trends."
+            )
 
-    def restore_default_feeds(self):
-        dlg = RestoreFeedsDialog(self.widget, self.feeds)
-        if dlg.exec():
-            to_restore = dlg.get_feeds_to_restore()
-            if to_restore:
-                for f in to_restore: f["keywords"] = ""
-                self.feeds.extend(to_restore)
-                self._save_config()
-                self._refresh_feed_ui()
-                ToastManager().show(f"Successfully restored {len(to_restore)} feeds.", "success")
 
     def edit_feed(self):
         row = self.feed_list.currentRow()
         if row < 0:
             ToastManager().show("Please select a feed from the list on the left to edit.", "warning")
             return
-        dlg = FeedEditorDialog(self.widget, self.feeds[row])
+
+        feed = self.feeds[row]
+        is_default = feed.get("is_default", False)
+
+        dlg = FeedEditorDialog(self.widget, feed, is_default=is_default)
         if dlg.exec():
             new_data = dlg.get_data()
             if new_data['url']:
+                new_data['is_default'] = is_default
                 self.feeds[row] = new_data
                 self._save_config()
                 self._refresh_feed_ui()
 
-    def remove_feed(self):
-        row = self.feed_list.currentRow()
-        if row < 0:
-            ToastManager().show("Please select a feed to remove.", "warning")
-            return
-        del self.feeds[row]
-        self._save_config()
-        self._refresh_feed_ui()
-        self._clear_articles()
-        ToastManager().show("Feed removed successfully.", "success")
 
-    def refresh_all_feeds(self):
-        if not self.feeds:
-            ToastManager().show("Your tracker list is empty. Add a source first.", "warning")
+    # 批量操作与右键菜单逻辑
+    def _show_feed_context_menu(self, pos):
+        menu = QMenu(self.widget)
+        menu.setStyleSheet("""
+            QMenu { background-color: #252526; color: white; border: 1px solid #444; } 
+            QMenu::item:selected { background-color: #007acc; }
+        """)
+
+        action_fetch = menu.addAction("🔄 Fetch Checked / Clicked")
+        action_unsub = menu.addAction("❌ Unsubscribe Checked / Clicked")
+
+        action = menu.exec(self.feed_list.mapToGlobal(pos))
+        if action == action_fetch:
+            self._batch_action("fetch", pos)
+        elif action == action_unsub:
+            self._batch_action("unsubscribe", pos)
+
+    def _get_target_feed_indices(self, pos=None):
+        """获取需要操作的索引：优先取所有打勾的，如果没有打勾则取当前悬停/选中的"""
+        indices = []
+        for i in range(self.feed_list.count()):
+            if self.feed_list.item(i).checkState() == Qt.Checked:
+                indices.append(i)
+
+        # 如果没有勾选任何项，但是通过右键或按钮触发，取当前高亮选中行
+        if not indices:
+            if pos is not None:
+                item = self.feed_list.itemAt(pos)
+                if item:
+                    indices.append(self.feed_list.row(item))
+            else:
+                row = self.feed_list.currentRow()
+                if row >= 0:
+                    indices.append(row)
+
+        # 反向排序，确保删除操作不会引起索引越界越移位
+        return sorted(list(set(indices)), reverse=True)
+
+    def _batch_action(self, action_type, pos=None):
+        indices = self._get_target_feed_indices(pos)
+
+        if not indices:
+            # 如果什么都没选中，Fetch 按钮可以被理解为 Fetch All
+            if action_type == "fetch":
+                indices = list(range(len(self.feeds)))
+            else:
+                ToastManager().show("Please check or select at least one feed.", "warning")
+                return
+
+        if action_type == "unsubscribe":
+            reply = QMessageBox.question(self.widget, 'Confirm Bulk Unsubscribe',
+                                         f"Are you sure you want to remove {len(indices)} feeds from your tracker?",
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                for idx in indices:
+                    del self.feeds[idx]
+                self._save_config()
+                self._refresh_feed_ui()
+                self._clear_articles()
+                ToastManager().show(f"Unsubscribed {len(indices)} feeds successfully.", "success")
+
+        elif action_type == "fetch":
+            target_feeds = [self.feeds[idx] for idx in indices]
+            self.refresh_specific_feeds(target_feeds)
+
+    # --- 交互逻辑 ---
+    def open_subscription_manager(self):
+        """管理全体订阅的库，不需要 row 和 feed"""
+        dlg = FeedLibraryDialog(self.widget, self.feeds)
+        if dlg.exec():
+            self.feeds = dlg.get_final_feeds()
+            self._save_config()
+            self._refresh_feed_ui()
+            ToastManager().show(f"Subscriptions updated. Current active feeds: {len(self.feeds)}.", "success")
+
+
+    def refresh_specific_feeds(self, target_feeds):
+        if not target_feeds:
             return
 
-        # 修复点：移除 telemetry_config 参数防止抛出 TypeError
-        self.pd = ProgressDialog(self.widget, "Fetching Literature", "Connecting to servers and detecting OA...")
+        telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
+        self.pd = ProgressDialog(self.widget, "Fetching Literature", f"Syncing {len(target_feeds)} feeds...", telemetry_config=telemetry_off)
         self.pd.show()
 
         self.task_mgr.sig_progress.connect(self.pd.update_progress)
         self.task_mgr.sig_state_changed.connect(self._on_fetch_done)
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
 
-        self.task_mgr.start_task(FetchRSSTask, "rss_fetch", feeds=self.feeds, save_path=self.cache_file)
+        self.task_mgr.start_task(FetchRSSTask, "rss_fetch", feeds=target_feeds, save_path=self.cache_file)
 
     def _on_fetch_done(self, state, msg):
         try:
@@ -585,13 +909,22 @@ class RSSTool(BaseTool):
 
     def _on_feed_selected(self, row):
         if row < 0: return
+
+        feed = self.feeds[row]
+        if feed.get("is_default", False):
+            self.btn_edit.setEnabled(False)
+            self.btn_edit.setToolTip("Built-in Default Source (Cannot edit)")
+        else:
+            self.btn_edit.setEnabled(True)
+            self.btn_edit.setToolTip("Edit Custom Source")
+
         self._clear_articles()
 
-        url = self.feeds[row]['url']
+        url = feed['url']
         articles = self.article_cache.get(url, [])
 
         if not articles:
-            lbl = QLabel("No data available. Click 'Sync Latest Papers' to pull data.")
+            lbl = QLabel("No data available. Select feed and click 'Sync' to pull data.")
             lbl.setStyleSheet("color: #888; padding: 20px;")
             self.article_layout.insertWidget(0, lbl)
             return
@@ -609,6 +942,19 @@ class RSSTool(BaseTool):
                 w.set_checked(not w.is_checked())
             else:
                 w.set_checked(bool(mode))
+
+    # 左侧订阅源批量选择逻辑
+    def _batch_select_feeds(self, mode):
+        self.feed_list.blockSignals(True)
+        for i in range(self.feed_list.count()):
+            item = self.feed_list.item(i)
+            if mode == "invert":
+                new_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            else:
+                new_state = Qt.Checked if mode else Qt.Unchecked
+            item.setCheckState(new_state)
+        self.feed_list.blockSignals(False)
+
 
     def export_to_pdf(self):
         selected = [w.article_data for w in self.current_article_widgets if w.is_checked()]
@@ -644,7 +990,6 @@ class RSSTool(BaseTool):
         save_dir = QFileDialog.getExistingDirectory(self.widget, "Select Folder to Save PDFs")
         if not save_dir: return
 
-        # 使用安全的 QThread 避免卡死或 Toast 崩溃
         self.dl_thread = DownloadWorker(selected_urls, save_dir)
         self.dl_thread.sig_msg.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
         self.dl_thread.finished.connect(self.dl_thread.deleteLater)
@@ -666,6 +1011,19 @@ class RSSTool(BaseTool):
                     cfg.save_settings()
             except:
                 pass
+
+        for feed in saved_feeds:
+            if "category" not in feed:
+                feed["category"] = "Legacy Sources"
+            if "is_default" not in feed:
+                is_def = False
+                for built_in in ALL_BUILTIN_FEEDS:
+                    if built_in["url"] == feed["url"]:
+                        is_def = True
+                        feed["category"] = built_in["category"]
+                        feed["name"] = built_in["name"]
+                        break
+                feed["is_default"] = is_def
 
         self.feeds = saved_feeds if saved_feeds else []
 
@@ -696,10 +1054,35 @@ class RSSTool(BaseTool):
     def _refresh_feed_ui(self):
         self.feed_list.blockSignals(True)
         self.feed_list.clear()
+
+        self.feeds.sort(key=lambda x: (x.get('category', 'Z'), x['name']))
+
         for feed in self.feeds:
+            cat_prefix = f"[{feed.get('category', 'Other')}] "
             kws = feed.get('keywords', '')
+
+            icon = "🔒" if feed.get("is_default") else "📰"
             suffix = " 🔍" if kws else ""
-            item = QListWidgetItem(f"📰 {feed['name']}{suffix}")
+
+            item_text = f"{icon} {cat_prefix}{feed['name']}{suffix}"
+            item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, feed['url'])
+
+            # 悬浮提示，鼠标放上去即可查看完整的名称和来源
+            item.setToolTip(f"Category: {feed.get('category', 'Other')}\nSource: {feed['name']}\nURL: {feed['url']}")
+
+            # 挂载复选框供多选
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+
+            if feed.get("is_default"):
+                item.setForeground(Qt.lightGray)
+            else:
+                item.setForeground(Qt.cyan)
+
             self.feed_list.addItem(item)
+
         self.feed_list.blockSignals(False)
+
+        if self.feed_list.count() > 0 and self.feed_list.currentRow() == -1:
+            self.feed_list.setCurrentRow(0)

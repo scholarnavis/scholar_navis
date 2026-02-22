@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scholar Navis | AI-Driven Academic Navigation</title>
+    <meta name="description" content="An advanced, AI-integrated scholarly navigation and literature management tool.">
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    colors: {
+                        primary: '#1e3a8a', // Deep academic blue
+                        secondary: '#3b82f6',
+                        surface: '#f8fafc',
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="font-sans text-gray-800 bg-surface antialiased flex flex-col min-h-screen">
+
+    <header class="bg-white border-b border-gray-200 pt-20 pb-24 text-center px-4 sm:px-6 lg:px-8 shadow-sm">
+        <div class="max-w-4xl mx-auto mt-10">
+            <div class="inline-flex items-center justify-center p-3 bg-blue-50 rounded-full mb-6">
+                <i class="fa-solid fa-microscope text-primary text-2xl"></i>
+            </div>
+            <h1 class="text-4xl md:text-5xl font-bold tracking-tight text-gray-900 mb-6">
+                Scholar Navis
+            </h1>
+            <p class="text-lg md:text-xl text-gray-600 mb-10 max-w-2xl mx-auto leading-relaxed">
+                Empowering your research journey. An advanced, AI-integrated scholarly navigation and literature management platform designed for modern researchers.
+            </p>
+            
+            <div class="flex flex-col sm:flex-row justify-center gap-4">
+                <a href="#download" class="inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-primary hover:bg-blue-800 transition-colors duration-200 shadow-md">
+                    <i class="fa-solid fa-download mr-2"></i> Download Latest Version
+                </a>
+                <a href="https://github.com/yourusername/scholar-navis/releases" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center px-6 py-3 border border-gray-300 text-base font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 transition-colors duration-200 shadow-sm">
+                    <i class="fa-solid fa-code-branch mr-2"></i> Release Notes
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <section id="features" class="py-20 bg-surface px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16">
+                <h2 class="text-3xl font-bold text-gray-900">Key Features</h2>
+                <p class="mt-4 text-gray-600">Built to streamline literature review, data analysis, and academic writing.</p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                
+                <div class="bg-white rounded-xl p-8 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                    <div class="w-12 h-12 inline-flex items-center justify-center rounded-lg bg-blue-50 text-primary mb-6">
+                        <i class="fa-solid fa-brain text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 mb-3">AI-Powered Insights</h3>
+                    <p class="text-gray-600 leading-relaxed">
+                        Seamlessly interact with your literature using integrated Large Language Models and Retrieval-Augmented Generation (RAG).
+                    </p>
+                </div>
+
+                <div class="bg-white rounded-xl p-8 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                    <div class="w-12 h-12 inline-flex items-center justify-center rounded-lg bg-blue-50 text-primary mb-6">
+                        <i class="fa-solid fa-puzzle-piece text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 mb-3">Modular Plugin Architecture</h3>
+                    <p class="text-gray-600 leading-relaxed">
+                        Highly extensible base tool classes. Easily add new analysis modules or custom workflows as independent plugins.
+                    </p>
+                </div>
+
+                <div class="bg-white rounded-xl p-8 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                    <div class="w-12 h-12 inline-flex items-center justify-center rounded-lg bg-blue-50 text-primary mb-6">
+                        <i class="fa-solid fa-server text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 mb-3">Local Vector Database</h3>
+                    <p class="text-gray-600 leading-relaxed">
+                        Securely index and retrieve your academic papers locally using ChromaDB, ensuring complete privacy of your research data.
+                    </p>
+                </div>
+
+            </div>
+        </div>
+    </section>
+
+    <section id="requirements" class="py-20 bg-white border-t border-gray-100 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-5xl mx-auto">
+            <div class="text-center mb-12">
+                <h2 class="text-3xl font-bold text-gray-900">System Requirements</h2>
+                <p class="mt-4 text-gray-600">Ensure your hardware meets the following criteria for optimal performance.</p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div class="rounded-xl border border-gray-200 overflow-hidden">
+                    <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
+                        <h3 class="text-lg font-semibold text-gray-700">Minimum Requirements</h3>
+                    </div>
+                    <div class="p-6">
+                        <ul class="space-y-4 text-sm text-gray-600">
+                            <li class="flex items-start">
+                                <i class="fa-solid fa-check text-green-500 mt-1 mr-3"></i>
+                                <div><strong class="text-gray-900 block">OS:</strong> Windows 10/11 or modern Linux distribution</div>
+                            </li>
+                            <li class="flex items-start">
+                                <i class="fa-solid fa-check text-green-500 mt-1 mr-3"></i>
+                                <div><strong class="text-gray-900 block">Processor:</strong> Intel Core i5 / AMD Ryzen 5 or equivalent</div>
+                            </li>
+                            <li class="flex items-start">
+                                <i class="fa-solid fa-check text-green-500 mt-1 mr-3"></i>
+                                <div><strong class="text-gray-900 block">Memory:</strong> 8 GB RAM</div>
+                            </li>
+                            <li class="flex items-start">
+                                <i class="fa-solid fa-check text-green-500 mt-1 mr-3"></i>
+                                <div><strong class="text-gray-900 block">Storage:</strong> 2 GB available space (SSD recommended)</div>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="rounded-xl border-2 border-primary overflow-hidden relative shadow-md">
+                    <div class="absolute top-0 right-0 bg-primary text-white text-xs font-bold px-3 py-1 rounded-bl-lg">
+                        Recommended
+                    </div>
+                    <div class="bg-blue-50 px-6 py-4 border-b border-blue-100">
+                        <h3 class="text-lg font-semibold text-primary">Optimal Configuration</h3>
+                    </div>
+                    <div class="p-6">
+                        <ul class="space-y-4 text-sm text-gray-600">
+                            <li class="flex items-start">
+                                <i class="fa-solid fa-star text-primary mt-1 mr-3"></i>
+                                <div><strong class="text-gray-900 block">OS:</strong> Linux environment (or Windows with WSL2 configured)</div>
+                            </li>
+                            <li class="flex items-start">
+                                <i class="fa-solid fa-star text-primary mt-1 mr-3"></i>
+                                <div><strong class="text-gray-900 block">Processor:</strong> Modern multi-core CPU</div>
+                            </li>
+                            <li class="flex items-start">
+                                <i class="fa-solid fa-star text-primary mt-1 mr-3"></i>
+                                <div><strong class="text-gray-900 block">Memory:</strong> 16 GB to 32 GB RAM (for large dataset processing)</div>
+                            </li>
+                            <li class="flex items-start">
+                                <i class="fa-solid fa-star text-primary mt-1 mr-3"></i>
+                                <div><strong class="text-gray-900 block">Graphics:</strong> NVIDIA GPU (for accelerated local LLM/embedding inference)</div>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer class="bg-gray-900 mt-auto py-10 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center">
+            <div class="mb-4 md:mb-0">
+                <span class="text-xl font-bold text-white tracking-tight">Scholar Navis</span>
+                <p class="text-gray-400 text-sm mt-1">© 2026. All rights reserved.</p>
+            </div>
+            
+            <div class="flex space-x-6">
+                <a href="#" class="text-gray-400 hover:text-white transition-colors">
+                    <span class="sr-only">GitHub</span>
+                    <i class="fa-brands fa-github text-2xl"></i>
+                </a>
+                <a href="mailto:your.email@example.com" class="text-gray-400 hover:text-white transition-colors">
+                    <span class="sr-only">Email</span>
+                    <i class="fa-solid fa-envelope text-2xl"></i>
+                </a>
+            </div>
+        </div>
+    </footer>
+
+</body>
+</html>

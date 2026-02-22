@@ -18,6 +18,7 @@ from huggingface_hub import snapshot_download
 from chromadb.utils import embedding_functions
 from langdetect import detect
 
+from src.core.model_manager import ModelManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
@@ -28,6 +29,7 @@ from src.core.kb_manager import KBManager
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.ui.components.combo import BaseComboBox
+from src.ui.components.dialog import StandardDialog
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
@@ -213,7 +215,7 @@ class ChatWorker(QObject):
     sig_error = Signal(str)
 
     def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False,
-                 use_thinking_model=False):
+                 use_thinking_model=False, external_context=None):
         super().__init__()
 
         self.logger = logging.getLogger("ChatWorker")
@@ -221,9 +223,10 @@ class ChatWorker(QObject):
         self.main_config = main_config
         self.trans_config = trans_config
         self.messages = messages
-        self.kb_id = kb_id
+        self.kb_id = kb_id if kb_id != "none" else None
         self.requires_translation = requires_translation
         self.use_thinking_model = use_thinking_model
+        self.external_context = external_context
 
         self.db = DatabaseManager()
         self.kb_manager = KBManager()
@@ -254,145 +257,151 @@ class ChatWorker(QObject):
             self._init_llms()
             original_user_query = self.messages[-1]['content']
             search_query = original_user_query
-
-            if not self.kb_id:
-                self.sig_error.emit("No Knowledge Base ID provided.")
-                return
-
-            kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
-            if not kb_info: return
+            domain = "General Academic"
+            context_str = ""
+            sources_map = {}
 
             # ==========================================
-            # 阶段一：Query 提取与翻译 (缓存加速)
+            # Phase 1: Query Extraction & Translation (Cache Accelerated)
             # ==========================================
             if self.requires_translation:
-                self.sig_token.emit("<i>🌐 正在将您的问题翻译为学术英语以进行精准检索...</i>\n\n")
+                self.sig_token.emit("<i>🌐 Translating your query to academic English for precise retrieval...</i>\n\n")
                 try:
                     search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm)
                 except Exception as e:
-                    self.sig_error.emit(f"翻译模型请求失败，请检查翻译 API 配置。\n详细错误: {e}")
+                    self.sig_error.emit(
+                        f"Translation model request failed. Please check your translation API configuration.\nDetails: {e}")
                     return
 
             self.sig_token.emit("[CLEAR_SEARCH]")
-            self.sig_token.emit("<i>🔍 正在加载向量模型并检索本地文献...</i>\n\n")
 
             # ==========================================
-            # 阶段二：显式加载 Embedding 模型并进行向量检索
+            # Phase 2 & 3: Vector Retrieval & Reranking (Only if KB is selected)
             # ==========================================
-            model_id = kb_info.get('model_id', 'embed_auto')
-            user_pref = ConfigManager().user_settings.get("inference_device", "Auto")
-            target_device = DeviceManager().parse_device_string(user_pref)
+            if self.kb_id and self.kb_id != "none":
+                self.sig_token.emit("<i>🔍 Loading vector model and retrieving local literature...</i>\n\n")
 
-            conf = get_model_conf(model_id, "embedding")
-            if not conf or conf.get('is_auto'):
-                real_id = resolve_auto_model("embedding", target_device)
-                conf = get_model_conf(real_id, "embedding")
+                kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
+                if kb_info:
+                    domain = kb_info.get('domain', 'General Academic')
+                    model_id = kb_info.get('model_id', 'embed_auto')
+                    user_pref = ConfigManager().user_settings.get("inference_device", "Auto")
+                    target_device = DeviceManager().parse_device_string(user_pref)
 
-            repo_id = conf.get('hf_repo_id')
+                    conf = get_model_conf(model_id, "embedding")
+                    if not conf or conf.get('is_auto'):
+                        real_id = resolve_auto_model("embedding", target_device)
+                        conf = get_model_conf(real_id, "embedding")
 
-            try:
-                model_path = snapshot_download(
-                    repo_id=repo_id,
-                    local_files_only=True,
-                )
+                    repo_id = conf.get('hf_repo_id')
 
-                embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-                    model_name=model_path,
-                    device=target_device,
-                    trust_remote_code=conf.get('trust_remote_code', False),
-                    normalize_embeddings=True
-                )
+                    try:
+                        model_path = snapshot_download(
+                            repo_id=repo_id,
+                            local_files_only=True,
+                        )
 
-                if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
-                    self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
-                    return
-            except Exception as e:
-                self.sig_error.emit(f"Critical Model Error: {str(e)}")
-                return
+                        embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+                            model_name=model_path,
+                            device=target_device,
+                            trust_remote_code=conf.get('trust_remote_code', False),
+                            normalize_embeddings=True
+                        )
 
-            # 多路召回扩展
-            domain = kb_info.get('domain', 'General Academic')
-            history_context = ""
-            if len(self.messages) >= 3:
-                prev_assistant = self.messages[-2]['content'][:100]
-                history_context = f" (Context: {prev_assistant})"
+                        if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
+                            self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
+                            return
+                    except Exception as e:
+                        self.sig_error.emit(f"Critical Model Error: {str(e)}")
+                        return
 
-            expanded_queries = [
-                search_query,
-                f"{search_query}{history_context}",
-                f"{domain} context: {search_query} research details",
-                f"{search_query} references bibliography citations",
-            ]
+                    # Multi-query Expansion
+                    history_context = ""
+                    if len(self.messages) >= 3:
+                        prev_assistant = self.messages[-2]['content'][:100]
+                        history_context = f" (Context: {prev_assistant})"
 
-            candidate_docs = []
-            seen_contents = set()
+                    expanded_queries = [
+                        search_query,
+                        f"{search_query}{history_context}",
+                        f"{domain} context: {search_query} research details",
+                        f"{search_query} references bibliography citations",
+                    ]
 
-            for eq in expanded_queries:
-                raw_results = self.db.query(eq, n_results=25)
-                if raw_results and raw_results.get('documents') and raw_results['documents'][0]:
-                    docs = raw_results['documents'][0]
-                    metas = raw_results['metadatas'][0]
-                    distances = raw_results.get('distances', [[0] * len(docs)])[0]
+                    candidate_docs = []
+                    seen_contents = set()
 
-                    for i, doc_text in enumerate(docs):
-                        clean_text = doc_text.strip()
-                        if clean_text not in seen_contents and len(clean_text) > 20:
-                            seen_contents.add(clean_text)
-                            candidate_docs.append({
-                                "content": clean_text,
-                                "metadata": metas[i],
-                                "v_dist": distances[i]
-                            })
+                    for eq in expanded_queries:
+                        raw_results = self.db.query(eq, n_results=25)
+                        if raw_results and raw_results.get('documents') and raw_results['documents'][0]:
+                            docs = raw_results['documents'][0]
+                            metas = raw_results['metadatas'][0]
+                            distances = raw_results.get('distances', [[0] * len(docs)])[0]
 
-            # ==========================================
-            # 阶段三：Reranker 语义重排与 Context 组装
-            # ==========================================
-            if candidate_docs:
-                candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:45]
-                final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=15)
+                            for i, doc_text in enumerate(docs):
+                                clean_text = doc_text.strip()
+                                if clean_text not in seen_contents and len(clean_text) > 20:
+                                    seen_contents.add(clean_text)
+                                    candidate_docs.append({
+                                        "content": clean_text,
+                                        "metadata": metas[i],
+                                        "v_dist": distances[i]
+                                    })
+
+                    # Reranker execution
+                    if candidate_docs:
+                        candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:45]
+                        final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=15)
+                    else:
+                        final_docs = []
+
+                    diverse_docs = []
+                    source_counts = {}
+
+                    if final_docs:
+                        for doc in final_docs:
+                            if doc.get('score', 0) < -5.0: continue
+                            src_name = doc['metadata'].get('source', 'Unknown')
+                            source_counts[src_name] = source_counts.get(src_name, 0) + 1
+                            if source_counts[src_name] <= 3:
+                                diverse_docs.append(doc)
+                            if len(diverse_docs) >= 8: break
+
+                    if diverse_docs:
+                        for i, doc_obj in enumerate(diverse_docs):
+                            ref_id = i + 1
+                            meta = doc_obj['metadata']
+                            content = doc_obj['content'].replace('\n', ' ')
+                            sources_map[ref_id] = {
+                                "path": meta.get('file_path', ''),
+                                "page": meta.get('page', 1),
+                                "name": meta.get('source', 'Document'),
+                                "search_text": content[:100]
+                            }
+                            context_str += (
+                                f"--- [Document {ref_id}] ---\n"
+                                f"Source: {meta.get('source', 'Unknown')} (Page {meta.get('page', '?')})\n"
+                                f"Content: {content}\n\n"
+                            )
             else:
-                final_docs = []
-
-            diverse_docs = []
-            source_counts = {}
-
-            if final_docs:
-                for doc in final_docs:
-                    if doc.get('score', 0) < -5.0: continue
-                    src_name = doc['metadata'].get('source', 'Unknown')
-                    source_counts[src_name] = source_counts.get(src_name, 0) + 1
-                    if source_counts[src_name] <= 3:
-                        diverse_docs.append(doc)
-                    if len(diverse_docs) >= 8: break
-
-            context_str = ""
-            sources_map = {}
-            if diverse_docs:
-                for i, doc_obj in enumerate(diverse_docs):
-                    ref_id = i + 1
-                    meta = doc_obj['metadata']
-                    content = doc_obj['content'].replace('\n', ' ')
-                    sources_map[ref_id] = {
-                        "path": meta.get('file_path', ''),
-                        "page": meta.get('page', 1),
-                        "name": meta.get('source', 'Document'),
-                        "search_text": content[:100]
-                    }
-                    context_str += (
-                        f"--- [Document {ref_id}] ---\n"
-                        f"Source: {meta.get('source', 'Unknown')} (Page {meta.get('page', '?')})\n"
-                        f"Content: {content}\n\n"
-                    )
-
-            if not context_str:
-                context_str = "No documents found. Reply strictly based on the lack of internal data."
+                self.sig_token.emit("<i>ℹ️ No Knowledge Base selected. Entering direct chat mode...</i>\n\n")
 
             # ==========================================
-            # 阶段四：混合 Agentic RAG (本地知识库 + NCBI MCP 外部工具)
+            # Phase 3.5: Inject External Context (e.g., RSS, Selected Docs)
+            # ==========================================
+            if getattr(self, 'external_context', None):
+                context_str += f"\n\n--- [External Context Provided by User] ---\n{self.external_context}\n\n"
+
+            if not context_str.strip():
+                context_str = "No local or external documents provided. Please answer based on general knowledge or use available NCBI tools."
+
+            # ==========================================
+            # Phase 4: Hybrid Agentic RAG (Local DB + NCBI MCP Tools)
             # ==========================================
             self.sig_token.emit("[CLEAR_SEARCH]")
             if self.requires_translation:
-                self.sig_token.emit("<i>🧠 核心模型正在分析检索需求并评估 NCBI 工具调用...</i>\n\n")
+                self.sig_token.emit(
+                    "<i>🧠 Core model is analyzing requirements and evaluating NCBI tool calls...</i>\n\n")
             else:
                 self.sig_token.emit("[START_LLM_NETWORK]")
 
@@ -404,9 +413,9 @@ class ChatWorker(QObject):
                 f"You are a rigorous research assistant specializing in {domain}.\n"
                 "Answer based on the provided Context. If the information is missing, use the available NCBI tools to retrieve real-time biological data.\n\n"
                 "### CORE DIRECTIVES:\n"
-                "1. **NO HALLUCINATION**: If the answer is not in the context, say 'I cannot answer this based on the provided documents.'\n"
+                "1. **NO HALLUCINATION**: If the answer is not in the context or accessible via tools, say 'I cannot answer this based on the provided context.'\n"
                 "2. **CITATIONS**: Append `[1]`, `[2]` directly after sentences using that document's facts.\n"
-                "3. **FOLLOW-UPS (CRITICAL)**: At the end of your response, you MUST provide exactly 6 follow-up questions. The first 3 should dive into the current context, and the last 3 should expand the user's thinking (brainstorming/related topics). Format them EXACTLY like this:\n"
+                "3. **FOLLOW-UPS (CRITICAL)**: At the end of your response, you MUST provide exactly 6 follow-up questions. Format them EXACTLY like this:\n"
                 "   💡 Suggested Follow-ups:\n"
                 "   - [Deep Dive] <Question about specific details or mechanisms>\n"
                 "   - [Critical] <Question about limitations, alternatives, or weaknesses>\n"
@@ -416,7 +425,6 @@ class ChatWorker(QObject):
                 "   - [Application] <Question about real-world applications or cross-disciplinary use>\n\n"
                 f"### CONTEXT:\n{context_str}"
             )
-
 
             rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
             rag_messages.append({"role": "user", "content": search_query})
@@ -440,23 +448,22 @@ class ChatWorker(QObject):
                             tool_name = tool_call.function.name
                             try:
                                 tool_args = json.loads(tool_call.function.arguments)
-                                self.sig_token.emit(f"<i>📡 正在请求 NCBI 远程数据库: {tool_name}...</i>\n\n")
-                                # 执行 MCP 工具
+                                self.sig_token.emit(f"<i>📡 Requesting remote NCBI database: {tool_name}...</i>\n\n")
+
                                 tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
 
                                 try:
                                     res_dict = json.loads(tool_result)
                                     if isinstance(res_dict, dict) and res_dict.get("status") == "error":
                                         error_msg = res_dict.get("message", "Unknown error")
-                                        GlobalSignals().sig_toast.emit(f"NCBI 数据库请求失败: {error_msg}", "warning")
-                                        # 替换结果，强制 LLM 放弃使用该工具数据并回退到本地知识库
+                                        GlobalSignals().sig_toast.emit(f"NCBI Request Failed: {error_msg}", "warning")
                                         tool_result = "Action failed. The NCBI tool encountered a network or API limit error. Please strictly inform the user that real-time retrieval failed, and answer using ONLY local context."
                                 except Exception:
-                                    pass # JSON解析失败说明返回的是正常字符串，放行
+                                    pass
 
                             except Exception as e:
                                 self.logger.error(f"NCBI MCP tool {tool_name} failed: {e}")
-                                GlobalSignals().sig_toast.emit(f"NCBI 插件连接异常: {str(e)}", "error")
+                                GlobalSignals().sig_toast.emit(f"NCBI Plugin Connection Error: {str(e)}", "error")
                                 tool_result = "Tool execution failed due to a system exception. Proceed using ONLY local context."
 
                             rag_messages.append({
@@ -466,23 +473,21 @@ class ChatWorker(QObject):
                                 "content": tool_result
                             })
 
-                        self.sig_token.emit("<i>✅ NCBI 数据获取成功，正在进行综合学术分析...</i>\n\n")
+                        self.sig_token.emit(
+                            "<i>✅ NCBI data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
                 except Exception as e:
                     self.logger.warning(f"Tool calling failed: {e}")
 
-            # --- 后续输出逻辑 ---
+            # --- LLM Output Streaming ---
             english_response = ""
-            if self.requires_translation:
-                for token in self.main_llm.stream_chat(rag_messages):
-                    english_response += token
-            else:
-                for token in self.main_llm.stream_chat(rag_messages):
-                    english_response += token
+            for token in self.main_llm.stream_chat(rag_messages):
+                english_response += token
+                if not self.requires_translation:
                     self.full_response_cache += token
                     self.sig_token.emit(token)
 
             # ==========================================
-            # 阶段五：结果翻译回母语并流式输出 (增强版生物学学术翻译)
+            # Phase 5: Result Translation (If required)
             # ==========================================
             if self.requires_translation:
                 self.sig_token.emit("[CLEAR_SEARCH]")
@@ -507,7 +512,7 @@ class ChatWorker(QObject):
                     self.sig_token.emit(token)
 
             # ==========================================
-            # 阶段六：动态挂载参考文献溯源链接
+            # Phase 6: Dynamic Citation Mounting
             # ==========================================
             has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
             if sources_map and has_citation:
@@ -518,9 +523,8 @@ class ChatWorker(QObject):
                     if rid in used_indices:
                         safe_path = quote(info['path'])
                         safe_text = quote(info['search_text'])
-                        safe_name = quote(info['name'])  # <-- Encode the actual filename
+                        safe_name = quote(info['name'])
 
-                        # Add the name parameter to the citation URL payload
                         link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}&name={safe_name}"
 
                         ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']} (Page {info['page']})</a></div>"
@@ -553,6 +557,10 @@ class ChatTool(BaseTool):
 
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.connect(self.load_llm_configs)
+
+        self.external_context_buffer = ""
+        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
+            GlobalSignals().sig_send_to_chat.connect(self.handle_external_send)
 
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
@@ -708,34 +716,33 @@ class ChatTool(BaseTool):
         if hasattr(self, 'model_selector'):
             self.model_selector.load_llm_configs()
 
-
     def process_send(self, text, is_retry=False):
         from src.core.model_manager import ModelManager
         from src.ui.components.dialog import StandardDialog
         from src.ui.components.toast import ToastManager
 
-        # 1. 基础校验
+        # 1. 获取并格式化 KB ID
         kb_data = self.combo_kb.currentData()
-        if not kb_data:
-            ToastManager().show("无法发送：请先在右上角选择一个知识库！", "error")
-            return
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
 
-        ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(kb_id)
-        if not ready:
-            msg = (
-                f"<b>⚠️ Model Missing - Action Blocked</b><br><br>"
-                f"Required offline model is not installed: <br>"
-                f"<font color='#ff6b6b'>• {missing_label}</font><br><br>"
-                f"Please go to <b>[Global Settings]</b> and click 'Save' to download required models."
-            )
-            StandardDialog(self.widget, "Offline Security Intercept", msg, show_cancel=False).exec()
+        # 兜底处理：如果获取不到或者为空，默认为 "none"
+        if not kb_id:
+            kb_id = "none"
 
-            # 触发下载信号并自动跳转
-            from src.core.signals import GlobalSignals
-            GlobalSignals().request_model_download.emit(missing_id, m_type)
-            # (MainWindow 会捕获此信号并跳转到设置页)
-            return
+        # 2. 模型拦截校验（仅在使用了本地知识库时触发）
+        if kb_id != "none":
+            ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(kb_id)
+            if not ready:
+                msg = (
+                    f"<b>⚠️ Model Missing - Action Blocked</b><br><br>"
+                    f"Required offline model is not installed: <br>"
+                    f"<font color='#ff6b6b'>• {missing_label}</font><br><br>"
+                    f"Please go to <b>[Global Settings]</b> and click 'Save' to download required models."
+                )
+                StandardDialog(self.widget, "Offline Security Intercept", msg, show_cancel=False).exec()
+                from src.core.signals import GlobalSignals
+                GlobalSignals().request_model_download.emit(missing_id, m_type)
+                return
 
         # 2. 语言检测逻辑 (保持原样)
         trans_config = self.combo_trans_llm.currentData()
@@ -834,8 +841,10 @@ class ChatTool(BaseTool):
             messages=list(self.history),
             kb_id=kb_id,
             requires_translation=requires_translation,
-            use_thinking_model=use_think
+            use_thinking_model=use_think,
+            external_context=getattr(self, 'external_context_buffer', "")
         )
+        self.external_context_buffer = ""
         self.worker.moveToThread(self.thread)
 
         try:
@@ -857,6 +866,35 @@ class ChatTool(BaseTool):
 
         self.thread.start()
 
+    def cancel_generation(self):
+        """Handle the stop button click to abort AI generation."""
+        # 1. 调用 worker 层面的取消逻辑（中断 LLM 请求）
+        if hasattr(self, 'worker') and self.worker:
+            self.worker.cancel()
+
+        # 2. 停止 UI 加载状态
+        if self.current_ai_bubble and self.current_ai_bubble.is_loading:
+            self.current_ai_bubble.set_loading(False)
+
+        # 3. 在对话气泡中追加中止提示
+        self.current_ai_text += "\n\n<div style='color:#ff9800; font-weight:bold;'>[⏹️ Generation Cancelled by User]</div>"
+        if self.current_ai_bubble:
+            idx = getattr(self.current_ai_bubble, 'index', -1)
+            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
+
+        # 4. 恢复底部输入框的按钮状态
+        self.input_container.btn_stop.setVisible(False)
+        self.input_container.btn_send.setVisible(True)
+        self.input_container.btn_retry.setVisible(True)
+
+        # 5. 强制退出后台线程
+        if hasattr(self, 'thread') and self.thread.isRunning():
+            self.thread.quit()
+
+        self.logger.info("AI generation cancelled by user.")
+        self.scroll_to_bottom()
+
+
     def _show_slow_connection_warning(self):
         if self.current_ai_bubble and getattr(self, '_is_waiting_llm', False):
             idx = getattr(self.current_ai_bubble, 'index', -1)
@@ -869,6 +907,40 @@ class ChatTool(BaseTool):
                 "</div>"
             )
             self.scroll_to_bottom()
+
+    def handle_external_send(self, context_text, prompt_text=""):
+        """
+        接收跨组件投递的文本（例如 RSS 摘要或 PDF 片段）并自动触发对话，同时跳转到该 Tab
+        """
+        self.external_context_buffer = context_text
+
+        p = self.widget
+        while p:
+            if hasattr(p, 'setCurrentWidget'):
+                try:
+                    p.setCurrentWidget(self.widget)
+                    # Force the sidebar to synchronize its active selection
+                    main_window = p.window()
+                    if hasattr(main_window, 'sidebar'):
+                        idx = p.indexOf(self.widget)
+                        if idx >= 0:
+                            main_window.sidebar.setCurrentRow(idx)
+                except:
+                    pass
+            p = p.parentWidget()
+
+        # 确保主窗口获焦显示
+        if self.widget.window():
+            self.widget.window().showNormal()
+            self.widget.window().raise_()
+            self.widget.window().activateWindow()
+
+        if prompt_text:
+            self.input_container.set_text(prompt_text)
+            self.process_send(prompt_text)
+        else:
+            self.input_container.set_text("Please summarize this content and extract key insights.")
+
 
     def update_ai_bubble(self, token):
         """Updates the AI chat bubble with streaming tokens and handles status clearing."""
@@ -1165,29 +1237,32 @@ class ChatTool(BaseTool):
         else:
             QDesktopServices.openUrl(QUrl(url_str))
 
-
     def refresh_kb_list(self):
         self.load_llm_configs()
         if not hasattr(self, 'combo_kb'): return
         curr_data = self.combo_kb.currentData()
         curr_id = curr_data['id'] if isinstance(curr_data, dict) else curr_data
+
         self.combo_kb.blockSignals(True)
         self.combo_kb.clear()
-        kbs = KBManager().get_all_kbs()
-        target_idx = -1
-        for kb in kbs:
+
+        self.combo_kb.addItem("❌ No Knowledge Base (Direct Chat)", "none")
+
+        kbs = self.kb_manager.get_all_kbs()
+        target_idx = 0  # 默认选中 "none"
+
+        for i, kb in enumerate(kbs):
             if kb.get('status') == 'ready':
                 m = get_model_conf(kb.get('model_id'), "embedding")
                 m_ui = m['ui_name'] if m else kb.get('model_id', '?')
                 display_text = f"{kb['name']}   [Model: {m_ui} | Docs: {kb.get('doc_count', 0)}]"
                 self.combo_kb.addItem(display_text, kb)
-                if kb['id'] == curr_id: target_idx = self.combo_kb.count() - 1
-        if target_idx >= 0:
+                if kb['id'] == curr_id:
+                    target_idx = self.combo_kb.count() - 1
+
+        if self.combo_kb.count() > 0:
             self.combo_kb.setCurrentIndex(target_idx)
-        elif self.combo_kb.count() > 0:
-            self.combo_kb.setCurrentIndex(0)
-        else:
-            self.combo_kb.setCurrentIndex(-1)
+
         self.combo_kb.blockSignals(False)
 
     def on_global_kb_switched(self, kb_id):
