@@ -537,15 +537,32 @@ class SettingsTool(BaseTool):
             lambda idx: self.model_param_container.setVisible(idx == 1)
         )
 
+        # --- 独立翻译层选择 ---
         trans_group = QGroupBox("🌐 Translation Agent Configuration")
         trans_group.setStyleSheet(
             "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
         trans_layout = QFormLayout(trans_group)
-        self.combo_trans_preset = BaseComboBox()
-        self.combo_trans_preset.addItem("❌ None (Disable)", None)
+
+        trans_provider_layout = QHBoxLayout()
+        self.combo_trans_provider = BaseComboBox()
+        self.combo_trans_model = BaseComboBox()
+        self.btn_trans_refresh = QPushButton("🔄 Refresh Models")
+        self.btn_trans_refresh.setToolTip("从上方 LLM 配置的缓存模型列表中拉取最新数据")
+
         for conf in self.llm_configs:
-            self.combo_trans_preset.addItem(conf.get("name", "Unnamed Provider"), conf.get("id"))
-        trans_layout.addRow("Translation Provider:", self.combo_trans_preset)
+            self.combo_trans_provider.addItem(conf.get("name", "Unnamed Provider"), conf.get("id"))
+
+        trans_provider_layout.addWidget(self.combo_trans_provider, stretch=1)
+        trans_provider_layout.addWidget(self.btn_trans_refresh)
+
+        trans_layout.addRow("Translation Provider:", trans_provider_layout)
+        trans_layout.addRow("Translation Model:", self.combo_trans_model)
+
+        lbl_trans_hint = QLabel(
+            "💡 <b>Note:</b> Configure the specific translation model for each provider here. It is highly recommended to select a fast, non-reasoning model (e.g., gpt-4o-mini). Do not use 'thinking' models as they inject unwanted reasoning blocks into translations.")
+        lbl_trans_hint.setWordWrap(True)
+        lbl_trans_hint.setStyleSheet("color: #aaa; font-size: 11px; font-style: italic; margin-top: 5px;")
+        trans_layout.addRow("", lbl_trans_hint)
 
         layout.addRow("Service Provider:", header_layout)
         layout.addRow("Provider Name:", self.input_llm_name)
@@ -575,9 +592,59 @@ class SettingsTool(BaseTool):
         self._on_llm_preset_changed(idx_to_select)
 
         trans_id = self.config.user_settings.get("trans_llm_id", None)
-        idx_trans = self.combo_trans_preset.findData(trans_id)
+        idx_trans = self.combo_trans_provider.findData(trans_id)
         if idx_trans >= 0:
-            self.combo_trans_preset.setCurrentIndex(idx_trans)
+            self.combo_trans_provider.setCurrentIndex(idx_trans)
+
+        # 连接翻译器专用信号
+        self.combo_trans_provider.currentIndexChanged.connect(self._on_trans_provider_changed)
+        self.combo_trans_model.currentTextChanged.connect(self._sync_trans_model)
+        self.btn_trans_refresh.clicked.connect(self._on_trans_refresh_clicked)
+
+        # 初始化显示
+        self._on_trans_provider_changed(0)
+
+    def _on_trans_refresh_clicked(self):
+        """用户主动点击刷新按钮时触发，包含 Toast 提示"""
+        self._refresh_trans_models_ui()
+        ToastManager().show("Translation models refreshed from cache.", "success")
+
+    def _on_trans_provider_changed(self, index):
+        if index < 0 or index >= len(self.llm_configs): return
+        self._refresh_trans_models_ui()
+
+    def _refresh_trans_models_ui(self):
+        idx = self.combo_trans_provider.currentIndex()
+        if idx < 0: return
+        conf = self.llm_configs[idx]
+
+        # 尝试读取现有的翻译模型，若没有则用聊天模型兜底
+        curr_model = conf.get("trans_model_name", conf.get("model_name", ""))
+        fetched = conf.get("fetched_models", [])
+
+        self.combo_trans_model.blockSignals(True)
+        self.combo_trans_model.clear()
+
+        items = list(fetched)
+        if curr_model and curr_model not in items:
+            items.insert(0, curr_model)
+
+        self.combo_trans_model.addItems(items)
+        if curr_model:
+            self.combo_trans_model.setCurrentText(curr_model)
+        self.combo_trans_model.blockSignals(False)
+        self._sync_trans_model(self.combo_trans_model.currentText())
+
+    def _sync_trans_model(self, text):
+        idx = self.combo_trans_provider.currentIndex()
+        if idx >= 0:
+            self.llm_configs[idx]["trans_model_name"] = text.strip()
+            self._save_llm_config()  # 静默保存映射关系
+            # 触发全局信号让 Chat 和 QuickTranslator 的下拉栏立即刷新展示文本
+            if hasattr(GlobalSignals(), 'llm_config_changed'):
+                GlobalSignals().llm_config_changed.emit()
+
+
 
     def _extract_real_model_name(self, display_text):
         for suffix in [" (⚙️ Custom)", " (🚫 Closed)"]:
@@ -698,17 +765,20 @@ class SettingsTool(BaseTool):
             if provider_idx >= 0:
                 conf = self.llm_configs[provider_idx]
 
-                # 从内存中剔除数据
                 if "fetched_models" in conf and real_name in conf["fetched_models"]:
                     conf["fetched_models"].remove(real_name)
                 if "models_config" in conf and real_name in conf["models_config"]:
                     del conf["models_config"][real_name]
 
-                # 如果刚好删除了正在使用的模型，兜底更新回溯配置
                 if conf.get("model_name") == real_name:
                     conf["model_name"] = conf["fetched_models"][0] if conf.get("fetched_models") else ""
 
+                self.combo_llm_model.blockSignals(True)
+                self.combo_llm_model.setCurrentText("")
+                self.combo_llm_model.blockSignals(False)
+
                 self._refresh_model_combo(conf)
+                self._sync_llm_data()
 
     def _load_model_params_to_ui(self, conf, model_name):
         self._is_updating_model_ui = True
@@ -735,13 +805,12 @@ class SettingsTool(BaseTool):
     def _refresh_model_combo(self, conf):
         self._is_updating_model_ui = True
 
-        curr_text = self.combo_llm_model.currentText().strip()
-        curr_real = self._extract_real_model_name(curr_text)
+        curr_real = conf.get("model_name", "").strip()
 
         self.combo_llm_model.blockSignals(True)
         self.combo_llm_model.clear()
 
-        fetched = conf.get("fetched_models", [])
+        fetched = list(conf.get("fetched_models", []))
         models_config = conf.get("models_config", {})
 
         items_to_add = []
@@ -759,6 +828,7 @@ class SettingsTool(BaseTool):
 
         self.combo_llm_model.addItems(items_to_add)
 
+        # 选中正确的项
         idx_to_select = -1
         for i in range(self.combo_llm_model.count()):
             if self._extract_real_model_name(self.combo_llm_model.itemText(i)) == curr_real:
@@ -767,8 +837,6 @@ class SettingsTool(BaseTool):
 
         if idx_to_select >= 0:
             self.combo_llm_model.setCurrentIndex(idx_to_select)
-        else:
-            self.combo_llm_model.setCurrentText(curr_text)
 
         self.combo_llm_model.blockSignals(False)
         self._is_updating_model_ui = False
@@ -800,28 +868,30 @@ class SettingsTool(BaseTool):
         self.input_llm_name.blockSignals(True)
         self.input_llm_url.blockSignals(True)
         self.input_llm_key.blockSignals(True)
+        self.combo_model_param_strategy.blockSignals(True)
 
         self.input_llm_name.setText(conf.get("name", ""))
         self.input_llm_url.setText(conf.get("base_url", ""))
         self.input_llm_key.setText(conf.get("api_key", ""))
 
-        self.input_llm_name.blockSignals(False)
-        self.input_llm_url.blockSignals(False)
-        self.input_llm_key.blockSignals(False)
+        mode = conf.get("model_params_mode", "inherit")
+        reverse_map = {"inherit": 0, "custom": 1, "closed": 2}
+        self.combo_model_param_strategy.setCurrentIndex(reverse_map.get(mode, 0))
+        self.model_param_container.setVisible(mode == "custom")
 
         self.editor_provider_params.blockSignals(True)
         self.editor_provider_params.load_data(conf.get("provider_params", []))
         self.editor_provider_params.blockSignals(False)
 
-        if "model_name" in conf and conf["model_name"]:
-            self.combo_llm_model.blockSignals(True)
-            self.combo_llm_model.setCurrentText(conf["model_name"])
-            self.combo_llm_model.blockSignals(False)
-
-        self._refresh_model_combo(conf)
+        self.input_llm_name.blockSignals(False)
+        self.input_llm_url.blockSignals(False)
+        self.input_llm_key.blockSignals(False)
+        self.combo_model_param_strategy.blockSignals(False)
 
         default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
         self.btn_del_llm.setEnabled(conf.get("id") not in default_ids)
+
+        self._refresh_model_combo(conf)
 
     def _sync_llm_data(self):
         if self._is_updating_model_ui: return
@@ -852,7 +922,13 @@ class SettingsTool(BaseTool):
         self.combo_llm_preset.blockSignals(True)
         self.combo_llm_preset.setItemText(idx, conf["name"])
         self.combo_llm_preset.blockSignals(False)
+        self.combo_trans_provider.blockSignals(True)
 
+        for i in range(1, self.combo_trans_provider.count()):
+            if self.combo_trans_provider.itemData(i) == self.llm_configs[idx]["id"]:
+                self.combo_trans_provider.setItemText(i, self.llm_configs[idx]["name"])
+                break
+        self.combo_trans_provider.blockSignals(False)
         self._update_current_model_marker(curr_real, mode)
 
     def _start_fetch_task(self):
@@ -1126,7 +1202,7 @@ class SettingsTool(BaseTool):
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
-            "trans_llm_id": self.combo_trans_preset.currentData(),
+            "trans_llm_id": self.combo_trans_provider.currentData(),
             "theme": self.combo_theme.currentText(),
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,

@@ -626,15 +626,18 @@ class ChatTool(BaseTool):
         top_bar = QVBoxLayout()
         top_bar.setSpacing(8)
 
-        #  1: 模型选择组件
+        #  模型选择组件
         row1_layout = QHBoxLayout()
-        self.model_selector = ModelSelectorWidget()
+        # Chat 用的模型
+        self.model_selector = ModelSelectorWidget(label_text="🧠 Model:", config_key="active_llm_id",
+                                                  model_key="model_name")
         row1_layout.addWidget(self.model_selector)
 
         row1_layout.addSpacing(15)
-        row1_layout.addWidget(QLabel("🌐 Translator:"))
-        self.combo_trans_llm = BaseComboBox(min_width=150)
-        row1_layout.addWidget(self.combo_trans_llm)
+        # 翻译用的模型 (指向 trans_model_name)
+        self.trans_selector = ModelSelectorWidget(label_text="🌐 Translator:", config_key="trans_llm_id",
+                                                  model_key="trans_model_name")
+        row1_layout.addWidget(self.trans_selector)
         row1_layout.addStretch()
 
         # 第二行：知识库选择
@@ -786,34 +789,10 @@ class ChatTool(BaseTool):
         self.logger.info("Chat history cleared by user.")
 
     def load_llm_configs(self):
-        if not hasattr(self, 'combo_trans_llm'): return
-
-        path = os.path.join(os.getcwd(), "config", "llm_config.json")
-        self.combo_trans_llm.clear()
-        self.combo_trans_llm.addItem("❌ None (Disable)", None)
-
-        from src.core.config_manager import ConfigManager
-        trans_id = ConfigManager().user_settings.get("trans_llm_id", "")
-        trans_target_idx = 0
-
-        if os.path.exists(path):
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    configs = json.load(f)
-                    for i, cfg in enumerate(configs):
-                        trans_name = f"{cfg['name']} ({cfg.get('model_name', 'Unknown')})"
-                        self.combo_trans_llm.addItem(trans_name, cfg)
-                        if cfg.get("id") == trans_id:
-                            trans_target_idx = i + 1
-            except:
-                pass
-
-        if self.combo_trans_llm.count() > 0:
-            self.combo_trans_llm.setCurrentIndex(trans_target_idx)
-
-        # 同步刷新独立的模型选择器组件
         if hasattr(self, 'model_selector'):
             self.model_selector.load_llm_configs()
+        if hasattr(self, 'trans_selector'):
+            self.trans_selector.load_llm_configs()
 
     def process_send(self, text, is_retry=False):
         # 1. 获取并格式化 KB ID
@@ -836,7 +815,11 @@ class ChatTool(BaseTool):
                 GlobalSignals().request_model_download.emit(missing_id, m_type)
                 return
 
-        trans_config = self.combo_trans_llm.currentData()
+        trans_config = self.trans_selector.get_current_config()
+        if trans_config:
+            trans_config = trans_config.copy()
+            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
+
         is_english = True
         try:
             detected_lang = detect(text)
@@ -937,7 +920,11 @@ class ChatTool(BaseTool):
     def start_ai_response(self, kb_id, requires_translation=False):
         # 获取最新的主模型配置与翻译配置
         main_config = self.model_selector.get_current_config()
-        trans_config = self.combo_trans_llm.currentData()
+        trans_config = self.trans_selector.get_current_config()
+
+        if trans_config:
+            trans_config = trans_config.copy()
+            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
 
         if main_config:
             actual_model = main_config.get("model_name", "").strip()

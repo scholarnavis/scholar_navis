@@ -20,6 +20,24 @@ def get_system_language():
     return "English"
 
 
+class TranslatorInputEdit(QTextEdit):
+    sig_send = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def keyPressEvent(self, event):
+        # 拦截 Enter 键发送，允许 Shift+Enter 换行
+        if event.key() == Qt.Key_Return and not event.modifiers() & Qt.ShiftModifier:
+            self.sig_send.emit()
+            event.accept()
+        # 传递 Esc 键给父窗口以触发隐藏逻辑
+        elif event.key() == Qt.Key_Escape:
+            event.ignore()
+        else:
+            super().keyPressEvent(event)
+
+
 class TranslatorWorker(QObject):
     sig_token = Signal(str)
     sig_finished = Signal()
@@ -103,6 +121,9 @@ class QuickTranslatorWindow(QWidget):
         if hasattr(GlobalSignals(), 'sig_invoke_translator'):
             GlobalSignals().sig_invoke_translator.connect(self.receive_and_translate)
 
+        if hasattr(GlobalSignals(), 'llm_config_changed'):
+            GlobalSignals().llm_config_changed.connect(self.model_selector.load_llm_configs)
+
     def _setup_ui(self):
         self.main_frame = QWidget(self)
         self.main_frame.setStyleSheet(
@@ -139,7 +160,8 @@ class QuickTranslatorWindow(QWidget):
 
         # --- 模型选择与语言配置 ---
         cfg_bar = QHBoxLayout()
-        self.model_selector = ModelSelectorWidget()
+        self.model_selector = ModelSelectorWidget(label_text="🌐 Translator:", config_key="trans_llm_id",
+                                                  model_key="trans_model_name")
         cfg_bar.addWidget(self.model_selector)
         cfg_bar.addSpacing(15)
 
@@ -170,14 +192,16 @@ class QuickTranslatorWindow(QWidget):
         frame_layout.addLayout(cfg_bar)
 
         # --- 输入输出区 ---
-        self.input_box = QTextEdit()
-        self.input_box.setPlaceholderText("Paste text here... (Press Esc to hide)")
+        self.input_box = TranslatorInputEdit()
+        self.input_box.setPlaceholderText(
+            "Paste text here... (Enter to translate, Shift+Enter for new line, Esc to hide)")
         self.input_box.setStyleSheet(
             "background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; border-radius: 6px; padding: 8px;")
         self.input_box.setFixedHeight(100)
+        self.input_box.sig_send.connect(self._start_translation)
+
         frame_layout.addWidget(self.input_box)
 
-        ctrl_bar = QHBoxLayout()
         ctrl_bar = QHBoxLayout()
         self.btn_trans = QPushButton("🚀 Translate / Polish")
         self.btn_stop = QPushButton("⏹ Stop")  # NEW STOP BUTTON
@@ -289,17 +313,10 @@ class QuickTranslatorWindow(QWidget):
         self.btn_trans.setVisible(False)
         self.btn_stop.setVisible(True)
 
-        # Fetch Dedicated Translation Config from ConfigManager
-        trans_id = self.cfg_mgr.user_settings.get("trans_llm_id")
-        # Load the full list from llm_config.json to find the matching provider
-        import json, os
-        trans_config = None
-        path = os.path.join(os.getcwd(), "config", "llm_config.json")
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                configs = json.load(f)
-                trans_config = next((c for c in configs if c.get("id") == trans_id), configs[0] if configs else None)
-
+        trans_config = self.model_selector.get_current_config()
+        if trans_config:
+            trans_config = trans_config.copy()
+            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
         self.worker_thread = QThread()
         self.worker = TranslatorWorker(
             text, self.combo_src.currentText(), self.combo_tgt.currentText(),
