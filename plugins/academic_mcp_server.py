@@ -591,6 +591,27 @@ def fetch_gene_information(gene_symbol: str, organism: str = "") -> str:
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
+
+@mcp.tool()
+def fetch_pubmed_abstract(pmid: str) -> str:
+    """
+    [Core Academic Tool] Fetch the full-text abstract of a specific PubMed article.
+    Use this when the user asks for details or a summary of a specific paper.
+    """
+    logger.info(f"Task: Fetch Abstract | PMID: {pmid}")
+    try:
+        handle = Entrez.efetch(db="pubmed", id=pmid, rettype="abstract", retmode="text")
+        abstract_text = handle.read()
+        handle.close()
+
+        if not abstract_text.strip():
+            return json.dumps({"status": "warning", "message": "No abstract available for this PMID."})
+
+        return json.dumps({"status": "success", "pmid": pmid, "abstract": abstract_text.strip()})
+    except Exception as e:
+        logger.error(f"Failed to fetch abstract for {pmid}: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
 if __name__ == "__main__":
     logger.info("Academic MCP Server initialized.")
     mcp.run(transport='stdio')

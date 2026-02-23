@@ -303,10 +303,16 @@ class QuickTranslatorWindow(QWidget):
         text = self.input_box.toPlainText().strip()
         if not text: return
 
-        if self.worker_thread and self.worker_thread.isRunning():
-            self.worker.cancel()
-            self.worker_thread.quit()
-            self.worker_thread.wait()
+        try:
+            if getattr(self, 'worker_thread', None) and self.worker_thread.isRunning():
+                if hasattr(self, 'worker') and self.worker:
+                    self.worker.cancel()
+                self.worker_thread.quit()
+                self.worker_thread.wait(500)
+        except RuntimeError:
+            # 捕获 C++ 对象已删除的错误，直接将其置空切断幽灵指针
+            self.worker_thread = None
+            self.worker = None
 
         self.output_box.clear()
         self.output_box.setHtml("<span style='color:#05B8CC;'><i>AI is preparing...</i></span>")
@@ -317,6 +323,7 @@ class QuickTranslatorWindow(QWidget):
         if trans_config:
             trans_config = trans_config.copy()
             trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
+
         self.worker_thread = QThread()
         self.worker = TranslatorWorker(
             text, self.combo_src.currentText(), self.combo_tgt.currentText(),
@@ -333,6 +340,7 @@ class QuickTranslatorWindow(QWidget):
         self.worker.sig_finished.connect(self.worker_thread.quit)
         self.worker.sig_finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        self.worker_thread.finished.connect(lambda: setattr(self, 'worker_thread', None))
 
         self.current_out_text = ""
         self.worker_thread.start()

@@ -23,19 +23,18 @@ os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 def init_mcp(logger):
     """
-    Initialize MCP servers:
+    Initialize MCP servers: One Core Internal + One External Bridge
     """
     mcp_mgr = MCPManager.get_instance()
     config = ConfigManager().user_settings
 
-    os.environ["NCBI_API_EMAIL"] = config.get("ncbi_email", "")
+    os.environ["NCBI_API_EMAIL"] = config.get("ncbi_email", "scholar.navis@example.com")
     os.environ["NCBI_API_KEY"] = config.get("ncbi_api_key", "")
     os.environ["S2_API_KEY"] = config.get("s2_api_key", "")
 
     logger.info("Starting MCP subsystem initialization.")
 
-    # --- Phase 1: Load Internal Compiled MCP Server ---
-    # Using sys.executable with '-c' to run the module compiled inside the Nuitka binary
+    # 内置核心 MCP (Core Academic)
     try:
         logger.info("Attempting to load internal academic MCP server.")
         mcp_mgr.connect_sync(
@@ -43,34 +42,31 @@ def init_mcp(logger):
             args=["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
         )
         logger.info("Internal academic MCP server initialized successfully.")
-
     except Exception as e:
         logger.error(f"Failed to start internal academic MCP server: {e}")
 
-    # --- Phase 2: Load External CLI MCP Servers ---
-    # Retrieve the external Python path defined by the user in Settings
+    # 外挂扩展 MCP
     ext_python = config.get("external_python_path", "python")
     ext_plugins_dir = os.path.join(BASE_DIR, "plugins_ext")
 
     if not os.path.exists(ext_plugins_dir):
         try:
             os.makedirs(ext_plugins_dir)
-            logger.info(f"Created external plugins directory at: {ext_plugins_dir}")
         except Exception as e:
             logger.error(f"Failed to create external plugins directory: {e}")
             return
 
-    logger.info(f"Scanning for external MCP plugins in: {ext_plugins_dir}")
-
-    for file in os.listdir(ext_plugins_dir):
-        if file.endswith(".py"):
-            plugin_path = os.path.join(ext_plugins_dir, file)
-            try:
-                logger.info(f"Attempting to load external plugin: {file} using python env: {ext_python}")
-                mcp_mgr.connect_sync(script_path=plugin_path, python_path=ext_python)
-                logger.info(f"External MCP plugin loaded successfully: {file}")
-            except Exception as e:
-                logger.error(f"Failed to load external plugin {file}. Error: {e}")
+    # 严格约定外挂桥接器的文件名为 external_bridge.py
+    bridge_script = os.path.join(ext_plugins_dir, "external_bridge.py")
+    if os.path.exists(bridge_script):
+        try:
+            logger.info(f"Attempting to load external MCP bridge: {bridge_script}")
+            mcp_mgr.connect_sync(script_path=bridge_script, python_path=ext_python)
+            logger.info("External MCP bridge loaded successfully.")
+        except Exception as e:
+            logger.error(f"Failed to load external bridge. Error: {e}")
+    else:
+        logger.info("No external_bridge.py found. Running with core tools only.")
 
 
 if __name__ == "__main__":

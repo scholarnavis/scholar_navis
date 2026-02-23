@@ -1,30 +1,22 @@
 import os
-import shutil
-import sys
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
-                               QStackedWidget, QSplitter, QPushButton, QHBoxLayout, QGraphicsOpacityEffect, QLabel)
-from PySide6.QtCore import Qt, QSize, QEasingCurve, QAbstractAnimation, QPropertyAnimation
+                               QStackedWidget, QSplitter, QPushButton, QLabel)
 
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
-from src.core.logger import get_qt_log_handler
 from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf
+from src.tools.chat_tool import ChatTool
+# 引入所有工具
+from src.tools.import_tool import ImportTool
+from src.tools.log_tool import LogTool
 from src.tools.rss_tool import RSSTool
+from src.tools.settings_tool import SettingsTool
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
-
-# 引入所有工具
-from src.tools.import_tool import ImportTool
-from src.tools.settings_tool import SettingsTool
-from src.tools.chat_tool import ChatTool
-from src.tools.staging_tool import StagingTool
-from src.tools.graph_tool import GraphTool
-from src.tools.gap_miner import GapMinerTool
-from src.tools.radar_tool import RadarTool
-from src.tools.log_tool import LogTool
 
 
 class MainWindow(QMainWindow):
@@ -137,13 +129,8 @@ class MainWindow(QMainWindow):
         self.import_tool = ImportTool()
         self.add_tool(self.import_tool)
 
-        self.add_tool(StagingTool())
-        self.add_tool(ChatTool())
-        self.add_tool(GraphTool())
-        self.add_tool(GapMinerTool())
-        self.add_tool(RadarTool())
 
-        # 挂载 RSS 工具
+        self.add_tool(ChatTool())
         self.rss_tool = RSSTool()
         self.add_tool(self.rss_tool)
 

@@ -1,4 +1,5 @@
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -7,11 +8,11 @@ import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl
-from PySide6.QtGui import QDesktopServices, QCursor
+from PySide6.QtGui import QDesktopServices, QCursor, QAction
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
-                               QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox)
+                               QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox)
 from chromadb.utils import embedding_functions
 from huggingface_hub import snapshot_download
 from langdetect import detect
@@ -33,7 +34,6 @@ from src.ui.components.dialog import StandardDialog
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
 from src.ui.components.pill_button import FollowUpPillButton
-from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
 
@@ -138,6 +138,45 @@ class ChatInputContainer(QFrame):
         banner_layout.addStretch()
         banner_layout.addWidget(self.btn_clear_context)
         main_layout.addWidget(self.context_banner)
+
+        self.mcp_toolbar = QHBoxLayout()
+        self.chk_mcp_enable = QCheckBox("🚀 Enable advanced search (MCP Tools)")
+        self.chk_mcp_enable.setStyleSheet("color: #05B8CC; font-weight: bold;")
+        self.chk_mcp_enable.setChecked(False)  # 默认关闭
+
+        self.btn_mcp_guide = QPushButton("💡 Prompt guide")
+        self.btn_mcp_guide.setCursor(Qt.PointingHandCursor)
+        self.btn_mcp_guide.setStyleSheet(
+            "color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px;")
+        self.btn_mcp_guide.setVisible(False)  # 默认隐藏，开启 MCP 后显示
+
+        self.mcp_toolbar.addWidget(self.chk_mcp_enable)
+        self.mcp_toolbar.addWidget(self.btn_mcp_guide)
+        self.mcp_toolbar.addStretch()
+        main_layout.insertLayout(1, self.mcp_toolbar)
+
+        # 绑定开关联动
+        self.chk_mcp_enable.toggled.connect(self.btn_mcp_guide.setVisible)
+
+        # 设置菜单
+        guide_menu = QMenu(self)
+        guide_menu.setStyleSheet(
+            "QMenu { background-color: #2b2b2b; color: #ddd; border: 1px solid #555; } QMenu::item:selected { background-color: #05B8CC; color: white; }")
+
+        prompts = [
+            "🔍 查找最近关于 雄性不育 (male sterility) 的 OA 文章",
+            "📄 根据 PMID 提取这篇文献的完整摘要",
+            "📥 帮我找一下这篇文章的免费 PDF 下载链接：[输入DOI]",
+            "🧬 检索特定基因 (如 ADH1) 的表达和功能信息"
+        ]
+
+        for p in prompts:
+            action = QAction(p, self)
+            action.triggered.connect(lambda checked, text=p: self.set_text(text.split("：")[0] if "：" in text else text))
+            guide_menu.addAction(action)
+
+        self.btn_mcp_guide.setMenu(guide_menu)
+
 
         self.bottom_bar = QHBoxLayout()
         self.bottom_bar.setContentsMargins(0, 0, 0, 0)
@@ -250,8 +289,8 @@ class ChatWorker(QObject):
     sig_finished = Signal()
     sig_error = Signal(str)
 
-    def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False,
-                external_context=None):
+    def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False, external_context=None,
+                 use_mcp=False):
         super().__init__()
 
         self.logger = logging.getLogger("ChatWorker")
@@ -262,7 +301,7 @@ class ChatWorker(QObject):
         self.kb_id = kb_id if kb_id != "none" else None
         self.requires_translation = requires_translation
         self.external_context = external_context
-
+        self.use_mcp = use_mcp
         self.db = DatabaseManager()
         self.kb_manager = KBManager()
         self.reranker = RerankEngine()
@@ -448,19 +487,18 @@ class ChatWorker(QObject):
             if not context_str.strip():
                 context_str = "No local or external documents provided. Please answer based on general knowledge or use available NCBI tools."
 
-            # ==========================================
             # Phase 4: Hybrid Agentic RAG (Local DB + NCBI MCP Tools)
-            # ==========================================
             self.sig_token.emit("[CLEAR_SEARCH]")
             if self.requires_translation:
-                self.sig_token.emit(
-                    "<i>🧠 Core model is analyzing requirements and evaluating NCBI tool calls...</i>\n\n")
+                self.sig_token.emit("<i>🧠 Core model is analyzing requirements and evaluating tools...</i>\n\n")
             else:
                 self.sig_token.emit("[START_LLM_NETWORK]")
 
             from src.core.mcp_manager import MCPManager
             mcp_mgr = MCPManager.get_instance()
-            mcp_tools = mcp_mgr.get_openai_tools_schema()
+
+            # 只有用户开启了高级功能，才获取工具 schema
+            mcp_tools = mcp_mgr.get_openai_tools_schema() if self.use_mcp else None
 
             system_prompt = (
                 f"You are a rigorous research assistant specializing in {domain}.\n"
@@ -468,7 +506,8 @@ class ChatWorker(QObject):
                 "### CORE DIRECTIVES:\n"
                 "1. **NO HALLUCINATION**: If the answer is not in the context or accessible via tools, say 'I cannot answer this based on the provided context.'\n"
                 "2. **CITATIONS**: Append `[1]`, `[2]` directly after sentences using that document's facts.\n"
-                "3. **FOLLOW-UPS (CRITICAL)**: At the end of your response, you MUST provide exactly 6 follow-up questions. Format them EXACTLY like this:\n"
+                "3. **DATA VISUALIZATION (CRITICAL)**: If the user explicitly asks for a diagram, flowchart, mind map, or relationship graph, you MUST NEVER use plain text or ASCII art. You MUST strictly generate valid Mermaid.js code enclosed in ```mermaid ... ``` blocks. Use 'graph LR' or 'mindmap' syntax.\n"
+                "4. **FOLLOW-UPS (CRITICAL)**: At the end of your response, you MUST provide exactly 6 follow-up questions. Format them EXACTLY like this:\n"
                 "   💡 Suggested Follow-ups:\n"
                 "   - [Deep Dive] <Question about specific details or mechanisms>\n"
                 "   - [Critical] <Question about limitations, alternatives, or weaknesses>\n"
@@ -683,49 +722,63 @@ class ChatTool(BaseTool):
         return self.widget
 
     def attach_from_local(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self.widget, "Select Document", "",
+        paths, _ = QFileDialog.getOpenFileNames(
+            self.widget, "Select Document(s)", "",
             "Documents (*.pdf *.md *.txt *.csv *.py);;All Files (*.*)"
         )
-        if not path: return
+        if not paths: return
 
-        f_name = os.path.basename(path)
-        try:
-            if not hasattr(self, 'external_chunks'):
-                self.external_chunks = []
+        if not hasattr(self, 'external_chunks'):
+            self.external_chunks = []
+        if not hasattr(self, 'external_context_html'):
+            self.external_context_html = ""
 
-            if path.lower().endswith('.pdf'):
-                import fitz
-                with fitz.open(path) as doc:
-                    for i, page in enumerate(doc):
-                        text = page.get_text().strip()
-                        if len(text) > 10:  # 过滤空白页
+        success_names = []
+
+        for path in paths:
+            f_name = os.path.basename(path)
+            try:
+                if path.lower().endswith('.pdf'):
+                    import fitz
+                    with fitz.open(path) as doc:
+                        for i, page in enumerate(doc):
+                            text = page.get_text().strip()
+                            if len(text) > 10:  # 过滤空白页
+                                self.external_chunks.append({
+                                    "path": path, "name": f_name,
+                                    "page": i + 1, "content": text
+                                })
+                else:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        text = f.read().strip()
+                        if text:
                             self.external_chunks.append({
                                 "path": path, "name": f_name,
-                                "page": i + 1, "content": text
+                                "page": 1, "content": text
                             })
+
+                # 构造气泡上方的可点击链接
+                from urllib.parse import quote
+                link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
+                html_link = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
+
+                self.external_context_html += html_link
+                success_names.append(f_name)
+
+            except Exception as e:
+                self.logger.error(f"Failed to read file {f_name}: {e}")
+                ToastManager().show(f"Failed to read file: {f_name}", "error")
+
+        # 更新 UI 提示
+        if success_names:
+            # 如果文件较多，做个简单的 UI 文本截断
+            if len(success_names) > 2:
+                display_text = f"{success_names[0]}, {success_names[1]} 等 {len(success_names)} 个文件"
             else:
-                with open(path, 'r', encoding='utf-8') as f:
-                    text = f.read().strip()
-                    if text:
-                        self.external_chunks.append({
-                            "path": path, "name": f_name,
-                            "page": 1, "content": text
-                        })
+                display_text = ", ".join(success_names)
 
-            # 构造气泡上方的可点击链接
-            from urllib.parse import quote
-            link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-            html_link = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
-
-            if not hasattr(self, 'external_context_html'):
-                self.external_context_html = ""
-            self.external_context_html += html_link
-
-            self.input_container.show_context_preview(f_name)
-            ToastManager().show(f"Attached local file: {f_name}", "success")
-        except Exception as e:
-            ToastManager().show(f"Failed to read file: {e}", "error")
+            self.input_container.show_context_preview(display_text)
+            ToastManager().show(f"Attached {len(success_names)} local file(s).", "success")
 
     def on_kb_modified(self, kb_id):
         if not self.history: return
@@ -827,7 +880,6 @@ class ChatTool(BaseTool):
 
         requires_translation = (not is_english) and (trans_config is not None)
 
-        # 非英语输入且翻译器关闭时的单次 Toast 提示
         if not is_english and trans_config is None:
             if not getattr(self.__class__, '_has_shown_lang_warning', False):
                 ToastManager().show(
@@ -861,10 +913,17 @@ class ChatTool(BaseTool):
                 )
                 llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
 
-            self.history.append({"role": "user", "content": llm_text})
+            self.history.append({
+                "role": "user",
+                "content": llm_text,
+                "display_text": text,
+                "context_html": current_html if current_html else None,
+                "external_chunks": current_chunks
+            })
 
         self.input_container.hide_context_preview()
 
+        self.external_chunks = current_chunks
         self.start_ai_response(kb_id, requires_translation)
 
     def trigger_retry(self):
@@ -872,15 +931,25 @@ class ChatTool(BaseTool):
         if not self.history: return
 
         # 寻找最后一次 user 的提问
-        last_user_text = ""
+        last_user_msg = None
         for i in range(len(self.history) - 1, -1, -1):
             if self.history[i]['role'] == 'user':
-                last_user_text = self.history[i]['content']
+                last_user_msg = self.history[i]
                 break
 
-        if last_user_text:
-            # 直接走重试通道，不新增气泡
-            self.process_send(last_user_text, is_retry=True)
+        if last_user_msg:
+            # 清理历史记录中失败的 Assistant 回复及其气泡，避免大模型读取到报错信息
+            if self.history[-1]['role'] == 'assistant':
+                self.history.pop()
+                if self.chat_layout.count() > 1:
+                    item = self.chat_layout.itemAt(self.chat_layout.count() - 2)
+                    if item.widget():
+                        item.widget().deleteLater()
+
+            # 恢复外部附件切片
+            self.external_chunks = last_user_msg.get('external_chunks', [])
+            self.process_send(last_user_msg.get('display_text', last_user_msg['content']), is_retry=True)
+
 
     def add_bubble(self, text, is_user, context_html=None):
         if self.chat_layout.count() > 0:
@@ -903,6 +972,8 @@ class ChatTool(BaseTool):
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
             bubble.sig_link_clicked.connect(self.handle_link_click)
         else:
+            bubble.sig_retry_clicked.connect(lambda idx: self.trigger_retry())
+
             bubble.lbl_text.linkActivated.connect(self.handle_link_click)
 
         self.chat_layout.addWidget(bubble)
@@ -919,6 +990,9 @@ class ChatTool(BaseTool):
         # 获取最新的主模型配置与翻译配置
         main_config = self.model_selector.get_current_config()
         trans_config = self.trans_selector.get_current_config()
+        use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container,
+                                                                                   'chk_mcp_enable') else False
+
 
         if trans_config:
             trans_config = trans_config.copy()
@@ -944,7 +1018,8 @@ class ChatTool(BaseTool):
             messages=list(self.history),
             kb_id=kb_id,
             requires_translation=requires_translation,
-            external_context=getattr(self, 'external_chunks', [])
+            external_context=getattr(self, 'external_chunks', []),
+            use_mcp=use_mcp_tools
         )
         self.external_chunks = []
         self.external_context_html = ""
@@ -1224,10 +1299,32 @@ class ChatTool(BaseTool):
         if is_at_bottom: self.scroll_to_bottom()
 
     def _format_response(self, text, index):
-        return TextFormatter.format_chat_text(
-            text, index, getattr(self, 'expanded_thinks', set()), getattr(self, 'user_toggled_thinks', set())
-        )
+        pattern = r'```mermaid\s*\n(.*?)\n```'
 
+        def repl_mermaid(match):
+            code = match.group(1).strip()
+            # 使用 MD5 哈希作为字典的 Key
+            code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()
+
+            if not hasattr(self, 'mermaid_codes'):
+                self.mermaid_codes = {}
+            self.mermaid_codes[code_hash] = code
+
+            # 生成一个清爽的 UI 卡片替代长串代码
+            return (
+                f"<br><div style='padding:12px; margin: 8px 0; border:1px solid #05B8CC; border-radius:6px; background-color: rgba(5, 184, 204, 0.08);'>"
+                f"<div style='margin-bottom: 5px;'>📊 <b>Mermaid Diagram Generated</b></div>"
+                f"<a href='mermaid://view?hash={code_hash}' style='color:#05B8CC; text-decoration:none; font-weight:bold;'>"
+                f"👉 Click here to view / edit interactive diagram</a></div><br>")
+
+        # 执行替换
+        processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
+
+        # 交给原本的格式化器处理其他 Markdown 元素
+        from src.ui.components.text_formatter import TextFormatter
+        return TextFormatter.format_chat_text(
+            processed_text, index, getattr(self, 'expanded_thinks', set()), getattr(self, 'user_toggled_thinks', set())
+        )
 
     def on_chat_error(self, msg):
         self.logger.error(f"Chat generation encountered an error: {msg}")
@@ -1255,6 +1352,7 @@ class ChatTool(BaseTool):
 
         if self.current_ai_bubble:
             self.current_ai_bubble.set_content(self.current_ai_text)
+            self.current_ai_bubble.show_error_retry()
 
         self.scroll_to_bottom()
 
@@ -1274,20 +1372,25 @@ class ChatTool(BaseTool):
 
         full_text = self.current_ai_text
 
-        match = re.search(r'(💡\s*Suggested Follow-ups:.*?(?=<br><hr|$))', full_text, flags=re.IGNORECASE | re.DOTALL)
+        # 1. 以 💡 开头
+        # 2. 跟着一行标题 (如 Suggested Follow-ups:)
+        # 3. 后面必须全部是 - 或 * 开头的列表项，一直持续到文本末尾 ($)
+        match = re.search(r'(💡\s*[^\n]*\n(?:\s*[-*]\s+[^\n]+(?:\n|$))+)$', full_text, flags=re.IGNORECASE)
         questions = []
 
         if match:
             follow_up_block = match.group(1)
+            # 从正文中剥离追问模块
             clean_text = full_text.replace(follow_up_block, "").strip()
             self.current_ai_text = clean_text
 
             for line in follow_up_block.split('\n'):
                 line = line.strip()
-                if line.startswith('-'):
-                    q = line.lstrip('-').strip()
+                if line.startswith('-') or line.startswith('*'):
+                    q = line.lstrip('-*').strip()
                     if q:
-                        tag_match = re.match(r'\[(.*?)\]\s*(.*)', q)
+                        # 匹配 [Tag] 内容
+                        tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
                         if tag_match:
                             tag, text = tag_match.groups()
                             questions.append({"tag": tag.strip(), "text": text.strip()})
@@ -1298,6 +1401,7 @@ class ChatTool(BaseTool):
             final_html = self._format_response(self.current_ai_text, idx)
             self.current_ai_bubble.set_content(final_html)
 
+            # 渲染胶囊按钮
             if questions:
                 self.render_follow_up_buttons(questions)
         else:
@@ -1357,7 +1461,15 @@ class ChatTool(BaseTool):
     def handle_edit_resend(self, index, new_text):
         if getattr(self, 'is_locked', False):
             ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
+            old_msg = self.history[index]
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), ChatBubbleWidget):
+                    if item.widget().index == index:
+                        item.widget().set_content(
+                            self._format_response(old_msg.get('display_text', old_msg['content']), index))
             return
+
         last_user_idx = -1
         for i in range(len(self.history) - 1, -1, -1):
             if self.history[i]['role'] == 'user':
@@ -1366,17 +1478,49 @@ class ChatTool(BaseTool):
         if index != last_user_idx:
             ToastManager().show("You can only edit your most recent message.", "warning")
             return
+
+        old_msg = self.history[index]
+        old_context_html = old_msg.get('context_html')
+        old_chunks = old_msg.get('external_chunks', [])
+
         self.history = self.history[:index]
         self.clear_layout(self.chat_layout)
         temp_history = list(self.history)
         self.history = []
+
+        # 重新绘制历史气泡时，带上附加 UI 元素并避免渲染整段大长串 Prompt
         for msg in temp_history:
-            self.add_bubble(msg['content'], is_user=(msg['role'] == 'user'))
+            display_text = msg.get('display_text', msg['content'])
+            ctx_html = msg.get('context_html')
+            self.add_bubble(display_text, is_user=(msg['role'] == 'user'), context_html=ctx_html)
             self.history.append(msg)
+
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-        self.add_bubble(new_text, is_user=True)
-        self.history.append({"role": "user", "content": new_text})
+
+        # 重新绘制被编辑的新气泡，并带上附件
+        self.add_bubble(new_text, is_user=True, context_html=old_context_html)
+
+        # 重新拼接供底层喂给大模型的完整 Prompt
+        llm_text = new_text
+        if old_chunks:
+            context_block = "\n".join(
+                [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in old_chunks]
+            )
+            llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{new_text}"
+        elif "Context Info:\n" in old_msg['content'] and "\n\nQuestion:\n" in old_msg['content']:
+            context_part = old_msg['content'].split("\n\nQuestion:\n")[0]
+            llm_text = f"{context_part}\n\nQuestion:\n{new_text}"
+
+        self.history.append({
+            "role": "user",
+            "content": llm_text,
+            "display_text": new_text,
+            "context_html": old_context_html,
+            "external_chunks": old_chunks
+        })
+
+        self.external_chunks = old_chunks
         self.start_ai_response(kb_id)
 
     def clear_layout(self, layout):
@@ -1387,6 +1531,24 @@ class ChatTool(BaseTool):
         layout.addStretch()
 
     def handle_link_click(self, url_str):
+
+        if url_str.startswith("mermaid://"):
+            parsed = urlparse(url_str)
+            params = parse_qs(parsed.query)
+            code_hash = params.get('hash', [''])[0]
+
+            # 从缓存字典中取出真实的 Mermaid 代码
+            code = getattr(self, 'mermaid_codes', {}).get(code_hash, "")
+            if code:
+                # 延迟导入避免循环依赖
+                from src.ui.components.mermaid_viewer import MermaidViewer
+                if not hasattr(self, 'mermaid_viewer') or self.mermaid_viewer is None:
+                    self.mermaid_viewer = MermaidViewer(self.widget)
+                self.mermaid_viewer.load_diagram(code)
+            else:
+                ToastManager().show("Diagram data lost. Please ask the AI to generate it again.", "error")
+            return
+
         if url_str.startswith("think://"):
             parsed = urlparse(url_str)
             action = parsed.netloc

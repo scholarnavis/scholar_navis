@@ -10,6 +10,7 @@ import re
 class ChatBubbleWidget(QWidget):
     sig_edit_confirmed = Signal(int, str)
     sig_link_clicked = Signal(str)
+    sig_retry_clicked = Signal(int)
 
     def __init__(self, text, is_user, index, context_html=None, parent=None):
         super().__init__(parent)
@@ -149,6 +150,17 @@ class ChatBubbleWidget(QWidget):
         self.btn_copy.clicked.connect(self.copy_text)
         self.btn_layout.addWidget(self.btn_copy)
 
+        if not self.is_user:
+            self.btn_bubble_retry = QPushButton("🔄 Retry")
+            self.btn_bubble_retry.setCursor(Qt.PointingHandCursor)
+            self.btn_bubble_retry.setStyleSheet("""
+                        QPushButton { background-color: transparent; border: none; color: #ff9800; font-size: 12px; padding: 2px 4px; border-radius: 4px; font-weight: bold;} 
+                        QPushButton:hover { color: #fff; background-color: #f57c00; }
+                    """)
+            self.btn_bubble_retry.clicked.connect(lambda: self.sig_retry_clicked.emit(self.index))
+            self.btn_bubble_retry.setVisible(False)
+            self.btn_layout.addWidget(self.btn_bubble_retry)
+
         if self.is_user:
             self.btn_edit = QPushButton("✎ Edit")
             self.btn_edit.setCursor(Qt.PointingHandCursor)
@@ -222,7 +234,7 @@ class ChatBubbleWidget(QWidget):
         menu.exec(self.lbl_text.mapToGlobal(pos))
 
     def disable_edit(self):
-        self._can_edit = False  # 彻底锁死权限
+        self._can_edit = False
         if hasattr(self, 'btn_edit'):
             self.btn_edit.setVisible(False)
         if self.is_editing:
