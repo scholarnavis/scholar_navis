@@ -40,12 +40,6 @@ def init_mcp(logger):
         logger.info("Attempting to load internal biological MCP server.")
         mcp_mgr.connect_sync(
             python_path=sys.executable,
-            args=["-c", "from plugins.common_server import mcp; mcp.run(transport='stdio')"]
-        )
-        logger.info("Internal Common MCP server initialized successfully.")
-
-        mcp_mgr.connect_sync(
-            python_path=sys.executable,
             args=["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
         )
         logger.info("Internal Academic MCP server initialized successfully.")

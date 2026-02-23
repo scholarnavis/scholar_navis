@@ -14,7 +14,8 @@ class OpenAICompatibleLLM:
 
         sys_cfg = ConfigManager().user_settings
         proxy_mode = sys_cfg.get("proxy_mode", "system")
-
+        custom_timeout = config.get("timeout", 60.0) if config else 60.0
+        httpx_kwargs = {"timeout": custom_timeout}
         httpx_kwargs = {"timeout": 60.0}
         proxy_cfg = _get_explicit_proxy_kwargs()
         httpx_kwargs.update(proxy_cfg)

@@ -15,6 +15,10 @@ from src.core.signals import GlobalSignals
 # 支持鼠标划词的交互式 Label
 class InteractivePDFLabel(QLabel):
     sig_text_selected = Signal(str)
+    sig_translate = Signal(str)
+    sig_prev_page = Signal()
+    sig_next_page = Signal()
+    sig_close = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -37,23 +41,65 @@ class InteractivePDFLabel(QLabel):
             self.rubber_band.setGeometry(QRect(self.origin, event.position().toPoint()).normalized())
 
     def mouseReleaseEvent(self, event):
-        rect = self.rubber_band.geometry()
-        # 只有当框选面积大于一定值，且当前页面和矩阵已加载时才触发文本提取
-        if rect.width() > 10 and rect.height() > 10 and self.current_page and self.mat:
-            # 矩阵逆运算：将屏幕坐标映射回 PDF 真实坐标
-            inv_mat = ~self.mat
-            f_rect = fitz.Rect(rect.left(), rect.top(), rect.right(), rect.bottom())
-            pdf_rect = f_rect * inv_mat
-            text = self.current_page.get_text("text", clip=pdf_rect).strip()
-            if text:
-                self.selected_text = text
-                self.sig_text_selected.emit(text)
-        else:
-            self.rubber_band.hide()
+        if event.button() == Qt.LeftButton:
+            rect = self.rubber_band.geometry()
+            if rect.width() > 10 and rect.height() > 10 and self.current_page and self.mat:
+                inv_mat = ~self.mat
+                f_rect = fitz.Rect(rect.left(), rect.top(), rect.right(), rect.bottom())
+                pdf_rect = f_rect * inv_mat
+                text = self.current_page.get_text("text", clip=pdf_rect).strip()
+                if text:
+                    self.selected_text = text
+                    self.sig_text_selected.emit(text)
+            else:
+                self.rubber_band.hide()
 
     def clear_selection(self):
         self.rubber_band.hide()
         self.selected_text = ""
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #2d2d30; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px; }
+            QMenu::item { padding: 6px 25px; border-radius: 2px; }
+            QMenu::item:selected { background-color: #007acc; }
+        """)
+
+        has_text = bool(self.selected_text)
+
+        if has_text:
+            act_copy = menu.addAction("📄 复制 (Copy)")
+            act_trans = menu.addAction("🌐 翻译 (Translate)")
+            act_sel_all = menu.addAction("📑 全选 (Select All)")
+            act_close = menu.addAction("❌ 关闭 (Close)")
+        else:
+            act_prev = menu.addAction("◀ 上一页 (Previous)")
+            act_next = menu.addAction("▶ 下一页 (Next)")
+            act_sel_all = menu.addAction("📑 全选 (Select All)")
+            act_close = menu.addAction("❌ 关闭 (Close)")
+
+        action = menu.exec(event.globalPos())
+
+        if action:
+            if action.text().startswith("📄"):
+                from PySide6.QtGui import QGuiApplication
+                QGuiApplication.clipboard().setText(self.selected_text)
+                self.clear_selection()
+            elif action.text().startswith("🌐"):
+                self.sig_translate.emit(self.selected_text)
+                self.clear_selection()
+            elif action.text().startswith("◀"):
+                self.sig_prev_page.emit()
+            elif action.text().startswith("▶"):
+                self.sig_next_page.emit()
+            elif action.text().startswith("📑"):
+                if self.current_page:
+                    self.selected_text = self.current_page.get_text("text").strip()
+                    self.rubber_band.setGeometry(self.rect())
+                    self.rubber_band.show()
+            elif action.text().startswith("❌"):
+                self.sig_close.emit()
 
 
 # 高级 PDF 阅读器 (带划词翻译、缩放与导出)
@@ -80,6 +126,16 @@ class InternalPDFViewer(QMainWindow):
         self.setCentralWidget(self.scroll_area)
 
         self._setup_toolbar()
+
+        # 连接 Label 传出的右键菜单信号
+        self.lbl_page.sig_prev_page.connect(self.prev_page)
+        self.lbl_page.sig_next_page.connect(self.next_page)
+        self.lbl_page.sig_close.connect(self.close)
+        self.lbl_page.sig_translate.connect(
+            lambda text: GlobalSignals().sig_invoke_translator.emit(text) if hasattr(GlobalSignals(),
+                                                                                     'sig_invoke_translator') else None)
+        # 拦截滚动条事件，实现滚轮翻页
+        self.scroll_area.verticalScrollBar().installEventFilter(self)
 
     def _setup_toolbar(self):
         tb1 = QToolBar()
@@ -111,23 +167,42 @@ class InternalPDFViewer(QMainWindow):
         hint.setStyleSheet("color: #aaa; font-style: italic; font-size: 13px; padding-left: 10px;")
         tb2.addWidget(hint)
 
-
     def load_document(self, file_path, page_num=0, highlight_text="", display_name=""):
         try:
             if self.doc: self.doc.close()
-            self.original_file_path = file_path  # 保存原始物理路径用于导出和外部打开
+            self.original_file_path = file_path
             self.doc = fitz.open(file_path)
             self.highlight_text = highlight_text
             self.display_name = display_name or os.path.basename(file_path)
 
-            self.fit_width()  # 默认自适应宽度
-            self.goto_page(page_num)
-
             self.show()
+            QApplication.processEvents()
+            self.fit_width()
+
+            self.goto_page(page_num)
             self.raise_()
             self.activateWindow()
         except Exception as e:
             print(f"Error opening PDF: {e}")
+
+    def eventFilter(self, obj, event):
+        # 监听滚轮事件，实现触底/触顶翻页
+        if obj == self.scroll_area.verticalScrollBar() and event.type() == QEvent.Wheel:
+            bar = self.scroll_area.verticalScrollBar()
+            delta = event.angleDelta().y()
+
+            if delta < 0 and bar.value() >= bar.maximum():
+                self.next_page()
+                # 翻到下一页后，滚动条回顶部
+                bar.setValue(0)
+                return True
+            elif delta > 0 and bar.value() <= bar.minimum():
+                self.prev_page()
+                # 翻到上一页后，视觉习惯上滚动条应该在底部
+                QApplication.processEvents()
+                bar.setValue(bar.maximum())
+                return True
+        return super().eventFilter(obj, event)
 
     # --- 缩放与自适应功能 ---
     def zoom_in(self):
@@ -328,16 +403,13 @@ class InternalTextViewer(QMainWindow):
         tb2.addWidget(hint)
 
 
-    def eventFilter(self, obj, event):
-        if obj == self.text_browser and event.type() == QEvent.KeyPress:
-            if event.key() == Qt.Key_Space:
-                selected_text = self.text_browser.textCursor().selectedText()
-                if selected_text:
-                    self._invoke_translator(selected_text)
-                    return True  # 拦截事件，防止文本框向下滚动
-        return super().eventFilter(obj, event)
+    def prev_page(self):
+        if self.doc and self.current_page > 0:
+            self.goto_page(self.current_page - 1)
 
-
+    def next_page(self):
+        if self.doc and self.current_page < len(self.doc) - 1:
+            self.goto_page(self.current_page + 1)
 
     # --- 呼出全局翻译 ---
     def _invoke_translator(self, text):
@@ -355,7 +427,16 @@ class InternalTextViewer(QMainWindow):
     def zoom_out(self):
         self.text_browser.zoomOut(2)
 
-    # --- 加载与高亮逻辑保持不变 ---
+    def eventFilter(self, obj, event):
+        # 监听空格键，实现快捷划词翻译
+        if obj == self.text_browser and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Space:
+                selected_text = self.text_browser.textCursor().selectedText()
+                if selected_text:
+                    self._invoke_translator(selected_text)
+                    return True  # 拦截事件，防止文本框向下滚动
+        return super().eventFilter(obj, event)
+
     def load_document(self, file_path, highlight_text="", display_name=""):
         self.original_file_path = file_path
         self.display_name = display_name or os.path.basename(file_path)

@@ -41,10 +41,6 @@ class TranslatorWorker(QObject):
 
     def run(self):
         try:
-            # 💡 防假死：确保代理设置只在 Worker 线程生效，不会锁死主线程
-            import socket
-            socket.setdefaulttimeout(15.0)  # 全局网络超时兜底限制
-
             setup_global_network_env()
 
             if not self.llm_config:
@@ -54,7 +50,7 @@ class TranslatorWorker(QObject):
             cfg = self.llm_config.copy()
             if self.use_think and cfg.get("thinking_model_name"):
                 cfg["model_name"] = cfg["thinking_model_name"]
-
+            cfg["timeout"] = 15.0
             self.llm = OpenAICompatibleLLM(cfg)
 
             if self.target_lang == "Academic Polish":
@@ -256,14 +252,22 @@ class QuickTranslatorWindow(QWidget):
         self.move((screen.width() - self.width()) // 2, int((screen.height() - self.height()) // 2))
 
     def _clear_all(self):
-        if self.worker: self.worker.cancel()
+        if self.worker_thread and self.worker_thread.isRunning():
+            self.worker.cancel()
+            self.worker_thread.quit()
+            self.worker_thread.wait()
+
         self.input_box.clear()
         self.output_box.clear()
 
     def _start_translation(self):
         text = self.input_box.toPlainText().strip()
         if not text: return
-        if self.worker: self.worker.cancel()
+
+        if self.worker_thread and self.worker_thread.isRunning():
+            self.worker.cancel()
+            self.worker_thread.quit()
+            self.worker_thread.wait()
 
         self.output_box.clear()
         self.output_box.setHtml("<span style='color:#05B8CC;'><i>AI is preparing...</i></span>")
@@ -276,15 +280,22 @@ class QuickTranslatorWindow(QWidget):
         )
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
+
         self.worker.sig_token.connect(self._on_token)
         self.worker.sig_error.connect(self._on_error)
-        self.worker.sig_finished.connect(lambda: self.btn_trans.setEnabled(True))
+
+        self.worker.sig_finished.connect(self._on_translation_finished)
+
         self.worker.sig_finished.connect(self.worker_thread.quit)
         self.worker.sig_finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
 
         self.current_out_text = ""
         self.worker_thread.start()
+
+    def _on_translation_finished(self):
+        self.btn_trans.setEnabled(True)
+
 
     def _on_token(self, token):
         self.current_out_text += token
