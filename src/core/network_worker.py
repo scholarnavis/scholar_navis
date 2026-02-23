@@ -1,9 +1,7 @@
 import os
 import requests
 import httpx
-from openai import OpenAI
 from PySide6.QtCore import QObject, Signal
-
 from src.core.config_manager import ConfigManager
 
 
@@ -75,7 +73,6 @@ class LightNetworkWorker(QObject):
         self._is_cancelled = False
         self._req_session = requests.Session()
 
-        # 显式注入 requests 代理
         proxy_cfg = _get_explicit_proxy_kwargs()
         if "trust_env" in proxy_cfg:
             self._req_session.trust_env = False
@@ -112,47 +109,58 @@ class LightNetworkWorker(QObject):
         self._is_cancelled = False
         custom_params = custom_params or {}
 
-        # 显式注入 httpx 代理
+        # 配置代理环境
         httpx_kwargs = {"timeout": 15.0}
         httpx_kwargs.update(_get_explicit_proxy_kwargs())
+
+        if "proxy" in httpx_kwargs:
+            httpx_kwargs["proxies"] = httpx_kwargs.pop("proxy")
+
         self._httpx_client = httpx.Client(**httpx_kwargs)
 
         try:
-            client = OpenAI(
-                api_key=api_key or "sk-test",
-                base_url=base_url,
-                http_client=self._httpx_client
-            )
+            url = f"{base_url.rstrip('/')}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key or 'sk-test'}",
+                "Content-Type": "application/json"
+            }
 
-            # 基础请求参数
-            kwargs = {
+            payload = {
                 "model": model_name,
                 "messages": [{"role": "user", "content": "Hello. Please reply with exactly one word: 'OK'."}],
                 "max_tokens": 5
             }
 
-            # 安全合并自定义参数（防止覆盖掉系统必需的 model 和 messages）
+            # 融合自定义参数（跳过影响测试的保留字段）
             for k, v in custom_params.items():
-                if k not in ["model", "messages"]:
-                    kwargs[k] = v
+                if k not in ["model", "messages", "stream"]:
+                    payload[k] = v
 
-            response = client.chat.completions.create(**kwargs)
+            response = self._httpx_client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
 
-            msg_obj = response.choices[0].message
-            raw_content = msg_obj.content
+            data = response.json()
+            choices = data.get("choices", [])
+
+            if not choices:
+                raise ValueError("No choices returned from API.")
+
+            msg_obj = choices[0].get("message", {})
+            raw_content = msg_obj.get("content")
 
             if raw_content is None:
-                # 兼容纯思考模型或被服务商安全护栏拦截的情况
-                if hasattr(msg_obj, 'reasoning_content') and msg_obj.reasoning_content:
-                    raw_content = f"{msg_obj.reasoning_content}"
+                if msg_obj.get("reasoning_content"):
+                    raw_content = str(msg_obj.get("reasoning_content"))
                 else:
                     raw_content = "[Empty Response / Filtered by Provider]"
 
             reply = raw_content.strip()
-
             self.sig_test_finished.emit(True,
                                         f"✅ API connectivity is excellent!\nModel '{model_name}' responded successfully:\n'{reply}'")
 
+        except httpx.HTTPStatusError as e:
+            err_text = e.response.text
+            self.sig_test_finished.emit(False, f"Test failed: HTTP {e.response.status_code}\n{err_text}")
         except Exception as e:
             if self._is_cancelled or "closed" in str(e).lower():
                 self.sig_test_finished.emit(False, "Operation cancelled by user.")
@@ -161,10 +169,8 @@ class LightNetworkWorker(QObject):
         finally:
             self._httpx_client.close()
 
-
     def do_fetch_models(self):
         self.fetch_models(getattr(self, 'base_url', ''), getattr(self, 'api_key', ''))
-
 
     def do_test_api(self):
         self.test_api(
@@ -173,4 +179,3 @@ class LightNetworkWorker(QObject):
             getattr(self, 'model_name', ''),
             getattr(self, 'custom_params', {})
         )
-

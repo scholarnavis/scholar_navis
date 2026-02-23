@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
-                               QHeaderView, QAbstractItemView, QComboBox, QPushButton)
+                               QHeaderView, QAbstractItemView, QComboBox, QPushButton, QPlainTextEdit)
 from PySide6.QtCore import Qt, Signal
 
 
@@ -18,7 +18,9 @@ class ParamEditorWidget(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setFixedHeight(120)
+
+        # 增加表格整体高度，以适应多行文本框
+        self.table.setMinimumHeight(160)
         self.table.setStyleSheet("QTableWidget { background-color: #2b2b2b; color: white; border: 1px solid #444; }")
 
         self.layout.addWidget(self.table)
@@ -36,15 +38,20 @@ class ParamEditorWidget(QWidget):
 
         # Type
         combo_type = QComboBox()
-        combo_type.addItems(["str", "int", "float", "bool"])
+        combo_type.addItems(["str", "int", "float", "bool", "json"])
         combo_type.setCurrentText(ptype)
         combo_type.setStyleSheet("background: #333; color: white; border: none;")
         combo_type.currentTextChanged.connect(lambda _: self.sig_data_changed.emit())
         self.table.setCellWidget(row, 1, combo_type)
 
         # Value
-        item_val = QTableWidgetItem(str(val))
-        self.table.setItem(row, 2, item_val)
+        val_edit = QPlainTextEdit(str(val))
+        val_edit.setPlaceholderText("Enter value or valid JSON...")
+        val_edit.setStyleSheet("background: #222; color: #eee; border: 1px solid #444; border-radius: 2px;")
+        val_edit.textChanged.connect(lambda: self.sig_data_changed.emit())
+        self.table.setCellWidget(row, 2, val_edit)
+
+        self.table.setRowHeight(row, 60)
 
         # Delete Button
         btn_del = QPushButton("❌")
@@ -68,11 +75,13 @@ class ParamEditorWidget(QWidget):
         data = []
         for r in range(self.table.rowCount()):
             name_item = self.table.item(r, 0)
-            val_item = self.table.item(r, 2)
+            val_widget = self.table.cellWidget(r, 2)
             type_combo = self.table.cellWidget(r, 1)
 
             name = name_item.text().strip() if name_item else ""
-            val = val_item.text().strip() if val_item else ""
+
+            # 从 QPlainTextEdit 提取文本，而不是 QTableWidgetItem
+            val = val_widget.toPlainText().strip() if val_widget else ""
 
             if not name or not val: continue
 
@@ -89,4 +98,9 @@ class ParamEditorWidget(QWidget):
             self.table.setRowCount(0)
 
         for p in param_list:
-            self.add_param_row(p.get("name", ""), p.get("type", "str"), p.get("value", ""))
+            val = p.get("value", "")
+            if p.get("type") == "json" and isinstance(val, dict):
+                import json
+                val = json.dumps(val, ensure_ascii=False, indent=2)
+
+            self.add_param_row(p.get("name", ""), p.get("type", "str"), val)

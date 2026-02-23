@@ -484,23 +484,21 @@ class ChatWorker(QObject):
 
             if mcp_tools:
                 try:
-                    pre_flight_response = self.main_llm.client.chat.completions.create(
-                        model=self.main_llm.model_name,
+                    response_msg = self.main_llm.chat(
                         messages=rag_messages,
                         tools=mcp_tools,
                         tool_choice="auto",
-                        temperature=0.2
                     )
 
-                    response_msg = pre_flight_response.choices[0].message
+                    tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
 
-                    if getattr(response_msg, 'tool_calls', None):
+                    if tool_calls:
                         rag_messages.append(response_msg)
 
-                        for tool_call in response_msg.tool_calls:
-                            tool_name = tool_call.function.name
+                        for tool_call in tool_calls:
+                            tool_name = tool_call['function']['name']
                             try:
-                                tool_args = json.loads(tool_call.function.arguments)
+                                tool_args = json.loads(tool_call['function']['arguments'])
                                 self.sig_token.emit(f"<i>📡 Requesting remote NCBI database: {tool_name}...</i>\n\n")
 
                                 tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
@@ -521,7 +519,7 @@ class ChatWorker(QObject):
 
                             rag_messages.append({
                                 "role": "tool",
-                                "tool_call_id": tool_call.id,
+                                "tool_call_id": tool_call['id'],
                                 "name": tool_name,
                                 "content": tool_result
                             })

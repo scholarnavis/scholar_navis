@@ -14,7 +14,6 @@ dependencies = [
     "markdown>=3.10.2",
     "matplotlib>=3.10.8",
     "networkx>=3.6.1",
-    "openai>=2.18.0",
     "pymupdf>=1.26.7",
     "pypdf>=6.7.0",
     "pyqtdarktheme>=2.1.0",

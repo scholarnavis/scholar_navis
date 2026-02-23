@@ -1,7 +1,7 @@
+import json
 import logging
 import httpx
 from typing import Generator, List, Dict, Optional
-from openai import OpenAI
 from src.core.config_manager import ConfigManager
 from src.core.network_worker import _get_explicit_proxy_kwargs
 
@@ -17,16 +17,15 @@ class OpenAICompatibleLLM:
         sys_cfg = ConfigManager().user_settings
         proxy_mode = sys_cfg.get("proxy_mode", "system")
         custom_timeout = config.get("timeout", 60.0) if config else 60.0
+
         httpx_kwargs = {"timeout": custom_timeout}
         proxy_cfg = _get_explicit_proxy_kwargs()
         httpx_kwargs.update(proxy_cfg)
 
-        try:
-            self._httpx_client = httpx.Client(**httpx_kwargs)
-        except TypeError:
-            if "proxy" in httpx_kwargs:
-                httpx_kwargs["proxies"] = httpx_kwargs.pop("proxy")
-            self._httpx_client = httpx.Client(**httpx_kwargs)
+        if "proxy" in httpx_kwargs:
+            httpx_kwargs["proxies"] = httpx_kwargs.pop("proxy")
+
+        self._httpx_client = httpx.Client(**httpx_kwargs)
 
         if not config:
             self.api_key = sys_cfg.get("llm_api_key", "sk-placeholder")
@@ -40,18 +39,13 @@ class OpenAICompatibleLLM:
         if not self.api_key:
             self.api_key = "sk-no-key-required"
 
-        self.logger.info(f"Initializing LLM Client: [{self.model_name}] @ {self.base_url} (Proxy Mode: {proxy_mode})")
-
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            http_client=self._httpx_client
-        )
+        self.logger.info(f"Initialized LLM Config: [{self.model_name}] @ {self.base_url} (Proxy: {proxy_mode})")
 
     def cancel(self):
         self._is_cancelled = True
         try:
-            self._httpx_client.close()
+            if self._httpx_client:
+                self._httpx_client.close()
         except Exception:
             pass
 
@@ -73,22 +67,53 @@ class OpenAICompatibleLLM:
                     res[name] = float(val_str)
                 elif ptype == "bool":
                     res[name] = val_str.lower() in ['true', '1', 'yes', 'on']
+                elif ptype == "json":
+                    import json
+                    res[name] = json.loads(val_str)
                 else:
                     res[name] = val_str
-            except ValueError:
-                self.logger.warning(f"Parameter Parse Warning: Cannot cast '{name}' ({val_str}) to {ptype}. Skipping.")
+            except Exception as e:
+                self.logger.warning(f"Parameter Parse Warning: Cannot cast '{name}' ({val_str}) to {ptype}. Skipping. Error: {e}")
 
         return res
 
+    def chat(self, messages: List[Dict[str, str]], **kwargs):
+        """非流式请求，用于翻译和工具调用 (Tool Calling)"""
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+        }
+        payload.update(kwargs)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+
+        response = self._httpx_client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+
+        data = response.json()
+        choices = data.get("choices", [])
+        if not choices:
+            return "" if "tools" not in kwargs else {}
+
+        message = choices[0].get("message", {})
+        # 如果是工具调用则返回整个 message dict，否则只返回文本
+        if "tools" in kwargs:
+            return message
+        else:
+            return message.get("content", "") or ""
+
     def stream_chat(self, messages: List[Dict[str, str]]) -> Generator[str, None, None]:
         try:
-            kwargs = {
+            payload = {
                 "model": self.model_name,
                 "messages": messages,
                 "stream": True,
             }
 
-            # Strategy Resolution: Isolate parameters per specific model
             models_config = self.config_data.get("models_config", {})
             current_model_conf = models_config.get(self.model_name, {})
 
@@ -96,7 +121,6 @@ class OpenAICompatibleLLM:
                 param_mode = current_model_conf.get("mode", "inherit")
                 model_params = current_model_conf.get("params", [])
             else:
-                # Fallback for backward compatibility
                 param_mode = self.config_data.get("model_params_mode", "inherit")
                 model_params = self.config_data.get("model_params", [])
 
@@ -107,51 +131,76 @@ class OpenAICompatibleLLM:
                 custom_params = self._parse_custom_params(provider_params)
             elif param_mode == "custom":
                 custom_params = self._parse_custom_params(model_params)
-            # If mode == "closed", custom_params remains empty
 
             safe_custom_params = {
                 k: v for k, v in custom_params.items()
                 if k not in ["messages", "model", "stream"]
             }
 
-            kwargs.update(safe_custom_params)
+            payload.update(safe_custom_params)
 
-            log_kwargs = {k: v for k, v in kwargs.items() if k != 'messages'}
+            log_kwargs = {k: v for k, v in payload.items() if k != 'messages'}
             self.logger.info(f"Stream generation requested. Config applied [Mode: {param_mode}]: {log_kwargs}")
 
-            response = self.client.chat.completions.create(**kwargs)
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            url = f"{self.base_url.rstrip('/')}/chat/completions"
 
             is_thinking = False
 
-            for chunk in response:
-                if self._is_cancelled:
-                    if is_thinking: yield "\n</think>\n"
-                    yield "\n\n[⛔ Generation halted by user.]"
-                    break
+            with self._httpx_client.stream("POST", url, headers=headers, json=payload) as response:
+                # 修复核心：如果报错(例如 400参数错误)，强制提前读取 error body，防止 raise 时抛出 ResponseNotRead
+                if response.status_code >= 400:
+                    response.read()
+                response.raise_for_status()
 
-                if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-                    continue
+                for line in response.iter_lines():
+                    if self._is_cancelled:
+                        if is_thinking: yield "\n</think>\n"
+                        yield "\n\n[⛔ Generation halted by user.]"
+                        break
 
-                delta = getattr(chunk.choices[0], "delta", None)
-                if not delta: continue
+                    line = line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
 
-                reasoning = getattr(delta, 'reasoning_content', None)
-                if reasoning:
-                    if not is_thinking:
-                        yield "<think>\n"
-                        is_thinking = True
-                    yield reasoning
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
 
-                content = getattr(delta, 'content', None)
-                if content:
-                    if is_thinking:
-                        yield "\n</think>\n"
-                        is_thinking = False
-                    yield content
+                    try:
+                        chunk = json.loads(data_str)
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+
+                        delta = choices[0].get("delta", {})
+
+                        reasoning = delta.get("reasoning_content")
+                        if reasoning:
+                            if not is_thinking:
+                                yield "<think>\n"
+                                is_thinking = True
+                            yield reasoning
+
+                        content = delta.get("content")
+                        if content:
+                            if is_thinking:
+                                yield "\n</think>\n"
+                                is_thinking = False
+                            yield content
+                    except json.JSONDecodeError:
+                        pass
 
             if is_thinking:
                 yield "\n</think>\n"
 
+        except httpx.HTTPStatusError as e:
+            err_text = e.response.text
+            self.logger.error(f"HTTP Status Error: {e.response.status_code} - {err_text}")
+            yield f"\n\n[API Request Error: HTTP {e.response.status_code}]\n{err_text}\n"
         except Exception as e:
             error_msg = str(e).lower()
             if self._is_cancelled or "closed" in error_msg or "cancelled" in error_msg:
