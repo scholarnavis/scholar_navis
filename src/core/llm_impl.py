@@ -100,11 +100,18 @@ class OpenAICompatibleLLM:
             return "" if "tools" not in kwargs else {}
 
         message = choices[0].get("message", {})
-        # 如果是工具调用则返回整个 message dict，否则只返回文本
+        if "tool_calls" in message and message["tool_calls"]:
+            message["content"] = ""  # 确保 content 不为 None
+            return message
+
+        # 如果是正常的文本请求（如翻译、润色），只返回 content 字符串
+        content = message.get("content", "") or ""
+
+        # 如果外部明确要求返回工具格式（即使没触发），也返回字典
         if "tools" in kwargs:
             return message
-        else:
-            return message.get("content", "") or ""
+
+        return content  # 返回字符串，这样 .strip() 就能正常工作了
 
     def stream_chat(self, messages: List[Dict[str, str]]) -> Generator[str, None, None]:
         try:

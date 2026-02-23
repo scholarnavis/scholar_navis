@@ -66,7 +66,9 @@ if ncbi_email:
     def search_pubmed_literature(query: str, max_results: int = 5) -> str:
         """
         [Requires API Key] Search PubMed for scientific literature.
+        Use this to search for broad topics (e.g., "male sterility") OR specific exact article titles to retrieve precise metadata (authors, journal, publication date, DOI).
         Returns metadata including PMID, Title, Abstract, DOI, and PMC links.
+        CRITICAL: If the user asks for Open Access (OA) articles and download links, first use this tool to find relevant papers and extract their DOIs, then IMMEDIATELY pass those DOIs to the `fetch_open_access_pdf` tool.
         """
         logger.info(f"Task: PubMed Search | Query: '{query}'")
         try:
@@ -118,7 +120,8 @@ if ncbi_email:
     @mcp.tool()
     def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
         """
-        Download raw FASTA sequences for nucleotides (nuccore) or proteins (protein).
+        Download raw FASTA sequences for nucleotides (DNA/RNA) or proteins.
+        Use this WHENEVER the user requests exact genetic sequences, nucleotide codes (A, T, C, G), or protein amino acid sequences for specific accession IDs (e.g., NM_100000).
         """
         logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
         try:
@@ -146,8 +149,8 @@ if ncbi_email:
     @mcp.tool()
     def search_sra_datasets(query: str, max_results: int = 5) -> str:
         """
-        Access the Sequence Read Archive (SRA) to find high-throughput sequencing datasets (SRR IDs).
-        Essential for multi-omics data mining.
+        Search the Sequence Read Archive (SRA) for high-throughput sequencing metadata.
+        Use this to find raw multi-omics datasets (e.g., RNA-Seq, ChIP-Seq, WGS), biosample details, and Run IDs (SRR) associated with specific phenotypes, treatments, or organisms.
         """
         logger.info(f"Task: SRA Metadata Search | Query: '{query}'")
         try:
@@ -207,7 +210,8 @@ if ncbi_email:
     @mcp.tool()
     def fetch_protein_summary(protein_query: str, organism: str = "") -> str:
         """
-        Retrieve structural metadata and summaries from the NCBI Protein database.
+        Retrieve structural metadata, lengths, and basic summaries from the NCBI Protein database.
+        Use this when the user asks about protein structure, sequence size, or taxonomy mapping for a specific protein target.
         """
         logger.info(f"Task: Protein Summary Retrieval | Query: {protein_query}")
         try:
@@ -390,7 +394,8 @@ if s2_api_key:
     def search_semantic_scholar(query: str, max_results: int = 5) -> str:
         """
         [Requires API Key] Search Semantic Scholar for global academic papers.
-        Useful for cross-disciplinary queries and citation counts.
+        Highly effective for searching specific exact article titles (e.g., "Triptycene as a scaffold in metallocene catalyzed olefin polymerization") to retrieve exact metadata (authors, journal, date, citation count).
+        Useful for cross-disciplinary queries.
         """
         logger.info(f"Task: S2 Search | Query: '{query}'")
         try:
@@ -470,15 +475,13 @@ def search_pmc_literature_fallback(query: str, max_results: int = 5) -> str:
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
-# =========================================================================
-# 📥 OA 全文下载统一兜底 (PDF Retrieval Cascade)
-# =========================================================================
+# OA 全文下载统一兜底 (PDF Retrieval Cascade)
 @mcp.tool()
 def fetch_open_access_pdf(doi: str) -> str:
     """
-    [Always Enabled] Find a direct Open Access PDF download link for a DOI.
+    [Always Enabled] Find a direct Open Access PDF download link for a given DOI.
+    CRITICAL: Use this tool WHENEVER the user asks for full-text download links, OA links, or PDF links for an article.
     Cascade Strategy: Semantic Scholar (if Key) -> Unpaywall -> PubMed OA Web Service (PMC).
-    If the paper is Non-OA (Paywalled), it returns the publisher landing page.
     """
     logger.info(f"Task: Fetch OA PDF | DOI: '{doi}'")
     try:
@@ -574,7 +577,10 @@ def fetch_open_access_pdf(doi: str) -> str:
 # 生物学基础数据工具 (基因、物种、组学等)
 @mcp.tool()
 def fetch_gene_information(gene_symbol: str, organism: str = "") -> str:
-    """Query NCBI Gene database for gene info."""
+    """
+    Query the NCBI Gene database to retrieve detailed gene descriptions, official symbols, and functional summaries.
+    Use this when the user asks "What is the function of gene X?" or needs basic biological context and pathways about a specific gene in a given organism.
+    """
     try:
         term = f"{gene_symbol}[Gene Name]" + (f" AND {organism}[Organism]" if organism else "")
         search_handle = Entrez.esearch(db="gene", term=term, retmax=3)

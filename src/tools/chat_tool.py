@@ -140,9 +140,9 @@ class ChatInputContainer(QFrame):
         main_layout.addWidget(self.context_banner)
 
         self.mcp_toolbar = QHBoxLayout()
-        self.chk_mcp_enable = QCheckBox("🚀 Enable advanced search (MCP Tools)")
+        self.chk_mcp_enable = QCheckBox("🚀 Enable advanced search (MCP Tools - Requires model support)")
         self.chk_mcp_enable.setStyleSheet("color: #05B8CC; font-weight: bold;")
-        self.chk_mcp_enable.setChecked(False)  # 默认关闭
+        self.chk_mcp_enable.setChecked(False)
 
         self.btn_mcp_guide = QPushButton("💡 Prompt guide")
         self.btn_mcp_guide.setCursor(Qt.PointingHandCursor)
@@ -164,10 +164,12 @@ class ChatInputContainer(QFrame):
             "QMenu { background-color: #2b2b2b; color: #ddd; border: 1px solid #555; } QMenu::item:selected { background-color: #05B8CC; color: white; }")
 
         prompts = [
-            "🔍 查找最近关于 雄性不育 (male sterility) 的 OA 文章",
-            "📄 根据 PMID 提取这篇文献的完整摘要",
-            "📥 帮我找一下这篇文章的免费 PDF 下载链接：[输入DOI]",
-            "🧬 检索特定基因 (如 ADH1) 的表达和功能信息"
+            "🔍 Search for the latest high-impact literature and abstracts in a specific research field",
+            "📄 Extract detailed metadata (authors, journal, publication year) for this exact article title",
+            "📥 Find Open Access (OA) free download links or PDFs for specific papers or DOIs",
+            "🧬 Query the expression and functional summary of a specific gene or protein in a target organism",
+            "📊 Find public omics datasets (GEO/SRA) related to specific experimental treatments or phenotypes",
+            "🌐 Explain a complex biological mechanism and draw a Mermaid relationship map"
         ]
 
         for p in prompts:
@@ -501,13 +503,25 @@ class ChatWorker(QObject):
             mcp_tools = mcp_mgr.get_openai_tools_schema() if self.use_mcp else None
 
             system_prompt = (
-                f"You are a rigorous research assistant specializing in {domain}.\n"
-                "Answer based on the provided Context. If the information is missing, use the available NCBI tools to retrieve real-time biological data.\n\n"
-                "### CORE DIRECTIVES:\n"
-                "1. **NO HALLUCINATION**: If the answer is not in the context or accessible via tools, say 'I cannot answer this based on the provided context.'\n"
-                "2. **CITATIONS**: Append `[1]`, `[2]` directly after sentences using that document's facts.\n"
-                "3. **DATA VISUALIZATION (CRITICAL)**: If the user explicitly asks for a diagram, flowchart, mind map, or relationship graph, you MUST NEVER use plain text or ASCII art. You MUST strictly generate valid Mermaid.js code enclosed in ```mermaid ... ``` blocks. Use 'graph LR' or 'mindmap' syntax.\n"
-                "4. **FOLLOW-UPS (CRITICAL)**: At the end of your response, you MUST provide exactly 6 follow-up questions. Format them EXACTLY like this:\n"
+                f"You are a Senior Research Scientist specializing in {domain}. "
+                "Your goal is to provide high-density, evidence-based academic responses.\n\n"
+
+                "### TOOL USE PROTOCOL (STRICT):\n"
+                "1. **SILENT EXECUTION**: If the provided Context is insufficient, invoke NCBI tools IMMEDIATELY.\n"
+                "2. **NO PLANNING TEXT**: Never output phrases like 'I will now search for...', 'Let me check...', or 'I need to use...'. \n"
+                "3. **DIRECT CALL**: If you determine a tool is necessary, your first output MUST be the tool call. Do not explain your reasoning unless explicitly asked.\n\n"
+
+                "### RESPONSE GUIDELINES:\n"
+                "1. **GROUNDING**: Prioritize local Context. If data comes from Context, you MUST append citations (e.g., [1], [2]) immediately after the relevant sentence.\n"
+                "2. **NCBI INTEGRATION**: Use NCBI data to fill gaps. Treat tool outputs as primary evidence.\n"
+                "3. **NO HALLUCINATION**: If information is unavailable in both Context and Tools, state: 'I cannot answer this based on the provided context or real-time retrieval.'\n\n"
+
+                "### DATA VISUALIZATION:\n"
+                "- For diagrams, flowcharts, or mind maps, strictly use ```mermaid ... ``` blocks.\n"
+                "- Use 'graph LR' for mechanisms and 'mindmap' for conceptual networks. No ASCII art.\n\n"
+
+                "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
+                "At the very end, provide exactly 6 follow-up questions using this EXACT format:\n"
                 "   💡 Suggested Follow-ups:\n"
                 "   - [Deep Dive] <Question about specific details or mechanisms>\n"
                 "   - [Critical] <Question about limitations, alternatives, or weaknesses>\n"
@@ -515,9 +529,9 @@ class ChatWorker(QObject):
                 "   - [Brainstorm] <A creative brainstorming question or hypothetical \"What if\" scenario>\n"
                 "   - [Similar] <Question connecting to a similar or parallel topic/concept>\n"
                 "   - [Application] <Question about real-world applications or cross-disciplinary use>\n\n"
+                
                 f"### CONTEXT:\n{context_str}"
             )
-
             rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
             rag_messages.append({"role": "user", "content": search_query})
 
@@ -1351,8 +1365,8 @@ class ChatTool(BaseTool):
         self.current_ai_text += f"\n\n<div style='color:#ff6b6b; font-weight:bold;'>[⚠️ AI Error]</div>\n<div style='color:#888; font-size:12px;'>{display_error}</div>"
 
         if self.current_ai_bubble:
-            self.current_ai_bubble.set_content(self.current_ai_text)
-            self.current_ai_bubble.show_error_retry()
+            idx = getattr(self.current_ai_bubble, 'index', -1)
+            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
 
         self.scroll_to_bottom()
 
