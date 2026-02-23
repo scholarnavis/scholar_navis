@@ -27,7 +27,7 @@ class PDFEngine:
         self.logger.debug(f"Starting to parse: {display_name} | Physical path: {file_path}")
 
         if not os.path.exists(file_path):
-            self.logger.error(f"[PDF_ENGINE] File does not exist: {file_path}")
+            self.logger.error(f"File does not exist: {file_path}")
             return 0
 
         try:

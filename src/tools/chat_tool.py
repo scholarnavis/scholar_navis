@@ -3,40 +3,38 @@ import json
 import logging
 import os
 import re
-import shutil
-import tempfile
 import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl
+from PySide6.QtGui import QDesktopServices, QCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
-                               QScrollArea, QFrame, QFileDialog, QCheckBox, QApplication)
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl
-from PySide6.QtGui import QDesktopServices
-
-from huggingface_hub import snapshot_download
+                               QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
+                               QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox)
 from chromadb.utils import embedding_functions
+from huggingface_hub import snapshot_download
 from langdetect import detect
 
+from src.core.config_manager import ConfigManager
+from src.core.database import DatabaseManager
+from src.core.device_manager import DeviceManager
+from src.core.kb_manager import KBManager
+from src.core.llm_impl import OpenAICompatibleLLM
 from src.core.model_manager import ModelManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
+from src.services.file_service import FileService
 from src.tools.base_tool import BaseTool
-from src.core.llm_impl import OpenAICompatibleLLM
-from src.core.database import DatabaseManager
-from src.core.kb_manager import KBManager
-from src.core.config_manager import ConfigManager
-from src.core.device_manager import DeviceManager
+from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.model_selector import ModelSelectorWidget
+from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
+from src.ui.components.pill_button import FollowUpPillButton
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
-
-from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
-from src.ui.components.chat_bubble import ChatBubbleWidget
-from src.ui.components.pill_button import FollowUpPillButton
 
 
 @functools.lru_cache(maxsize=128)
@@ -100,6 +98,8 @@ class ChatInputContainer(QFrame):
     sig_send_clicked = Signal(str)
     sig_export_clicked = Signal()
     sig_clear_clicked = Signal()
+    sig_attach_clicked = Signal()
+    sig_clear_context_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -119,6 +119,26 @@ class ChatInputContainer(QFrame):
         self.text_edit = AutoResizingTextEdit()
         main_layout.addWidget(self.text_edit)
 
+        self.context_banner = QWidget()
+        self.context_banner.setVisible(False)
+        self.context_banner.setStyleSheet(
+            "background-color: rgba(5, 184, 204, 0.1); border: 1px solid #05B8CC; border-radius: 4px;")
+        banner_layout = QHBoxLayout(self.context_banner)
+        banner_layout.setContentsMargins(8, 4, 8, 4)
+
+        self.lbl_context_info = QLabel("📎 Context Attached")
+        self.lbl_context_info.setStyleSheet("color: #05B8CC; font-size: 12px; border: none;")
+        self.btn_clear_context = QPushButton("✖")
+        self.btn_clear_context.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_context.setStyleSheet(
+            "QPushButton { color: #ff6b6b; border: none; font-weight: bold; background: transparent; } QPushButton:hover { color: #ff4c4c; }")
+        self.btn_clear_context.clicked.connect(self.sig_clear_context_clicked.emit)
+
+        banner_layout.addWidget(self.lbl_context_info)
+        banner_layout.addStretch()
+        banner_layout.addWidget(self.btn_clear_context)
+        main_layout.addWidget(self.context_banner)
+
         self.bottom_bar = QHBoxLayout()
         self.bottom_bar.setContentsMargins(0, 0, 0, 0)
 
@@ -137,11 +157,17 @@ class ChatInputContainer(QFrame):
         self.btn_clear.setStyleSheet(tool_btn_style)
         self.btn_clear.clicked.connect(self.sig_clear_clicked.emit)
 
+        self.btn_attach = QPushButton("📎 Attach")
+        self.btn_attach.setCursor(Qt.PointingHandCursor)
+        self.btn_attach.setStyleSheet(tool_btn_style)
+        self.btn_attach.clicked.connect(self.sig_attach_clicked.emit)
+        self.bottom_bar.insertWidget(0, self.btn_attach)
+
         self.bottom_bar.addWidget(self.btn_export)
         self.bottom_bar.addWidget(self.btn_clear)
         self.bottom_bar.addStretch()
 
-        self.btn_send = QPushButton("发送")
+        self.btn_send = QPushButton("Send")
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.setFixedSize(70, 32)
         self.btn_send.setStyleSheet("""
@@ -153,7 +179,8 @@ class ChatInputContainer(QFrame):
         """)
         self.bottom_bar.addWidget(self.btn_send)
 
-        self.btn_stop = QPushButton("⏹ 停止")
+
+        self.btn_stop = QPushButton("⏹ Stop")
         self.btn_stop.setCursor(Qt.PointingHandCursor)
         self.btn_stop.setFixedSize(70, 32)
         self.btn_stop.setStyleSheet("""
@@ -208,6 +235,15 @@ class ChatInputContainer(QFrame):
         self.text_edit.setPlaceholderText("Ask a question... (Enter to send, Shift+Enter for new line)")
         self.btn_send.setEnabled(True)
 
+    def show_context_preview(self, text_info):
+        """显示输入框上方的附件预览条"""
+        self.lbl_context_info.setText(f"📎 Attached: {text_info}")
+        self.context_banner.setVisible(True)
+
+    def hide_context_preview(self):
+        """隐藏输入框上方的附件预览条"""
+        self.context_banner.setVisible(False)
+        self.lbl_context_info.setText("📎 Context Attached")
 
 class ChatWorker(QObject):
     sig_token = Signal(str)
@@ -390,7 +426,27 @@ class ChatWorker(QObject):
             # Phase 3.5: Inject External Context (e.g., RSS, Selected Docs)
             # ==========================================
             if getattr(self, 'external_context', None):
-                context_str += f"\n\n--- [External Context Provided by User] ---\n{self.external_context}\n\n"
+                if isinstance(self.external_context, list):
+                    # 动态接续向量库的引用编号
+                    current_ref_id = len(sources_map) + 1 if sources_map else 1
+                    for chunk in self.external_context:
+                        # 记录溯源映射，截取前 100 个字符用于传给 PDFViewer 做高亮匹配
+                        sources_map[current_ref_id] = {
+                            "path": chunk.get('path', ''),
+                            "page": chunk.get('page', 1),
+                            "name": chunk.get('name', 'External Document'),
+                            "search_text": chunk.get('content', '')[:100]
+                        }
+                        # 伪装成正规文档格式喂给大模型
+                        context_str += (
+                            f"--- [Document {current_ref_id}] ---\n"
+                            f"Source: {chunk.get('name', 'External')} (Page {chunk.get('page', 1)})\n"
+                            f"Content: {chunk.get('content', '')}\n\n"
+                        )
+                        current_ref_id += 1
+                else:
+                    # 兼容纯文本 RSS 的老逻辑
+                    context_str += f"\n\n--- [External Context Provided by User] ---\n{self.external_context}\n\n"
 
             if not context_str.strip():
                 context_str = "No local or external documents provided. Please answer based on general knowledge or use available NCBI tools."
@@ -550,6 +606,8 @@ class ChatTool(BaseTool):
         self.pdf_viewer = None
         self.expanded_thinks = set()
         self.user_toggled_thinks = set()
+        self.external_context_buffer = ""
+        self.external_context_html = ""
 
         GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
         GlobalSignals().kb_switched.connect(self.on_global_kb_switched)
@@ -558,7 +616,6 @@ class ChatTool(BaseTool):
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.connect(self.load_llm_configs)
 
-        self.external_context_buffer = ""
         if hasattr(GlobalSignals(), 'sig_send_to_chat'):
             GlobalSignals().sig_send_to_chat.connect(self.handle_external_send)
 
@@ -621,11 +678,56 @@ class ChatTool(BaseTool):
         self.input_container.sig_export_clicked.connect(self.export_chat_history)
         self.input_container.sig_clear_clicked.connect(self.clear_chat_history)
         self.input_container.btn_retry.clicked.connect(self.trigger_retry)
+        self.input_container.sig_attach_clicked.connect(self.show_attachment_menu)
+        self.input_container.sig_clear_context_clicked.connect(self.clear_attached_context)
 
         layout.addWidget(self.input_container)
         return self.widget
 
+    def attach_from_local(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self.widget, "Select Document", "",
+            "Documents (*.pdf *.md *.txt *.csv *.py);;All Files (*.*)"
+        )
+        if not path: return
 
+        f_name = os.path.basename(path)
+        try:
+            if not hasattr(self, 'external_chunks'):
+                self.external_chunks = []
+
+            if path.lower().endswith('.pdf'):
+                import fitz
+                with fitz.open(path) as doc:
+                    for i, page in enumerate(doc):
+                        text = page.get_text().strip()
+                        if len(text) > 10:  # 过滤空白页
+                            self.external_chunks.append({
+                                "path": path, "name": f_name,
+                                "page": i + 1, "content": text
+                            })
+            else:
+                with open(path, 'r', encoding='utf-8') as f:
+                    text = f.read().strip()
+                    if text:
+                        self.external_chunks.append({
+                            "path": path, "name": f_name,
+                            "page": 1, "content": text
+                        })
+
+            # 构造气泡上方的可点击链接
+            from urllib.parse import quote
+            link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
+            html_link = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
+
+            if not hasattr(self, 'external_context_html'):
+                self.external_context_html = ""
+            self.external_context_html += html_link
+
+            self.input_container.show_context_preview(f_name)
+            ToastManager().show(f"Attached local file: {f_name}", "success")
+        except Exception as e:
+            ToastManager().show(f"Failed to read file: {e}", "error")
 
     def on_kb_modified(self, kb_id):
         if not self.history: return
@@ -717,10 +819,6 @@ class ChatTool(BaseTool):
             self.model_selector.load_llm_configs()
 
     def process_send(self, text, is_retry=False):
-        from src.core.model_manager import ModelManager
-        from src.ui.components.dialog import StandardDialog
-        from src.ui.components.toast import ToastManager
-
         # 1. 获取并格式化 KB ID
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
@@ -744,7 +842,7 @@ class ChatTool(BaseTool):
                 GlobalSignals().request_model_download.emit(missing_id, m_type)
                 return
 
-        # 2. 语言检测逻辑 (保持原样)
+        # 3. 语言检测逻辑
         trans_config = self.combo_trans_llm.currentData()
         is_english = True
         try:
@@ -755,7 +853,13 @@ class ChatTool(BaseTool):
 
         requires_translation = (not is_english) and (trans_config is not None)
 
-        # 3. UI 切换与历史记录
+        # 4. 获取当前附件数据
+        current_html = getattr(self, 'external_context_html', "")
+        current_chunks = getattr(self, 'external_chunks', [])
+        self.external_context_html = ""
+        self.external_chunks = []
+
+        # 5. UI 切换与历史记录
         self.input_container.btn_retry.setVisible(False)
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
@@ -763,8 +867,20 @@ class ChatTool(BaseTool):
         if not is_retry:
             self.logger.info(f"🗣️ User asked: {text[:50]}... (KB: {kb_id})")
             self.input_container.clear_text()
-            self.add_bubble(text, is_user=True)
-            self.history.append({"role": "user", "content": text})
+
+            # 将上下文的 HTML 链接渲染在气泡上方
+            self.add_bubble(text, is_user=True, context_html=current_html if current_html else None)
+
+            # 把块内容拼接到 LLM 的历史记录里，确保大模型能看到文本
+            llm_text = text
+            if current_chunks:
+                context_block = "\n".join(
+                    [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in current_chunks])
+                llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
+
+            self.history.append({"role": "user", "content": llm_text})
+
+        self.input_container.hide_context_preview()
 
         self.start_ai_response(kb_id, requires_translation)
 
@@ -783,8 +899,7 @@ class ChatTool(BaseTool):
             # 直接走重试通道，不新增气泡
             self.process_send(last_user_text, is_retry=True)
 
-
-    def add_bubble(self, text, is_user):
+    def add_bubble(self, text, is_user, context_html=None):
         if self.chat_layout.count() > 0:
             item = self.chat_layout.itemAt(self.chat_layout.count() - 1)
             if item.spacerItem(): self.chat_layout.removeItem(item)
@@ -796,13 +911,17 @@ class ChatTool(BaseTool):
                     if isinstance(w, ChatBubbleWidget) and w.is_user: w.disable_edit()
 
         index = len(self.history)
-        bubble = ChatBubbleWidget(text, is_user, index)
+
+        bubble = ChatBubbleWidget(text, is_user, index, context_html=context_html)
+
         bubble.index = index
 
         if is_user:
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
+            bubble.sig_link_clicked.connect(self.handle_link_click)
         else:
             bubble.lbl_text.linkActivated.connect(self.handle_link_click)
+
         self.chat_layout.addWidget(bubble)
         self.chat_layout.addStretch()
         QThread.msleep(10)
@@ -842,9 +961,11 @@ class ChatTool(BaseTool):
             kb_id=kb_id,
             requires_translation=requires_translation,
             use_thinking_model=use_think,
-            external_context=getattr(self, 'external_context_buffer', "")
+            external_context=getattr(self, 'external_chunks', [])
         )
-        self.external_context_buffer = ""
+        self.external_chunks = []
+        self.external_context_html = ""
+        self.input_container.hide_context_preview()
         self.worker.moveToThread(self.thread)
 
         try:
@@ -909,17 +1030,42 @@ class ChatTool(BaseTool):
             self.scroll_to_bottom()
 
     def handle_external_send(self, context_text, prompt_text=""):
-        """
-        接收跨组件投递的文本（例如 RSS 摘要或 PDF 片段）并自动触发对话，同时跳转到该 Tab
-        """
-        self.external_context_buffer = context_text
+        import tempfile
+        import os
+        from urllib.parse import quote
 
+        # 1. 将纯文本伪装成本地物理文件，供 TextViewer 读取
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, "scholar_navis_external_context.txt")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(context_text)
+        except Exception as e:
+            self.logger.error(f"Failed to write temp external context: {e}")
+
+        # 2. 兼容投递给大模型的 Chunks
+        self.external_chunks = [{
+            "path": temp_path,
+            "name": "External Context.txt",
+            "page": 1,
+            "content": context_text
+        }]
+
+        # 3. 生成带 <a> 标签的可点击 URI 链接
+        safe_path = quote(temp_path)
+        safe_name = quote("External Context.txt")
+        link = f"cite://view?path={safe_path}&page=1&name={safe_name}"
+
+        # 提取前 80 个字符做预览，去掉换行符保持气泡紧凑
+        preview_text = context_text[:80].replace('\n', ' ') + "..."
+        self.external_context_html = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {preview_text} (Click to read more)</a></div>"
+
+        # 4. 界面焦点跳转与预览 UI 逻辑
         p = self.widget
         while p:
             if hasattr(p, 'setCurrentWidget'):
                 try:
                     p.setCurrentWidget(self.widget)
-                    # Force the sidebar to synchronize its active selection
                     main_window = p.window()
                     if hasattr(main_window, 'sidebar'):
                         idx = p.indexOf(self.widget)
@@ -929,17 +1075,122 @@ class ChatTool(BaseTool):
                     pass
             p = p.parentWidget()
 
-        # 确保主窗口获焦显示
         if self.widget.window():
             self.widget.window().showNormal()
             self.widget.window().raise_()
             self.widget.window().activateWindow()
 
         if prompt_text:
-            self.input_container.set_text(prompt_text)
             self.process_send(prompt_text)
         else:
             self.input_container.set_text("Please summarize this content and extract key insights.")
+            self.input_container.show_context_preview("External Information (RSS/Web)")
+
+    def show_attachment_menu(self):
+        menu = QMenu(self.widget)
+        menu.setStyleSheet("""
+            QMenu { background-color: #2d2d30; color: white; border: 1px solid #444; } 
+            QMenu::item { padding: 6px 20px; }
+            QMenu::item:selected { background-color: #007acc; }
+        """)
+
+        act_kb = menu.addAction("🗂️ Select from Knowledge Base")
+        act_local = menu.addAction("💻 Upload Local File")
+
+        act_kb.triggered.connect(self.attach_from_kb)
+        act_local.triggered.connect(self.attach_from_local)
+
+        menu.exec(QCursor.pos())
+
+    def clear_attached_context(self):
+        self.external_chunks = []
+        self.external_context_html = ""
+        self.input_container.hide_context_preview()
+
+
+
+    def attach_from_kb(self):
+        kb_data = self.combo_kb.currentData()
+        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
+
+        if not kb_id or kb_id == "none":
+            ToastManager().show("Please select a Knowledge Base from the top dropdown first.", "warning")
+            return
+
+        files = self.kb_manager.get_kb_files(kb_id)
+        if not files:
+            ToastManager().show("The selected Knowledge Base is empty.", "warning")
+            return
+
+        # 简单的文件选择弹窗
+        dlg = QDialog(self.widget)
+        dlg.setWindowTitle("Select Files from KB")
+        dlg.setFixedSize(400, 300)
+        dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
+        layout = QVBoxLayout(dlg)
+
+        list_widget = QListWidget()
+        list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        list_widget.setStyleSheet("background-color: #252526; border: 1px solid #444;")
+        for f in files:
+            item = QListWidgetItem(f['name'])
+            item.setData(Qt.UserRole, f['path'])
+            list_widget.addItem(item)
+
+        layout.addWidget(QLabel("Hold Ctrl/Shift to select multiple files:"))
+        layout.addWidget(list_widget)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        layout.addWidget(btn_box)
+
+        if dlg.exec():
+            selected_items = list_widget.selectedItems()
+            if not selected_items: return
+
+            if not hasattr(self, 'external_chunks'):
+                self.external_chunks = []
+            if not hasattr(self, 'external_context_html'):
+                self.external_context_html = ""
+
+            names = []
+            for item in selected_items:
+                f_path = item.data(Qt.UserRole)
+                f_name = item.text()
+                try:
+                    # 按照 PDF 页数进行精确切片
+                    if f_name.lower().endswith('.pdf') or f_path.lower().endswith('.pdf'):
+                        import fitz
+                        with fitz.open(f_path) as doc:
+                            for i, page in enumerate(doc):
+                                text = page.get_text().strip()
+                                if len(text) > 10:
+                                    self.external_chunks.append({
+                                        "path": f_path, "name": f_name,
+                                        "page": i + 1, "content": text
+                                    })
+                    else:
+                        # 🚨 修正：直接原生读取，不用那个根本不存在的 read_file_content
+                        with open(f_path, 'r', encoding='utf-8') as f:
+                            content = f.read().strip()
+                            if content:
+                                self.external_chunks.append({
+                                    "path": f_path, "name": f_name,
+                                    "page": 1, "content": content
+                                })
+
+                    names.append(f_name)
+                    # 构造气泡上方的可点击链接
+                    from urllib.parse import quote
+                    link = f"cite://view?path={quote(f_path)}&page=1&name={quote(f_name)}"
+                    self.external_context_html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
+                except Exception as e:
+                    print(f"Failed to read {f_name}: {e}")
+
+            if names:
+                self.input_container.show_context_preview(", ".join(names))
+                ToastManager().show(f"Attached {len(names)} document(s).", "success")
 
 
     def update_ai_bubble(self, token):

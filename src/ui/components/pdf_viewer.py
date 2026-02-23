@@ -144,7 +144,7 @@ class InternalPDFViewer(QMainWindow):
         # 减去滚动条余量防止出现横向滚动条
         view_w = self.scroll_area.viewport().width() - 25
         self.zoom_factor = view_w / page.rect.width
-        if self.doc.is_open: self.render_page()
+        if not self.doc.is_closed: self.render_page()
 
 
 

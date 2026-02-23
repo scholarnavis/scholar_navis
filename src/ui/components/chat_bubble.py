@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu)
+                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QTextBrowser)
 from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer
 from PySide6.QtGui import QClipboard, QGuiApplication, QCursor
 from src.ui.components.toast import ToastManager
@@ -9,12 +9,14 @@ import re
 
 class ChatBubbleWidget(QWidget):
     sig_edit_confirmed = Signal(int, str)
+    sig_link_clicked = Signal(str)
 
-    def __init__(self, text, is_user, index, parent=None):
+    def __init__(self, text, is_user, index, context_html=None, parent=None):
         super().__init__(parent)
         self.original_text = text
         self.is_user = is_user
         self.index = index
+        self.context_html = context_html
         self.is_editing = False
         self._can_edit = True
 
@@ -25,6 +27,7 @@ class ChatBubbleWidget(QWidget):
 
         self.init_ui()
 
+
     def init_ui(self):
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(10, 5, 10, 15)
@@ -33,28 +36,57 @@ class ChatBubbleWidget(QWidget):
         self.spacer = QWidget()
         self.spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-        # 核心：最大化容器
         self.content_container = QWidget()
         self.content_container.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
 
         self.content_layout = QVBoxLayout(self.content_container)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
-        self.content_layout.setSpacing(6)  # 默认阅读模式间距：6px (舒适)
+        self.content_layout.setSpacing(6)
         self.content_layout.setAlignment(Qt.AlignTop)
+
+        font_family = (
+            "'Microsoft YaHei', 'PingFang SC', 'Segoe UI', "
+            "'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif"
+        )
+
+        if self.is_user and self.context_html:
+            self.ctx_frame = QFrame()
+            self.ctx_frame.setStyleSheet("""
+                        QFrame { background-color: rgba(0, 0, 0, 0.2); border-left: 3px solid #05B8CC; border-radius: 4px; }
+                    """)
+            ctx_layout = QVBoxLayout(self.ctx_frame)
+            ctx_layout.setContentsMargins(10, 8, 10, 8)
+            ctx_layout.setSpacing(4)
+
+            ctx_header = QLabel("📎 Attached Context (Click to View)")
+            ctx_header.setStyleSheet(
+                f"color: #05B8CC; font-size: 11px; font-weight: bold; border: none; background: transparent; font-family: {font_family};")
+
+            ctx_content = QLabel()
+            ctx_content.setTextFormat(Qt.RichText)
+            ctx_content.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            ctx_content.setOpenExternalLinks(False)
+            ctx_content.linkActivated.connect(self.sig_link_clicked.emit)
+            ctx_content.setText(self.context_html)
+            ctx_content.setWordWrap(True)
+
+            self.ctx_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            ctx_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+
+            ctx_content.setStyleSheet(
+                f"color: #aaa; font-size: 12px; border: none; background: transparent; font-family: {font_family}; margin: 0px; padding: 0px;")
+
+            ctx_layout.addWidget(ctx_header)
+            ctx_layout.addWidget(ctx_content)
+            self.content_layout.addWidget(self.ctx_frame)
 
         self.lbl_text = QLabel()
         self.lbl_text.setWordWrap(True)
         self.lbl_text.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.lbl_text.setOpenExternalLinks(False)
         self.lbl_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-
         self.lbl_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
-
-        font_family = (
-            "'Microsoft YaHei', 'PingFang SC', 'Segoe UI', "
-            "'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif"
-        )
 
         if self.is_user:
             bg_color = "#124126"
@@ -85,7 +117,6 @@ class ChatBubbleWidget(QWidget):
 
         self.set_content(self.original_text)
 
-        # 灵动自适应编辑框
         self.edit_input = QTextEdit()
         self.edit_input.setVisible(False)
         self.edit_input.setStyleSheet(f"""
@@ -101,7 +132,6 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.addWidget(self.lbl_text)
         self.content_layout.addWidget(self.edit_input)
 
-        # 按钮条 1：常规模式（复制 / 编辑）
         self.btn_widget = QWidget()
         self.btn_layout = QHBoxLayout(self.btn_widget)
         self.btn_layout.setContentsMargins(0, 0, 5, 0)
@@ -113,14 +143,14 @@ class ChatBubbleWidget(QWidget):
             QPushButton:hover { color: #ccc; background-color: #444; }
         """
 
-        self.btn_copy = QPushButton("📄 复制")
+        self.btn_copy = QPushButton("📄 Copy")
         self.btn_copy.setCursor(Qt.PointingHandCursor)
         self.btn_copy.setStyleSheet(btn_style)
         self.btn_copy.clicked.connect(self.copy_text)
         self.btn_layout.addWidget(self.btn_copy)
 
         if self.is_user:
-            self.btn_edit = QPushButton("✎ 编辑")
+            self.btn_edit = QPushButton("✎ Edit")
             self.btn_edit.setCursor(Qt.PointingHandCursor)
             self.btn_edit.setStyleSheet(btn_style)
             self.btn_edit.clicked.connect(self.toggle_edit)
@@ -128,7 +158,6 @@ class ChatBubbleWidget(QWidget):
 
         self.content_layout.addWidget(self.btn_widget)
 
-        # 🚀 按钮条 2：编辑模式（取消 / 确定）
         if self.is_user:
             self.edit_btn_widget = QWidget()
             self.edit_btn_layout = QHBoxLayout(self.edit_btn_widget)
@@ -136,12 +165,12 @@ class ChatBubbleWidget(QWidget):
             self.edit_btn_layout.setSpacing(10)
             self.edit_btn_layout.setAlignment(btn_alignment)
 
-            self.btn_cancel = QPushButton("❌ 取消")
+            self.btn_cancel = QPushButton("❌ Cancel")
             self.btn_cancel.setCursor(Qt.PointingHandCursor)
             self.btn_cancel.setStyleSheet(btn_style)
             self.btn_cancel.clicked.connect(self.cancel_edit)
 
-            self.btn_confirm = QPushButton("✅ 确定 (Enter)")
+            self.btn_confirm = QPushButton("✅ Confirm (Enter)")
             self.btn_confirm.setCursor(Qt.PointingHandCursor)
             confirm_style = """
                 QPushButton { background-color: #007acc; border: none; color: white; font-size: 12px; padding: 5px 12px; border-radius: 4px; font-weight: bold;} 
