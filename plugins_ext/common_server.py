@@ -1,4 +1,5 @@
-# plugins/common_server.py
+# plugins_ext/common_server.py
+# External expansion tool (MCP)
 import json
 import logging
 import os
