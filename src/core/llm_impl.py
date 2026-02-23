@@ -12,18 +12,18 @@ class OpenAICompatibleLLM:
         self.logger = logging.getLogger("LLM.Provider")
         self._is_cancelled = False
 
+        self.config_data = config or {}
+
         sys_cfg = ConfigManager().user_settings
         proxy_mode = sys_cfg.get("proxy_mode", "system")
         custom_timeout = config.get("timeout", 60.0) if config else 60.0
         httpx_kwargs = {"timeout": custom_timeout}
-        httpx_kwargs = {"timeout": 60.0}
         proxy_cfg = _get_explicit_proxy_kwargs()
         httpx_kwargs.update(proxy_cfg)
 
         try:
             self._httpx_client = httpx.Client(**httpx_kwargs)
         except TypeError:
-            # 兼容低版本/不同系统的 httpx 代理参数名差异
             if "proxy" in httpx_kwargs:
                 httpx_kwargs["proxies"] = httpx_kwargs.pop("proxy")
             self._httpx_client = httpx.Client(**httpx_kwargs)
@@ -55,28 +55,70 @@ class OpenAICompatibleLLM:
         except Exception:
             pass
 
+    def _parse_custom_params(self, params_list: List[Dict]) -> Dict:
+        res = {}
+        if not params_list: return res
+
+        for p in params_list:
+            name = p.get("name", "").strip()
+            if not name: continue
+
+            val_str = str(p.get("value", ""))
+            ptype = p.get("type", "str")
+
+            try:
+                if ptype == "int":
+                    res[name] = int(val_str)
+                elif ptype == "float":
+                    res[name] = float(val_str)
+                elif ptype == "bool":
+                    res[name] = val_str.lower() in ['true', '1', 'yes', 'on']
+                else:
+                    res[name] = val_str
+            except ValueError:
+                self.logger.warning(f"Parameter Parse Warning: Cannot cast '{name}' ({val_str}) to {ptype}. Skipping.")
+
+        return res
+
     def stream_chat(self, messages: List[Dict[str, str]]) -> Generator[str, None, None]:
         try:
-            # 1. 基础参数
             kwargs = {
                 "model": self.model_name,
                 "messages": messages,
                 "stream": True,
-                "temperature": 0.7,
-                "max_tokens": 16384
             }
 
-            # 2. 动态注入 Nvidia 专属思考激活参数
-            # 通过检测 base_url 判断是否为 Nvidia 服务商
-            if "nvidia.com" in self.base_url.lower():
-                kwargs["extra_body"] = {
-                    "chat_template_kwargs": {
-                        "enable_thinking": True,
-                        "clear_thinking": False
-                    }
-                }
+            # Strategy Resolution: Isolate parameters per specific model
+            models_config = self.config_data.get("models_config", {})
+            current_model_conf = models_config.get(self.model_name, {})
 
-            self.logger.debug(f"Calling LLM API with kwargs: {kwargs.keys()}")
+            if current_model_conf:
+                param_mode = current_model_conf.get("mode", "inherit")
+                model_params = current_model_conf.get("params", [])
+            else:
+                # Fallback for backward compatibility
+                param_mode = self.config_data.get("model_params_mode", "inherit")
+                model_params = self.config_data.get("model_params", [])
+
+            provider_params = self.config_data.get("provider_params", [])
+            custom_params = {}
+
+            if param_mode == "inherit":
+                custom_params = self._parse_custom_params(provider_params)
+            elif param_mode == "custom":
+                custom_params = self._parse_custom_params(model_params)
+            # If mode == "closed", custom_params remains empty
+
+            safe_custom_params = {
+                k: v for k, v in custom_params.items()
+                if k not in ["messages", "model", "stream"]
+            }
+
+            kwargs.update(safe_custom_params)
+
+            log_kwargs = {k: v for k, v in kwargs.items() if k != 'messages'}
+            self.logger.info(f"Stream generation requested. Config applied [Mode: {param_mode}]: {log_kwargs}")
+
             response = self.client.chat.completions.create(**kwargs)
 
             is_thinking = False
@@ -93,7 +135,6 @@ class OpenAICompatibleLLM:
                 delta = getattr(chunk.choices[0], "delta", None)
                 if not delta: continue
 
-                # 1. 处理思考内容 (Reasoning)
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if reasoning:
                     if not is_thinking:
@@ -101,16 +142,13 @@ class OpenAICompatibleLLM:
                         is_thinking = True
                     yield reasoning
 
-                # 2. 处理正式内容 (Content)
                 content = getattr(delta, 'content', None)
                 if content:
                     if is_thinking:
-                        # 只有当正式内容出现时，才闭合思考标签
                         yield "\n</think>\n"
                         is_thinking = False
                     yield content
 
-                # 异常中断补全标签
             if is_thinking:
                 yield "\n</think>\n"
 
@@ -118,11 +156,7 @@ class OpenAICompatibleLLM:
             error_msg = str(e).lower()
             if self._is_cancelled or "closed" in error_msg or "cancelled" in error_msg:
                 self.logger.info("LLM Socket connection closed by user cancellation.")
-                if 'is_thinking' in locals() and is_thinking:
-                    yield "\n</think>\n"
                 yield "\n\n[⛔ Generation halted by user.]"
             else:
-                self.logger.error(f"LLM Stream Error: {error_msg}")
-                if 'is_thinking' in locals() and is_thinking:
-                    yield "\n</think>\n"
-                yield f"\n\n[⚠System Error: {str(e)}]\n"
+                self.logger.error(f"LLM API Stream Error: {str(e)}")
+                yield f"\n\n[System Error: {str(e)}]\n"

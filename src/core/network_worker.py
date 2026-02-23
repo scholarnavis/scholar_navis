@@ -108,8 +108,9 @@ class LightNetworkWorker(QObject):
         finally:
             self._req_session.close()
 
-    def test_api(self, base_url, api_key, model_name):
+    def test_api(self, base_url, api_key, model_name, custom_params=None):
         self._is_cancelled = False
+        custom_params = custom_params or {}
 
         # 显式注入 httpx 代理
         httpx_kwargs = {"timeout": 15.0}
@@ -123,28 +124,34 @@ class LightNetworkWorker(QObject):
                 http_client=self._httpx_client
             )
 
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": "Hello. Please reply with exactly one word: 'OK'."}],
-                max_tokens=5
-            )
+            # 基础请求参数
+            kwargs = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": "Hello. Please reply with exactly one word: 'OK'."}],
+                "max_tokens": 5
+            }
+
+            # 安全合并自定义参数（防止覆盖掉系统必需的 model 和 messages）
+            for k, v in custom_params.items():
+                if k not in ["model", "messages"]:
+                    kwargs[k] = v
+
+            response = client.chat.completions.create(**kwargs)
 
             msg_obj = response.choices[0].message
             raw_content = msg_obj.content
 
             if raw_content is None:
-                # 兼容 1：检查是不是“纯思考模型”把内容放到了 reasoning_content 里
+                # 兼容纯思考模型或被服务商安全护栏拦截的情况
                 if hasattr(msg_obj, 'reasoning_content') and msg_obj.reasoning_content:
-                    raw_content = f"[Thinking Process] {msg_obj.reasoning_content}"
+                    raw_content = f"{msg_obj.reasoning_content}"
                 else:
-                    # 兼容 2：如果啥都没有，说明被 Nvidia 官方安全护栏拦截，或者纯粹返回了空值
                     raw_content = "[Empty Response / Filtered by Provider]"
 
             reply = raw_content.strip()
 
             self.sig_test_finished.emit(True,
                                         f"✅ API connectivity is excellent!\nModel '{model_name}' responded successfully:\n'{reply}'")
-
 
         except Exception as e:
             if self._is_cancelled or "closed" in str(e).lower():
@@ -154,10 +161,16 @@ class LightNetworkWorker(QObject):
         finally:
             self._httpx_client.close()
 
+
     def do_fetch_models(self):
         self.fetch_models(getattr(self, 'base_url', ''), getattr(self, 'api_key', ''))
 
-    def do_test_api(self):
-        self.test_api(getattr(self, 'base_url', ''), getattr(self, 'api_key', ''), getattr(self, 'model_name', ''))
 
+    def do_test_api(self):
+        self.test_api(
+            getattr(self, 'base_url', ''),
+            getattr(self, 'api_key', ''),
+            getattr(self, 'model_name', ''),
+            getattr(self, 'custom_params', {})
+        )
 

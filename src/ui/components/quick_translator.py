@@ -25,13 +25,12 @@ class TranslatorWorker(QObject):
     sig_finished = Signal()
     sig_error = Signal(str)
 
-    def __init__(self, text, source_lang, target_lang, llm_config, use_think):
+    def __init__(self, text, source_lang, target_lang, llm_config):
         super().__init__()
         self.text = text
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.llm_config = llm_config
-        self.use_think = use_think
         self.llm = None
         self._is_cancelled = False
 
@@ -48,8 +47,6 @@ class TranslatorWorker(QObject):
                 return
 
             cfg = self.llm_config.copy()
-            if self.use_think and cfg.get("thinking_model_name"):
-                cfg["model_name"] = cfg["thinking_model_name"]
             cfg["timeout"] = 15.0
             self.llm = OpenAICompatibleLLM(cfg)
 
@@ -181,14 +178,24 @@ class QuickTranslatorWindow(QWidget):
         frame_layout.addWidget(self.input_box)
 
         ctrl_bar = QHBoxLayout()
+        ctrl_bar = QHBoxLayout()
         self.btn_trans = QPushButton("🚀 Translate / Polish")
+        self.btn_stop = QPushButton("⏹ Stop")  # NEW STOP BUTTON
         self.btn_clear = QPushButton("🧹 Clear")
+
         self.btn_trans.setStyleSheet(
             "background-color: #007acc; color: white; border-radius: 6px; padding: 6px; font-weight: bold;")
+        self.btn_stop.setStyleSheet(
+            "background-color: #c42b1c; color: white; border-radius: 6px; padding: 6px; font-weight: bold;")
+        self.btn_stop.setVisible(False)
         self.btn_clear.setStyleSheet("background-color: #333; color: white; border-radius: 6px; padding: 6px;")
+
         self.btn_trans.clicked.connect(self._start_translation)
+        self.btn_stop.clicked.connect(self._stop_translation)
         self.btn_clear.clicked.connect(self._clear_all)
+
         ctrl_bar.addWidget(self.btn_trans)
+        ctrl_bar.addWidget(self.btn_stop)
         ctrl_bar.addWidget(self.btn_clear)
         frame_layout.addLayout(ctrl_bar)
 
@@ -196,6 +203,14 @@ class QuickTranslatorWindow(QWidget):
         self.output_box.setStyleSheet(
             "background-color: #1e1e1e; color: #fff; border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 14px;")
         frame_layout.addWidget(self.output_box)
+
+    def _stop_translation(self):
+        if self.worker_thread and self.worker_thread.isRunning():
+            self.worker.cancel()
+            self.output_box.append("<br><span style='color:#e6a23c;'><b>[⏹ Stopped by User]</b></span>")
+            self._on_translation_finished()
+
+
 
     def _toggle_pin(self):
         """切换置顶状态，并刷新 Window Flags 和图标"""
@@ -271,12 +286,24 @@ class QuickTranslatorWindow(QWidget):
 
         self.output_box.clear()
         self.output_box.setHtml("<span style='color:#05B8CC;'><i>AI is preparing...</i></span>")
-        self.btn_trans.setEnabled(False)
+        self.btn_trans.setVisible(False)
+        self.btn_stop.setVisible(True)
+
+        # Fetch Dedicated Translation Config from ConfigManager
+        trans_id = self.cfg_mgr.user_settings.get("trans_llm_id")
+        # Load the full list from llm_config.json to find the matching provider
+        import json, os
+        trans_config = None
+        path = os.path.join(os.getcwd(), "config", "llm_config.json")
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                configs = json.load(f)
+                trans_config = next((c for c in configs if c.get("id") == trans_id), configs[0] if configs else None)
 
         self.worker_thread = QThread()
         self.worker = TranslatorWorker(
             text, self.combo_src.currentText(), self.combo_tgt.currentText(),
-            self.model_selector.get_current_config(), self.model_selector.is_think_mode()
+            trans_config
         )
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
@@ -294,8 +321,9 @@ class QuickTranslatorWindow(QWidget):
         self.worker_thread.start()
 
     def _on_translation_finished(self):
+        self.btn_stop.setVisible(False)
+        self.btn_trans.setVisible(True)
         self.btn_trans.setEnabled(True)
-
 
     def _on_token(self, token):
         self.current_out_text += token

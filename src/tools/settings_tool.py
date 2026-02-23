@@ -10,7 +10,8 @@ import time
 import qdarktheme
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QMessageBox,
-                               QScrollArea, QHBoxLayout, QComboBox)
+                               QScrollArea, QHBoxLayout, QComboBox, QTableWidget, QAbstractItemView, QHeaderView,
+                               QTableWidgetItem, QFrame)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from huggingface_hub import constants
 
@@ -18,13 +19,14 @@ from src.core.core_task import TaskState, TaskManager
 from src.core.device_manager import DeviceManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, check_model_exists, resolve_auto_model)
-from src.core.network_worker import setup_global_network_env
+from src.core.network_worker import setup_global_network_env, LightNetworkWorker
 from src.core.signals import GlobalSignals
 from src.tools.base_tool import BaseTool
 from src.core.config_manager import ConfigManager
 from src.task.hf_download_task import RealTimeHFDownloadTask
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import ProgressDialog, StandardDialog
+from src.ui.components.toast import ToastManager
 
 
 class DownloadCancelledException(Exception):
@@ -126,6 +128,7 @@ class SettingsTool(BaseTool):
         self.widget = None
         self.llm_configs = []
         self.logger = logging.getLogger("SettingsTool")
+        self._is_updating_model_ui = False
 
         GlobalSignals().request_model_download.connect(self.on_download_requested)
 
@@ -142,25 +145,13 @@ class SettingsTool(BaseTool):
         self.layout = QVBoxLayout(content)
         self.layout.setSpacing(20)
 
-        # 硬件详情
         self.init_hardware_section()
-
-        # 网络设置
         self.init_network_section()
-
-        # 模型管理 (Embedding & Reranker)
         self.init_model_section()
-
-        # LLM API 配置 (动态 JSON 管理)
         self.init_llm_section()
-
-        #  生物学数据库配置
         self.init_ncbi_section()
-
-        # 系统设置
         self.init_system_section()
 
-        # Save Button
         btn_save = QPushButton("💾 Save Settings & Verify Models")
         btn_save.setCursor(Qt.PointingHandCursor)
         btn_save.setStyleSheet("""
@@ -229,7 +220,6 @@ class SettingsTool(BaseTool):
         status_color = "#4caf50" if info['cuda_support'] else "#ff9800"
         cuda_status = "Available" if info['cuda_support'] else "Not Available"
 
-        # 构建显卡版本详情字符串
         if info['cuda_support']:
             ver_info = f"Toolkit: {info['torch_cuda_ver']} | Driver: {info['gpu_driver_ver']}"
         else:
@@ -253,12 +243,10 @@ class SettingsTool(BaseTool):
     def init_ncbi_section(self):
         group = QGroupBox("Academic Databases (NCBI & Semantic Scholar)")
         group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }"
-        )
+            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
-        # [保留 NCBI 邮箱和 Key 的代码]
         self.input_ncbi_email = QLineEdit()
         self.input_ncbi_email.setPlaceholderText("Required: e.g. user@university.edu")
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
@@ -270,14 +258,12 @@ class SettingsTool(BaseTool):
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
         self.input_ncbi_api_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
-        # 🆕 新增 Semantic Scholar API Key 输入框
         self.input_s2_api_key = QLineEdit()
         self.input_s2_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
         self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
         self.input_s2_api_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
-        # 🆕 更新提示信息，包含 S2 的申请链接
         lbl_hint = QLabel(
             "💡 <b>Important Notice:</b><br>"
             "• <b>NCBI:</b> API Key increases limits from 3 to 10 requests/sec. "
@@ -296,7 +282,6 @@ class SettingsTool(BaseTool):
 
         self.layout.addWidget(group)
 
-
     def init_network_section(self):
         group = QGroupBox("Network & Proxy")
         group.setStyleSheet(
@@ -304,22 +289,18 @@ class SettingsTool(BaseTool):
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
-        # 🌟 新增：代理模式选择
         self.combo_proxy_mode = BaseComboBox()
         self.combo_proxy_mode.addItems(["System Proxy (Default)", "No Proxy (Direct)", "Custom Proxy"])
 
-        # 映射配置字符串到 Index
         current_mode = self.config.user_settings.get("proxy_mode", "system")
         mode_map = {"system": 0, "off": 1, "custom": 2}
         self.combo_proxy_mode.setCurrentIndex(mode_map.get(current_mode, 0))
 
-        # 代理地址输入框
         self.input_proxy = QLineEdit()
         self.input_proxy.setPlaceholderText("e.g. http://127.0.0.1:7890")
         self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
         self.input_proxy.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
-        # 镜像地址
         self.input_mirror = QLineEdit()
         self.input_mirror.setPlaceholderText("Leave empty for default (huggingface.co)")
         self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
@@ -332,7 +313,6 @@ class SettingsTool(BaseTool):
         layout.addRow("Proxy URL:", self.input_proxy)
         layout.addRow("HF Mirror:", self.input_mirror)
 
-
         self.layout.addWidget(group)
 
     def _on_proxy_mode_changed(self, index):
@@ -342,7 +322,6 @@ class SettingsTool(BaseTool):
             self.input_proxy.setStyleSheet("background: #222; color: #666; border: 1px solid #444; padding: 5px;")
         else:
             self.input_proxy.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
-
 
     def init_model_section(self):
         group = QGroupBox("🧠 AI Models Configuration")
@@ -388,25 +367,30 @@ class SettingsTool(BaseTool):
         QThread.msleep(50)
         self.check_models_status()
 
-
-    # =========================================================================
-    # 🌟 LLM API 动态配置模块
-    # =========================================================================
     def _load_llm_config(self):
         config_path = os.path.join(os.getcwd(), "config", "llm_config.json")
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
         default_config = [
-            {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "gpt-4o", "thinking_model_name": "o3", "api_key": ""},
-            {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1", "model_name": "deepseek-chat", "thinking_model_name": "deepseek-reasoner", "api_key": ""},
-            {"id": "gemini", "name": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "gemini-3-pro", "thinking_model_name": "gemini-3-pro-thinking", "api_key": ""},
-            {"id":"Zhipu","name":"Zhipu GLM","base_url":"https://open.bigmodel.cn/api/coding/paas/v4/","model_name":"glm-5","thinking_model_name":"glm-5", "api_key": ""},
-            {"id": "anthropic", "name": "Anthropic", "base_url": "https://api.anthropic.com/v1", "model_name": "claude-3-5-sonnet-latest", "thinking_model_name": "claude-3-7-sonnet-thinking", "api_key": ""},
-            {"id": "nvidia", "name": "Nvidia Build", "base_url": "https://integrate.api.nvidia.com/v1", "model_name": "meta/llama-3.1-70b-instruct", "thinking_model_name": "", "api_key": ""},
-            {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model_name": "qwen-plus", "thinking_model_name": "qwen-max", "api_key": ""},
-            {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4", "model_name": "glm-4-plus", "thinking_model_name": "glm-4-long", "api_key": ""},
-            {"id": "siliconflow", "name": "SiliconFlow (硅基流动)", "base_url": "https://api.siliconflow.cn/v1", "model_name": "deepseek-ai/DeepSeek-V3", "thinking_model_name": "deepseek-ai/DeepSeek-R1", "api_key": ""},
-            {"id": "custom", "name": "Local Custom (Ollama)", "base_url": "http://localhost:11434/v1", "model_name": "llama3", "thinking_model_name": "", "api_key": "ollama"}
+            {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "gpt-4o",
+             "api_key": ""},
+            {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
+             "model_name": "deepseek-chat", "api_key": ""},
+            {"id": "gemini", "name": "Google Gemini",
+             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "gemini-3-pro",
+             "api_key": ""},
+            {"id": "anthropic", "name": "Anthropic", "base_url": "https://api.anthropic.com/v1",
+             "model_name": "claude-3-5-sonnet-latest", "api_key": ""},
+            {"id": "nvidia", "name": "Nvidia Build", "base_url": "https://integrate.api.nvidia.com/v1",
+             "model_name": "meta/llama-3.1-70b-instruct", "api_key": ""},
+            {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+             "model_name": "qwen-plus", "api_key": ""},
+            {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
+             "model_name": "glm-4-plus", "api_key": ""},
+            {"id": "siliconflow", "name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1",
+             "model_name": "deepseek-ai/DeepSeek-V3", "api_key": ""},
+            {"id": "custom", "name": "Local Custom (Ollama)", "base_url": "http://localhost:11434/v1",
+             "model_name": "llama3", "api_key": "ollama"}
         ]
 
         loaded_configs = []
@@ -414,6 +398,18 @@ class SettingsTool(BaseTool):
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     loaded_configs = json.load(f)
+                    for cfg in loaded_configs:
+                        cfg.pop("thinking_model_name", None)
+
+                        # Migrate old provider-level params to model-specific structure
+                        if "model_params_mode" in cfg and "models_config" not in cfg:
+                            m_name = cfg.get("model_name", "default")
+                            cfg["models_config"] = {
+                                m_name: {
+                                    "mode": cfg.get("model_params_mode", "inherit"),
+                                    "params": cfg.get("model_params", [])
+                                }
+                            }
             except Exception as e:
                 self.logger.error(f"Error loading llm_config.json: {e}")
 
@@ -433,9 +429,7 @@ class SettingsTool(BaseTool):
 
         return loaded_configs if loaded_configs else default_config
 
-
     def _save_llm_config(self):
-        """将当前内存中的 LLM 配置列表写入 llm_config.json"""
         config_path = os.path.join(os.getcwd(), "config", "llm_config.json")
         try:
             with open(config_path, 'w', encoding='utf-8') as f:
@@ -444,6 +438,9 @@ class SettingsTool(BaseTool):
             self.logger.error(f"Error saving llm_config.json: {e}")
 
     def init_llm_section(self):
+        from src.ui.components.param_editor import ParamEditorWidget
+        from PySide6.QtWidgets import QFrame
+
         group = QGroupBox("💬 LLM Generation API")
         group.setStyleSheet(
             "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
@@ -452,7 +449,6 @@ class SettingsTool(BaseTool):
 
         self.llm_configs = self._load_llm_config()
 
-        # --- 服务商选择栏 ---
         header_layout = QHBoxLayout()
         self.combo_llm_preset = BaseComboBox()
         for conf in self.llm_configs:
@@ -463,229 +459,492 @@ class SettingsTool(BaseTool):
         self.btn_del_llm = QPushButton("🗑️ Delete")
         self.btn_del_llm.clicked.connect(self._del_llm_provider)
 
+        btn_help_params = QPushButton("❓ Parameter Help")
+        btn_help_params.clicked.connect(lambda: StandardDialog(
+            self.widget, "Custom Parameter Guide",
+            "You can specify request parameters (e.g., temperature, top_p, max_tokens) for the provider or specifically for a model.\n\n"
+            "• Priority: Model Custom > Provider Inherit\n"
+            "• If 'Closed' is selected for a model, no parameters are appended.\n"
+            "• The model dropdown indicates your configuration with (⚙️ Custom) or (🚫 Closed).",
+            show_cancel=False
+        ).exec())
+
         header_layout.addWidget(self.combo_llm_preset, stretch=1)
         header_layout.addWidget(self.btn_add_llm)
         header_layout.addWidget(self.btn_del_llm)
+        header_layout.addWidget(btn_help_params)
 
-        # --- 基本信息输入栏 ---
         self.input_llm_name = QLineEdit()
-        self.input_llm_name.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
-
         self.input_llm_url = QLineEdit()
-        self.input_llm_url.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
-
         self.input_llm_key = QLineEdit()
         self.input_llm_key.setEchoMode(QLineEdit.Password)
-        self.input_llm_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+        for inp in (self.input_llm_name, self.input_llm_url, self.input_llm_key):
+            inp.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
-        # --- 🚀 混合下拉输入栏：Standard Model ---
+        self.editor_provider_params = ParamEditorWidget()
+        btn_add_provider_param = QPushButton("➕ Add Provider Parameter")
+        btn_add_provider_param.clicked.connect(lambda: self.editor_provider_params.add_param_row())
+
+        provider_param_layout = QVBoxLayout()
+        provider_param_layout.addWidget(self.editor_provider_params)
+        provider_param_layout.addWidget(btn_add_provider_param)
+
         model_layout = QHBoxLayout()
-        self.combo_llm_model = QComboBox()  # 使用标准 QComboBox 以支持原生 Editable
-        self.combo_llm_model.setEditable(True)
+        self.combo_llm_model = QComboBox()
+        self.combo_llm_model = BaseComboBox()  # 替换为不可编辑的下拉框
         self.combo_llm_model.setStyleSheet(
             "background: #333; color: #fff; border: 1px solid #555; padding: 4px; selection-background-color: #007acc;")
 
-        self.btn_fetch_models = QPushButton("🔄 Fetch Models")
-        self.btn_fetch_models.setToolTip("Refresh available models from the API")
+        self.btn_add_model = QPushButton("➕ Add")
+        self.btn_add_model.clicked.connect(self._add_llm_model)
+        self.btn_del_model = QPushButton("🗑️ Delete")
+        self.btn_del_model.clicked.connect(self._del_llm_model)
+
+        self.btn_fetch_models = QPushButton("🔄 Fetch")
         self.btn_fetch_models.clicked.connect(self._start_fetch_task)
-
-        model_layout.addWidget(self.combo_llm_model, stretch=1)
-        model_layout.addWidget(self.btn_fetch_models)
-
-        # --- 🚀 混合下拉输入栏：Thinking Model ---
-        think_layout = QHBoxLayout()
-        self.combo_llm_think = QComboBox()
-        self.combo_llm_think.setEditable(True)
-        self.combo_llm_think.setStyleSheet(
-            "background: #333; color: #fff; border: 1px solid #555; padding: 4px; selection-background-color: #007acc;")
-
-        self.btn_test_api = QPushButton("🧪 Test Connection")
-        self.btn_test_api.setToolTip("Test if the current API key and Model are working")
+        self.btn_test_api = QPushButton("🧪 Test")
         self.btn_test_api.clicked.connect(self._start_test_task)
 
-        think_layout.addWidget(self.combo_llm_think, stretch=1)
-        think_layout.addWidget(self.btn_test_api)
+        model_layout.addWidget(self.combo_llm_model, stretch=1)
+        model_layout.addWidget(self.btn_add_model)
+        model_layout.addWidget(self.btn_del_model)
+        model_layout.addWidget(self.btn_fetch_models)
+        model_layout.addWidget(self.btn_test_api)
 
-        # --- 提示语 ---
-        lbl_think_hint = QLabel(
-            "💡 <b>Tip:</b> Using advanced reasoning models (e.g., <i>DeepSeek-R1, OpenAI o3, Gemini 3 Pro Thinking</i>) "
-            "significantly improves RAG accuracy and reduces hallucinations, but will heavily increase token usage and response time."
+        self.combo_model_param_strategy = BaseComboBox()
+        self.combo_model_param_strategy.addItems(["Inherit (Provider)", "Custom (Model Only)", "Closed (No Params)"])
+
+        self.editor_model_params = ParamEditorWidget()
+
+        model_param_btn_layout = QHBoxLayout()
+        btn_add_model_param = QPushButton("➕ Add Model Parameter")
+        btn_add_model_param.clicked.connect(lambda: self.editor_model_params.add_param_row())
+
+        btn_copy_params = QPushButton("📥 Copy from Provider")
+        btn_copy_params.setToolTip("Copies global provider parameters to the current model.")
+        btn_copy_params.clicked.connect(self._on_copy_params_clicked)
+
+        model_param_btn_layout.addWidget(btn_add_model_param)
+        model_param_btn_layout.addWidget(btn_copy_params)
+
+        self.model_param_container = QWidget()
+        mp_layout = QVBoxLayout(self.model_param_container)
+        mp_layout.setContentsMargins(0, 0, 0, 0)
+        mp_layout.addWidget(self.editor_model_params)
+        mp_layout.addLayout(model_param_btn_layout)
+
+        self.combo_model_param_strategy.currentIndexChanged.connect(
+            lambda idx: self.model_param_container.setVisible(idx == 1)
         )
-        lbl_think_hint.setWordWrap(True)
-        lbl_think_hint.setStyleSheet("color: #888888; font-size: 11px; margin-top: 2px; margin-bottom: 8px;")
 
-        # --- 挂载到表单 ---
+        trans_group = QGroupBox("🌐 Translation Agent Configuration")
+        trans_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
+        trans_layout = QFormLayout(trans_group)
+        self.combo_trans_preset = BaseComboBox()
+        self.combo_trans_preset.addItem("❌ None (Disable)", None)
+        for conf in self.llm_configs:
+            self.combo_trans_preset.addItem(conf.get("name", "Unnamed Provider"), conf.get("id"))
+        trans_layout.addRow("Translation Provider:", self.combo_trans_preset)
+
         layout.addRow("Service Provider:", header_layout)
         layout.addRow("Provider Name:", self.input_llm_name)
         layout.addRow("API Base URL:", self.input_llm_url)
         layout.addRow("API Key:", self.input_llm_key)
-        layout.addRow("Standard Model:", model_layout)
-        layout.addRow("Thinking Model:", think_layout)
-        layout.addRow("", lbl_think_hint)
+        layout.addRow("Provider Params:", provider_param_layout)
+        layout.addRow(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
+        layout.addRow("Model Name:", model_layout)
+        layout.addRow("Params Strategy:", self.combo_model_param_strategy)
+        layout.addRow("", self.model_param_container)
 
         self.layout.addWidget(group)
+        self.layout.addWidget(trans_group)
 
-        # --- 信号绑定 ---
         self.combo_llm_preset.currentIndexChanged.connect(self._on_llm_preset_changed)
         self.input_llm_name.textChanged.connect(self._sync_llm_data)
         self.input_llm_url.textChanged.connect(self._sync_llm_data)
         self.input_llm_key.textChanged.connect(self._sync_llm_data)
-        self.combo_llm_model.editTextChanged.connect(self._sync_llm_data)
-        self.combo_llm_think.editTextChanged.connect(self._sync_llm_data)
+        self.combo_llm_model.currentIndexChanged.connect(self._on_model_index_changed)
+        self.combo_model_param_strategy.currentIndexChanged.connect(self._sync_llm_data)
+        self.editor_provider_params.sig_data_changed.connect(self._sync_llm_data)
+        self.editor_model_params.sig_data_changed.connect(self._sync_llm_data)
 
-        # --- 回显选择 ---
         active_id = self.config.user_settings.get("active_llm_id", "openai")
-        idx_to_select = 0
-        for i, c in enumerate(self.llm_configs):
-            if c.get("id") == active_id:
-                idx_to_select = i
-                break
-
+        idx_to_select = next((i for i, c in enumerate(self.llm_configs) if c.get("id") == active_id), 0)
         self.combo_llm_preset.setCurrentIndex(idx_to_select)
         self._on_llm_preset_changed(idx_to_select)
 
-        # 独立的翻译层模型
-        trans_layout = QHBoxLayout()
-        self.combo_trans_preset = BaseComboBox()
-        self.combo_trans_model = QComboBox()
-        self.combo_trans_model.setEditable(True)
+        trans_id = self.config.user_settings.get("trans_llm_id", None)
+        idx_trans = self.combo_trans_preset.findData(trans_id)
+        if idx_trans >= 0:
+            self.combo_trans_preset.setCurrentIndex(idx_trans)
 
-        # 提示语防呆
-        lbl_trans_hint = QLabel(
-            "⚡ <b>Tip:</b> 请选择响应速度快的小型模型（如 gpt-4o-mini, qwen-plus）作为翻译器。<br><span style='color:#ff6b6b;'>强烈建议不要使用思考模型（如 DeepSeek-R1）</span>，否则会严重拖慢对话响应速度。")
-        lbl_trans_hint.setWordWrap(True)
+    def _extract_real_model_name(self, display_text):
+        for suffix in [" (⚙️ Custom)", " (🚫 Closed)"]:
+            if display_text.endswith(suffix):
+                return display_text[:-len(suffix)]
+        return display_text
+
+    def _on_copy_params_clicked(self):
+        from src.ui.components.dialog import StandardDialog
+        from src.ui.components.toast import ToastManager
+
+        provider_params = self.editor_provider_params.extract_data()
+        if not provider_params:
+            ToastManager().show("Provider has no parameters to copy.", "info")
+            return
+
+        model_params = self.editor_model_params.extract_data()
+        model_params_dict = {p['name']: p for p in model_params if p.get('name')}
+
+        merged_params = list(model_params)
+
+        for p_param in provider_params:
+            name = p_param.get("name", "").strip()
+            if not name:
+                continue
+
+            if name in model_params_dict:
+                m_param = model_params_dict[name]
+                msg = (
+                    f"Parameter '{name}' already exists in this model.\n\n"
+                    f"【Current Model Parameter】\n"
+                    f"  • Type: {m_param.get('type')}\n"
+                    f"  • Value: {m_param.get('value')}\n\n"
+                    f"【Provider Parameter to Copy】\n"
+                    f"  • Type: {p_param.get('type')}\n"
+                    f"  • Value: {p_param.get('value')}\n\n"
+                    f"Do you want to overwrite the model's parameter with the provider's?"
+                )
+
+                # 使用自定义的 StandardDialog 解决黑暗主题适配问题
+                dlg = StandardDialog(self.widget, "Duplicate Parameter", msg, show_cancel=True)
+                reply = dlg.exec()
+
+                if reply:
+                    for i, mp in enumerate(merged_params):
+                        if mp.get('name') == name:
+                            merged_params[i] = p_param.copy()
+                            break
+            else:
+                merged_params.append(p_param.copy())
+
+        try:
+            self.editor_model_params.load_data(merged_params, append=False)
+        except TypeError:
+            self.editor_model_params.load_data(merged_params)
+
+        self._sync_llm_data()
+        ToastManager().show("Parameters copied and merged successfully.", "success")
+
+    def _on_model_index_changed(self, index):
+        if self._is_updating_model_ui or index < 0: return
+
+        idx = self.combo_llm_preset.currentIndex()
+        if idx < 0: return
+        conf = self.llm_configs[idx]
+
+        real_model_name = self._extract_real_model_name(self.combo_llm_model.itemText(index).strip())
+        self._load_model_params_to_ui(conf, real_model_name)
+
+    def _add_llm_model(self):
+        from src.ui.components.dialog import BaseDialog
+        from PySide6.QtWidgets import QLineEdit
+
+        class AddModelDialog(BaseDialog):
+            def __init__(self, parent=None):
+                super().__init__(parent, title="Add Custom Model", width=350)
+                self.inp_name = QLineEdit()
+                self.inp_name.setPlaceholderText("Enter model ID/name...")
+                self.inp_name.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+                self.content_layout.addWidget(self.inp_name)
+                self.add_button("Cancel", self.reject)
+                self.add_button("Add", self.accept, is_primary=True)
+
+            def get_name(self):
+                return self.inp_name.text().strip()
+
+        dlg = AddModelDialog(self.widget)
+        if dlg.exec():
+            new_model = dlg.get_name()
+            if new_model:
+                idx = self.combo_llm_preset.currentIndex()
+                if idx >= 0:
+                    conf = self.llm_configs[idx]
+                    if "fetched_models" not in conf:
+                        conf["fetched_models"] = []
+                    if new_model not in conf["fetched_models"]:
+                        conf["fetched_models"].insert(0, new_model)
+                    self._refresh_model_combo(conf)
+
+                    # 添加完毕后自动选中该模型
+                    for i in range(self.combo_llm_model.count()):
+                        if self._extract_real_model_name(self.combo_llm_model.itemText(i)) == new_model:
+                            self.combo_llm_model.setCurrentIndex(i)
+                            break
+
+    def _del_llm_model(self):
+        idx = self.combo_llm_model.currentIndex()
+        if idx < 0: return
+
+        curr_text = self.combo_llm_model.itemText(idx)
+        real_name = self._extract_real_model_name(curr_text)
+
+        from src.ui.components.dialog import StandardDialog
+        dlg = StandardDialog(self.widget, "Delete Model",
+                             f"Are you sure you want to remove '{real_name}' from the list?", show_cancel=True)
+        if dlg.exec():
+            provider_idx = self.combo_llm_preset.currentIndex()
+            if provider_idx >= 0:
+                conf = self.llm_configs[provider_idx]
+
+                # 从内存中剔除数据
+                if "fetched_models" in conf and real_name in conf["fetched_models"]:
+                    conf["fetched_models"].remove(real_name)
+                if "models_config" in conf and real_name in conf["models_config"]:
+                    del conf["models_config"][real_name]
+
+                # 如果刚好删除了正在使用的模型，兜底更新回溯配置
+                if conf.get("model_name") == real_name:
+                    conf["model_name"] = conf["fetched_models"][0] if conf.get("fetched_models") else ""
+
+                self._refresh_model_combo(conf)
+
+    def _load_model_params_to_ui(self, conf, model_name):
+        self._is_updating_model_ui = True
+
+        models_config = conf.get("models_config", {})
+        m_conf = models_config.get(model_name, {})
+        mode = m_conf.get("mode", "inherit")
+        params = m_conf.get("params", [])
+
+        reverse_map = {"inherit": 0, "custom": 1, "closed": 2}
+
+        self.combo_model_param_strategy.blockSignals(True)
+        self.combo_model_param_strategy.setCurrentIndex(reverse_map.get(mode, 0))
+        self.combo_model_param_strategy.blockSignals(False)
+
+        self.model_param_container.setVisible(mode == "custom")
+
+        self.editor_model_params.blockSignals(True)
+        self.editor_model_params.load_data(params)
+        self.editor_model_params.blockSignals(False)
+
+        self._is_updating_model_ui = False
+
+    def _refresh_model_combo(self, conf):
+        self._is_updating_model_ui = True
+
+        curr_text = self.combo_llm_model.currentText().strip()
+        curr_real = self._extract_real_model_name(curr_text)
+
+        self.combo_llm_model.blockSignals(True)
+        self.combo_llm_model.clear()
+
+        fetched = conf.get("fetched_models", [])
+        models_config = conf.get("models_config", {})
+
+        items_to_add = []
+        if curr_real and curr_real not in fetched:
+            fetched.insert(0, curr_real)
+
+        for m in fetched:
+            mode = models_config.get(m, {}).get("mode", "inherit")
+            if mode == "custom":
+                items_to_add.append(f"{m} (⚙️ Custom)")
+            elif mode == "closed":
+                items_to_add.append(f"{m} (🚫 Closed)")
+            else:
+                items_to_add.append(m)
+
+        self.combo_llm_model.addItems(items_to_add)
+
+        idx_to_select = -1
+        for i in range(self.combo_llm_model.count()):
+            if self._extract_real_model_name(self.combo_llm_model.itemText(i)) == curr_real:
+                idx_to_select = i
+                break
+
+        if idx_to_select >= 0:
+            self.combo_llm_model.setCurrentIndex(idx_to_select)
+        else:
+            self.combo_llm_model.setCurrentText(curr_text)
+
+        self.combo_llm_model.blockSignals(False)
+        self._is_updating_model_ui = False
+
+        self._load_model_params_to_ui(conf, curr_real)
+
+    def _update_current_model_marker(self, real_name, mode):
+        self.combo_llm_model.blockSignals(True)
+        marker = ""
+        if mode == "custom":
+            marker = " (⚙️ Custom)"
+        elif mode == "closed":
+            marker = " (🚫 Closed)"
+
+        new_text = f"{real_name}{marker}"
+
+        idx = self.combo_llm_model.currentIndex()
+        if idx >= 0 and self._extract_real_model_name(self.combo_llm_model.itemText(idx)) == real_name:
+            self.combo_llm_model.setItemText(idx, new_text)
+        elif self.combo_llm_model.currentText() != new_text:
+            self.combo_llm_model.setCurrentText(new_text)
+
+        self.combo_llm_model.blockSignals(False)
 
     def _on_llm_preset_changed(self, index):
         if index < 0 or index >= len(self.llm_configs): return
         conf = self.llm_configs[index]
 
-        # 阻断信号，防止同步覆盖
         self.input_llm_name.blockSignals(True)
         self.input_llm_url.blockSignals(True)
         self.input_llm_key.blockSignals(True)
-        self.combo_llm_model.blockSignals(True)
-        self.combo_llm_think.blockSignals(True)
 
         self.input_llm_name.setText(conf.get("name", ""))
         self.input_llm_url.setText(conf.get("base_url", ""))
         self.input_llm_key.setText(conf.get("api_key", ""))
 
-        # 处理可编辑下拉框的文字
-        self.combo_llm_model.setCurrentText(conf.get("model_name", ""))
-        self.combo_llm_think.setCurrentText(conf.get("thinking_model_name", ""))
-
         self.input_llm_name.blockSignals(False)
         self.input_llm_url.blockSignals(False)
         self.input_llm_key.blockSignals(False)
-        self.combo_llm_model.blockSignals(False)
-        self.combo_llm_think.blockSignals(False)
 
-        # 默认服务商保护
+        self.editor_provider_params.blockSignals(True)
+        self.editor_provider_params.load_data(conf.get("provider_params", []))
+        self.editor_provider_params.blockSignals(False)
+
+        if "model_name" in conf and conf["model_name"]:
+            self.combo_llm_model.blockSignals(True)
+            self.combo_llm_model.setCurrentText(conf["model_name"])
+            self.combo_llm_model.blockSignals(False)
+
+        self._refresh_model_combo(conf)
+
         default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
-        is_default = conf.get("id") in default_ids
-        self.btn_del_llm.setEnabled(not is_default)
-
+        self.btn_del_llm.setEnabled(conf.get("id") not in default_ids)
 
     def _sync_llm_data(self):
+        if self._is_updating_model_ui: return
         idx = self.combo_llm_preset.currentIndex()
         if idx < 0 or idx >= len(self.llm_configs): return
 
-        self.llm_configs[idx]["name"] = self.input_llm_name.text().strip()
-        self.llm_configs[idx]["base_url"] = self.input_llm_url.text().strip()
-        self.llm_configs[idx]["api_key"] = self.input_llm_key.text().strip()
-        self.llm_configs[idx]["model_name"] = self.combo_llm_model.currentText().strip()
-        self.llm_configs[idx]["thinking_model_name"] = self.combo_llm_think.currentText().strip()
+        conf = self.llm_configs[idx]
+        conf["name"] = self.input_llm_name.text().strip()
+        conf["base_url"] = self.input_llm_url.text().strip()
+        conf["api_key"] = self.input_llm_key.text().strip()
+
+        curr_text = self.combo_llm_model.currentText().strip()
+        curr_real = self._extract_real_model_name(curr_text)
+        conf["model_name"] = curr_real
+
+        if "models_config" not in conf:
+            conf["models_config"] = {}
+
+        strategy_map = {0: "inherit", 1: "custom", 2: "closed"}
+        mode = strategy_map.get(self.combo_model_param_strategy.currentIndex(), "inherit")
+
+        conf["models_config"][curr_real] = {
+            "mode": mode,
+            "params": self.editor_model_params.extract_data()
+        }
+        conf["provider_params"] = self.editor_provider_params.extract_data()
 
         self.combo_llm_preset.blockSignals(True)
-        self.combo_llm_preset.setItemText(idx, self.llm_configs[idx]["name"])
+        self.combo_llm_preset.setItemText(idx, conf["name"])
         self.combo_llm_preset.blockSignals(False)
 
+        self._update_current_model_marker(curr_real, mode)
+
     def _start_fetch_task(self):
-        base_url = self.input_llm_url.text().strip()
-        api_key = self.input_llm_key.text().strip()
+        self._sync_llm_data()
+        idx = self.combo_llm_preset.currentIndex()
+        conf = self.llm_configs[idx] if 0 <= idx < len(self.llm_configs) else {}
+
+        base_url = conf.get("base_url", "").strip()
+        api_key = conf.get("api_key", "").strip()
+
         if not base_url:
             StandardDialog(self.widget, "Warning", "Please enter API Base URL first.").exec()
             return
 
-        # 启动纯 UI 进度的对话框
         self.net_pd = ProgressDialog(
             self.widget, "Network Request", "Contacting API...\n(You can cancel at any time)",
             telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
         )
         self.net_pd.show()
 
-        from PySide6.QtCore import QThread
-        from src.core.network_worker import LightNetworkWorker
-
-        # 🚀 采用全新的轻量级 QThread 架构，不再使用 TaskManager
         self.net_thread = QThread()
         self.net_worker = LightNetworkWorker()
         self.net_worker.moveToThread(self.net_thread)
-
-        # 绑定取消操作到 Socket 掐断
         self.net_pd.sig_canceled.connect(self.net_worker.cancel)
 
-        # 启动线程执行请求
         self.net_worker.base_url = base_url
         self.net_worker.api_key = api_key
         self.net_thread.started.connect(self.net_worker.do_fetch_models)
         self.net_worker.sig_models_fetched.connect(self._on_models_fetched)
 
-        # 线程安全回收闭环
         self.net_worker.sig_models_fetched.connect(self.net_thread.quit)
         self.net_worker.sig_models_fetched.connect(self.net_worker.deleteLater)
         self.net_thread.finished.connect(self.net_thread.deleteLater)
 
         self.net_thread.start()
 
-    def _on_fetch_log(self, level, msg):
-        if level == "RESULT":
-            import json
-            try:
-                self._fetched_models = json.loads(msg)
-            except:
-                pass
-
     def _on_models_fetched(self, success, models, msg):
         self.net_pd.close_safe()
 
         if success:
-            self.logger.info(f"🔄 Successfully fetched {len(models)} models from API.")  # 🆕
-            curr_std = self.combo_llm_model.currentText()
-            curr_thk = self.combo_llm_think.currentText()
-
-            # 阻断信号，静默刷新下拉框
-            self.combo_llm_model.blockSignals(True)
-            self.combo_llm_think.blockSignals(True)
-
-            self.combo_llm_model.clear()
-            self.combo_llm_think.clear()
-
-            self.combo_llm_model.addItems(models)
-            self.combo_llm_think.addItems([""] + models)  # 思考模型允许留空
-
-            # 恢复用户之前的输入（如果存在于新列表中会自动匹配，不存在也会作为手写文本保留）
-            self.combo_llm_model.setCurrentText(curr_std)
-            self.combo_llm_think.setCurrentText(curr_thk)
-
-            self.combo_llm_model.blockSignals(False)
-            self.combo_llm_think.blockSignals(False)
-
+            self.logger.info(f"🔄 Successfully fetched {len(models)} models from API.")
+            idx = self.combo_llm_preset.currentIndex()
+            if 0 <= idx < len(self.llm_configs):
+                conf = self.llm_configs[idx]
+                conf["fetched_models"] = models
+                self._refresh_model_combo(conf)
             StandardDialog(self.widget, "Success", msg).exec()
         else:
             self.logger.warning(f"⚠️ Failed to fetch models: {msg}")
+            ToastManager().show(f"Fetch Models Failed: {msg}", "error")
             StandardDialog(self.widget, "Information", msg).exec()
 
     def _start_test_task(self):
-        base_url = self.input_llm_url.text().strip()
-        api_key = self.input_llm_key.text().strip()
+        self._sync_llm_data()
+        idx = self.combo_llm_preset.currentIndex()
+        conf = self.llm_configs[idx] if 0 <= idx < len(self.llm_configs) else {}
 
-        # 优先测试思考模型，留空则测试标准模型
-        model_name = self.combo_llm_think.currentText().strip() or self.combo_llm_model.currentText().strip()
+        base_url = conf.get("base_url", "").strip()
+        api_key = conf.get("api_key", "").strip()
+        model_name = self._extract_real_model_name(self.combo_llm_model.currentText().strip())
+
+        models_config = conf.get("models_config", {})
+        current_model_conf = models_config.get(model_name, {})
+
+        param_mode = current_model_conf.get("mode", conf.get("model_params_mode", "inherit"))
+        custom_params_list = []
+
+        if param_mode == "inherit":
+            custom_params_list = conf.get("provider_params", [])
+        elif param_mode == "custom":
+            custom_params_list = current_model_conf.get("params", conf.get("model_params", []))
+
+        parsed_params = {}
+        for p in custom_params_list:
+            name = p.get("name", "").strip()
+            if not name: continue
+            val_str = str(p.get("value", ""))
+            ptype = p.get("type", "str")
+            try:
+                if ptype == "int":
+                    parsed_params[name] = int(val_str)
+                elif ptype == "float":
+                    parsed_params[name] = float(val_str)
+                elif ptype == "bool":
+                    parsed_params[name] = val_str.lower() in ['true', '1', 'yes', 'on']
+                else:
+                    parsed_params[name] = val_str
+            except ValueError:
+                self.logger.warning(f"Test Task: Skipped invalid param {name}")
 
         if not base_url or not model_name:
-            StandardDialog(self.widget, "Warning",
-                           "Please ensure Base URL and at least one Model Name are provided.").exec()
+            StandardDialog(self.widget, "Warning", "Please ensure Base URL and Model Name are provided.").exec()
             return
 
         self.net_pd = ProgressDialog(
@@ -695,25 +954,19 @@ class SettingsTool(BaseTool):
         )
         self.net_pd.show()
 
-        from PySide6.QtCore import QThread
-        from src.core.network_worker import LightNetworkWorker
-
-        # 🚀 同样采用轻量级 QThread，彻底告别 TaskManager 和 TestApiTask
         self.test_thread = QThread()
         self.test_worker = LightNetworkWorker()
         self.test_worker.moveToThread(self.test_thread)
-
-        # 绑定取消操作
         self.net_pd.sig_canceled.connect(self.test_worker.cancel)
 
-        # 启动线程执行请求
         self.test_worker.base_url = base_url
         self.test_worker.api_key = api_key
         self.test_worker.model_name = model_name
+        self.test_worker.custom_params = parsed_params
+
         self.test_thread.started.connect(self.test_worker.do_test_api)
         self.test_worker.sig_test_finished.connect(self._on_test_finished)
 
-        # 线程安全回收闭环
         self.test_worker.sig_test_finished.connect(self.test_thread.quit)
         self.test_worker.sig_test_finished.connect(self.test_worker.deleteLater)
         self.test_thread.finished.connect(self.test_thread.deleteLater)
@@ -727,106 +980,39 @@ class SettingsTool(BaseTool):
             StandardDialog(self.widget, "Test Passed", msg).exec()
         else:
             self.logger.error(f"❌ API Connection Test Failed: {msg}")
+            ToastManager().show(f"API Test Failed: {msg}", "error")
             StandardDialog(self.widget, "Test Failed", msg).exec()
 
-
-    def _on_fetch_state_changed(self, state, msg):
-        if state == TaskState.SUCCESS.value:
-            self.net_pd.close_safe()
-
-            if self._fetched_models:
-                # 记住当前文字，防止被清空
-                curr_std = self.combo_llm_model.currentText()
-                curr_thk = self.combo_llm_think.currentText()
-
-                self.combo_llm_model.blockSignals(True)
-                self.combo_llm_think.blockSignals(True)
-
-                self.combo_llm_model.clear()
-                self.combo_llm_think.clear()
-
-                self.combo_llm_model.addItems(self._fetched_models)
-                self.combo_llm_think.addItems([""] + self._fetched_models)
-
-                self.combo_llm_model.setCurrentText(curr_std)
-                self.combo_llm_think.setCurrentText(curr_thk)
-
-                self.combo_llm_model.blockSignals(False)
-                self.combo_llm_think.blockSignals(False)
-
-                StandardDialog(self.widget, "Success",
-                               f"Successfully fetched {len(self._fetched_models)} models!").exec()
-            else:
-                StandardDialog(self.widget, "Warning",
-                               "API returned an empty list. You can still type the model name manually.").exec()
-
-        elif state == TaskState.FAILED.value:
-            self.net_pd.pbar.setVisible(False)
-            self.net_pd.lbl_message.setText(f"Fetch Error:\n{msg}")
-            self.net_pd.btn_cancel.setText("Close")
-            self.net_pd.btn_cancel.clicked.connect(self.net_pd.close)
-
-        elif state == TaskState.TERMINATED.value:
-            self.net_pd.close()
-
-
-    def _on_test_log(self, level, msg):
-        if level == "RESULT":
-            self._test_result_msg = msg
-
-    def _on_test_state_changed(self, state, msg):
-        if state == TaskState.SUCCESS.value:
-            self.net_pd.close_safe()
-            StandardDialog(self.widget, "Test Passed", self._test_result_msg).exec()
-
-        elif state == TaskState.FAILED.value:
-            self.net_pd.pbar.setVisible(False)
-            self.net_pd.lbl_message.setText(f"Test Error:\n{msg}")
-            self.net_pd.btn_cancel.setText("Close")
-            self.net_pd.btn_cancel.clicked.connect(self.net_pd.close)
-
-        elif state == TaskState.TERMINATED.value:
-            self.net_pd.close()
-
-
-
     def _add_llm_provider(self):
-        """动态增加一个服务商"""
         new_id = f"custom_{int(time.time())}"
         new_conf = {
             "id": new_id,
             "name": "New Provider",
             "base_url": "https://",
             "model_name": "",
-            "api_key": ""
+            "api_key": "",
+            "models_config": {}
         }
         self.llm_configs.append(new_conf)
         self.combo_llm_preset.addItem(new_conf["name"])
         self.combo_llm_preset.setCurrentIndex(len(self.llm_configs) - 1)
 
     def _del_llm_provider(self):
-        """删除当前服务商"""
         idx = self.combo_llm_preset.currentIndex()
         if idx < 0: return
-
-        # 双重保险：后端逻辑再次拦截
         conf = self.llm_configs[idx]
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "grok", "custom"]
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
         if conf.get("id") in default_ids:
             QMessageBox.warning(self.widget, "Warning", "Built-in default providers cannot be deleted.")
             return
 
-        # 执行删除
         del self.llm_configs[idx]
         self.combo_llm_preset.removeItem(idx)
-
-    # =========================================================================
 
     def init_system_section(self):
         group = QGroupBox("System Preferences")
         group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }"
-        )
+            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
@@ -838,7 +1024,6 @@ class SettingsTool(BaseTool):
         self.combo_log.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
 
-        # 新增：外部 Python 解释器路径配置
         self.input_ext_python = QLineEdit()
         self.input_ext_python.setPlaceholderText("e.g. /usr/bin/python3 or C:/Python310/python.exe")
         self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
@@ -852,7 +1037,6 @@ class SettingsTool(BaseTool):
     def _get_req_html(self, conf):
         if not conf or 'recommended_config' not in conf:
             return ""
-
         rc = conf['recommended_config']
         prio = rc.get('device_priority', 'Unknown')
         vram = rc.get('min_vram', 'N/A')
@@ -860,17 +1044,15 @@ class SettingsTool(BaseTool):
 
         prio_color = "#ffb86c" if "High-End" in prio or "Required" in prio else "#888"
 
-        html = f"""
+        return f"""
         <div style='margin-top:4px; font-family:Consolas; font-size:10px; color:#aaa;'>
            👉 <span style='color:{prio_color}; font-weight:bold;'>[{prio}]</span> 
            | VRAM: <span style='color:#ccc'>{vram}</span> 
            | RAM: <span style='color:#ccc'>{ram}</span>
         </div>
         """
-        return html
 
     def check_models_status(self):
-        # 1. Check Embedding
         embed_id = self.combo_embed.currentData()
         real_embed = embed_id
         is_auto = (embed_id == "embed_auto")
@@ -883,14 +1065,12 @@ class SettingsTool(BaseTool):
         req_html = self._get_req_html(embed_conf)
 
         exists = check_model_exists(repo_id)
-
         msg = f"Target: {real_embed}" if is_auto else f"Repo: {repo_id}"
         if exists:
             self.lbl_embed_status.setText(f"✅ Ready | {msg}{req_html}")
         else:
             self.lbl_embed_status.setText(f"❌ Not Found | {msg} (Will Download){req_html}")
 
-        # 2. Check Reranker
         rerank_id = self.combo_rerank.currentData()
         real_rerank = rerank_id
         is_auto_r = (rerank_id == "rerank_auto")
@@ -903,7 +1083,6 @@ class SettingsTool(BaseTool):
         req_html_r = self._get_req_html(rerank_conf)
 
         exists_r = check_model_exists(repo_id_r)
-
         msg_r = f"Target: {real_rerank}" if is_auto_r else f"Repo: {repo_id_r}"
         if exists_r:
             self.lbl_rerank_status.setText(f"✅ Ready | {msg_r}{req_html_r}")
@@ -911,25 +1090,26 @@ class SettingsTool(BaseTool):
             self.lbl_rerank_status.setText(f"❌ Not Found | {msg_r} (Will Download){req_html_r}")
 
     def on_save_clicked(self):
+        self.widget.setFocus()
+        if hasattr(self, '_sync_llm_data'):
+            self._sync_llm_data()
+
         self._save_llm_config()
 
         old_email = self.config.user_settings.get("ncbi_email", "")
         old_key = self.config.user_settings.get("ncbi_api_key", "")
-        # 🆕 提取旧的 S2 Key
         old_s2_key = self.config.user_settings.get("s2_api_key", "")
         old_proxy_mode = self.config.user_settings.get("proxy_mode", "system")
         old_proxy_url = self.config.user_settings.get("proxy_url", "")
 
         new_email = self.input_ncbi_email.text().strip()
         new_key = self.input_ncbi_api_key.text().strip()
-        # 🆕 提取新的 S2 Key
         new_s2_key = self.input_s2_api_key.text().strip()
 
         mode_idx = self.combo_proxy_mode.currentIndex()
         new_proxy_mode = ["system", "off", "custom"][mode_idx]
         new_proxy_url = self.input_proxy.text().strip()
 
-        # 🆕 将 S2 Key 变化也加入重启判断条件
         needs_mcp_restart = (
                 (old_email != new_email) or
                 (old_key != new_key) or
@@ -946,11 +1126,12 @@ class SettingsTool(BaseTool):
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
+            "trans_llm_id": self.combo_trans_preset.currentData(),
             "theme": self.combo_theme.currentText(),
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
-            "s2_api_key": new_s2_key,  # 🆕 存入配置字典
+            "s2_api_key": new_s2_key,
             "external_python_path": self.input_ext_python.text().strip()
         })
         self.config.save_settings()
@@ -964,38 +1145,27 @@ class SettingsTool(BaseTool):
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.emit()
 
-        self.logger.info(f"Settings Saved. Proxy Mode: {new_proxy_mode}")
-
-        # 应用主题和日志级别
         qdarktheme.setup_theme(self.combo_theme.currentText().lower())
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
-        # 🆕 4. 按需重启 MCP 服务器，并接入 ProgressDialog 动画
         if needs_mcp_restart:
             from src.core.mcp_manager import MCPManager
-            from src.ui.components.dialog import ProgressDialog
             from PySide6.QtWidgets import QApplication
 
-            self.logger.info("Network or NCBI credentials changed. Restarting MCP Server...")
-
-            # 弹出一个不可取消的进度框（因为重启过程是同步且很快的，只是给个视觉缓冲）
             pd = ProgressDialog(self.widget, "Restarting Plugin",
                                 "Applying new network and API settings to NCBI Plugin...", telemetry_config={})
             pd.btn_cancel.setVisible(False)
             pd.show()
-            QApplication.processEvents()  # 强制刷新 UI，确保弹窗立刻渲染
+            QApplication.processEvents()
 
             try:
                 MCPManager.get_instance().restart_sync()
-                self.logger.info("MCP Server successfully hot-restarted.")
             except Exception as e:
                 self.logger.error(f"Failed to hot-restart MCP server: {e}")
             finally:
                 pd.close_safe()
 
-        # 5. 检查并提示模型下载（保持原逻辑不变）
         dev = self.dev_mgr.get_optimal_device()
-
         embed_id = self.combo_embed.currentData()
         if embed_id == "embed_auto": embed_id = resolve_auto_model("embedding", dev)
 
@@ -1029,41 +1199,6 @@ class SettingsTool(BaseTool):
             return self.llm_configs[idx].get("id", "")
         return ""
 
-    def check_models_download_needed(self):
-        """Self-check default cache and prompt download if missing"""
-        from huggingface_hub import constants
-        dev = self.dev_mgr.get_optimal_device()
-
-        embed_id = self.combo_embed.currentData()
-        if embed_id == "embed_auto": embed_id = resolve_auto_model("embedding", dev)
-
-        rerank_id = self.combo_rerank.currentData()
-        if rerank_id == "rerank_auto": rerank_id = resolve_auto_model("reranker", dev)
-
-        to_download = []
-        e_conf = get_model_conf(embed_id, "embedding")
-        if e_conf and not check_model_exists(e_conf.get('hf_repo_id')):
-            to_download.append(e_conf['hf_repo_id'])
-
-        r_conf = get_model_conf(rerank_id, "reranker")
-        if r_conf and not check_model_exists(r_conf.get('hf_repo_id')):
-            to_download.append(r_conf['hf_repo_id'])
-
-        if not to_download:
-            StandardDialog(self.widget, "Ready", "All models verified in system cache.").exec()
-            self.check_models_status()
-            return
-
-        # 🌟 Path is now dynamically resolved from constants.HF_HOME
-        msg = "The following models are missing from your system cache:\n"
-        for m in to_download: msg += f"• {m}\n"
-        msg += f"\nDownload to cache location ({constants.HF_HOME}) now?"
-
-        dlg = StandardDialog(self.widget, "Download Required", msg, show_cancel=True)
-        if dlg.exec():
-            self.start_download(to_download)
-
-
     def start_download(self, repo_list):
         if not repo_list: return
         self.pending_downloads = repo_list
@@ -1079,14 +1214,12 @@ class SettingsTool(BaseTool):
             return
 
         self.current_repo = self.pending_downloads.pop(0)
-        self.logger.info(f"⬇️ Starting download queue for: {self.current_repo}")
 
         if hasattr(self, 'task_mgr'): self.task_mgr = None
         self.task_mgr = TaskManager()
         self.task_mgr.sig_progress.connect(self.pd.update_progress)
         self.task_mgr.sig_state_changed.connect(self.on_task_state_changed)
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
-
 
         self.task_mgr.start_task(
             RealTimeHFDownloadTask,
@@ -1096,7 +1229,6 @@ class SettingsTool(BaseTool):
 
     def on_task_state_changed(self, state, msg):
         if state == TaskState.SUCCESS.value:
-            self.logger.info(f"Model download complete: {self.current_repo}")
             if hasattr(self, 'task_mgr') and self.task_mgr:
                 try:
                     self.task_mgr.sig_state_changed.disconnect()
@@ -1104,12 +1236,8 @@ class SettingsTool(BaseTool):
                 except:
                     pass
             QTimer.singleShot(500, self._download_next)
-
         elif state == TaskState.FAILED.value:
             self.pd.pbar.setRange(0, 100)
             self.pd.lbl_message.setText(f"❌ Failed to download {self.current_repo}:\n{msg}")
             self.pd.btn_cancel.setText("Close")
             self.pd.btn_cancel.setEnabled(True)
-
-
-

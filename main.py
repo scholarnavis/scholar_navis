@@ -37,18 +37,15 @@ def init_mcp(logger):
     # --- Phase 1: Load Internal Compiled MCP Server ---
     # Using sys.executable with '-c' to run the module compiled inside the Nuitka binary
     try:
-        logger.info("Attempting to load internal biological MCP server.")
+        logger.info("Attempting to load internal academic MCP server.")
         mcp_mgr.connect_sync(
             python_path=sys.executable,
             args=["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
         )
-        logger.info("Internal Academic MCP server initialized successfully.")
-
-
-        logger.info("All biological MCP servers initialized.")
+        logger.info("Internal academic MCP server initialized successfully.")
 
     except Exception as e:
-        logger.error(f"Failed to start internal MCP plugin: {e}")
+        logger.error(f"Failed to start internal academic MCP server: {e}")
 
     # --- Phase 2: Load External CLI MCP Servers ---
     # Retrieve the external Python path defined by the user in Settings

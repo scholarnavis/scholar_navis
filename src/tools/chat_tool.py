@@ -251,7 +251,7 @@ class ChatWorker(QObject):
     sig_error = Signal(str)
 
     def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False,
-                 use_thinking_model=False, external_context=None):
+                external_context=None):
         super().__init__()
 
         self.logger = logging.getLogger("ChatWorker")
@@ -261,7 +261,6 @@ class ChatWorker(QObject):
         self.messages = messages
         self.kb_id = kb_id if kb_id != "none" else None
         self.requires_translation = requires_translation
-        self.use_thinking_model = use_thinking_model
         self.external_context = external_context
 
         self.db = DatabaseManager()
@@ -281,8 +280,6 @@ class ChatWorker(QObject):
         """初始化主模型与翻译模型池"""
         if self.main_config and not self.main_llm:
             cfg = self.main_config.copy()
-            if self.use_thinking_model and cfg.get("thinking_model_name"):
-                cfg["model_name"] = cfg["thinking_model_name"]
             self.main_llm = OpenAICompatibleLLM(cfg)
 
         if self.requires_translation and self.trans_config and not self.trans_llm:
@@ -822,8 +819,6 @@ class ChatTool(BaseTool):
         # 1. 获取并格式化 KB ID
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-
-        # 兜底处理：如果获取不到或者为空，默认为 "none"
         if not kb_id:
             kb_id = "none"
 
@@ -838,20 +833,27 @@ class ChatTool(BaseTool):
                     f"Please go to <b>[Global Settings]</b> and click 'Save' to download required models."
                 )
                 StandardDialog(self.widget, "Offline Security Intercept", msg, show_cancel=False).exec()
-                from src.core.signals import GlobalSignals
                 GlobalSignals().request_model_download.emit(missing_id, m_type)
                 return
 
-        # 3. 语言检测逻辑
         trans_config = self.combo_trans_llm.currentData()
         is_english = True
         try:
             detected_lang = detect(text)
             is_english = (detected_lang == 'en')
-        except:
+        except Exception:
             is_english = True
 
         requires_translation = (not is_english) and (trans_config is not None)
+
+        # 非英语输入且翻译器关闭时的单次 Toast 提示
+        if not is_english and trans_config is None:
+            if not getattr(self.__class__, '_has_shown_lang_warning', False):
+                ToastManager().show(
+                    "检测到非英语输入，但翻译模型未启用。核心模型可能无法完美处理该语言，请注意结果准确性。",
+                    "warning"
+                )
+                self.__class__._has_shown_lang_warning = True
 
         # 4. 获取当前附件数据
         current_html = getattr(self, 'external_context_html', "")
@@ -859,7 +861,7 @@ class ChatTool(BaseTool):
         self.external_context_html = ""
         self.external_chunks = []
 
-        # 5. UI 切换与历史记录
+        # 5. UI 切换与历史记录管理
         self.input_container.btn_retry.setVisible(False)
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
@@ -871,11 +873,11 @@ class ChatTool(BaseTool):
             # 将上下文的 HTML 链接渲染在气泡上方
             self.add_bubble(text, is_user=True, context_html=current_html if current_html else None)
 
-            # 把块内容拼接到 LLM 的历史记录里，确保大模型能看到文本
             llm_text = text
             if current_chunks:
                 context_block = "\n".join(
-                    [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in current_chunks])
+                    [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in current_chunks]
+                )
                 llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
 
             self.history.append({"role": "user", "content": llm_text})
@@ -933,17 +935,14 @@ class ChatTool(BaseTool):
         sb.setValue(sb.maximum())
 
     def start_ai_response(self, kb_id, requires_translation=False):
-        #获取最新的主模型配置与 Think 模式状态
+        # 获取最新的主模型配置与翻译配置
         main_config = self.model_selector.get_current_config()
-        use_think = self.model_selector.is_think_mode()
         trans_config = self.combo_trans_llm.currentData()
 
         if main_config:
-            thinking_model = main_config.get("thinking_model_name", "").strip()
-            standard_model = main_config.get("model_name", "").strip()
-            actual_model = thinking_model if (use_think and thinking_model) else standard_model
+            actual_model = main_config.get("model_name", "").strip()
             self.logger.info(
-                f" Starting AI response | Model: [{actual_model}] | Provider: [{main_config.get('name', 'Unknown')}] | Deep Think: {use_think}")
+                f" Starting AI response | Model: [{actual_model}] | Provider: [{main_config.get('name', 'Unknown')}]")
 
         # 初始化聊天气泡与 UI 状态
         self.current_ai_text = ""
@@ -960,7 +959,6 @@ class ChatTool(BaseTool):
             messages=list(self.history),
             kb_id=kb_id,
             requires_translation=requires_translation,
-            use_thinking_model=use_think,
             external_context=getattr(self, 'external_chunks', [])
         )
         self.external_chunks = []

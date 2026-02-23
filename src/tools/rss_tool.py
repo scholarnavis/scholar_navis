@@ -22,9 +22,6 @@ from src.ui.components.toast import ToastManager
 from src.ui.components.dialog import ProgressDialog
 from src.core.signals import GlobalSignals
 
-# ==========================================
-# 📚 内置核心期刊与数据库源体系 (字典形式按期刊归类)
-# ==========================================
 DEFAULT_FEEDS_DICT = {
     "Nature (Main Subjects)": [
         {"name": "Biochemistry", "url": "https://www.nature.com/subjects/biochemistry.rss"},
@@ -42,8 +39,7 @@ DEFAULT_FEEDS_DICT = {
         {"name": "Environmental Sciences", "url": "https://www.nature.com/subjects/environmental-sciences.rss"},
         {"name": "Health Care", "url": "https://www.nature.com/subjects/health-care.rss"},
         {"name": "Anatomy", "url": "https://www.nature.com/subjects/anatomy.rss"},
-        {"name": "Astronomy and Planetary Science",
-         "url": "https://www.nature.com/subjects/astronomy-and-planetary-science.rss"},
+        {"name": "Astronomy and Planetary Science", "url": "https://www.nature.com/subjects/astronomy-and-planetary-science.rss"},
         {"name": "Chemistry", "url": "https://www.nature.com/subjects/chemistry.rss"},
         {"name": "Engineering", "url": "https://www.nature.com/subjects/engineering.rss"},
         {"name": "Materials Science", "url": "https://www.nature.com/subjects/materials-science.rss"},
@@ -62,20 +58,15 @@ DEFAULT_FEEDS_DICT = {
         {"name": "Nature Medicine", "url": "https://www.nature.com/nm.rss"}
     ],
     "Science": [
-        {"name": "Science Table of Contents",
-         "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science"},
+        {"name": "Science Table of Contents", "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science"},
         {"name": "Science Podcast", "url": "https://feeds.megaphone.fm/AAAS8717073854"},
-        {"name": "Science First Release",
-         "url": "https://www.science.org/action/showFeed?type=axatoc&feed=rss&jc=science"},
+        {"name": "Science First Release", "url": "https://www.science.org/action/showFeed?type=axatoc&feed=rss&jc=science"},
         {"name": "Science Daily News Feeds", "url": "https://www.science.org/rss/news_current.xml"},
         {"name": "Science Signaling", "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=signaling"},
-        {"name": "Science Translational Medicine",
-         "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=stm"},
+        {"name": "Science Translational Medicine", "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=stm"},
         {"name": "Science Advances", "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciadv"},
-        {"name": "Science Immunology",
-         "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciimmunol"},
-        {"name": "Science Robotics",
-         "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scirobotics"},
+        {"name": "Science Immunology", "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciimmunol"},
+        {"name": "Science Robotics", "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scirobotics"},
         {"name": "Science Careers", "url": "https://www.science.org/digital-feed/careers-articles"},
         {"name": "Science In the Pipeline", "url": "https://www.science.org/blogs/pipeline/feed"}
     ],
@@ -90,52 +81,31 @@ DEFAULT_FEEDS_DICT = {
         {"name": "Molecular Plant (Latest issue)", "url": "https://www.cell.com/molecular-plant/current.rss"},
         {"name": "Cell Reports (Online now)", "url": "https://www.cell.com/cell-reports/inpress.rss"},
         {"name": "Cell Reports (Current issue)", "url": "https://www.cell.com/cell-reports/current.rss"},
-        {"name": "Trends in Plant Science (Online now)",
-         "url": "https://www.cell.com/trends/plant-science/inpress.rss"},
-        {"name": "Trends in Plant Science (Current issue)",
-         "url": "https://www.cell.com/trends/plant-science/current.rss"},
+        {"name": "Trends in Plant Science (Online now)", "url": "https://www.cell.com/trends/plant-science/inpress.rss"},
+        {"name": "Trends in Plant Science (Current issue)", "url": "https://www.cell.com/trends/plant-science/current.rss"},
         {"name": "Trends in Genetics (Online now)", "url": "https://www.cell.com/trends/genetics/inpress.rss"},
         {"name": "Trends in Genetics (Current issue)", "url": "https://www.cell.com/trends/genetics/current.rss"}
     ],
     "PNAS": [
-        {"name": "PNAS Applied Mathematics",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=app-math"},
-        {"name": "PNAS Chemistry",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=chem"},
-        {"name": "PNAS Mathematics",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=math"},
-        {"name": "PNAS Applied Physical Sciences",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=app-phys"},
-        {"name": "PNAS Physics",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=phys"},
-        {"name": "PNAS Computer Sciences",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=comp-sci"},
-        {"name": "PNAS Engineering",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=eng"},
-        {"name": "PNAS Environmental Sciences",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCodeOr=env-sci-bio&tagCodeOr=env-sci-soc&tagCodeOr=env-sci-phys"},
-        {"name": "PNAS Agricultural Sciences",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=ag-sci"},
-        {"name": "PNAS Ecology",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=eco"},
-        {"name": "PNAS Physiology",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=physio"},
-        {"name": "PNAS Plant Biology",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=plant-bio"},
-        {"name": "PNAS Genetics",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=genetics"},
-        {"name": "PNAS Biochemistry",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=biochem"},
-        {"name": "PNAS Medical Sciences",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=med-sci"},
-        {"name": "PNAS Biophysics and Computational Biology",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCodeOr=biophys-bio&tagCodeOr=biophys-phys"},
-        {"name": "PNAS Cell Biology",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=cell-bio"},
-        {"name": "PNAS Microbiology",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=microbio"},
-        {"name": "PNAS Neuroscience",
-         "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=neuro"}
+        {"name": "PNAS Applied Mathematics", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=app-math"},
+        {"name": "PNAS Chemistry", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=chem"},
+        {"name": "PNAS Mathematics", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=math"},
+        {"name": "PNAS Applied Physical Sciences", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=app-phys"},
+        {"name": "PNAS Physics", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=phys"},
+        {"name": "PNAS Computer Sciences", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=comp-sci"},
+        {"name": "PNAS Engineering", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=eng"},
+        {"name": "PNAS Environmental Sciences", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCodeOr=env-sci-bio&tagCodeOr=env-sci-soc&tagCodeOr=env-sci-phys"},
+        {"name": "PNAS Agricultural Sciences", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=ag-sci"},
+        {"name": "PNAS Ecology", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=eco"},
+        {"name": "PNAS Physiology", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=physio"},
+        {"name": "PNAS Plant Biology", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=plant-bio"},
+        {"name": "PNAS Genetics", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=genetics"},
+        {"name": "PNAS Biochemistry", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=biochem"},
+        {"name": "PNAS Medical Sciences", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=med-sci"},
+        {"name": "PNAS Biophysics and Computational Biology", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCodeOr=biophys-bio&tagCodeOr=biophys-phys"},
+        {"name": "PNAS Cell Biology", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=cell-bio"},
+        {"name": "PNAS Microbiology", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=microbio"},
+        {"name": "PNAS Neuroscience", "url": "https://www.pnas.org/action/showFeed?type=searchTopic&taxonomyCode=topic&tagCode=neuro"}
     ],
     "bioRxiv": [
         {"name": "bioRxiv Plant Biology", "url": "https://connect.biorxiv.org/biorxiv_xml.php?subject=plant_biology"},
@@ -144,71 +114,44 @@ DEFAULT_FEEDS_DICT = {
         {"name": "bioRxiv Cell Biology", "url": "https://connect.biorxiv.org/biorxiv_xml.php?subject=cell_biology"}
     ],
     "Annual Reviews": [
-        {"name": "Animal Biosciences",
-         "url": "https://www.annualreviews.org/rss/content/journals/animal/latestarticles?fmt=rss"},
-        {"name": "Biochemistry",
-         "url": "https://www.annualreviews.org/rss/content/journals/biochem/latestarticles?fmt=rss"},
-        {"name": "Biomedical Engineering",
-         "url": "https://www.annualreviews.org/rss/content/journals/bioeng/latestarticles?fmt=rss"},
-        {"name": "Biomedical Data Science",
-         "url": "https://www.annualreviews.org/rss/content/journals/biodatasci/latestarticles?fmt=rss"},
-        {"name": "Biophysics",
-         "url": "https://www.annualreviews.org/rss/content/journals/biophys/latestarticles?fmt=rss"},
-        {"name": "Cancer Biology",
-         "url": "https://www.annualreviews.org/rss/content/journals/cancerbio/latestarticles?fmt=rss"},
-        {"name": "Cell and Developmental Biology",
-         "url": "https://www.annualreviews.org/rss/content/journals/cellbio/latestarticles?fmt=rss"},
-        {"name": "Chemical and Biomolecular Engineering",
-         "url": "https://www.annualreviews.org/rss/content/journals/chembioeng/latestarticles?fmt=rss"},
-        {"name": "Ecology, Evolution, and Systematics",
-         "url": "https://www.annualreviews.org/rss/content/journals/ecolsys/latestarticles?fmt=rss"},
-        {"name": "Food Science and Technology",
-         "url": "https://www.annualreviews.org/rss/content/journals/food/latestarticles?fmt=rss"},
+        {"name": "Animal Biosciences", "url": "https://www.annualreviews.org/rss/content/journals/animal/latestarticles?fmt=rss"},
+        {"name": "Biochemistry", "url": "https://www.annualreviews.org/rss/content/journals/biochem/latestarticles?fmt=rss"},
+        {"name": "Biomedical Engineering", "url": "https://www.annualreviews.org/rss/content/journals/bioeng/latestarticles?fmt=rss"},
+        {"name": "Biomedical Data Science", "url": "https://www.annualreviews.org/rss/content/journals/biodatasci/latestarticles?fmt=rss"},
+        {"name": "Biophysics", "url": "https://www.annualreviews.org/rss/content/journals/biophys/latestarticles?fmt=rss"},
+        {"name": "Cancer Biology", "url": "https://www.annualreviews.org/rss/content/journals/cancerbio/latestarticles?fmt=rss"},
+        {"name": "Cell and Developmental Biology", "url": "https://www.annualreviews.org/rss/content/journals/cellbio/latestarticles?fmt=rss"},
+        {"name": "Chemical and Biomolecular Engineering", "url": "https://www.annualreviews.org/rss/content/journals/chembioeng/latestarticles?fmt=rss"},
+        {"name": "Ecology, Evolution, and Systematics", "url": "https://www.annualreviews.org/rss/content/journals/ecolsys/latestarticles?fmt=rss"},
+        {"name": "Food Science and Technology", "url": "https://www.annualreviews.org/rss/content/journals/food/latestarticles?fmt=rss"},
         {"name": "Genetics", "url": "https://www.annualreviews.org/rss/content/journals/genet/latestarticles?fmt=rss"},
-        {"name": "Genomics and Human Genetics",
-         "url": "https://www.annualreviews.org/rss/content/journals/genom/latestarticles?fmt=rss"},
-        {"name": "Immunology",
-         "url": "https://www.annualreviews.org/rss/content/journals/immunol/latestarticles?fmt=rss"},
+        {"name": "Genomics and Human Genetics", "url": "https://www.annualreviews.org/rss/content/journals/genom/latestarticles?fmt=rss"},
+        {"name": "Immunology", "url": "https://www.annualreviews.org/rss/content/journals/immunol/latestarticles?fmt=rss"},
         {"name": "Medicine", "url": "https://www.annualreviews.org/rss/content/journals/med/latestarticles?fmt=rss"},
-        {"name": "Microbiology",
-         "url": "https://www.annualreviews.org/rss/content/journals/micro/latestarticles?fmt=rss"},
-        {"name": "Neuroscience",
-         "url": "https://www.annualreviews.org/rss/content/journals/neuro/latestarticles?fmt=rss"},
-        {"name": "Pathology: Mechanisms of Disease",
-         "url": "https://www.annualreviews.org/rss/content/journals/pathmechdis/latestarticles?fmt=rss"},
-        {"name": "Pharmacology and Toxicology",
-         "url": "https://www.annualreviews.org/rss/content/journals/pharmtox/latestarticles?fmt=rss"},
-        {"name": "Physical Chemistry",
-         "url": "https://www.annualreviews.org/rss/content/journals/physchem/latestarticles?fmt=rss"},
-        {"name": "Physiology",
-         "url": "https://www.annualreviews.org/rss/content/journals/physiol/latestarticles?fmt=rss"},
-        {"name": "Phytopathology",
-         "url": "https://www.annualreviews.org/rss/content/journals/phyto/latestarticles?fmt=rss"},
-        {"name": "Plant Biology",
-         "url": "https://www.annualreviews.org/rss/content/journals/arplant/latestarticles?fmt=rss"},
-        {"name": "Virology",
-         "url": "https://www.annualreviews.org/rss/content/journals/virology/latestarticles?fmt=rss"}
+        {"name": "Microbiology", "url": "https://www.annualreviews.org/rss/content/journals/micro/latestarticles?fmt=rss"},
+        {"name": "Neuroscience", "url": "https://www.annualreviews.org/rss/content/journals/neuro/latestarticles?fmt=rss"},
+        {"name": "Pathology: Mechanisms of Disease", "url": "https://www.annualreviews.org/rss/content/journals/pathmechdis/latestarticles?fmt=rss"},
+        {"name": "Pharmacology and Toxicology", "url": "https://www.annualreviews.org/rss/content/journals/pharmtox/latestarticles?fmt=rss"},
+        {"name": "Physical Chemistry", "url": "https://www.annualreviews.org/rss/content/journals/physchem/latestarticles?fmt=rss"},
+        {"name": "Physiology", "url": "https://www.annualreviews.org/rss/content/journals/physiol/latestarticles?fmt=rss"},
+        {"name": "Phytopathology", "url": "https://www.annualreviews.org/rss/content/journals/phyto/latestarticles?fmt=rss"},
+        {"name": "Plant Biology", "url": "https://www.annualreviews.org/rss/content/journals/arplant/latestarticles?fmt=rss"},
+        {"name": "Virology", "url": "https://www.annualreviews.org/rss/content/journals/virology/latestarticles?fmt=rss"}
     ],
     "Other Journals": [
         {"name": "Journal of Cell Biology (Recent issues)", "url": "https://rupress.org/rss/site_1000001/1000003.xml"},
-        {"name": "Journal of Cell Biology (Latest Articles)",
-         "url": "https://rupress.org/rss/site_1000001/LatestArticles_1000003.xml"},
+        {"name": "Journal of Cell Biology (Latest Articles)", "url": "https://rupress.org/rss/site_1000001/LatestArticles_1000003.xml"},
         {"name": "Bioinformatics (Latest Issue)", "url": "https://academic.oup.com/rss/site_5139/3001.xml"},
-        {"name": "Bioinformatics (Advance Articles)",
-         "url": "https://academic.oup.com/rss/site_5139/advanceAccess_3001.xml"},
+        {"name": "Bioinformatics (Advance Articles)", "url": "https://academic.oup.com/rss/site_5139/advanceAccess_3001.xml"},
         {"name": "Bioinformatics (Open Access)", "url": "https://academic.oup.com/rss/site_5139/OpenAccess.xml"},
         {"name": "Nucleic Acids Research (Latest Issue)", "url": "https://academic.oup.com/rss/site_5127/3091.xml"},
-        {"name": "Nucleic Acids Research (Advance Articles)",
-         "url": "https://academic.oup.com/rss/site_5127/advanceAccess_3091.xml"},
-        {"name": "Nucleic Acids Research (Open Access)",
-         "url": "https://academic.oup.com/rss/site_5127/OpenAccess.xml"},
+        {"name": "Nucleic Acids Research (Advance Articles)", "url": "https://academic.oup.com/rss/site_5127/advanceAccess_3091.xml"},
+        {"name": "Nucleic Acids Research (Open Access)", "url": "https://academic.oup.com/rss/site_5127/OpenAccess.xml"},
         {"name": "The Plant Cell (Latest Issue)", "url": "https://academic.oup.com/rss/site_6317/4077.xml"},
-        {"name": "The Plant Cell (Advance Articles)",
-         "url": "https://academic.oup.com/rss/site_6317/advanceAccess_4077.xml"},
+        {"name": "The Plant Cell (Advance Articles)", "url": "https://academic.oup.com/rss/site_6317/advanceAccess_4077.xml"},
         {"name": "The Plant Cell (Open Access)", "url": "https://academic.oup.com/rss/site_6317/OpenAccess.xml"},
         {"name": "Plant Physiology (Latest Issue)", "url": "https://academic.oup.com/rss/site_6323/4080.xml"},
-        {"name": "Plant Physiology (Advance Articles)",
-         "url": "https://academic.oup.com/rss/site_6323/advanceAccess_4080.xml"},
+        {"name": "Plant Physiology (Advance Articles)", "url": "https://academic.oup.com/rss/site_6323/advanceAccess_4080.xml"},
         {"name": "Plant Physiology (Open Access)", "url": "https://academic.oup.com/rss/site_6323/OpenAccess.xml"},
         {"name": "Ecology Letters (Most recent)", "url": "https://onlinelibrary.wiley.com/feed/14610248/most-recent"},
         {"name": "Ecology Letters (Most cited)", "url": "https://onlinelibrary.wiley.com/feed/14610248/most-cited"},
@@ -217,30 +160,21 @@ DEFAULT_FEEDS_DICT = {
 }
 
 
-
-# --- 为所有默认源打上 is_default 标签 ---
 for category, feeds in DEFAULT_FEEDS_DICT.items():
     for f in feeds:
         f['is_default'] = True
         f['category'] = category
 
-# 获取所有内置源列表（平铺格式）
 ALL_BUILTIN_FEEDS = [f for feeds in DEFAULT_FEEDS_DICT.values() for f in feeds]
 
 def clean_html_text(raw_text):
-    """更优雅的 HTML 文本清洗器"""
     if not raw_text: return ""
-    # 1. 替换常见的分块标签为换行符，防止单词粘连
     text = re.sub(r'</?(p|br|div|li|tr|h\d)[^>]*>', '\n', raw_text, flags=re.IGNORECASE)
-    # 2. 剥离剩余所有 HTML 标签
     text = re.sub(r'<[^>]+>', '', text)
-    # 3. 反转义 HTML 实体 (如 &amp; &nbsp; &#39;)
     text = html.unescape(text)
-    # 4. 清理多余的连续空白，将多个空行压缩为最多两个
     text = re.sub(r'\n\s*\n', '\n\n', text).strip()
     return text
 
-# --- 独立下载线程 (防假死) ---
 class DownloadWorker(QThread):
     sig_msg = Signal(str, str)
 
@@ -273,16 +207,13 @@ class FeedLibraryDialog(QDialog):
         self.setStyleSheet("background-color: #1e1e1e; color: white;")
         layout = QVBoxLayout(self)
 
-        # 全局记录用户已经订阅的 URLs
         self.current_user_feeds = current_feeds if current_feeds else []
         self.subscribed_urls = {f["url"] for f in self.current_user_feeds}
 
-        # 构建展示的全部源字典 (合并内置与用户自定义)
         self.display_dict = {}
         for cat, feeds in DEFAULT_FEEDS_DICT.items():
             self.display_dict[cat] = [f.copy() for f in feeds]
 
-        # 将用户的自定义源归类展示
         for f in self.current_user_feeds:
             if not f.get("is_default", False):
                 cat = f.get("category", "Custom Sources")
@@ -290,7 +221,6 @@ class FeedLibraryDialog(QDialog):
                     self.display_dict[cat] = []
                 self.display_dict[cat].append(f.copy())
 
-        # 顶栏布局
         top_bar = QHBoxLayout()
         lbl_cat = QLabel("📂 Category / Journal:")
         lbl_cat.setStyleSheet("color: #05B8CC; font-weight: bold;")
@@ -308,7 +238,6 @@ class FeedLibraryDialog(QDialog):
         top_bar.addWidget(btn_add_custom)
         layout.addLayout(top_bar)
 
-        # 表格布局
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Subscribe", "Journal / Source", "RSS URL"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -320,14 +249,12 @@ class FeedLibraryDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.table)
 
-        # 底部栏
         btn_box = QHBoxLayout()
         self.lbl_status = QLabel(f"Selected: {len(self.subscribed_urls)}")
         self.lbl_status.setStyleSheet("color: #888;")
 
         btn_save = QPushButton("💾 Save Subscriptions")
-        btn_save.setStyleSheet(
-            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+        btn_save.setStyleSheet("background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
         btn_save.clicked.connect(self.accept)
 
         btn_box.addWidget(self.lbl_status)
@@ -335,8 +262,7 @@ class FeedLibraryDialog(QDialog):
         btn_box.addWidget(btn_save)
         layout.addLayout(btn_box)
 
-        # 渲染初始分类
-        self.checkboxes_map = {}  # 记录当前显示的 checkbox
+        self.checkboxes_map = {}
         self._render_table(self.combo_category.currentText())
 
     def _render_table(self, category):
@@ -348,8 +274,6 @@ class FeedLibraryDialog(QDialog):
         for i, feed in enumerate(feeds):
             chk = QCheckBox()
             chk.setChecked(feed["url"] in self.subscribed_urls)
-
-            # 🌟 修复关键：改用 toggled 信号，它直接传递 bool 值 (True/False)，避免强类型比较失败
             chk.toggled.connect(lambda checked, url=feed["url"]: self._on_checkbox_toggled(url, checked))
 
             chk_widget = QWidget()
@@ -382,7 +306,6 @@ class FeedLibraryDialog(QDialog):
             ToastManager().show("Your tracker list is empty. Add a source first.", "warning")
             return
 
-        # 🌟 关闭所有遥测参数
         telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
         self.pd = ProgressDialog(self.widget, "Fetching Literature", "Connecting to servers and detecting OA...",
                                  telemetry_config=telemetry_off)
@@ -393,7 +316,6 @@ class FeedLibraryDialog(QDialog):
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
 
         self.task_mgr.start_task(FetchRSSTask, "rss_fetch", feeds=self.feeds, save_path=self.cache_file)
-
 
     def _on_add_custom(self):
         dlg = FeedEditorDialog(self)
@@ -408,21 +330,17 @@ class FeedLibraryDialog(QDialog):
                     self.combo_category.addItem(cat)
 
                 self.display_dict[cat].append(new_feed)
-                self.subscribed_urls.add(new_feed["url"])  # 自动勾选
+                self.subscribed_urls.add(new_feed["url"])
                 self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
-
-                # 切换到对应分类并渲染
                 self.combo_category.setCurrentText(cat)
 
     def get_final_feeds(self):
-        """返回用户所有处于选中状态的 feeds 的完整定义"""
         final_list = []
         for cat, feeds in self.display_dict.items():
             for f in feeds:
                 if f["url"] in self.subscribed_urls:
                     final_list.append(f)
 
-        # 简单去重 (以 URL 为准)
         unique_feeds = {f["url"]: f for f in final_list}
         return list(unique_feeds.values())
 
@@ -446,20 +364,17 @@ class FeedEditorDialog(QDialog):
         else:
             self.inp_category.setCurrentText("Custom Sources")
 
-        # ：默认订阅源不允许修改文本内容
         if is_default:
             for inp in [self.inp_name, self.inp_url]:
                 inp.setReadOnly(True)
                 inp.setStyleSheet("background:#222; border:1px solid #333; padding:5px; border-radius:3px; color:#888;")
             self.inp_category.setEnabled(False)
-            self.inp_category.setStyleSheet(
-                "background:#222; border:1px solid #333; padding:5px; border-radius:3px; color:#888;")
+            self.inp_category.setStyleSheet("background:#222; border:1px solid #333; padding:5px; border-radius:3px; color:#888;")
             layout.addRow("", QLabel("🔒 Built-in source: Read-only."))
         else:
             for inp in [self.inp_name, self.inp_url]:
                 inp.setStyleSheet("background:#1e1e1e; border:1px solid #444; padding:5px; border-radius:3px;")
-            self.inp_category.setStyleSheet(
-                "background:#1e1e1e; border:1px solid #444; padding:5px; border-radius:3px;")
+            self.inp_category.setStyleSheet("background:#1e1e1e; border:1px solid #444; padding:5px; border-radius:3px;")
 
         layout.addRow("Source Name:", self.inp_name)
         layout.addRow("RSS URL:", self.inp_url)
@@ -486,13 +401,11 @@ class FeedEditorDialog(QDialog):
         }
 
 
-# 独立文章卡片组件
 class ArticleWidget(QFrame):
     def __init__(self, article_data, parent=None):
         super().__init__(parent)
         self.article_data = article_data
-        self.setStyleSheet(
-            "QFrame { background-color: #252526; border: 1px solid #333; border-radius: 6px; margin-bottom: 10px; padding: 10px; }")
+        self.setStyleSheet("QFrame { background-color: #252526; border: 1px solid #333; border-radius: 6px; margin-bottom: 10px; padding: 10px; }")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -516,8 +429,7 @@ class ArticleWidget(QFrame):
         if article_data.get('tags'): meta_text += f" | 🏷️ {', '.join(article_data['tags'])}"
 
         lbl_meta = QLabel(meta_text)
-        lbl_meta.setStyleSheet(
-            "color: #888; font-size: 12px; border: none; background: transparent; padding-left: 25px;")
+        lbl_meta.setStyleSheet("color: #888; font-size: 12px; border: none; background: transparent; padding-left: 25px;")
         layout.addWidget(lbl_meta)
 
         self.text_browser = QLabel()
@@ -526,9 +438,7 @@ class ArticleWidget(QFrame):
         self.text_browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.text_browser.setWordWrap(True)
         self.text_browser.setText(article_data.get('summary', ''))
-        self.text_browser.setStyleSheet("""
-                    QLabel { background: transparent; color: #d4d4d4; border: none; font-size: 13px; line-height: 1.5; selection-background-color: #05B8CC; padding-left: 20px;}
-                """)
+        self.text_browser.setStyleSheet("QLabel { background: transparent; color: #d4d4d4; border: none; font-size: 13px; line-height: 1.5; selection-background-color: #05B8CC; padding-left: 20px;}")
         self.text_browser.installEventFilter(self)
         layout.addWidget(self.text_browser)
 
@@ -537,30 +447,26 @@ class ArticleWidget(QFrame):
 
         btn_trans = QPushButton("🌐 Quick Translate")
         btn_trans.setCursor(Qt.PointingHandCursor)
-        btn_trans.setStyleSheet(
-            "QPushButton { background-color: #333; color: #e0e0e0; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: 1px solid #555; } QPushButton:hover { background-color: #05B8CC; color: white; border: 1px solid #05B8CC; }")
+        btn_trans.setStyleSheet("QPushButton { background-color: #333; color: #e0e0e0; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: 1px solid #555; } QPushButton:hover { background-color: #05B8CC; color: white; border: 1px solid #05B8CC; }")
         btn_trans.clicked.connect(self._send_to_translator)
         btn_layout.addWidget(btn_trans)
 
         btn_chat = QPushButton("💬 Send to Chat")
         btn_chat.setCursor(Qt.PointingHandCursor)
-        btn_chat.setStyleSheet(
-            "QPushButton { background-color: #333; color: #e0e0e0; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: 1px solid #555; } QPushButton:hover { background-color: #007acc; color: white; border: 1px solid #007acc; }")
+        btn_chat.setStyleSheet("QPushButton { background-color: #333; color: #e0e0e0; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: 1px solid #555; } QPushButton:hover { background-color: #007acc; color: white; border: 1px solid #007acc; }")
         btn_chat.clicked.connect(self._send_to_chat)
         btn_layout.insertWidget(1, btn_chat)
 
         if article_data.get('pdf_url'):
             btn_dl = QPushButton("⬇️ Download OA PDF")
             btn_dl.setCursor(Qt.PointingHandCursor)
-            btn_dl.setStyleSheet(
-                "QPushButton { background-color: #28a745; color: white; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: none; font-weight: bold;} QPushButton:hover { background-color: #218838; }")
+            btn_dl.setStyleSheet("QPushButton { background-color: #28a745; color: white; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: none; font-weight: bold;} QPushButton:hover { background-color: #218838; }")
             btn_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['pdf_url'])))
             btn_layout.addWidget(btn_dl)
         else:
             btn_link = QPushButton("🔗 Publisher Link (Non-OA)")
             btn_link.setCursor(Qt.PointingHandCursor)
-            btn_link.setStyleSheet(
-                "QPushButton { background-color: #444; color: #aaa; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: none;} QPushButton:hover { background-color: #555; color: #fff; }")
+            btn_link.setStyleSheet("QPushButton { background-color: #444; color: #aaa; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: none;} QPushButton:hover { background-color: #555; color: #fff; }")
             btn_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['link'])))
             btn_layout.addWidget(btn_link)
 
@@ -571,8 +477,7 @@ class ArticleWidget(QFrame):
         if hasattr(GlobalSignals(), 'sig_send_to_chat'):
             clean_summary = clean_html_text(self.article_data.get('summary', ''))
             context_text = f"Title: {self.article_data['title']}\nAbstract: {clean_summary}\nURL: {self.article_data.get('link', '')}"
-            GlobalSignals().sig_send_to_chat.emit(context_text,
-                                                  "Please review this article. What are the core methodologies and potential implications?")
+            GlobalSignals().sig_send_to_chat.emit(context_text, "Please review this article. What are the core methodologies and potential implications?")
 
     def eventFilter(self, obj, event):
         if obj == self.text_browser and event.type() == QEvent.KeyPress:
@@ -596,9 +501,6 @@ class ArticleWidget(QFrame):
         self.checkbox.setChecked(state)
 
 
-# ==========================================
-# 🌟 主工具界面
-# ==========================================
 class RSSTool(BaseTool):
     def __init__(self):
         super().__init__("Literature Tracker")
@@ -625,8 +527,7 @@ class RSSTool(BaseTool):
 
         toolbar = QHBoxLayout()
         self.btn_manage = QPushButton("📚 Manage Subscriptions")
-        self.btn_manage.setStyleSheet(
-            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+        self.btn_manage.setStyleSheet("background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
         self.btn_manage.clicked.connect(self.open_subscription_manager)
 
         self.btn_edit = QPushButton("✏️ Edit Source")
@@ -639,8 +540,7 @@ class RSSTool(BaseTool):
         self.lbl_time.setStyleSheet("color: #888; font-style: italic; margin-left: 10px;")
 
         self.btn_refresh = QPushButton("🔄 Sync Selected / All")
-        self.btn_refresh.setStyleSheet(
-            "background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
+        self.btn_refresh.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
         self.btn_refresh.clicked.connect(lambda: self._batch_action("fetch"))
 
         toolbar.addWidget(self.btn_manage)
@@ -653,9 +553,6 @@ class RSSTool(BaseTool):
 
         splitter = QSplitter(Qt.Horizontal)
 
-        # ==========================================
-        # 🌟 修复 7：修正左侧布局，确保全选按钮正常显示
-        # ==========================================
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -683,12 +580,10 @@ class RSSTool(BaseTool):
         self.feed_list.currentRowChanged.connect(self._on_feed_selected)
         self.feed_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.feed_list.customContextMenuRequested.connect(self._show_feed_context_menu)
-        self.feed_list.setSelectionMode(QAbstractItemView.ExtendedSelection)  # 支持 Shift/Ctrl 多选
+        self.feed_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
-        # 开启自动换行，并关闭横向滚动条，防止文字被截断
         self.feed_list.setWordWrap(True)
         self.feed_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
         self.feed_list.setStyleSheet("""
                     QListWidget { background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; padding: 5px; }
                     QListWidget::indicator { width: 15px; height: 15px; }
@@ -697,7 +592,6 @@ class RSSTool(BaseTool):
         left_layout.addWidget(self.feed_list)
         splitter.addWidget(left_panel)
 
-        # 右侧新增批量分析按钮
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -772,7 +666,6 @@ class RSSTool(BaseTool):
                 "Please analyze the provided articles. Summarize their core contributions, compare their methodologies or findings, and highlight the overall trends."
             )
 
-
     def edit_feed(self):
         row = self.feed_list.currentRow()
         if row < 0:
@@ -791,8 +684,6 @@ class RSSTool(BaseTool):
                 self._save_config()
                 self._refresh_feed_ui()
 
-
-    # 批量操作与右键菜单逻辑
     def _show_feed_context_menu(self, pos):
         menu = QMenu(self.widget)
         menu.setStyleSheet("""
@@ -810,13 +701,11 @@ class RSSTool(BaseTool):
             self._batch_action("unsubscribe", pos)
 
     def _get_target_feed_indices(self, pos=None):
-        """获取需要操作的索引：优先取所有打勾的，如果没有打勾则取当前悬停/选中的"""
         indices = []
         for i in range(self.feed_list.count()):
             if self.feed_list.item(i).checkState() == Qt.Checked:
                 indices.append(i)
 
-        # 如果没有勾选任何项，但是通过右键或按钮触发，取当前高亮选中行
         if not indices:
             if pos is not None:
                 item = self.feed_list.itemAt(pos)
@@ -827,14 +716,12 @@ class RSSTool(BaseTool):
                 if row >= 0:
                     indices.append(row)
 
-        # 反向排序，确保删除操作不会引起索引越界越移位
         return sorted(list(set(indices)), reverse=True)
 
     def _batch_action(self, action_type, pos=None):
         indices = self._get_target_feed_indices(pos)
 
         if not indices:
-            # 如果什么都没选中，Fetch 按钮可以被理解为 Fetch All
             if action_type == "fetch":
                 indices = list(range(len(self.feeds)))
             else:
@@ -857,16 +744,13 @@ class RSSTool(BaseTool):
             target_feeds = [self.feeds[idx] for idx in indices]
             self.refresh_specific_feeds(target_feeds)
 
-    # --- 交互逻辑 ---
     def open_subscription_manager(self):
-        """管理全体订阅的库，不需要 row 和 feed"""
         dlg = FeedLibraryDialog(self.widget, self.feeds)
         if dlg.exec():
             self.feeds = dlg.get_final_feeds()
             self._save_config()
             self._refresh_feed_ui()
             ToastManager().show(f"Subscriptions updated. Current active feeds: {len(self.feeds)}.", "success")
-
 
     def refresh_specific_feeds(self, target_feeds):
         if not target_feeds:
@@ -900,7 +784,6 @@ class RSSTool(BaseTool):
             self.pd.close_safe()
             ToastManager().show(f"Fetch failed: {msg}", "error")
 
-    # --- 渲染逻辑 ---
     def _clear_articles(self):
         self.current_article_widgets = []
         while self.article_layout.count() > 1:
@@ -934,7 +817,6 @@ class RSSTool(BaseTool):
             self.current_article_widgets.append(w)
             self.article_layout.insertWidget(self.article_layout.count() - 1, w)
 
-    # --- 批量操作 ---
     def _batch_select(self, mode):
         if not self.current_article_widgets: return
         for w in self.current_article_widgets:
@@ -943,7 +825,6 @@ class RSSTool(BaseTool):
             else:
                 w.set_checked(bool(mode))
 
-    # 左侧订阅源批量选择逻辑
     def _batch_select_feeds(self, mode):
         self.feed_list.blockSignals(True)
         for i in range(self.feed_list.count()):
@@ -955,15 +836,13 @@ class RSSTool(BaseTool):
             item.setCheckState(new_state)
         self.feed_list.blockSignals(False)
 
-
     def export_to_pdf(self):
         selected = [w.article_data for w in self.current_article_widgets if w.is_checked()]
         if not selected:
             ToastManager().show("Please select at least one article to export.", "warning")
             return
 
-        path, _ = QFileDialog.getSaveFileName(self.widget, "Export to PDF", "Literature_Report.pdf",
-                                              "PDF Files (*.pdf)")
+        path, _ = QFileDialog.getSaveFileName(self.widget, "Export to PDF", "Literature_Report.pdf", "PDF Files (*.pdf)")
         if not path: return
 
         html = f"<h1>Literature Report</h1><p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p><hr>"
@@ -997,18 +876,12 @@ class RSSTool(BaseTool):
 
         ToastManager().show("Batch download started in background...", "info")
 
-    # --- 辅助方法 ---
     def _load_config(self):
-        from src.core.config_manager import ConfigManager
-        cfg = ConfigManager()
-        saved_feeds = cfg.user_settings.get("rss_feeds", [])
-
-        if not saved_feeds and os.path.exists(self.feeds_file):
+        saved_feeds = []
+        if os.path.exists(self.feeds_file):
             try:
                 with open(self.feeds_file, 'r', encoding='utf-8') as f:
                     saved_feeds = json.load(f)
-                    cfg.user_settings["rss_feeds"] = saved_feeds
-                    cfg.save_settings()
             except:
                 pass
 
@@ -1028,10 +901,6 @@ class RSSTool(BaseTool):
         self.feeds = saved_feeds if saved_feeds else []
 
     def _save_config(self):
-        from src.core.config_manager import ConfigManager
-        cfg = ConfigManager()
-        cfg.user_settings["rss_feeds"] = self.feeds
-        cfg.save_settings()
         try:
             with open(self.feeds_file, 'w', encoding='utf-8') as f:
                 json.dump(self.feeds, f, indent=4)
@@ -1068,10 +937,8 @@ class RSSTool(BaseTool):
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, feed['url'])
 
-            # 悬浮提示，鼠标放上去即可查看完整的名称和来源
             item.setToolTip(f"Category: {feed.get('category', 'Other')}\nSource: {feed['name']}\nURL: {feed['url']}")
 
-            # 挂载复选框供多选
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
 
