@@ -432,10 +432,8 @@ class ArticleWidget(QFrame):
 
         header_layout = QHBoxLayout()
 
-        # 🟢 核心修复 2：重置 Checkbox 尺寸策略，确保原生对号能被正确绘制
         self.checkbox = QCheckBox()
-        self.checkbox.setFixedSize(24, 24)
-        self.checkbox.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.checkbox.setStyleSheet("color: white; background: transparent;")
         header_layout.addWidget(self.checkbox)
         header_layout.addSpacing(5)
 
