@@ -136,6 +136,7 @@ class SettingsTool(BaseTool):
         if self.widget: return self.widget
         self.widget = QWidget()
         main_layout = QVBoxLayout(self.widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -145,12 +146,29 @@ class SettingsTool(BaseTool):
         self.layout = QVBoxLayout(content)
         self.layout.setSpacing(20)
 
+        # 初始化各个设置板块
         self.init_hardware_section()
         self.init_network_section()
         self.init_model_section()
         self.init_llm_section()
         self.init_ncbi_section()
         self.init_system_section()
+        self.layout.addStretch()
+
+        scroll.setWidget(content)
+        main_layout.addWidget(scroll, stretch=1)
+
+
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setContentsMargins(0, 10, 0, 0) # 顶部留一点缝隙
+
+        self.btn_undo = QPushButton("↩️ Undo Changes")
+        self.btn_undo.setCursor(Qt.PointingHandCursor)
+        self.btn_undo.setStyleSheet("""
+            QPushButton { background-color: #555555; color: white; padding: 12px; font-weight: bold; border-radius: 6px; font-size: 14px; }
+            QPushButton:hover { background-color: #666666; }
+        """)
+        self.btn_undo.clicked.connect(self.on_undo_clicked)
 
         btn_save = QPushButton("💾 Save Settings & Verify Models")
         btn_save.setCursor(Qt.PointingHandCursor)
@@ -159,11 +177,13 @@ class SettingsTool(BaseTool):
             QPushButton:hover { background-color: #0062a3; }
         """)
         btn_save.clicked.connect(self.on_save_clicked)
-        self.layout.addWidget(btn_save)
-        self.layout.addStretch()
 
-        scroll.setWidget(content)
-        main_layout.addWidget(scroll)
+        bottom_bar.addStretch()
+        bottom_bar.addWidget(self.btn_undo)
+        bottom_bar.addWidget(btn_save)
+
+        main_layout.addLayout(bottom_bar)
+
         return self.widget
 
     def refresh_model_combos(self):
@@ -190,6 +210,52 @@ class SettingsTool(BaseTool):
         self.combo_embed.blockSignals(False)
         self.combo_rerank.blockSignals(False)
         self.check_models_status()
+
+    def on_undo_clicked(self):
+        """撤销当前 UI 的更改，恢复到上次保存的配置状态"""
+        # 1. 恢复 NCBI / S2 API 密钥配置
+        self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
+        self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
+        self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
+
+        # 2. 恢复网络与代理配置
+        mode_map = {"system": 0, "off": 1, "custom": 2}
+        self.combo_proxy_mode.setCurrentIndex(mode_map.get(self.config.user_settings.get("proxy_mode", "system"), 0))
+        self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
+        self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
+
+        # 3. 恢复本地模型选项（包括刚刚加的低显存模式）
+        curr_embed = self.config.user_settings.get("current_model_id", "embed_auto")
+        idx_embed = self.combo_embed.findData(curr_embed)
+        self.combo_embed.setCurrentIndex(max(0, idx_embed))
+
+        curr_rerank = self.config.user_settings.get("rerank_model_id", "rerank_auto")
+        idx_rerank = self.combo_rerank.findData(curr_rerank)
+        self.combo_rerank.setCurrentIndex(max(0, idx_rerank))
+
+        if hasattr(self, 'chk_low_vram'):
+            self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
+
+        # 4. 恢复 LLM 核心配置文件 (直接从本地 json 文件重新加载)
+        self.llm_configs = self._load_llm_config()
+
+        active_id = self.config.user_settings.get("active_llm_id", "openai")
+        idx_to_select = next((i for i, c in enumerate(self.llm_configs) if c.get("id") == active_id), 0)
+        self.combo_llm_preset.setCurrentIndex(idx_to_select)
+        self._on_llm_preset_changed(idx_to_select)
+
+        trans_id = self.config.user_settings.get("trans_llm_id", None)
+        idx_trans = self.combo_trans_provider.findData(trans_id)
+        if idx_trans >= 0:
+            self.combo_trans_provider.setCurrentIndex(idx_trans)
+
+        # 5. 恢复系统设置
+        self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
+        self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
+        self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
+
+        # 通知用户
+        ToastManager().show("Changes reverted to the last saved state.", "info")
 
     def on_download_requested(self, model_id, model_type):
         self.refresh_model_combos()
