@@ -11,7 +11,7 @@ import qdarktheme
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QMessageBox,
                                QScrollArea, QHBoxLayout, QComboBox, QTableWidget, QAbstractItemView, QHeaderView,
-                               QTableWidgetItem, QFrame, QCheckBox)
+                               QTableWidgetItem, QFrame, QCheckBox, QApplication)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from huggingface_hub import constants
 
@@ -29,8 +29,55 @@ from src.ui.components.dialog import ProgressDialog, StandardDialog
 from src.ui.components.toast import ToastManager
 
 
-class DownloadCancelledException(Exception):
-    pass
+class SaveProcessWorker(QObject):
+    """处理保存配置时所有耗时操作的专属后台线程"""
+    sig_progress = Signal(str)
+    sig_finished = Signal(bool, str, list)  # success, msg, to_download_list
+
+    def __init__(self, needs_mcp, embed_id, rerank_id):
+        super().__init__()
+        self.needs_mcp = needs_mcp
+        self.embed_id = embed_id
+        self.rerank_id = rerank_id
+
+    def run(self):
+        try:
+            # 1. 耗时操作：重启 MCP
+            if self.needs_mcp:
+                self.sig_progress.emit("Applying network settings & restarting MCP Server...")
+                from src.core.mcp_manager import MCPManager
+                MCPManager.get_instance().restart_sync()
+
+            # 2. 耗时操作：探测硬件 CUDA 与模型缓存
+            self.sig_progress.emit("Verifying hardware and AI model files...")
+            from src.core.device_manager import DeviceManager
+            from src.core.models_registry import resolve_auto_model, get_model_conf, check_model_exists
+
+            # PyTorch 硬件探测（极易卡死主线程）
+            dev = DeviceManager().get_optimal_device()
+
+            real_embed = self.embed_id
+            if real_embed == "embed_auto":
+                real_embed = resolve_auto_model("embedding", dev)
+
+            real_rerank = self.rerank_id
+            if real_rerank == "rerank_auto":
+                real_rerank = resolve_auto_model("reranker", dev)
+
+            to_download = []
+
+            # 扫描 HuggingFace 缓存（极易卡死主线程）
+            e_conf = get_model_conf(real_embed, "embedding")
+            if e_conf and not check_model_exists(e_conf.get('hf_repo_id')):
+                to_download.append(e_conf['hf_repo_id'])
+
+            r_conf = get_model_conf(real_rerank, "reranker")
+            if r_conf and not check_model_exists(r_conf.get('hf_repo_id')):
+                to_download.append(r_conf['hf_repo_id'])
+
+            self.sig_finished.emit(True, "Success", to_download)
+        except Exception as e:
+            self.sig_finished.emit(False, str(e), [])
 
 
 class BatchDownloadWorker(QObject):
@@ -1265,6 +1312,7 @@ class SettingsTool(BaseTool):
 
         self._save_llm_config()
 
+        # 对比配置变化
         old_email = self.config.user_settings.get("ncbi_email", "")
         old_key = self.config.user_settings.get("ncbi_api_key", "")
         old_s2_key = self.config.user_settings.get("s2_api_key", "")
@@ -1287,6 +1335,7 @@ class SettingsTool(BaseTool):
                 (old_proxy_url != new_proxy_url)
         )
 
+        # 写入 Config
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
@@ -1296,17 +1345,17 @@ class SettingsTool(BaseTool):
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
             "trans_llm_id": self.combo_trans_provider.currentData(),
-            "low_vram_mode": self.chk_low_vram.isChecked(),
             "theme": self.combo_theme.currentText(),
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
             "s2_api_key": new_s2_key,
-            "external_python_path": self.input_ext_python.text().strip()
+            "external_python_path": self.input_ext_python.text().strip(),
+            "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked()
         })
         self.config.save_settings()
-        self.logger.info("Configuration saved successfully.")
 
+        # UI 快速更新与环境变量写入
         setup_global_network_env()
         os.environ["NCBI_API_EMAIL"] = new_email
         os.environ["NCBI_API_KEY"] = new_key
@@ -1318,23 +1367,74 @@ class SettingsTool(BaseTool):
         qdarktheme.setup_theme(self.combo_theme.currentText().lower())
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
-        if needs_mcp_restart:
-            from src.core.mcp_manager import MCPManager
-            from PySide6.QtWidgets import QApplication
+        self.save_pd = ProgressDialog(
+            self.widget, "Applying Settings",
+            "Initializing background tasks...", telemetry_config={}
+        )
+        self.save_pd.btn_cancel.setVisible(False)
+        self.save_pd.show()
 
-            pd = ProgressDialog(self.widget, "Restarting Plugin",
-                                "Applying new network and API settings to NCBI Plugin...", telemetry_config={})
-            pd.btn_cancel.setVisible(False)
-            pd.show()
-            QApplication.processEvents()
+        QApplication.processEvents()
 
-            try:
-                MCPManager.get_instance().restart_sync()
-            except Exception as e:
-                self.logger.error(f"Failed to hot-restart MCP server: {e}")
-            finally:
-                pd.close_safe()
+        # 挂载独立线程
+        self.save_thread = QThread()
+        embed_id = self.combo_embed.currentData()
+        rerank_id = self.combo_rerank.currentData()
 
+        self.save_worker = SaveProcessWorker(needs_mcp_restart, embed_id, rerank_id)
+        self.save_worker.moveToThread(self.save_thread)
+
+        # 信号连结
+        self.save_worker.sig_progress.connect(self.save_pd.lbl_message.setText)
+        self.save_worker.sig_finished.connect(self._on_save_worker_finished)
+        self.save_worker.sig_finished.connect(self.save_thread.quit)
+        self.save_worker.sig_finished.connect(self.save_worker.deleteLater)
+        self.save_thread.finished.connect(self.save_thread.deleteLater)
+
+        self.save_thread.started.connect(self.save_worker.run)
+
+        QTimer.singleShot(50, self.save_thread.start)
+
+    def _on_save_worker_finished(self, success, msg, to_download):
+        """线程任务结束回调"""
+        if hasattr(self, 'save_pd'):
+            self.save_pd.close_safe()
+
+        if not success:
+            self.logger.error(f"Save process failed: {msg}")
+            ToastManager().show(f"System Error: {msg}", "error")
+            return
+
+        # 如果不需要下载，弹出成功提示并收尾
+        if not to_download:
+            StandardDialog(self.widget, "Success",
+                           "Settings saved successfully.\nAll models and LLM APIs are ready.").exec()
+            self.check_models_status()
+            return
+
+        # 如果需要下载模型，唤起下载框
+        dl_msg = "The following models need to be downloaded:\n"
+        for m in to_download: dl_msg += f"• {m}\n"
+
+        dlg = StandardDialog(self.widget, "Download Required", dl_msg, show_cancel=True)
+        if dlg.exec():
+            self.start_download(to_download)
+        else:
+            self.check_models_status()
+
+    def _on_mcp_restart_finished(self, success, msg):
+        """MCP 重启完后的回调"""
+        if hasattr(self, 'mcp_pd'):
+            self.mcp_pd.close_safe()
+
+        if not success:
+            self.logger.error(f"Failed to hot-restart MCP server: {msg}")
+            ToastManager().show(f"Plugin restart error: {msg}", "error")
+
+        self._finalize_save()
+
+    def _finalize_save(self):
+        """保存流程的最后一步：模型校验与下载提示"""
         dev = self.dev_mgr.get_optimal_device()
         embed_id = self.combo_embed.currentData()
         if embed_id == "embed_auto": embed_id = resolve_auto_model("embedding", dev)
@@ -1352,7 +1452,8 @@ class SettingsTool(BaseTool):
             to_download.append(r_conf['hf_repo_id'])
 
         if not to_download:
-            StandardDialog(self.widget, "Success", "Settings saved. All models and LLM APIs are ready.").exec()
+            StandardDialog(self.widget, "Success",
+                           "Settings saved successfully.\nAll models and LLM APIs are ready.").exec()
             self.check_models_status()
             return
 
@@ -1362,6 +1463,7 @@ class SettingsTool(BaseTool):
         dlg = StandardDialog(self.widget, "Download Required", msg, show_cancel=True)
         if dlg.exec():
             self.start_download(to_download)
+
 
     def _get_active_llm_id(self):
         idx = self.combo_llm_preset.currentIndex()
