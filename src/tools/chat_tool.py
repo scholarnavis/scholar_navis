@@ -521,7 +521,7 @@ class ChatWorker(QObject):
             mcp_mgr = MCPManager.get_instance()
 
             # 只有用户开启了高级功能，才获取工具 schema
-            mcp_tools = mcp_mgr.get_openai_tools_schema() if self.use_mcp else None
+            mcp_tools = mcp_mgr.get_all_tools_schema() if self.use_mcp else None
 
             system_prompt = (
                 f"You are a Senior Research Scientist specializing in {domain}. "

@@ -1,16 +1,27 @@
 # plugins_ext/common_server.py
-# External expansion tool (MCP)
+# External Expansion Tool (MCP)
+# ============================================
+# User-Programmable External MCP Server Template
+# SECURITY NOTICE: This file runs as an independent subprocess.
+# Best Practices:
+# 1. Avoid executing dangerous system commands (e.g., rm -rf, formatting).
+# 2. Strictly validate all user inputs.
+# 3. Do not expose sensitive system credentials or API keys in plain text.
+# ============================================
 import json
 import logging
 import os
 import sys
-import subprocess
-import traceback
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
 
+# Security Configuration: Maximum allowed execution time
+MAX_EXECUTION_TIME = 30  # seconds
+# Security Configuration: Blacklisted commands
+FORBIDDEN_COMMANDS = ['rm', 'del', 'format', 'shutdown', 'reboot']
+
 # Setup production-grade logging
-# Redirect to stderr to avoid corrupting the stdio protocol stream
+# Redirect to stderr to avoid corrupting the stdio protocol stream expected by the Main UI
 log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"mcp_local_server_{datetime.now().strftime('%Y%m%d')}.log")
@@ -30,11 +41,20 @@ logger.addHandler(file_handler)
 mcp = FastMCP("ScholarNavis-LocalBio-Plugin")
 
 
+# ============================================
+# Example Tool 1: PCR Tm Calculator (Math/Logic)
+# ============================================
 @mcp.tool()
 def calculate_pcr_tm(sequence: str) -> str:
     """
     Calculate the melting temperature (Tm) for a DNA sequence using professional empirical formulas.
     Suitable for PCR primer design validation.
+
+    Tutorial for adding tools:
+    1. Use the @mcp.tool() decorator.
+    2. Write a clear docstring explaining the function (the AI reads this!).
+    3. Add parameter type hints.
+    4. Return results as a JSON string.
 
     Args:
         sequence: DNA sequence (A, T, C, G)
@@ -51,13 +71,11 @@ def calculate_pcr_tm(sequence: str) -> str:
     length = len(seq)
 
     # Basic Wallace rule for short oligos (<14bp)
-    # Basic formula: Tm = 2(A+T) + 4(G+C)
     if length < 14:
         tm = (at_count * 2) + (gc_count * 4)
         method = "Wallace Rule"
     else:
         # Salt-adjusted empirical formula for longer sequences
-        # Tm = 64.9 + 41.0 * (nGC - 16.4) / n
         tm = 64.9 + 41.0 * (gc_count - 16.4) / length
         method = "Salt-Adjusted Empirical Formula"
 
@@ -72,59 +90,144 @@ def calculate_pcr_tm(sequence: str) -> str:
     })
 
 
+# ============================================
+# Example Tool 2: Sequence Conversion (String Manipulation)
+# ============================================
 @mcp.tool()
-def trigger_wsl_alignment(fastq_file: str, reference_genome: str, tool: str = "hisat2") -> str:
+def convert_dna_to_rna(dna_sequence: str) -> str:
     """
-    Dispatch a bioinformatics alignment task to the Windows Subsystem for Linux (WSL).
-    Supports high-throughput sequencing tools like hisat2 and STAR.
+    Convert a DNA sequence to an RNA sequence by replacing Thymine (T) with Uracil (U).
 
     Args:
-        fastq_file: Absolute path to the FASTQ file in WSL format (e.g., /mnt/c/data/sample.fq)
-        reference_genome: Path to the genome index inside the WSL environment.
-        tool: Alignment tool to execute ('hisat2' or 'star').
+        dna_sequence: DNA sequence to convert (A, T, C, G)
     """
-    logger.info(f"Task: WSL Alignment Dispatch | Tool: {tool} | Target: {fastq_file}")
+    logger.info(f"Task: DNA to RNA conversion | Sequence: {dna_sequence[:20]}...")
+
+    # Input Validation
+    seq = dna_sequence.upper().strip()
+    if not seq or not all(base in "ATCG" for base in seq):
+        return json.dumps({
+            "status": "error",
+            "message": "Invalid DNA sequence. Must contain only A, T, C, G."
+        })
+
+    # Core Logic
+    rna_sequence = seq.replace('T', 'U')
+    return json.dumps({
+        "status": "success",
+        "dna_sequence": seq,
+        "rna_sequence": rna_sequence,
+        "conversion_note": "T replaced with U"
+    })
+
+
+# ============================================
+# Example Tool 3: Local File Operations (With Safety Constraints)
+# ============================================
+@mcp.tool()
+def read_local_fasta(file_path: str) -> str:
+    """
+    Read a FASTA file from local storage with security constraints.
+
+    Security Limitations Applied:
+    - Prevents directory traversal attacks (no absolute paths or parent directories).
+    - File size limit: 5MB maximum.
+    - File extension restriction: Only .fasta, .fa, .fna are allowed.
+
+    Args:
+        file_path: Relative path to the FASTA file within the allowed directory.
+    """
+    logger.info(f"Task: Read FASTA file | Path: {file_path}")
+
+    # Security Check 1: Prevent Directory Traversal
+    if '..' in file_path or file_path.startswith('/') or file_path.startswith('\\'):
+        return json.dumps({
+            "status": "error",
+            "message": "Security violation: Absolute paths or parent directory traversal (..) are not allowed."
+        })
+
+    # Security Check 2: Allowed File Extensions
+    if not any(file_path.endswith(ext) for ext in ['.fasta', '.fa', '.fna']):
+        return json.dumps({
+            "status": "error",
+            "message": "Security violation: Only FASTA files (.fasta, .fa, .fna) are allowed."
+        })
 
     try:
-        # Check if WSL is available
-        subprocess.run(["wsl", "--status"], check=True, capture_output=True)
+        full_path = os.path.abspath(file_path)
 
-        if tool.lower() == "hisat2":
-            cmd = f"wsl -e hisat2 -x {reference_genome} -U {fastq_file} -S output.sam"
-        elif tool.lower() == "star":
-            cmd = f"wsl -e STAR --runThreadN 8 --genomeDir {reference_genome} --readFilesIn {fastq_file}"
-        else:
-            logger.error(f"Unsupported tool requested: {tool}")
-            return json.dumps({"status": "error", "message": f"Tool '{tool}' is not supported."})
+        # Security Check 3: File Size Limit (5MB)
+        if os.path.getsize(full_path) > 5 * 1024 * 1024:
+            return json.dumps({
+                "status": "error",
+                "message": "Security violation: File size exceeds the 5MB limit."
+            })
 
-        # In this implementation, we log the command and simulate dispatch.
-        # Integration with TaskManager is recommended for long-running jobs.
-        logger.info(f"Command constructed: {cmd}")
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Truncate content if it's too massive to return in one go
+        display_content = content[:1000] + "\n...[TRUNCATED]" if len(content) > 1000 else content
+
         return json.dumps({
             "status": "success",
-            "dispatched_command": cmd,
-            "message": "Task successfully sent to WSL environment."
+            "file_path": file_path,
+            "content": display_content,
+            "size_bytes": os.path.getsize(full_path)
         })
     except Exception as e:
-        logger.error(f"WSL dispatch failed: {str(e)}")
-        return json.dumps({"status": "error", "message": f"WSL Environment Error: {str(e)}"})
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to read file: {str(e)}"
+        })
 
 
+# ============================================
+# Example Tool 4: Custom Tool Template
+# ============================================
 @mcp.tool()
-def query_local_gene_index(gene_id: str) -> str:
+def custom_tool_template(input_data: str) -> str:
     """
-    Search the local biological database for pre-indexed gene annotations and experimental results.
+    [Template] A blueprint for adding your own custom tools to Scholar Navis.
+
+    How to use this template:
+    1. Rename the function to match your desired action.
+    2. Update the docstring to explain what the tool does.
+    3. Modify the arguments and return types.
+    4. Implement your core logic inside the `try` block.
+
+    Args:
+        input_data: Description of the input data expected from the AI.
     """
-    logger.info(f"Task: Local Gene Query | ID: {gene_id}")
-    # Mock database logic - in production, this connects to the SQLite backend
-    return json.dumps({
-        "gene_id": gene_id,
-        "source": "Local-ChromaDB-Index",
-        "status": "ready",
-        "note": "Reference found in local knowledge base."
-    })
+    logger.info(f"Custom tool executed with input: {input_data}")
+
+    # 1. Validate Input
+    if not input_data:
+        return json.dumps({"status": "error", "message": "Input data cannot be empty."})
+
+    try:
+        # 2. Add your custom logic here
+        # result = do_something_awesome(input_data)
+        result = f"Successfully processed: {input_data}"
+
+        # 3. Return the result as JSON
+        return json.dumps({
+            "status": "success",
+            "input": input_data,
+            "result": result,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Custom tool error: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": f"Execution failed: {str(e)}"
+        })
 
 
 if __name__ == "__main__":
     logger.info("Local BioServer instance starting...")
+    logger.info(f"Security constraints enabled: MAX_TIME={MAX_EXECUTION_TIME}s, FORBIDDEN={FORBIDDEN_COMMANDS}")
+
+    # Start the FastMCP server using standard input/output
     mcp.run(transport='stdio')

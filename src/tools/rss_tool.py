@@ -681,15 +681,14 @@ class RSSTool(BaseTool):
         splitter.setSizes([340, 860])
         layout.addWidget(splitter, stretch=1)
 
-        self._load_cache()
-        self._refresh_feed_ui()
-        self.task_mgr.sig_log.connect(self.on_task_log)
-
-
         self.render_timer = QTimer(self.widget)
         self.render_timer.timeout.connect(self._render_batch)
         self.render_queue = []
         self.current_render_url = ""
+
+        self._load_cache()
+        self._refresh_feed_ui()
+        self.task_mgr.sig_log.connect(self.on_task_log)
 
         return self.widget
 

@@ -3,7 +3,7 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
-                               QStackedWidget, QSplitter, QPushButton, QLabel)
+                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout)
 
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
@@ -143,6 +143,8 @@ class MainWindow(QMainWindow):
         self.perform_startup_checks()
         self.clean_old_logs()
 
+        self._setup_mcp_status_bar()
+
         # 注册全局翻译快捷键
         self.translator_dialog = QuickTranslatorWindow(None)
         self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
@@ -157,6 +159,81 @@ class MainWindow(QMainWindow):
             self.translator_dialog.input_box.setFocus()
         else:
             self.translator_dialog.hide_with_fade()
+
+    def _setup_mcp_status_bar(self):
+        status_widget = QWidget()
+        status_layout = QHBoxLayout(status_widget)
+        status_layout.setContentsMargins(5, 2, 15, 2)
+
+        status_layout.addStretch()
+
+        status_layout.addWidget(QLabel("MCP Servers:"))
+
+        # 内置MCP状态
+        builtin_status = QLabel("Built-in: Running")
+        builtin_status.setStyleSheet("color: #4caf50; font-weight: bold;")
+        status_layout.addWidget(builtin_status)
+
+        status_layout.addSpacing(10)  # 增加一些间距
+
+        # 外部MCP状态
+        self.external_status_label = QLabel("External: Disabled")
+        self.external_status_label.setStyleSheet("color: #888;")
+        status_layout.addWidget(self.external_status_label)
+
+        status_layout.addSpacing(10)
+
+        # 网络MCP状态
+        self.network_status_label = QLabel("Network: 0 Active")
+        self.network_status_label.setStyleSheet("color: #888;")
+        status_layout.addWidget(self.network_status_label)
+
+        # 添加到主界面底部的状态栏
+        self.statusBar().addPermanentWidget(status_widget)
+
+        # 定期刷新状态
+        from PySide6.QtCore import QTimer
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._update_mcp_status)
+        self.status_timer.start(5000)  # 每5秒刷新一次
+
+    def _update_mcp_status(self):
+        from src.core.mcp_manager import MCPManager
+        from src.core.config_manager import ConfigManager
+
+        mcp_mgr = MCPManager.get_instance()
+        config = ConfigManager().user_settings
+
+        # 1. 更新外部MCP状态
+        if config.get('external_mcp_enabled', False):
+            status = mcp_mgr.get_server_status("external")
+            if status == "connected":
+                self.external_status_label.setText("External: Connected")
+                self.external_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
+            elif "error" in status:
+                self.external_status_label.setText("External: Error")
+                self.external_status_label.setStyleSheet("color: #ff6b6b;")
+                self.external_status_label.setToolTip(status)
+            else:
+                self.external_status_label.setText(f"External: {status.capitalize()}")
+                self.external_status_label.setStyleSheet("color: #ffb86c;")
+        else:
+            self.external_status_label.setText("External: Disabled")
+            self.external_status_label.setStyleSheet("color: #888;")
+
+        # 2. 更新网络MCP状态综合数量
+        net_mcps = config.get('network_mcps', [])
+        active_count = 0
+        for net in net_mcps:
+            if net.get('enabled') and mcp_mgr.get_server_status(net.get('name')) == "connected":
+                active_count += 1
+
+        if active_count > 0:
+            self.network_status_label.setText(f"Network: {active_count} Active")
+            self.network_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
+        else:
+            self.network_status_label.setText("Network: 0 Active")
+            self.network_status_label.setStyleSheet("color: #888;")
 
 
     def clean_old_logs(self):

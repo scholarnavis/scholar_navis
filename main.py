@@ -12,6 +12,16 @@ from src.core.config_manager import ConfigManager
 from src.core.logger import setup_logger
 from src.ui.main_window import MainWindow
 
+if len(sys.argv) > 1 and sys.argv[1] == "--run-builtin-mcp":
+    # 禁用标准输出的日志，防止污染 MCP 的 stdio 协议
+    os.environ["SCARF_NO_ANALYTICS"] = "true"
+
+    # 强制让这个进程转为纯粹的 FastMCP 服务器
+    from plugins.academic_mcp_server import mcp
+
+    mcp.run(transport='stdio')
+    sys.exit(0)
+
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -57,19 +67,21 @@ class StartupWorker(QObject):
             time.sleep(0.1)
 
             # Step 5: 启动内部学术服务
-            self.sig_progress.emit(55, "Starting internal academic MCP server...")
-            self.logger.info("Attempting to load internal academic MCP server.")
-            try:
-                mcp_mgr.connect_sync(
-                    python_path=sys.executable,
-                    args=["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
-                )
-                self.logger.info("Internal academic MCP server initialized successfully.")
-                self.sig_progress.emit(70, "Internal MCP server ready.")
-            except Exception as e:
-                self.logger.error(f"Failed to start internal academic MCP server: {e}")
-                self.sig_progress.emit(70, "Internal MCP server encountered an issue.")
-            time.sleep(0.1)
+            self.sig_progress.emit(55, "Starting internal MCP server...")
+
+            # 判断是否被打包。如果是打包环境，使用 sys.executable (即 exe 本身) 加上自定义参数
+            is_frozen = getattr(sys, 'frozen', False) or not sys.executable.endswith('python.exe')
+
+            if is_frozen:
+                cmd_args = ["--run-builtin-mcp"]
+            else:
+                cmd_args = ["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
+
+            mcp_mgr.connect_sync(
+                python_path=sys.executable,
+                args=cmd_args,
+                server_name="builtin"
+            )
 
             # Step 6: 扫描外部插件
             self.sig_progress.emit(80, "Scanning for external MCP plugins...")
@@ -189,14 +201,17 @@ class SplashScreen(QWidget):
 class AppController(QObject):
     def __init__(self):
         super().__init__()
+
+        # 1. 优先显示启动屏，并强制刷新 UI 渲染事件
+        self.splash = SplashScreen()
+        self.splash.show()
+        QApplication.processEvents()
+
+        # 2. UI 渲染出来后，再进行耗时的 Logger 初始化
         self.logger = setup_logger()
         self.logger.info("System Launching.")
 
-        # 1. 显示启动屏
-        self.splash = SplashScreen()
-        self.splash.show()
-
-        # 2. 准备后台工作线程
+        # 3. 准备后台工作线程
         self.thread = QThread()
         self.worker = StartupWorker(self.logger)
         self.worker.moveToThread(self.thread)
