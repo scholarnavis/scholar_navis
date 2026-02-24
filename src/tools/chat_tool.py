@@ -1,4 +1,5 @@
 import functools
+import gc
 import hashlib
 import json
 import logging
@@ -7,6 +8,7 @@ import re
 import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
+import torch
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl
 from PySide6.QtGui import QDesktopServices, QCursor, QAction
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
@@ -22,8 +24,7 @@ from src.core.database import DatabaseManager
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
 from src.core.llm_impl import OpenAICompatibleLLM
-from src.core.model_manager import ModelManager
-from src.core.models_registry import get_model_conf, resolve_auto_model
+from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
 from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
 from src.services.file_service import FileService
@@ -489,10 +490,33 @@ class ChatWorker(QObject):
             if not context_str.strip():
                 context_str = "No local or external documents provided. Please answer based on general knowledge or use available NCBI tools."
 
+            #  Phase 3.9: Low VRAM 内存/显存释放
+            is_low_vram = ConfigManager().user_settings.get("low_vram_mode", False)
+            if is_low_vram:
+                self.sig_token.emit("<i>🧹 [Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
+
+                # 1. 释放 Reranker 模型权重
+                if hasattr(self, 'reranker') and getattr(self.reranker, 'model', None) is not None:
+                    self.reranker.model = None
+
+                # 2. 彻底断开 ChromaDB 集合与 Embedding 函数的绑定
+                if hasattr(self, 'db') and self.db:
+                    self.db.reload()
+
+                    # 3. 删掉当前函数作用域内的局部变量引用
+                if 'embed_fn' in locals():
+                    del embed_fn
+
+                # 4. 强制 Python 垃圾回收，并清空 PyTorch 缓存
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+
             # Phase 4: Hybrid Agentic RAG (Local DB + NCBI MCP Tools)
             self.sig_token.emit("[CLEAR_SEARCH]")
             if self.requires_translation:
-                self.sig_token.emit("<i>🧠 Core model is analyzing requirements and evaluating tools...</i>\n\n")
+                self.sig_token.emit("<i>Core model is analyzing requirements and evaluating tools...</i>\n\n")
             else:
                 self.sig_token.emit("[START_LLM_NETWORK]")
 
@@ -552,7 +576,7 @@ class ChatWorker(QObject):
                             tool_name = tool_call['function']['name']
                             try:
                                 tool_args = json.loads(tool_call['function']['arguments'])
-                                self.sig_token.emit(f"<i>📡 Requesting remote NCBI database: {tool_name}...</i>\n\n")
+                                self.sig_token.emit(f"<i>📡 Requesting academic MCP server: {tool_name}...</i>\n\n")
 
                                 tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
 
@@ -560,14 +584,14 @@ class ChatWorker(QObject):
                                     res_dict = json.loads(tool_result)
                                     if isinstance(res_dict, dict) and res_dict.get("status") == "error":
                                         error_msg = res_dict.get("message", "Unknown error")
-                                        GlobalSignals().sig_toast.emit(f"NCBI Request Failed: {error_msg}", "warning")
+                                        GlobalSignals().sig_toast.emit(f"Academic MCP server Request Failed: {error_msg}", "warning")
                                         tool_result = "Action failed. The NCBI tool encountered a network or API limit error. Please strictly inform the user that real-time retrieval failed, and answer using ONLY local context."
                                 except Exception:
                                     pass
 
                             except Exception as e:
-                                self.logger.error(f"NCBI MCP tool {tool_name} failed: {e}")
-                                GlobalSignals().sig_toast.emit(f"NCBI Plugin Connection Error: {str(e)}", "error")
+                                self.logger.error(f"Academic MCP tool {tool_name} failed: {e}")
+                                GlobalSignals().sig_toast.emit(f"Academic MCP Plugin Connection Error: {str(e)}", "error")
                                 tool_result = "Tool execution failed due to a system exception. Proceed using ONLY local context."
 
                             rag_messages.append({
@@ -578,7 +602,7 @@ class ChatWorker(QObject):
                             })
 
                         self.sig_token.emit(
-                            "<i>✅ NCBI data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
+                            "<i>✅ Academic MCP data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
                 except Exception as e:
                     self.logger.warning(f"Tool calling failed: {e}")
 

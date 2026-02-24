@@ -11,7 +11,7 @@ import qdarktheme
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QMessageBox,
                                QScrollArea, QHBoxLayout, QComboBox, QTableWidget, QAbstractItemView, QHeaderView,
-                               QTableWidgetItem, QFrame)
+                               QTableWidgetItem, QFrame, QCheckBox)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from huggingface_hub import constants
 
@@ -358,10 +358,37 @@ class SettingsTool(BaseTool):
         self.combo_rerank.setCurrentIndex(max(0, idx))
         self.combo_rerank.currentIndexChanged.connect(self.check_models_status)
 
+        self.chk_low_vram = QCheckBox("Low VRAM Mode (Release RAG models after search)")
+        self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
+        self.chk_low_vram.setStyleSheet("color: #ff9800; font-weight: bold;")
+        self.chk_low_vram.setToolTip(
+            "Enable this to prevent OOM errors. It will unload Embedding and Reranker models before the LLM starts generating.")
+
         layout.addRow("Embedding:", self.combo_embed)
         layout.addRow("", self.lbl_embed_status)
         layout.addRow("Reranker:", self.combo_rerank)
         layout.addRow("", self.lbl_rerank_status)
+
+        self.chk_low_vram = QCheckBox("Low VRAM Mode (Release RAG models after search)")
+        self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
+        self.chk_low_vram.setStyleSheet("color: #ffb86c; font-weight: bold; margin-top: 10px;")
+
+        lbl_vram_desc = QLabel(
+            "<div style='font-size: 11px; color: #aaa; line-height: 1.5; margin-left: 20px;'>"
+            "💡 <b>Turn ON (Low VRAM):</b> Frees up memory immediately after document retrieval.<br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#4caf50;'>👍 Pros: Maximizes LLM context length, prevents Out-of-Memory (OOM) crashes.</span><br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#ff6b6b;'>👎 Cons: Adds 1~3s loading delay to every new query.</span><br>"
+            "💡 <b>Turn OFF (Speed Mode):</b> Keeps RAG models persistently in memory.<br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#4caf50;'>👍 Pros: Lightning-fast multi-turn conversation.</span><br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#ff6b6b;'>👎 Cons: Embedding + Reranker will constantly occupy VRAM/RAM.</span>"
+            "</div>"
+        )
+        lbl_vram_desc.setWordWrap(True)
+        lbl_vram_desc.setTextFormat(Qt.RichText)
+
+        layout.addRow("", self.chk_low_vram)
+        layout.addRow("", lbl_vram_desc)
+        # ==========================================
 
         self.layout.addWidget(group)
         QThread.msleep(50)
@@ -1203,6 +1230,7 @@ class SettingsTool(BaseTool):
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
             "trans_llm_id": self.combo_trans_provider.currentData(),
+            "low_vram_mode": self.chk_low_vram.isChecked(),
             "theme": self.combo_theme.currentText(),
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,
