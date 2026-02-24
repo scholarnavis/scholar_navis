@@ -372,11 +372,12 @@ class ImportExternalKBTask(BackgroundTask):
                 zipf.extractall(temp_extract_dir)
             found_root = None
             for root, dirs, files in os.walk(temp_extract_dir):
-                if "info.json" in files:
+                if "meta.json" in files:
                     found_root = root
                     break
             if not found_root: raise ValueError("Invalid Project Bundle")
-            with open(os.path.join(found_root, "info.json"), 'r', encoding='utf-8') as f:
+
+            with open(os.path.join(found_root, "meta.json"), 'r', encoding='utf-8') as f:
                 info = json.load(f)
             kb_id = info.get('id')
             if not kb_id: raise ValueError("Missing ID")
@@ -387,9 +388,9 @@ class ImportExternalKBTask(BackgroundTask):
                 info['name'] = f"{info['name']} (Imported)"
                 kb_id = new_id
                 target_dir = os.path.join(kb_mgr.WORKSPACE_DIR, kb_id)
-                with open(os.path.join(found_root, "info.json"), 'w', encoding='utf-8') as f: json.dump(info, f)
+                with open(os.path.join(found_root, "meta.json"), 'w', encoding='utf-8') as f: json.dump(info, f)
             shutil.move(found_root, target_dir)
-            kb_mgr._load_kbs()
+
             self.send_log("INFO", f"Project imported successfully as '{info['name']}'")
         finally:
             if os.path.exists(temp_extract_dir): shutil.rmtree(temp_extract_dir)

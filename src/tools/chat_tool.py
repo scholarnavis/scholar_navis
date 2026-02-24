@@ -515,10 +515,7 @@ class ChatWorker(QObject):
 
             # Phase 4: Hybrid Agentic RAG (Local DB + NCBI MCP Tools)
             self.sig_token.emit("[CLEAR_SEARCH]")
-            if self.requires_translation:
-                self.sig_token.emit("<i>Core model is analyzing requirements and evaluating tools...</i>\n\n")
-            else:
-                self.sig_token.emit("[START_LLM_NETWORK]")
+            self.sig_token.emit("[START_LLM_NETWORK]")
 
             from src.core.mcp_manager import MCPManager
             mcp_mgr = MCPManager.get_instance()
@@ -606,38 +603,12 @@ class ChatWorker(QObject):
                 except Exception as e:
                     self.logger.warning(f"Tool calling failed: {e}")
 
+
             # --- LLM Output Streaming ---
-            english_response = ""
             for token in self.main_llm.stream_chat(rag_messages):
-                english_response += token
-                if not self.requires_translation:
-                    self.full_response_cache += token
-                    self.sig_token.emit(token)
+                self.full_response_cache += token
+                self.sig_token.emit(token)
 
-            # ==========================================
-            # Phase 5: Result Translation (If required)
-            # ==========================================
-            if self.requires_translation:
-                self.sig_token.emit("[CLEAR_SEARCH]")
-                self.sig_token.emit("[START_LLM_NETWORK]")
-
-                trans_out_prompt = (
-                    "You are an expert academic translator specializing in bioinformatics and molecular biology. "
-                    "Translate the following English academic response into the language of the user's original query.\n\n"
-                    "### CRITICAL TRANSLATION RULES:\n"
-                    "1. **PRESERVE NOMENCLATURE**: DO NOT translate Latin taxonomic names (e.g., Gossypium hirsutum, Arabidopsis thaliana), Gene/Protein symbols (e.g., GhChr01, NAC1), NCBI Accession IDs (e.g., NM_100000), or database names (e.g., PubMed, NCBI, TAIR, CottonFGD).\n"
-                    "2. **PRESERVE SEQUENCES**: If there are any FASTA sequences, DNA/RNA sequences (A, T, C, G, U), or technical code blocks, leave them EXACTLY as they are. Do not alter their spacing, formatting, or characters.\n"
-                    "3. **PRESERVE CITATIONS**: KEEP ALL CITATION TAGS INTACT exactly as they appear (e.g., [1], [2]). Do not move them away from the sentences they support.\n"
-                    "4. **PRESERVE FORMATTING**: Strictly maintain all Markdown formatting, bolding, italics, tables, and structural elements. If the input has a Markdown table for NCBI search results, the translated output MUST have the exact same table structure.\n"
-                    "5. **FOLLOW-UPS**: Translate the '💡 Suggested Follow-ups:' section content, but strictly keep the exact format `- [Tag] Question`.\n"
-                )
-
-                for token in self.trans_llm.stream_chat([
-                    {"role": "system", "content": trans_out_prompt},
-                    {"role": "user", "content": english_response}
-                ]):
-                    self.full_response_cache += token
-                    self.sig_token.emit(token)
 
             # ==========================================
             # Phase 6: Dynamic Citation Mounting
@@ -1581,7 +1552,7 @@ class ChatTool(BaseTool):
                 # 延迟导入避免循环依赖
                 from src.ui.components.mermaid_viewer import MermaidViewer
                 if not hasattr(self, 'mermaid_viewer') or self.mermaid_viewer is None:
-                    self.mermaid_viewer = MermaidViewer(self.widget)
+                    self.mermaid_viewer = MermaidViewer(None)
                 self.mermaid_viewer.load_diagram(code)
             else:
                 ToastManager().show("Diagram data lost. Please ask the AI to generate it again.", "error")
