@@ -24,7 +24,7 @@ os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 
 class StartupWorker(QObject):
-    """后台启动任务，防止卡死主 UI 线程"""
+    """后台启动任务，防止卡死主 UI 线程（精细化进度版）"""
     sig_progress = Signal(int, str)
     sig_finished = Signal()
 
@@ -34,18 +34,30 @@ class StartupWorker(QObject):
 
     def run(self):
         try:
-            self.sig_progress.emit(10, "Applying network configurations...")
+            # Step 1: 基础环境准备
+            self.sig_progress.emit(5, "Initializing environment...")
+            time.sleep(0.1)
+
+            # Step 2: 网络环境
+            self.sig_progress.emit(15, "Applying network configurations...")
             setup_global_network_env()
-            time.sleep(0.3)  # 仅为视觉过渡顺滑
+            time.sleep(0.1)
 
-            self.sig_progress.emit(30, "Initializing core MCP subsystem...")
-            mcp_mgr = MCPManager.get_instance()
+            # Step 3: 加载用户配置
+            self.sig_progress.emit(25, "Loading user preferences...")
             config = ConfigManager().user_settings
-
             os.environ["NCBI_API_EMAIL"] = config.get("ncbi_email", "scholar.navis@example.com")
             os.environ["NCBI_API_KEY"] = config.get("ncbi_api_key", "")
             os.environ["S2_API_KEY"] = config.get("s2_api_key", "")
+            time.sleep(0.1)
 
+            # Step 4: MCP 管理器寻址
+            self.sig_progress.emit(40, "Initializing core MCP subsystem...")
+            mcp_mgr = MCPManager.get_instance()
+            time.sleep(0.1)
+
+            # Step 5: 启动内部学术服务
+            self.sig_progress.emit(55, "Starting internal academic MCP server...")
             self.logger.info("Attempting to load internal academic MCP server.")
             try:
                 mcp_mgr.connect_sync(
@@ -53,10 +65,14 @@ class StartupWorker(QObject):
                     args=["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
                 )
                 self.logger.info("Internal academic MCP server initialized successfully.")
+                self.sig_progress.emit(70, "Internal MCP server ready.")
             except Exception as e:
                 self.logger.error(f"Failed to start internal academic MCP server: {e}")
+                self.sig_progress.emit(70, "Internal MCP server encountered an issue.")
+            time.sleep(0.1)
 
-            self.sig_progress.emit(70, "Loading external MCP bridge...")
+            # Step 6: 扫描外部插件
+            self.sig_progress.emit(80, "Scanning for external MCP plugins...")
             ext_python = config.get("external_python_path", "python")
             ext_plugins_dir = os.path.join(BASE_DIR, "plugins_ext")
 
@@ -65,18 +81,29 @@ class StartupWorker(QObject):
 
             bridge_script = os.path.join(ext_plugins_dir, "external_bridge.py")
             if os.path.exists(bridge_script):
+                # Step 7a: 加载外部桥接
+                self.sig_progress.emit(85, "Connecting external MCP bridge...")
                 try:
                     mcp_mgr.connect_sync(script_path=bridge_script, python_path=ext_python)
                     self.logger.info("External MCP bridge loaded successfully.")
+                    self.sig_progress.emit(90, "External MCP bridge connected.")
                 except Exception as e:
                     self.logger.error(f"Failed to load external bridge: {e}")
             else:
+                # Step 7b: 无外部桥接
                 self.logger.info("No external_bridge.py found. Running with core tools only.")
+                self.sig_progress.emit(90, "Running with core tools only.")
+            time.sleep(0.1)
 
+            # Step 8: 构建主界面
             self.sig_progress.emit(95, "Building User Interface...")
-            time.sleep(0.3)
+            time.sleep(0.2)
 
+            # 结束
+            self.sig_progress.emit(99, "Finalizing...")
+            time.sleep(0.1)
             self.sig_finished.emit()
+
         except Exception as e:
             self.logger.error(f"Startup error: {e}")
             self.sig_finished.emit()
