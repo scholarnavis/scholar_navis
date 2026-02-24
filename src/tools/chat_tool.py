@@ -1127,6 +1127,10 @@ class ChatTool(BaseTool):
         preview_text = context_text[:80].replace('\n', ' ') + "..."
         self.external_context_html = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {preview_text} (Click to read more)</a></div>"
 
+        if hasattr(self, 'input_container') and hasattr(self.input_container, 'chk_mcp_enable'):
+            if not self.input_container.chk_mcp_enable.isChecked():
+                self.input_container.chk_mcp_enable.setChecked(True)
+
         # 4. 界面焦点跳转与预览 UI 逻辑
         p = self.widget
         while p:

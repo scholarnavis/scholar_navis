@@ -261,11 +261,27 @@ class ChatBubbleWidget(QWidget):
         if self.is_loading: return
 
         try:
-            html = markdown.markdown(text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
+            processed_text = text
+
+            # 1. 正则匹配纯文本 DOI 并转换为可点击的超链接 (避免替换已经带有 href= 或 markdown 格式的内容)
+            processed_text = re.sub(
+                r'(?<![="\'/])\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b',
+                r'<a href="https://doi.org/\1">\1</a>',
+                processed_text
+            )
+
+            # 2. 正则匹配普通 http/https 链接并转换
+            processed_text = re.sub(
+                r'(?<![="\'/\[\(])\b(https?://[^\s<>\)\]]+)\b',
+                r'<a href="\1">\1</a>',
+                processed_text
+            )
+
+            html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
             html = html.replace("<a href=",
                                 "<a style='color: #4daafc; text-decoration: none; font-weight: bold;' href=")
             self.lbl_text.setText(html)
-        except:
+        except Exception as e:
             self.lbl_text.setText(text)
 
     def copy_text(self):

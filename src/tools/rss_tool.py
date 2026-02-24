@@ -10,9 +10,10 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QListWidget, QSplitter, QComboBox,
                                QTextBrowser, QListWidgetItem, QDialog, QLineEdit, QFormLayout,
                                QCheckBox, QScrollArea, QFileDialog, QTableWidget, QHeaderView,
-                               QTableWidgetItem, QFrame, QAbstractItemView, QMessageBox, QMenu)
-from PySide6.QtCore import Qt, QUrl, QEvent, QThread, Signal
-from PySide6.QtGui import QDesktopServices, QTextDocument
+                               QTableWidgetItem, QFrame, QAbstractItemView, QMessageBox, QMenu, QSizePolicy)
+from PySide6.QtCore import Qt, QUrl, QEvent, QThread, Signal, QMarginsF, QTimer, QRectF
+from PySide6.QtGui import QDesktopServices, QTextDocument, QPageLayout, QAbstractTextDocumentLayout, QPainter, QFont, \
+    QColor
 from PySide6.QtPrintSupport import QPrinter
 
 from src.tools.base_tool import BaseTool
@@ -229,12 +230,20 @@ class FeedLibraryDialog(QDialog):
         self.combo_category.setStyleSheet("padding: 5px; background: #252526; border: 1px solid #444;")
         self.combo_category.currentTextChanged.connect(self._render_table)
 
+        # 弹窗库搜索框
+        self.inp_search_lib = QLineEdit()
+        self.inp_search_lib.setPlaceholderText("🔍 Search journal names...")
+        self.inp_search_lib.setStyleSheet(
+            "padding: 5px; background: #252526; border: 1px solid #444; border-radius: 3px;")
+        self.inp_search_lib.textChanged.connect(self._filter_library_table)
+
         btn_add_custom = QPushButton("➕ Add Custom Source")
         btn_add_custom.setStyleSheet("background-color: #333; color: white; padding: 5px 15px; border-radius: 4px;")
         btn_add_custom.clicked.connect(self._on_add_custom)
 
         top_bar.addWidget(lbl_cat)
-        top_bar.addWidget(self.combo_category, stretch=1)
+        top_bar.addWidget(self.combo_category)
+        top_bar.addWidget(self.inp_search_lib, stretch=1)
         top_bar.addWidget(btn_add_custom)
         layout.addLayout(top_bar)
 
@@ -264,6 +273,13 @@ class FeedLibraryDialog(QDialog):
 
         self.checkboxes_map = {}
         self._render_table(self.combo_category.currentText())
+
+    def _filter_library_table(self, text):
+        text = text.lower()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            if item:
+                self.table.setRowHidden(row, text not in item.text().lower())
 
     def _render_table(self, category):
         self.table.setRowCount(0)
@@ -405,14 +421,23 @@ class ArticleWidget(QFrame):
     def __init__(self, article_data, parent=None):
         super().__init__(parent)
         self.article_data = article_data
-        self.setStyleSheet("QFrame { background-color: #252526; border: 1px solid #333; border-radius: 6px; margin-bottom: 10px; padding: 10px; }")
+
+        # 🟢 核心修复 1：指定专属 ID，防止 QFrame 样式污染内部的 Checkbox 和 Label
+        self.setObjectName("ArticleFrame")
+        self.setStyleSheet(
+            "QFrame#ArticleFrame { background-color: #252526; border: 1px solid #333; border-radius: 6px; margin-bottom: 10px; padding: 10px; }")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
 
         header_layout = QHBoxLayout()
+
+        # 🟢 核心修复 2：重置 Checkbox 尺寸策略，确保原生对号能被正确绘制
         self.checkbox = QCheckBox()
-        self.checkbox.setStyleSheet("QCheckBox::indicator { width: 16px; height: 16px; }")
+        self.checkbox.setFixedSize(24, 24)
+        self.checkbox.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        header_layout.addWidget(self.checkbox)
+        header_layout.addSpacing(5)
 
         title_link = f"<a href='{article_data['link']}' style='color:#05B8CC; text-decoration:none; font-size: 16px; font-weight:bold;'>{article_data['title']}</a>"
         lbl_title = QLabel(title_link)
@@ -477,7 +502,14 @@ class ArticleWidget(QFrame):
         if hasattr(GlobalSignals(), 'sig_send_to_chat'):
             clean_summary = clean_html_text(self.article_data.get('summary', ''))
             context_text = f"Title: {self.article_data['title']}\nAbstract: {clean_summary}\nURL: {self.article_data.get('link', '')}"
-            GlobalSignals().sig_send_to_chat.emit(context_text, "Please review this article. What are the core methodologies and potential implications?")
+
+            prompt = (
+                "Please analyze the provided Title and Abstract of this article. "
+                "1. Extract the primary research objective, key methodologies, and core findings.\n"
+                "2. Evaluate its potential biological or clinical significance.\n"
+                "*(Note: Since this is only an abstract, you may trigger the NCBI/Semantic Scholar tools to retrieve more metadata or related literature if you need deeper context.)*"
+            )
+            GlobalSignals().sig_send_to_chat.emit(context_text, prompt)
 
     def eventFilter(self, obj, event):
         if obj == self.text_browser and event.type() == QEvent.KeyPress:
@@ -557,6 +589,14 @@ class RSSTool(BaseTool):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
+        # RSS 源搜索框
+        self.inp_search_feed = QLineEdit()
+        self.inp_search_feed.setPlaceholderText("🔍 Search feeds...")
+        self.inp_search_feed.setStyleSheet(
+            "background-color: #252526; color: white; border: 1px solid #444; border-radius: 4px; padding: 5px;")
+        self.inp_search_feed.textChanged.connect(self._filter_feed_list)
+        left_layout.addWidget(self.inp_search_feed)
+
         left_action_bar = QHBoxLayout()
         self.btn_feed_sel_all = QPushButton("☑ Select All")
         self.btn_feed_sel_inv = QPushButton("🔲 Invert")
@@ -564,9 +604,9 @@ class RSSTool(BaseTool):
         for btn in [self.btn_feed_sel_all, self.btn_feed_sel_inv]:
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet("""
-                        QPushButton { background-color: #333; color: #ccc; border-radius: 3px; padding: 4px 8px; font-size: 11px; border: 1px solid #444; } 
-                        QPushButton:hover { background-color: #444; color: white; }
-                    """)
+                                QPushButton { background-color: #333; color: #ccc; border-radius: 3px; padding: 4px 8px; font-size: 11px; border: 1px solid #444; } 
+                                QPushButton:hover { background-color: #444; color: white; }
+                            """)
 
         self.btn_feed_sel_all.clicked.connect(lambda: self._batch_select_feeds(True))
         self.btn_feed_sel_inv.clicked.connect(lambda: self._batch_select_feeds("invert"))
@@ -647,7 +687,30 @@ class RSSTool(BaseTool):
         self._refresh_feed_ui()
         self.task_mgr.sig_log.connect(self.on_task_log)
 
+
+        self.render_timer = QTimer(self.widget)
+        self.render_timer.timeout.connect(self._render_batch)
+        self.render_queue = []
+        self.current_render_url = ""
+
         return self.widget
+
+    def _clear_articles(self):
+        # 停止正在进行的渲染
+        if hasattr(self, 'render_timer'):
+            self.render_timer.stop()
+        self.render_queue = []
+
+        # 隐藏并移出当前控件（利用缓存）
+        for w in self.current_article_widgets:
+            self.article_layout.removeWidget(w)
+            w.hide()
+        self.current_article_widgets = []
+
+        while self.article_layout.count() > 1:
+            item = self.article_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
     def batch_send_to_chat(self):
         selected = [w.article_data for w in self.current_article_widgets if w.is_checked()]
@@ -661,10 +724,13 @@ class RSSTool(BaseTool):
             context += f"[{i + 1}] Title: {art['title']}\nAbstract: {clean_summary}\nURL: {art.get('link', '')}\n\n"
 
         if hasattr(GlobalSignals(), 'sig_send_to_chat'):
-            GlobalSignals().sig_send_to_chat.emit(
-                context,
-                "Please analyze the provided articles. Summarize their core contributions, compare their methodologies or findings, and highlight the overall trends."
+            prompt = (
+                "Based on the Titles and Abstracts of these selected articles, please provide a synthesized summary:\n"
+                "1. **Thematic Overview**: Identify the overarching research trends or common problems addressed in these papers.\n"
+                "2. **Methodological/Finding Breakdown**: Briefly categorize their distinct methodologies or highlight overlapping conclusions.\n"
+                "3. **Synthesis**: Are there any contradictions or synergistic implications among these studies?"
             )
+            GlobalSignals().sig_send_to_chat.emit(context, prompt)
 
     def edit_feed(self):
         row = self.feed_list.currentRow()
@@ -683,6 +749,12 @@ class RSSTool(BaseTool):
                 self.feeds[row] = new_data
                 self._save_config()
                 self._refresh_feed_ui()
+
+    def _filter_feed_list(self, text):
+        text = text.lower()
+        for i in range(self.feed_list.count()):
+            item = self.feed_list.item(i)
+            item.setHidden(text not in item.text().lower())
 
     def _show_feed_context_menu(self, pos):
         menu = QMenu(self.widget)
@@ -779,16 +851,28 @@ class RSSTool(BaseTool):
         if state == TaskState.SUCCESS.value:
             self.pd.show_success_state("Complete", "Literature synced successfully.")
             self._load_cache()
+
+            if hasattr(self, 'article_widgets_cache'):
+                for url, widgets in self.article_widgets_cache.items():
+                    for w in widgets:
+                        w.deleteLater()
+                self.article_widgets_cache.clear()
+
             self._on_feed_selected(self.feed_list.currentRow())
         else:
             self.pd.close_safe()
             ToastManager().show(f"Fetch failed: {msg}", "error")
 
     def _clear_articles(self):
+        for w in self.current_article_widgets:
+            self.article_layout.removeWidget(w)
+            w.hide()
         self.current_article_widgets = []
+
         while self.article_layout.count() > 1:
             item = self.article_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
+            if item.widget():
+                item.widget().deleteLater()
 
     def _on_feed_selected(self, row):
         if row < 0: return
@@ -812,10 +896,38 @@ class RSSTool(BaseTool):
             self.article_layout.insertWidget(0, lbl)
             return
 
-        for art in articles:
-            w = ArticleWidget(art)
+        if not hasattr(self, 'article_widgets_cache'):
+            self.article_widgets_cache = {}
+
+        self.current_render_url = url
+        if url not in self.article_widgets_cache:
+            self.article_widgets_cache[url] = []
+            self.render_queue = articles.copy()
+        else:
+            self.render_queue = self.article_widgets_cache[url].copy()
+
+        # 启动分片渲染，每 15ms 触发一次
+        self.render_timer.start(15)
+
+    def _render_batch(self):
+        if not self.render_queue:
+            self.render_timer.stop()
+            return
+
+        batch = self.render_queue[:4]
+        self.render_queue = self.render_queue[4:]
+
+        for item in batch:
+            if isinstance(item, dict):
+                w = ArticleWidget(item)
+                self.article_widgets_cache[self.current_render_url].append(w)
+            else:
+                w = item
+
             self.current_article_widgets.append(w)
             self.article_layout.insertWidget(self.article_layout.count() - 1, w)
+            w.show()
+
 
     def _batch_select(self, mode):
         if not self.current_article_widgets: return
@@ -837,27 +949,80 @@ class RSSTool(BaseTool):
         self.feed_list.blockSignals(False)
 
     def export_to_pdf(self):
+
         selected = [w.article_data for w in self.current_article_widgets if w.is_checked()]
         if not selected:
             ToastManager().show("Please select at least one article to export.", "warning")
             return
 
-        path, _ = QFileDialog.getSaveFileName(self.widget, "Export to PDF", "Literature_Report.pdf", "PDF Files (*.pdf)")
+        row = self.feed_list.currentRow()
+        feed_name = self.feeds[row]['name'] if 0 <= row < len(self.feeds) else "Literature_Report"
+        safe_filename = re.sub(r'[\\/*?:"<>|]', "_", feed_name)
+
+        path, _ = QFileDialog.getSaveFileName(self.widget, "Export to PDF", f"{safe_filename}.pdf",
+                                              "PDF Files (*.pdf)")
         if not path: return
 
-        html = f"<h1>Literature Report</h1><p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p><hr>"
+        html = f"""
+        <h1 style='color: #333;'>{feed_name}</h1>
+        <p style='color: #666;'>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+        <hr>
+        """
+
         for art in selected:
-            html += f"<h3>{art['title']}</h3>"
-            html += f"<p style='color:gray;'><b>Date:</b> {art.get('pub_date', '')} | <b>DOI:</b> {art.get('doi', '')}</p>"
-            html += f"<div>{art.get('summary', '')}</div><hr>"
+            landing_url = art.get('link', '#')
+            html += f"<h3><a href='{landing_url}' style='color:#05B8CC; text-decoration:none;'>{art['title']}</a></h3>"
+            doi_val = art.get('doi', '')
+            doi_html = f"<a href='https://doi.org/{doi_val}' style='color:#05B8CC; text-decoration:none;'>{doi_val}</a>" if doi_val else "N/A"
+            oa_url = art.get('pdf_url', '')
+            oa_html = f" | <b>OA PDF:</b> <a href='{oa_url}' style='color:#28a745; text-decoration:none;'>⬇️ Click to Download</a>" if oa_url else ""
+            html += f"<p style='color:gray; font-size: 10pt;'><b>Date:</b> {art.get('pub_date', '')} | <b>DOI:</b> {doi_html}{oa_html}</p>"
+            html += f"<div style='font-size: 11pt; line-height: 1.4;'>{art.get('summary', '')}</div><hr>"
 
         doc = QTextDocument()
         doc.setHtml(html)
+
         printer = QPrinter(QPrinter.HighResolution)
         printer.setOutputFormat(QPrinter.PdfFormat)
+
+        margin = QMarginsF(15, 15, 15, 22)
+        printer.setPageMargins(margin, QPageLayout.Millimeter)
         printer.setOutputFileName(path)
-        doc.print_(printer)
-        ToastManager().show("PDF report exported successfully.", "success")
+
+        page_rect = printer.pageRect(QPrinter.DevicePixel)
+        doc.setPageSize(page_rect.size())
+
+        painter = QPainter(printer)
+        page_count = doc.pageCount()
+
+        for page_idx in range(page_count):
+            if page_idx > 0:
+                printer.newPage()
+
+            painter.save()
+            painter.translate(0, -(page_idx * page_rect.height()))
+            clip_rect = QRectF(0, page_idx * page_rect.height(), page_rect.width(), page_rect.height())
+
+            ctx = QAbstractTextDocumentLayout.PaintContext()
+            ctx.clip = clip_rect
+            doc.documentLayout().draw(painter, ctx)
+            painter.restore()
+
+            painter.save()
+            font = QFont("Arial", 10)
+            painter.setFont(font)
+            painter.setPen(QColor(150, 150, 150))
+
+            fm = painter.fontMetrics()
+            text_height = fm.height()
+
+            text_rect = QRectF(0, page_rect.height() - text_height * 1.5, page_rect.width(), text_height)
+            painter.drawText(text_rect, Qt.AlignCenter | Qt.AlignBottom, f"- {page_idx + 1} -")
+            painter.restore()
+
+        painter.end()
+
+        ToastManager().show(f"PDF exported successfully ({page_count} pages).", "success")
 
     def batch_download_pdfs(self):
         selected_urls = [w.article_data['pdf_url'] for w in self.current_article_widgets if

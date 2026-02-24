@@ -1,3 +1,5 @@
+import html
+
 import fitz  # PyMuPDF
 import os
 import shutil
@@ -358,6 +360,7 @@ class InternalTextViewer(QMainWindow):
 
         # 使用 QTextBrowser 显示纯文本
         self.text_browser = QTextBrowser()
+        self.text_browser.setOpenExternalLinks(True)
         self.text_browser.setStyleSheet("""
             QTextBrowser {
                 background-color: #1e1e1e;
@@ -445,7 +448,58 @@ class InternalTextViewer(QMainWindow):
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            self.text_browser.setPlainText(content)
+
+
+            pattern = re.compile(
+                r'('
+                r'\[[^\]]+\]\([^)]+\)|'  # 1. 最优先：保护已有的 Markdown 链接
+                r'<a\s+[^>]*>.*?</a>|'  # 2. 其次：保护已有的 HTML <a> 标签
+                r'https?://[^\s<]+[^\s<.,;?)\]]|'  # 3. 处理纯 HTTP/HTTPS
+                r'10\.\d{4,9}/[-._;()/:A-Za-z0-9]+[A-Za-z0-9/]'  # 4. 兜底处理独立的 DOI
+                r')',
+                flags=re.IGNORECASE
+            )
+
+            parts = pattern.split(content)
+            html_chunks = []
+
+            for i, part in enumerate(parts):
+                if not part:
+                    continue
+
+                # 偶数索引代表“未匹配到的普通文本”
+                if i % 2 == 0:
+                    html_chunks.append(html.escape(part).replace('\n', '<br>'))
+                # 奇数索引代表“被上面正则命中抽离的特殊目标”
+                else:
+                    if part.startswith('['):
+                        # 是 Markdown 链接，将其解析为安全的 HTML a 标签
+                        match_md = re.match(r'\[([^\]]+)\]\(([^)]+)\)', part)
+                        if match_md:
+                            t = html.escape(match_md.group(1))
+                            u = html.escape(match_md.group(2))
+                            html_chunks.append(f'<a href="{u}" style="color: #05B8CC; text-decoration: none;">{t}</a>')
+                        else:
+                            html_chunks.append(html.escape(part))
+
+                    elif part.lower().startswith('<a '):
+                        # 原生 HTML a 标签，信任内容，直接放行
+                        html_chunks.append(part)
+
+                    elif part.lower().startswith('http'):
+                        u = html.escape(part)
+                        html_chunks.append(f'<a href="{u}" style="color: #05B8CC; text-decoration: none;">{u}</a>')
+
+                    elif part.startswith('10.'):
+                        doi = html.escape(part)
+                        html_chunks.append(
+                            f'<a href="https://doi.org/{doi}" style="color: #05B8CC; text-decoration: none;">{doi}</a>')
+
+                    else:
+                        html_chunks.append(html.escape(part))
+
+            html_content = "".join(html_chunks)
+            self.text_browser.setHtml(html_content)
 
             if highlight_text:
                 self._highlight_and_scroll(highlight_text)
