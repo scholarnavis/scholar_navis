@@ -42,19 +42,58 @@ mcp = FastMCP("ScholarNavis-LocalBio-Plugin")
 
 
 # ============================================
-# Example Tool 1: PCR Tm Calculator (Math/Logic)
+# 1. Custom Tool Template
 # ============================================
-@mcp.tool()
+@mcp.tool(
+    name="custom_tool_template",
+    description="[Tags: Template] A blueprint for adding your own custom tools to Scholar Navis."
+)
+def custom_tool_template(input_data: str) -> str:
+    """
+    How to use this template:
+    1. Rename the function to match your desired action.
+    2. Update the description tag above with your desired [Tags: ...].
+    3. Modify the arguments and return types.
+    4. Implement your core logic inside the `try` block.
+
+    Args:
+        input_data: Description of the input data expected from the AI.
+    """
+    logger.info(f"Custom tool executed with input: {input_data}")
+
+    # 1. Validate Input
+    if not input_data:
+        return json.dumps({"status": "error", "message": "Input data cannot be empty."})
+
+    try:
+        # 2. Add your custom logic here
+        result = f"Successfully processed: {input_data}"
+
+        # 3. Return the result as JSON
+        return json.dumps({
+            "status": "success",
+            "input": input_data,
+            "result": result,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Custom tool error: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": f"Execution failed: {str(e)}"
+        })
+
+
+# ============================================
+# 2. Example Tool: PCR Tm Calculator
+# ============================================
+@mcp.tool(
+    name="calculate_pcr_tm",
+    description="[Tags: Calculator] Calculate the melting temperature (Tm) for a DNA sequence using professional empirical formulas."
+)
 def calculate_pcr_tm(sequence: str) -> str:
     """
-    Calculate the melting temperature (Tm) for a DNA sequence using professional empirical formulas.
     Suitable for PCR primer design validation.
-
-    Tutorial for adding tools:
-    1. Use the @mcp.tool() decorator.
-    2. Write a clear docstring explaining the function (the AI reads this!).
-    3. Add parameter type hints.
-    4. Return results as a JSON string.
 
     Args:
         sequence: DNA sequence (A, T, C, G)
@@ -91,13 +130,14 @@ def calculate_pcr_tm(sequence: str) -> str:
 
 
 # ============================================
-# Example Tool 2: Sequence Conversion (String Manipulation)
+# 3. Example Tool: Sequence Conversion
 # ============================================
-@mcp.tool()
+@mcp.tool(
+    name="convert_dna_to_rna",
+    description="[Tags: Genomics] Convert a DNA sequence to an RNA sequence by replacing Thymine (T) with Uracil (U)."
+)
 def convert_dna_to_rna(dna_sequence: str) -> str:
     """
-    Convert a DNA sequence to an RNA sequence by replacing Thymine (T) with Uracil (U).
-
     Args:
         dna_sequence: DNA sequence to convert (A, T, C, G)
     """
@@ -119,110 +159,6 @@ def convert_dna_to_rna(dna_sequence: str) -> str:
         "rna_sequence": rna_sequence,
         "conversion_note": "T replaced with U"
     })
-
-
-# ============================================
-# Example Tool 3: Local File Operations (With Safety Constraints)
-# ============================================
-@mcp.tool()
-def read_local_fasta(file_path: str) -> str:
-    """
-    Read a FASTA file from local storage with security constraints.
-
-    Security Limitations Applied:
-    - Prevents directory traversal attacks (no absolute paths or parent directories).
-    - File size limit: 5MB maximum.
-    - File extension restriction: Only .fasta, .fa, .fna are allowed.
-
-    Args:
-        file_path: Relative path to the FASTA file within the allowed directory.
-    """
-    logger.info(f"Task: Read FASTA file | Path: {file_path}")
-
-    # Security Check 1: Prevent Directory Traversal
-    if '..' in file_path or file_path.startswith('/') or file_path.startswith('\\'):
-        return json.dumps({
-            "status": "error",
-            "message": "Security violation: Absolute paths or parent directory traversal (..) are not allowed."
-        })
-
-    # Security Check 2: Allowed File Extensions
-    if not any(file_path.endswith(ext) for ext in ['.fasta', '.fa', '.fna']):
-        return json.dumps({
-            "status": "error",
-            "message": "Security violation: Only FASTA files (.fasta, .fa, .fna) are allowed."
-        })
-
-    try:
-        full_path = os.path.abspath(file_path)
-
-        # Security Check 3: File Size Limit (5MB)
-        if os.path.getsize(full_path) > 5 * 1024 * 1024:
-            return json.dumps({
-                "status": "error",
-                "message": "Security violation: File size exceeds the 5MB limit."
-            })
-
-        with open(full_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        # Truncate content if it's too massive to return in one go
-        display_content = content[:1000] + "\n...[TRUNCATED]" if len(content) > 1000 else content
-
-        return json.dumps({
-            "status": "success",
-            "file_path": file_path,
-            "content": display_content,
-            "size_bytes": os.path.getsize(full_path)
-        })
-    except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "message": f"Failed to read file: {str(e)}"
-        })
-
-
-# ============================================
-# Example Tool 4: Custom Tool Template
-# ============================================
-@mcp.tool()
-def custom_tool_template(input_data: str) -> str:
-    """
-    [Template] A blueprint for adding your own custom tools to Scholar Navis.
-
-    How to use this template:
-    1. Rename the function to match your desired action.
-    2. Update the docstring to explain what the tool does.
-    3. Modify the arguments and return types.
-    4. Implement your core logic inside the `try` block.
-
-    Args:
-        input_data: Description of the input data expected from the AI.
-    """
-    logger.info(f"Custom tool executed with input: {input_data}")
-
-    # 1. Validate Input
-    if not input_data:
-        return json.dumps({"status": "error", "message": "Input data cannot be empty."})
-
-    try:
-        # 2. Add your custom logic here
-        # result = do_something_awesome(input_data)
-        result = f"Successfully processed: {input_data}"
-
-        # 3. Return the result as JSON
-        return json.dumps({
-            "status": "success",
-            "input": input_data,
-            "result": result,
-            "timestamp": datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Custom tool error: {str(e)}")
-        return json.dumps({
-            "status": "error",
-            "message": f"Execution failed: {str(e)}"
-        })
 
 
 if __name__ == "__main__":

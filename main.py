@@ -2,7 +2,7 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar, QGraphicsDropShadowEffect
 
@@ -51,17 +51,13 @@ class StartupWorker(QObject):
 
             # Step 2: 统一配置加载
             self.sig_progress.emit(30, "Loading unified system configuration...")
-            # ConfigManager 实例化时会自动加载 settings.json 和 mcp_servers.json
-            # 并自动将 NCBI/S2/代理 等参数注入到 os.environ 中
             ConfigManager()
             setup_global_network_env()
             time.sleep(0.1)
 
-            # Step 3: 自动化唤起 MCP 服务器引擎
-            self.sig_progress.emit(60, "Bootstrapping MCP Subsystems...")
-            mcp_mgr = MCPManager.get_instance()
-            mcp_mgr.bootstrap_servers()
-            time.sleep(0.2)
+            # Step 3: MCP 懒加载准备 (不再这里执行耗时连接)
+            self.sig_progress.emit(60, "Preparing MCP Subsystems (Lazy Mode)...")
+            time.sleep(0.1)
 
             # Step 4: 构建主界面
             self.sig_progress.emit(90, "Building User Interface...")
@@ -168,6 +164,8 @@ class AppController(QObject):
 
         self.main_window.show()
         self.splash.close()
+
+        QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
 
 
 if __name__ == "__main__":

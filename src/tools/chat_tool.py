@@ -14,7 +14,8 @@ from PySide6.QtGui import QDesktopServices, QCursor, QAction
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
-                               QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox)
+                               QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
+                               QToolButton)
 from chromadb.utils import embedding_functions
 from huggingface_hub import snapshot_download
 from langdetect import detect
@@ -24,6 +25,7 @@ from src.core.database import DatabaseManager
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
 from src.core.llm_impl import OpenAICompatibleLLM
+from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
 from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
@@ -145,6 +147,39 @@ class ChatInputContainer(QFrame):
         self.chk_mcp_enable.setStyleSheet("color: #05B8CC; font-weight: bold;")
         self.chk_mcp_enable.setChecked(False)
 
+        self.btn_mcp_tags = QToolButton()
+        self.btn_mcp_tags.setText("🏷️ Filter Tools: Loading...")
+        self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
+        self.btn_mcp_tags.setPopupMode(QToolButton.InstantPopup)
+        self.btn_mcp_tags.setStyleSheet(
+            "QToolButton { color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px; }"
+            "QToolButton::menu-indicator { image: none; }"  # 隐藏默认的丑陋小箭头
+        )
+        self.btn_mcp_tags.setVisible(False)
+
+        self.menu_mcp_tags = QMenu(self)
+        self.menu_mcp_tags.setStyleSheet(
+            "QMenu { background-color: #2b2b2b; color: #ddd; border: 1px solid #555; }"
+            "QMenu::item { padding: 5px 20px 5px 20px; }"
+            "QMenu::item:selected { background-color: #05B8CC; color: white; }"
+        )
+        self.btn_mcp_tags.setMenu(self.menu_mcp_tags)
+        self.menu_mcp_tags.aboutToShow.connect(self._on_mcp_enable_toggled)
+        self.tag_actions = {}
+        self.known_tags = set()
+
+        # 创建一个菜单用于多选
+        self.menu_mcp_tags = QMenu(self)
+        self.menu_mcp_tags.setStyleSheet(
+            "QMenu { background-color: #2b2b2b; color: #ddd; border: 1px solid #555; }"
+            "QMenu::item { padding: 5px 20px 5px 20px; }"
+            "QMenu::item:selected { background-color: #05B8CC; color: white; }"
+        )
+        self.btn_mcp_tags.setMenu(self.menu_mcp_tags)
+
+        # 存储复选框动作的字典
+        self.tag_actions = {}
+
         self.btn_mcp_guide = QPushButton("💡 Prompt guide")
         self.btn_mcp_guide.setCursor(Qt.PointingHandCursor)
         self.btn_mcp_guide.setStyleSheet(
@@ -152,12 +187,12 @@ class ChatInputContainer(QFrame):
         self.btn_mcp_guide.setVisible(False)  # 默认隐藏，开启 MCP 后显示
 
         self.mcp_toolbar.addWidget(self.chk_mcp_enable)
+        self.mcp_toolbar.addWidget(self.btn_mcp_tags)
         self.mcp_toolbar.addWidget(self.btn_mcp_guide)
         self.mcp_toolbar.addStretch()
         main_layout.insertLayout(1, self.mcp_toolbar)
 
-        # 绑定开关联动
-        self.chk_mcp_enable.toggled.connect(self.btn_mcp_guide.setVisible)
+        self.chk_mcp_enable.toggled.connect(self._on_mcp_enable_toggled)
 
         # 设置菜单
         guide_menu = QMenu(self)
@@ -253,6 +288,58 @@ class ChatInputContainer(QFrame):
 
         self.btn_send.clicked.connect(self._emit_send)
         self.text_edit.sig_send.connect(self._emit_send)
+
+    def _on_mcp_enable_toggled(self, checked):
+        """当用户勾选/取消勾选 MCP 开关时触发"""
+        self.btn_mcp_guide.setVisible(checked)
+        self.btn_mcp_tags.setVisible(checked)
+        if checked:
+            # 只要开启，就立刻主动刷新一次标签，而不是傻等用户点击菜单
+            self.refresh_mcp_tags()
+
+    def refresh_mcp_tags(self):
+        """动态获取最新标签"""
+        from src.core.mcp_manager import MCPManager
+        try:
+            mcp_mgr = MCPManager.get_instance()
+            available_tags = mcp_mgr.get_available_tags()
+
+            if not available_tags:
+                self.btn_mcp_tags.setText("🏷️ Filter Tools: None")
+                return
+
+            # 找出新连上的 MCP 带来的新标签
+            new_tags = [t for t in available_tags if t not in self.known_tags]
+
+            if new_tags:
+                for tag in new_tags:
+                    action = QAction(tag, self)
+                    action.setCheckable(True)
+                    action.setChecked(True)
+                    action.triggered.connect(self._update_tag_button_text)
+                    self.menu_mcp_tags.addAction(action)
+                    self.tag_actions[tag] = action
+                    self.known_tags.add(tag)
+
+            self._update_tag_button_text()
+
+        except Exception as e:
+            pass
+
+
+    def _update_tag_button_text(self):
+        selected = self.get_selected_tags()
+        total = len(self.tag_actions)
+        if total == 0:
+            self.btn_mcp_tags.setText("🏷️ Filter Tools: None")
+        elif len(selected) == total:
+            self.btn_mcp_tags.setText("🏷️ Filter Tools: All")
+        else:
+            self.btn_mcp_tags.setText(f"🏷️ Filter Tools: {len(selected)} selected")
+
+    def get_selected_tags(self) -> list:
+        return [tag for tag, action in self.tag_actions.items() if action.isChecked()]
+
 
     def _emit_send(self):
         text = self.text_edit.toPlainText().strip()
@@ -466,17 +553,14 @@ class ChatWorker(QObject):
             # ==========================================
             if getattr(self, 'external_context', None):
                 if isinstance(self.external_context, list):
-                    # 动态接续向量库的引用编号
                     current_ref_id = len(sources_map) + 1 if sources_map else 1
                     for chunk in self.external_context:
-                        # 记录溯源映射，截取前 100 个字符用于传给 PDFViewer 做高亮匹配
                         sources_map[current_ref_id] = {
                             "path": chunk.get('path', ''),
                             "page": chunk.get('page', 1),
                             "name": chunk.get('name', 'External Document'),
                             "search_text": chunk.get('content', '')[:100]
                         }
-                        # 伪装成正规文档格式喂给大模型
                         context_str += (
                             f"--- [Document {current_ref_id}] ---\n"
                             f"Source: {chunk.get('name', 'External')} (Page {chunk.get('page', 1)})\n"
@@ -484,64 +568,49 @@ class ChatWorker(QObject):
                         )
                         current_ref_id += 1
                 else:
-                    # 兼容纯文本 RSS 的老逻辑
                     context_str += f"\n\n--- [External Context Provided by User] ---\n{self.external_context}\n\n"
 
             if not context_str.strip():
-                context_str = "No local or external documents provided. Please answer based on general knowledge or use available NCBI tools."
+                context_str = "No local documents provided. Use tools to fetch real-time data if necessary."
 
-            #  Phase 3.9: Low VRAM 内存/显存释放
+            # Phase 3.9: Low VRAM 内存/显存释放
             is_low_vram = ConfigManager().user_settings.get("low_vram_mode", False)
             if is_low_vram:
                 self.sig_token.emit("<i>🧹 [Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
-
-                # 1. 释放 Reranker 模型权重
                 if hasattr(self, 'reranker') and getattr(self.reranker, 'model', None) is not None:
                     self.reranker.model = None
-
-                # 2. 彻底断开 ChromaDB 集合与 Embedding 函数的绑定
                 if hasattr(self, 'db') and self.db:
                     self.db.reload()
-
-                    # 3. 删掉当前函数作用域内的局部变量引用
                 if 'embed_fn' in locals():
                     del embed_fn
-
-                # 4. 强制 Python 垃圾回收，并清空 PyTorch 缓存
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-
-            # Phase 4: Hybrid Agentic RAG (Local DB + NCBI MCP Tools)
+            # Phase 4: Hybrid Agentic RAG (Local DB + MCP Tools)
             self.sig_token.emit("[CLEAR_SEARCH]")
             self.sig_token.emit("[START_LLM_NETWORK]")
-
-            from src.core.mcp_manager import MCPManager
             mcp_mgr = MCPManager.get_instance()
 
-            # 只有用户开启了高级功能，才获取工具 schema
-            mcp_tools = mcp_mgr.get_all_tools_schema() if self.use_mcp else None
+            # 按需过滤加载工具
+            mcp_tools = None
+            if self.use_mcp:
+                selected_tags = getattr(self, 'selected_mcp_tags', [])
+                if selected_tags:
+                    mcp_tools = mcp_mgr.get_tools_schema_by_tags(selected_tags)
+                else:
+                    mcp_tools = mcp_mgr.get_all_tools_schema()
 
             system_prompt = (
                 f"You are a Senior Research Scientist specializing in {domain}. "
                 "Your goal is to provide high-density, evidence-based academic responses.\n\n"
 
                 "### TOOL USE PROTOCOL (STRICT):\n"
-                "1. **SILENT EXECUTION**: If the provided Context is insufficient, invoke NCBI tools IMMEDIATELY.\n"
-                "2. **NO PLANNING TEXT**: Never output phrases like 'I will now search for...', 'Let me check...', or 'I need to use...'. \n"
-                "3. **DIRECT CALL**: If you determine a tool is necessary, your first output MUST be the tool call. Do not explain your reasoning unless explicitly asked.\n\n"
+                "1. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
+                "2. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n\n"
 
                 "### RESPONSE GUIDELINES:\n"
-                "1. **GROUNDING**: Prioritize local Context. If data comes from Context, you MUST append citations (e.g., [1], [2]) immediately after the relevant sentence.\n"
-                "2. **NCBI INTEGRATION**: Use NCBI data to fill gaps. Treat tool outputs as primary evidence.\n"
-                "3. **NO HALLUCINATION**: If information is unavailable in both Context and Tools, state: 'I cannot answer this based on the provided context or real-time retrieval.'\n\n"
-
-                "### DATA VISUALIZATION:\n"
-                "- For diagrams, flowcharts, or mind maps, strictly use ```mermaid ... ``` blocks.\n"
-                "- Use 'graph LR' for mechanisms and 'mindmap' for conceptual networks. No ASCII art.\n\n"
-
-                "【Important Note】When you need to use external tools such as MCP, please do not ask me for confirmation—proceed directly.\n\n"
+                "1. GROUNDING: If data comes from Context, append citations (e.g., [1], [2]).\n\n"
 
                 "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
                 "At the very end, provide exactly 6 follow-up questions using this EXACT format:\n"
@@ -552,11 +621,13 @@ class ChatWorker(QObject):
                 "   - [Brainstorm] <A creative brainstorming question or hypothetical \"What if\" scenario>\n"
                 "   - [Similar] <Question connecting to a similar or parallel topic/concept>\n"
                 "   - [Application] <Question about real-world applications or cross-disciplinary use>\n\n"
-                
+
                 f"### CONTEXT:\n{context_str}"
             )
             rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
             rag_messages.append({"role": "user", "content": search_query})
+
+            tool_executed = False
 
             if mcp_tools:
                 try:
@@ -567,8 +638,17 @@ class ChatWorker(QObject):
                     )
 
                     tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
+                    content_text = response_msg.get('content', '') if isinstance(response_msg, dict) else str(response_msg)
 
-                    if tool_calls:
+                    # 🚀 优化点 2：拦截大模型的“格式幻觉”（伪装成调用工具的普通文本）
+                    # 避免拦截用户正常索要的 JSON，只针对特有的暴露语法
+                    if not tool_calls and content_text and re.search(r'(?:Tool_args|tool_calls|arguments):\s*\{', content_text, re.IGNORECASE):
+                        self.logger.warning(f"Intercepted model tool hallucination: {content_text}")
+                        # 抛弃这条幻觉回复，直接进入后续基于系统提示词的最终回答
+                        pass
+
+                    elif tool_calls:
+                        tool_executed = True
                         rag_messages.append(response_msg)
 
                         for tool_call in tool_calls:
@@ -583,15 +663,13 @@ class ChatWorker(QObject):
                                     res_dict = json.loads(tool_result)
                                     if isinstance(res_dict, dict) and res_dict.get("status") == "error":
                                         error_msg = res_dict.get("message", "Unknown error")
-                                        GlobalSignals().sig_toast.emit(f"Academic MCP server Request Failed: {error_msg}", "warning")
-                                        tool_result = "Action failed. The NCBI tool encountered a network or API limit error. Please strictly inform the user that real-time retrieval failed, and answer using ONLY local context."
+                                        GlobalSignals().sig_toast.emit(f"Tool Request Failed: {error_msg}", "warning")
                                 except Exception:
                                     pass
 
                             except Exception as e:
-                                self.logger.error(f"Academic MCP tool {tool_name} failed: {e}")
-                                GlobalSignals().sig_toast.emit(f"Academic MCP Plugin Connection Error: {str(e)}", "error")
-                                tool_result = "Tool execution failed due to a system exception. Proceed using ONLY local context."
+                                self.logger.error(f"MCP tool {tool_name} failed: {e}")
+                                tool_result = "Tool execution failed. Proceed using ONLY local context."
 
                             rag_messages.append({
                                 "role": "tool",
@@ -600,17 +678,27 @@ class ChatWorker(QObject):
                                 "content": tool_result
                             })
 
-                        self.sig_token.emit(
-                            "<i>✅ Academic MCP data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
+                        self.sig_token.emit("<i>✅ Data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
                 except Exception as e:
                     self.logger.warning(f"Tool calling failed: {e}")
 
+            # 🚀 优化点 3：工具调用完毕后，注入强硬的闭嘴指令 (Silent Execution)
+            if tool_executed:
+                silence_prompt = (
+                    "CRITICAL SYSTEM INSTRUCTION: "
+                    "The tools have successfully executed and returned the necessary data. "
+                    "You MUST NOW provide the final answer directly to the user. "
+                    "STRICTLY FORBIDDEN: Do not explain the tool execution process. "
+                    "Do not output phrases like 'I have obtained the data...', 'Based on the tool...', or 'Let me check...'. "
+                    "Do not output any JSON argument blocks. "
+                    "Deliver a clean, direct, and professional response immediately."
+                )
+                rag_messages.append({"role": "system", "content": silence_prompt})
 
             # --- LLM Output Streaming ---
             for token in self.main_llm.stream_chat(rag_messages):
                 self.full_response_cache += token
                 self.sig_token.emit(token)
-
 
             # ==========================================
             # Phase 6: Dynamic Citation Mounting
@@ -627,7 +715,6 @@ class ChatWorker(QObject):
                         safe_name = quote(info['name'])
 
                         link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}&name={safe_name}"
-
                         ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']} (Page {info['page']})</a></div>"
                         displayed += 1
                 if displayed > 0:
@@ -1003,6 +1090,7 @@ class ChatTool(BaseTool):
         trans_config = self.trans_selector.get_current_config()
         use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container,
                                                                                    'chk_mcp_enable') else False
+        selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
 
 
         if trans_config:
@@ -1032,6 +1120,7 @@ class ChatTool(BaseTool):
             external_context=getattr(self, 'external_chunks', []),
             use_mcp=use_mcp_tools
         )
+        self.worker.selected_mcp_tags = selected_mcp_tags
         self.external_chunks = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()

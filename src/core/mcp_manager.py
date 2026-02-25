@@ -6,11 +6,14 @@ import os
 import time
 from contextlib import AsyncExitStack
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 from typing import Dict, List, Optional
+
+from src.core.config_manager import ConfigManager
 
 logger = logging.getLogger("MCP.Manager")
 
@@ -42,23 +45,24 @@ class MCPManager:
     def bootstrap_servers(self):
         """
         Unified method to load and start all enabled MCP servers from the central configuration.
+        Implements staggered lazy-loading for external servers to prevent UI freezes.
         """
-        from src.core.config_manager import ConfigManager
         config_mgr = ConfigManager()
         servers = config_mgr.mcp_servers.get("mcpServers", {})
+
+        delay_ms = 500  # 外部服务器初始延迟
 
         for server_name, srv_cfg in servers.items():
             is_enabled = srv_cfg.get("enabled", False)
             always_on = srv_cfg.get("always_on", False)
 
             if is_enabled or always_on:
-                logger.info(f"Bootstrapping MCP Server: [{server_name}] via {srv_cfg.get('type')}")
+                self.server_status[server_name] = "starting"
 
-                # Create a deep copy to avoid mutating the original config dict in memory
                 run_cfg = dict(srv_cfg)
 
-                # Special dynamic handling for the builtin academic server (PyInstaller compatibility)
                 if server_name == "builtin":
+                    logger.info(f"Bootstrapping Core MCP Server: [{server_name}] immediately.")
                     is_frozen = getattr(sys, 'frozen', False) or not sys.executable.endswith('python.exe')
                     run_cfg['command'] = sys.executable
                     if is_frozen:
@@ -67,18 +71,25 @@ class MCPManager:
                         run_cfg['args'] = ["-c",
                                            "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
 
-                # Resolve default Python executable path for external scripts
-                elif run_cfg.get('type') == 'stdio' and run_cfg.get('command') == 'python':
-                    ext_py = config_mgr.user_settings.get("external_python_path", "")
-                    run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
+                    self._async_start(server_name, run_cfg)
 
-                # Ensure env vars are passed correctly for stdio
-                if run_cfg.get('type') == 'stdio':
-                    env_copy = os.environ.copy()
-                    env_copy.update(run_cfg.get('env', {}))
-                    run_cfg['env'] = env_copy
+                else:
+                    logger.info(f"Scheduled Lazy Load for External MCP Server: [{server_name}] in {delay_ms}ms")
 
-                self._async_start(server_name, run_cfg)
+                    if run_cfg.get('type') == 'stdio' and run_cfg.get('command') == 'python':
+                        ext_py = config_mgr.user_settings.get("external_python_path", "")
+                        run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
+
+                    if run_cfg.get('type') == 'stdio':
+                        env_copy = os.environ.copy()
+                        env_copy.update(run_cfg.get('env', {}))
+                        run_cfg['env'] = env_copy
+
+                    def start_lazy_server(name=server_name, cfg=run_cfg):
+                        self._async_start(name, cfg)
+
+                    QTimer.singleShot(delay_ms, start_lazy_server)
+                    delay_ms += 2000
 
     async def _run_session(self, server_name: str, connection_config: dict):
         self.server_status[server_name] = "connecting"
@@ -133,6 +144,41 @@ class MCPManager:
             tools_to_remove = [k for k, v in self.tool_map.items() if v == server_name]
             for tool in tools_to_remove:
                 del self.tool_map[tool]
+
+    def get_available_tags(self) -> list:
+        """供 UI 获取所有可选标签"""
+        tags = set()
+        for schema in self.get_all_tools_schema():
+            tags.update(self._get_tool_effective_tags(schema))
+        return sorted(list(tags))
+
+
+    def _get_tool_effective_tags(self, schema: dict) -> list:
+        server_name = schema.get("function", {}).get("server", "")
+
+        if server_name in ["builtin", "external"]:
+            desc = schema.get("function", {}).get("description", "")
+            import re
+            match = re.search(r"\[Tags:\s*(.*?)\]", desc, re.IGNORECASE)
+            if match:
+                return [t.strip() for t in match.group(1).split(",")]
+            return ["General Tools"]  # 如果内置工具忘了写标签，默认分到 General
+        else:
+            return [server_name] if server_name else ["Unknown Server"]
+
+    def get_tools_schema_by_tags(self, selected_tags: list) -> list:
+        """根据 UI 勾选的标签，精准过滤发给大模型的工具列表"""
+        if not selected_tags:
+            return self.get_all_tools_schema()
+
+        filtered_tools = []
+        for schema in self.get_all_tools_schema():
+            tool_tags = self._get_tool_effective_tags(schema)
+            # 只要该工具的任何一个标签在用户勾选的标签里，就塞给大模型
+            if any(tag in selected_tags for tag in tool_tags):
+                filtered_tools.append(schema)
+
+        return filtered_tools
 
 
     def connect_manual(self, server_name: str, config: dict) -> bool:

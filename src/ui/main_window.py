@@ -204,7 +204,7 @@ class MainWindow(QMainWindow):
         config_mgr = ConfigManager()
         mcp_config = config_mgr.mcp_servers.get("mcpServers", {})
 
-        # 1. 更新外部MCP状态
+        # 1. 更新外部 MCP 状态 (Legacy External)
         ext_cfg = mcp_config.get("external", {})
         if ext_cfg.get("enabled", False):
             status = mcp_mgr.get_server_status("external")
@@ -217,22 +217,38 @@ class MainWindow(QMainWindow):
                 self.external_status_label.setToolTip(status)
             else:
                 self.external_status_label.setText(f"External: {status.capitalize()}")
-                self.external_status_label.setStyleSheet("color: #ffb86c;")
+                self.external_status_label.setStyleSheet("color: #ffb86c; font-weight: bold;")
         else:
             self.external_status_label.setText("External: Disabled")
             self.external_status_label.setStyleSheet("color: #888;")
 
-        # 2. 更新MCP状态综合数量 (SSE/stdio)
-        active_count = 0
-        for name, cfg in mcp_config.items():
-            # 只要不是内置和默认外部，不论是 stdio 还是 sse，全算作 Custom 扩展
-            if name not in ["builtin", "external"]:
-                if cfg.get("enabled", False) and mcp_mgr.get_server_status(name) == "connected":
-                    active_count += 1
+        # 全面更新自定义 MCP 状态综合数量
+        connected_count = 0
+        starting_count = 0
+        error_count = 0
 
-        if active_count > 0:
-            self.custom_status_label.setText(f"Custom: {active_count} Active")
-            self.custom_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
+        for name, cfg in mcp_config.items():
+            # 过滤掉两个内置的，剩下的全算 Custom
+            if name not in ["builtin", "external"]:
+                if cfg.get("enabled", False) or cfg.get("always_on", False):
+                    status = mcp_mgr.get_server_status(name)
+                    if status == "connected":
+                        connected_count += 1
+                    elif status in ["starting", "connecting"]:
+                        starting_count += 1
+                    elif "error" in status:
+                        error_count += 1
+
+        # 优先级：正在启动/排队中 > 报错 > 全部连上 > 未启用
+        if starting_count > 0:
+            self.custom_status_label.setText(f"Custom: {starting_count} Starting...")
+            self.custom_status_label.setStyleSheet("color: #ffb86c; font-weight: bold;") # 橘黄色提示正在加载
+        elif error_count > 0:
+            self.custom_status_label.setText(f"Custom: {connected_count} Active, {error_count} Error")
+            self.custom_status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;") # 红色警告
+        elif connected_count > 0:
+            self.custom_status_label.setText(f"Custom: {connected_count} Active")
+            self.custom_status_label.setStyleSheet("color: #4caf50; font-weight: bold;") # 绿色就绪
         else:
             self.custom_status_label.setText("Custom: 0 Active")
             self.custom_status_label.setStyleSheet("color: #888;")
