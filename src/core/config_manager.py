@@ -21,9 +21,11 @@ class ConfigManager:
 
             cls._instance.BASE_DIR = base_dir
             cls._instance.SETTINGS_PATH = os.path.join(base_dir, "config", "settings.json")
+            cls._instance.MCP_SERVERS_PATH = os.path.join(base_dir, "config", "mcp_servers.json")
 
             # 2. 加载配置
             cls._instance.load_settings()
+            cls._instance.load_mcp_servers()
 
         return cls._instance
 
@@ -107,3 +109,68 @@ class ConfigManager:
         else:
             os.environ.pop("HTTP_PROXY", None)
             os.environ.pop("HTTPS_PROXY", None)
+
+    def load_mcp_servers(self):
+        """
+        加载 MCP 服务器统一配置，如果不存在则创建默认配置
+        """
+        # 默认的 MCP 服务器字典，将 builtin 和 external 整合在一起
+        default_mcp_servers = {
+            "mcpServers": {
+                "builtin": {
+                    "type": "stdio",
+                    "command": "python",
+                    "args": ["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"],
+                    "env": {"SCARF_NO_ANALYTICS": "true"},
+                    "enabled": True,
+                    "always_on": True,
+                    "description": "Core Academic Tools (Built-in)"
+                },
+                "external": {
+                    "type": "stdio",
+                    "command": "python",
+                    "args": ["plugins_ext/common_server.py"],
+                    "env": {},
+                    "enabled": False,
+                    "always_on": False,
+                    "description": "Local External Tools (common_server.py)"
+                }
+            }
+        }
+
+        current_servers = {}
+
+        if os.path.exists(self.MCP_SERVERS_PATH):
+            try:
+                with open(self.MCP_SERVERS_PATH, 'r', encoding='utf-8') as f:
+                    current_servers = json.load(f)
+            except Exception as e:
+                self.logger.error(f"MCP servers config corrupted, using defaults: {e}")
+                current_servers = {}
+
+        is_modified = False
+        if not current_servers or "mcpServers" not in current_servers:
+            current_servers = default_mcp_servers.copy()
+            is_modified = True
+        else:
+            # 确保核心服务器结构不丢失
+            for essential_server in ["builtin", "external"]:
+                if essential_server not in current_servers["mcpServers"]:
+                    current_servers["mcpServers"][essential_server] = default_mcp_servers["mcpServers"][
+                        essential_server]
+                    is_modified = True
+
+        self.mcp_servers = current_servers
+
+        if is_modified:
+            self.save_mcp_servers()
+
+    def save_mcp_servers(self):
+        os.makedirs(os.path.dirname(self.MCP_SERVERS_PATH), exist_ok=True)
+        try:
+            with open(self.MCP_SERVERS_PATH, 'w', encoding='utf-8') as f:
+                json.dump(self.mcp_servers, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            self.logger.error(f"Failed to save MCP servers config: {e}")
+
+

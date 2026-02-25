@@ -541,6 +541,8 @@ class ChatWorker(QObject):
                 "- For diagrams, flowcharts, or mind maps, strictly use ```mermaid ... ``` blocks.\n"
                 "- Use 'graph LR' for mechanisms and 'mindmap' for conceptual networks. No ASCII art.\n\n"
 
+                "【Important Note】When you need to use external tools such as MCP, please do not ask me for confirmation—proceed directly.\n\n"
+
                 "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
                 "At the very end, provide exactly 6 follow-up questions using this EXACT format:\n"
                 "   💡 Suggested Follow-ups:\n"

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
 
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
+from src.core.mcp_manager import MCPManager
 from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf
 from src.tools.chat_tool import ChatTool
 # 引入所有工具
@@ -184,9 +185,9 @@ class MainWindow(QMainWindow):
         status_layout.addSpacing(10)
 
         # 网络MCP状态
-        self.network_status_label = QLabel("Network: 0 Active")
-        self.network_status_label.setStyleSheet("color: #888;")
-        status_layout.addWidget(self.network_status_label)
+        self.custom_status_label = QLabel("Custom: 0 Active")
+        self.custom_status_label.setStyleSheet("color: #888;")
+        status_layout.addWidget(self.custom_status_label)
 
         # 添加到主界面底部的状态栏
         self.statusBar().addPermanentWidget(status_widget)
@@ -198,14 +199,14 @@ class MainWindow(QMainWindow):
         self.status_timer.start(5000)  # 每5秒刷新一次
 
     def _update_mcp_status(self):
-        from src.core.mcp_manager import MCPManager
-        from src.core.config_manager import ConfigManager
 
         mcp_mgr = MCPManager.get_instance()
-        config = ConfigManager().user_settings
+        config_mgr = ConfigManager()
+        mcp_config = config_mgr.mcp_servers.get("mcpServers", {})
 
         # 1. 更新外部MCP状态
-        if config.get('external_mcp_enabled', False):
+        ext_cfg = mcp_config.get("external", {})
+        if ext_cfg.get("enabled", False):
             status = mcp_mgr.get_server_status("external")
             if status == "connected":
                 self.external_status_label.setText("External: Connected")
@@ -221,19 +222,20 @@ class MainWindow(QMainWindow):
             self.external_status_label.setText("External: Disabled")
             self.external_status_label.setStyleSheet("color: #888;")
 
-        # 2. 更新网络MCP状态综合数量
-        net_mcps = config.get('network_mcps', [])
+        # 2. 更新MCP状态综合数量 (SSE/stdio)
         active_count = 0
-        for net in net_mcps:
-            if net.get('enabled') and mcp_mgr.get_server_status(net.get('name')) == "connected":
-                active_count += 1
+        for name, cfg in mcp_config.items():
+            # 只要不是内置和默认外部，不论是 stdio 还是 sse，全算作 Custom 扩展
+            if name not in ["builtin", "external"]:
+                if cfg.get("enabled", False) and mcp_mgr.get_server_status(name) == "connected":
+                    active_count += 1
 
         if active_count > 0:
-            self.network_status_label.setText(f"Network: {active_count} Active")
-            self.network_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
+            self.custom_status_label.setText(f"Custom: {active_count} Active")
+            self.custom_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
         else:
-            self.network_status_label.setText("Network: 0 Active")
-            self.network_status_label.setStyleSheet("color: #888;")
+            self.custom_status_label.setText("Custom: 0 Active")
+            self.custom_status_label.setStyleSheet("color: #888;")
 
 
     def clean_old_logs(self):

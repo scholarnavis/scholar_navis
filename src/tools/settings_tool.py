@@ -11,60 +11,24 @@ import qdarktheme
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QMessageBox,
                                QScrollArea, QHBoxLayout, QComboBox, QTableWidget, QAbstractItemView, QHeaderView,
-                               QTableWidgetItem, QFrame, QCheckBox, QApplication)
+                               QTableWidgetItem, QCheckBox, QApplication)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from huggingface_hub import constants
 
-from src.core.core_task import TaskState, TaskManager, BackgroundTask, TaskMode
+from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
+from src.core.mcp_manager import MCPManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, check_model_exists, resolve_auto_model)
 from src.core.network_worker import setup_global_network_env, LightNetworkWorker
 from src.core.signals import GlobalSignals
+from src.task.settings_tasks import VerifySettingsTask
 from src.tools.base_tool import BaseTool
 from src.core.config_manager import ConfigManager
 from src.task.hf_download_task import RealTimeHFDownloadTask
-from src.ui.components.checkbox import StyledCheckBox
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import ProgressDialog, StandardDialog
+from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog
 from src.ui.components.toast import ToastManager
-
-
-class VerifySettingsTask(BackgroundTask):
-    """标准的系统校验 Task，通过 TaskManager 统一调度"""
-    def _execute(self):
-        self.update_progress(10, "Verifying hardware and AI model files...")
-        from src.core.device_manager import DeviceManager
-        from src.core.models_registry import resolve_auto_model, get_model_conf, check_model_exists
-
-        embed_id = self.kwargs.get('embed_id')
-        rerank_id = self.kwargs.get('rerank_id')
-        mcp_config = self.kwargs.get('mcp_config')
-
-        dev = DeviceManager().get_optimal_device()
-
-        real_embed = embed_id
-        if real_embed == "embed_auto": real_embed = resolve_auto_model("embedding", dev)
-
-        real_rerank = rerank_id
-        if real_rerank == "rerank_auto": real_rerank = resolve_auto_model("reranker", dev)
-
-        to_download = []
-        e_conf = get_model_conf(real_embed, "embedding")
-        if e_conf and not check_model_exists(e_conf.get('hf_repo_id')):
-            to_download.append(e_conf['hf_repo_id'])
-
-        r_conf = get_model_conf(real_rerank, "reranker")
-        if r_conf and not check_model_exists(r_conf.get('hf_repo_id')):
-            to_download.append(r_conf['hf_repo_id'])
-
-        self.update_progress(90, "Verification complete.")
-
-        # 返回值会被 TaskManager 的 sig_result 信号发射出去
-        return {
-            "to_download": to_download,
-            "mcp_config": mcp_config
-        }
 
 
 class BatchDownloadWorker(QObject):
@@ -209,186 +173,62 @@ class SettingsTool(BaseTool):
         self._load_current_settings()
 
         self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self._refresh_external_status)
+        self.status_timer.timeout.connect(self._refresh_mcp_status)
         self.status_timer.start(5000)
 
         return self.widget
 
     def _load_current_settings(self):
         """加载配置到 UI"""
-        # 加载 External MCP 配置
-        self.ext_enabled.blockSignals(True)
-        self.ext_enabled.setChecked(self.config.user_settings.get('external_mcp_enabled', False))
-        self.ext_enabled.blockSignals(False)
-        self.python_path_edit.setText(self.config.user_settings.get('external_python_path', 'python'))
-        self._refresh_external_status()
+        if hasattr(self, '_load_mcp_servers_to_ui'):
+            self._load_mcp_servers_to_ui()
 
-        # 加载 Network MCP 列表
-        net_mcps = self.config.user_settings.get('network_mcps', [])
-        self.table_net_mcp.setRowCount(0)
-        for mcp in net_mcps:
-            self._add_network_mcp_row(mcp.get('enabled', False), mcp.get('name', ''), mcp.get('url', ''))
+        if hasattr(self, '_refresh_mcp_status'):
+            self._refresh_mcp_status()
 
 
-    def _on_external_enabled_changed(self, state):
-        if state == Qt.Checked:
-            msg = (
-                "<b>Security Risk</b><br><br>"
-                "Enabling External MCP allows the execution of localized Python scripts "
-                "(<code>common_server.py</code>) which can read, write, or alter your system files.<br><br>"
-                "Only enable this if you have manually reviewed the code."
-            )
-            dlg = StandardDialog(self.widget, "Security Warning", msg, show_cancel=True)
-            if not dlg.exec():
-                self.ext_enabled.blockSignals(True)
-                self.ext_enabled.setChecked(False)
-                self.ext_enabled.blockSignals(False)
 
-    def _refresh_external_status(self):
+
+    def _refresh_mcp_status(self):
         try:
             from src.core.mcp_manager import MCPManager
             mcp_mgr = MCPManager.get_instance()
 
-            # 刷新 Local External 状态
-            if self.ext_enabled.isChecked():
-                status = mcp_mgr.get_server_status("external")
-                if status == "connected":
-                    self.ext_status_label.setText("Status: Connected")
-                    self.ext_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
-                elif "error" in status:
-                    self.ext_status_label.setText(f"Status: Error")
-                    self.ext_status_label.setStyleSheet("color: #ff6b6b;")
-                    self.ext_status_label.setToolTip(status)
+            for row in range(self.table_mcp.rowCount()):
+                name_item = self.table_mcp.item(row, 1)
+                if not name_item: continue
+                name = name_item.text()
+
+                status_lbl = self.table_mcp.cellWidget(row, 4)
+                if not status_lbl: continue
+
+                chk_widget = self.table_mcp.cellWidget(row, 0)
+                chk = chk_widget.layout().itemAt(0).widget() if chk_widget else None
+                is_enabled = chk.isChecked() if chk else False
+
+                if is_enabled:
+                    status = mcp_mgr.get_server_status(name)
+                    if status == "connected":
+                        status_lbl.setText("Connected")
+                        status_lbl.setStyleSheet("color: #4caf50; font-weight: bold;")
+                    elif "error" in status:
+                        status_lbl.setText("Error")
+                        status_lbl.setStyleSheet("color: #ff6b6b;")
+                        status_lbl.setToolTip(status)
+                    else:
+                        status_lbl.setText(status.capitalize())
+                        status_lbl.setStyleSheet("color: #ffb86c;")
                 else:
-                    self.ext_status_label.setText(f"Status: {status.capitalize()}")
-                    self.ext_status_label.setStyleSheet("color: #ffb86c;")
-            else:
-                self.ext_status_label.setText("Status: Disabled")
-                self.ext_status_label.setStyleSheet("color: #888;")
+                    status_lbl.setText("Disabled")
+                    status_lbl.setStyleSheet("color: #888;")
 
         except Exception as e:
             self.logger.error(f"Status refresh failed: {e}")
 
-    def _test_external_connection(self):
-        """测试连接按钮点击事件"""
-        if not self.ext_enabled.isChecked():
-            ToastManager().show("Please enable the External MCP first.", "warning")
-            return
-
-        py_path = self.python_path_edit.text().strip() or "python"
-        script_path = os.path.join(os.getcwd(), "plugins_ext", "common_server.py")
-
-        if not os.path.exists(script_path):
-            StandardDialog(self.widget, "Error", f"Could not find script at:\n{script_path}").exec()
-            return
-
-        self.pd_test = ProgressDialog(self.widget, "Testing", "Connecting to external server...")
-        self.pd_test.btn_cancel.setVisible(False)
-        self.pd_test.show()
-
-        QTimer.singleShot(100, lambda: self._do_test_ext_connection(script_path, py_path))
-
-    def _do_test_ext_connection(self, script_path, py_path):
-        from src.core.mcp_manager import MCPManager
-        mgr = MCPManager.get_instance()
-        # 先断开旧的
-        mgr.disconnect_server("external")
-        # 尝试连接
-        success = mgr.connect_external_mcp(script_path, py_path)
-
-        self.pd_test.close_safe()
-        if success:
-            self.logger.info("✅ External MCP Server (common_server.py) connected successfully!")
-            StandardDialog(self.widget, "Success", "External MCP Server connected successfully!").exec()
-        else:
-            err = mgr.get_server_status("external")
-            self.logger.error(f"❌ Failed to connect to External MCP: {err}")
-            StandardDialog(self.widget, "Failed", f"Could not connect to external server.\nError: {err}").exec()
-
-        self._refresh_external_status()
-
-    def _add_network_server(self):
-        self._add_network_mcp_row(True, f"Server_{self.table_net_mcp.rowCount() + 1}", "http://")
-
-    def _add_network_mcp_row(self, is_enabled, name, url):
-        row = self.table_net_mcp.rowCount()
-        self.table_net_mcp.insertRow(row)
-
-        chk = QCheckBox()
-        chk.setChecked(is_enabled)
-        chk.setStyleSheet("color: white; background: transparent;")
-
-        chk_widget = QWidget()
-        l = QHBoxLayout(chk_widget)
-        l.addWidget(chk)
-        l.setAlignment(Qt.AlignCenter)
-        l.setContentsMargins(0, 0, 0, 0)
-        self.table_net_mcp.setCellWidget(row, 0, chk_widget)
 
 
-        # Name
-        name_edit = QLineEdit(name)
-        name_edit.setStyleSheet("background: transparent; color: white; border: none;")
-        self.table_net_mcp.setCellWidget(row, 1, name_edit)
-
-        # URL
-        url_edit = QLineEdit(url)
-        url_edit.setStyleSheet("background: transparent; color: white; border: none;")
-        self.table_net_mcp.setCellWidget(row, 2, url_edit)
-
-        # Delete Button
-        del_btn = QPushButton("🗑️")
-        del_btn.setStyleSheet("background: transparent; border: none;")
-        del_btn.setCursor(Qt.PointingHandCursor)
-        del_btn.clicked.connect(
-            lambda _, r=row: self.table_net_mcp.removeRow(self.table_net_mcp.indexAt(del_btn.pos()).row()))
-        self.table_net_mcp.setCellWidget(row, 3, del_btn)
-
-    def _get_network_mcp_configs(self):
-        """从表格中提取配置"""
-        configs = []
-        for row in range(self.table_net_mcp.rowCount()):
-            chk_widget = self.table_net_mcp.cellWidget(row, 0)
-            chk = chk_widget.layout().itemAt(0).widget() if chk_widget else None
-
-            name_edit = self.table_net_mcp.cellWidget(row, 1)
-            url_edit = self.table_net_mcp.cellWidget(row, 2)
-
-            if name_edit and url_edit:
-                name = name_edit.text().strip()
-                url = url_edit.text().strip()
-                if name and url:
-                    configs.append({
-                        "enabled": chk.isChecked() if chk else False,
-                        "name": name,
-                        "url": url
-                    })
-        return configs
 
 
-    def _apply_settings(self):
-        from src.core.config_manager import ConfigManager
-        from src.core.mcp_manager import MCPManager
-
-        config = ConfigManager()
-
-        # 保存外部MCP设置
-        config.user_settings['external_mcp_enabled'] = self.ext_enabled.isChecked()
-        config.user_settings['external_python_path'] = self.python_path_edit.text()
-
-        # 保存网络MCP设置
-        config.user_settings['network_mcp_enabled'] = self.network_enabled.isChecked()
-
-        config.save_settings()
-
-        # 如果启用了外部MCP，尝试连接
-        if self.ext_enabled.isChecked():
-            self._connect_external_mcp()
-
-        # 应用后刷新状态
-        self._refresh_external_status()
-
-        QMessageBox.information(None, "成功", "设置已保存并应用")
 
 
     def refresh_model_combos(self):
@@ -554,90 +394,162 @@ class SettingsTool(BaseTool):
         self.layout.addWidget(group)
 
     def init_mcp_section(self):
-        mcp_group = QGroupBox("🔌 MCP Server Configuration")
-        mcp_group.setStyleSheet(
+        group = QGroupBox("🔌 MCP Servers (Unified)")
+        group.setStyleSheet(
             "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
-        mcp_layout = QVBoxLayout(mcp_group)
+        layout = QVBoxLayout(group)
 
-        # 1. 内置MCP状态显示
-        builtin_layout = QHBoxLayout()
-        builtin_layout.addWidget(QLabel("<b>Built-in Academic Server:</b>"))
-        builtin_status = QLabel("Always Enabled")
-        builtin_status.setStyleSheet("color: #4caf50; font-weight: bold;")
-        builtin_layout.addWidget(builtin_status)
-        builtin_layout.addStretch()
-        mcp_layout.addLayout(builtin_layout)
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("<b>Manage Local & Remote Tools:</b>"))
+        header_layout.addStretch()
 
-        mcp_layout.addWidget(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
+        btn_add = QPushButton("➕ Add Server")
+        btn_add.clicked.connect(self._on_add_mcp_clicked)
+        btn_add.setStyleSheet("background: #05B8CC; color: white; border-radius: 4px; padding: 4px 10px;")
 
-        # 2. 外部MCP配置 (common_server.py)
-        ext_layout = QFormLayout()
-        self.ext_enabled = QCheckBox("Enable Local External MCP Server")
-        self.ext_enabled.setToolTip("Run user-defined common_server.py script locally.")
-        self.ext_enabled.setStyleSheet("color: white; background: transparent;")
-        self.ext_enabled.stateChanged.connect(self._on_external_enabled_changed)
-        ext_layout.addRow("", self.ext_enabled)
+        btn_refresh = QPushButton("🔄 Refresh Status")
+        btn_refresh.clicked.connect(self._refresh_mcp_status)
+        btn_refresh.setStyleSheet("background: #444; color: white; border-radius: 4px; padding: 4px 10px;")
 
-        self.ext_status_label = QLabel("Status: Disabled")
-        self.ext_status_label.setStyleSheet("color: #888;")
+        header_layout.addWidget(btn_add)
+        header_layout.addWidget(btn_refresh)
+        layout.addLayout(header_layout)
 
-        ext_py_layout = QHBoxLayout()
-        self.python_path_edit = QLineEdit()
-        self.python_path_edit.setPlaceholderText("Leave empty to use system default Python")
-        ext_py_layout.addWidget(self.python_path_edit)
-
-        ext_btn_layout = QHBoxLayout()
-        test_btn = QPushButton("🧪 Test Connection")
-        test_btn.clicked.connect(self._test_external_connection)
-        refresh_btn = QPushButton("🔄 Refresh Status")
-        refresh_btn.clicked.connect(self._refresh_external_status)
-        ext_btn_layout.addWidget(test_btn)
-        ext_btn_layout.addWidget(refresh_btn)
-        ext_btn_layout.addStretch()
-
-        warning_label = QLabel(
-            "⚠️ Security Warning: External MCP executes custom Python code. Ensure source is trusted.")
-        warning_label.setStyleSheet("color: #ff9800; font-size: 11px;")
-
-        ext_layout.addRow("", self.ext_enabled)
-        ext_layout.addRow("Status:", self.ext_status_label)
-        ext_layout.addRow("Python Path:", ext_py_layout)
-        ext_layout.addRow("", ext_btn_layout)
-        ext_layout.addRow("", warning_label)
-
-        mcp_layout.addLayout(ext_layout)
-
-        mcp_layout.addWidget(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
-
-        # 3. 网络MCP配置
-        net_layout = QVBoxLayout()
-        net_header = QHBoxLayout()
-        net_header.addWidget(QLabel("<b>Network MCP Servers (SSE):</b>"))
-        add_network_btn = QPushButton("➕ Add Network Server")
-        add_network_btn.clicked.connect(self._add_network_server)
-        net_header.addStretch()
-        net_header.addWidget(add_network_btn)
-        net_layout.addLayout(net_header)
-
-        # 使用表格展示网络 MCP 列表
-        self.table_net_mcp = QTableWidget(0, 4)
-        self.table_net_mcp.setHorizontalHeaderLabels(["Enabled", "Name", "SSE URL", "Action"])
-        self.table_net_mcp.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table_net_mcp.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
-        self.table_net_mcp.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table_net_mcp.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table_net_mcp.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table_net_mcp.setFixedHeight(150)
-        self.table_net_mcp.setStyleSheet("""
+        # 统一的 Server 列表视图
+        self.table_mcp = QTableWidget(0, 6)
+        self.table_mcp.setHorizontalHeaderLabels(["Enabled", "Name", "Type", "Target", "Status", "Action"])
+        self.table_mcp.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table_mcp.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
+        self.table_mcp.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table_mcp.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_mcp.setFixedHeight(220)
+        self.table_mcp.setStyleSheet("""
             QTableWidget { background-color: #1e1e1e; color: #eee; border: 1px solid #444; }
-            QHeaderView::section { background-color: #2a2d2e; color: #ccc; border: 1px solid #444; }
-            QLineEdit { background: transparent; border: none; color: #fff; }
+            QHeaderView::section { background-color: #2a2d2e; color: #ccc; border: 1px solid #444; padding: 4px; }
         """)
-        net_layout.addWidget(self.table_net_mcp)
+        self.table_mcp.cellDoubleClicked.connect(self._on_mcp_double_clicked)
+        layout.addWidget(self.table_mcp)
 
-        mcp_layout.addLayout(net_layout)
-        self.layout.addWidget(mcp_group)
+        lbl_hint = QLabel(
+            "💡 <i>Changes to MCP servers require clicking the blue 'Save Settings & Verify' button below to take effect.</i>")
+        lbl_hint.setStyleSheet("color: #aaa; font-size: 11px;")
+        layout.addWidget(lbl_hint)
 
+        self.layout.addWidget(group)
+
+    def _on_mcp_double_clicked(self, row, col):
+        name_item = self.table_mcp.item(row, 1)
+        if not name_item: return
+
+        name = name_item.text()
+
+        if name in ["builtin", "external"]:
+            from src.ui.components.toast import ToastManager
+            ToastManager().show(f"Core service '{name}' cannot be edited here.", "info")
+            return
+
+        self._on_edit_mcp_clicked(row)
+
+    def _load_mcp_servers_to_ui(self):
+        """将 ConfigManager 中的 JSON 渲染到表格"""
+        servers = self.config.mcp_servers.get("mcpServers", {})
+        self.table_mcp.setRowCount(0)
+        for name, cfg in servers.items():
+            self._add_mcp_row(name, cfg)
+
+    def _add_mcp_row(self, name, cfg):
+        row = self.table_mcp.rowCount()
+        self.table_mcp.insertRow(row)
+
+        always_on = cfg.get("always_on", False)
+        is_enabled = cfg.get("enabled", False) or always_on
+
+        # 0. Enabled Checkbox
+        chk = QCheckBox()
+        chk.setChecked(is_enabled)
+        if always_on:
+            chk.setEnabled(False)  # 保护 builtin 核心不被意外关闭
+            chk.setToolTip("Core service must remain enabled.")
+        chk.setStyleSheet("color: white; background: transparent; margin-left: 10px;")
+        chk_widget = QWidget()
+        l = QHBoxLayout(chk_widget)
+        l.addWidget(chk)
+        l.setAlignment(Qt.AlignCenter)
+        l.setContentsMargins(0, 0, 0, 0)
+        self.table_mcp.setCellWidget(row, 0, chk_widget)
+
+        # 1. Name
+        name_item = QTableWidgetItem(name)
+        name_item.setData(Qt.UserRole, cfg)  # 隐式存储完整配置对象
+        name_item.setFlags(name_item.flags() ^ Qt.ItemIsEditable)
+        self.table_mcp.setItem(row, 1, name_item)
+
+        # 2. Type
+        stype = cfg.get("type", "stdio")
+        type_item = QTableWidgetItem(stype)
+        type_item.setFlags(type_item.flags() ^ Qt.ItemIsEditable)
+        self.table_mcp.setItem(row, 2, type_item)
+
+        # 3. Target
+        target = cfg.get("command", "") if stype == "stdio" else cfg.get("url", "")
+        target_item = QTableWidgetItem(target)
+        target_item.setFlags(target_item.flags() ^ Qt.ItemIsEditable)
+        self.table_mcp.setItem(row, 3, target_item)
+
+        # 4. Status
+        status_lbl = QLabel("Checking...")
+        status_lbl.setAlignment(Qt.AlignCenter)
+        self.table_mcp.setCellWidget(row, 4, status_lbl)
+
+        # 5. Actions (Edit / Delete)
+        action_widget = QWidget()
+        al = QHBoxLayout(action_widget)
+        al.setContentsMargins(0, 0, 0, 0)
+
+        btn_edit = QPushButton("✏️")
+        btn_edit.setCursor(Qt.PointingHandCursor)
+        btn_edit.setStyleSheet("background: transparent; border: none;")
+        btn_edit.clicked.connect(lambda _, r=row: self._on_edit_mcp_clicked(r))
+        al.addWidget(btn_edit)
+
+        if not always_on:
+            btn_del = QPushButton("🗑️")
+            btn_del.setCursor(Qt.PointingHandCursor)
+            btn_del.setStyleSheet("background: transparent; border: none;")
+            btn_del.clicked.connect(
+                lambda _, r=row: self.table_mcp.removeRow(self.table_mcp.indexAt(btn_del.pos()).row()))
+            al.addWidget(btn_del)
+
+        self.table_mcp.setCellWidget(row, 5, action_widget)
+
+    def _on_add_mcp_clicked(self):
+        dlg = McpConfigDialog(self.widget)
+        if dlg.exec():
+            name, cfg = dlg.get_config()
+            if not name: return
+            cfg["enabled"] = True
+            self._add_mcp_row(name, cfg)
+
+    def _on_edit_mcp_clicked(self, row):
+        name_item = self.table_mcp.item(row, 1)
+        if not name_item: return
+
+        old_name = name_item.text()
+        old_cfg = name_item.data(Qt.UserRole)
+
+        dlg = McpConfigDialog(self.widget, server_name=old_name, server_config=old_cfg)
+        if dlg.exec():
+            new_name, new_cfg = dlg.get_config()
+            # 合并保留隐藏属性如 always_on
+            new_cfg["always_on"] = old_cfg.get("always_on", False)
+            new_cfg["enabled"] = old_cfg.get("enabled", True)
+
+            # 更新 UI
+            name_item.setText(new_name)
+            name_item.setData(Qt.UserRole, new_cfg)
+            self.table_mcp.item(row, 2).setText(new_cfg.get("type", "stdio"))
+            target = new_cfg.get("command", "") if new_cfg.get("type", "stdio") == "stdio" else new_cfg.get("url", "")
+            self.table_mcp.item(row, 3).setText(target)
 
     def init_network_section(self):
         group = QGroupBox("Network & Proxy")
@@ -1336,7 +1248,8 @@ class SettingsTool(BaseTool):
         self.net_thread = QThread()
         self.net_worker = LightNetworkWorker()
         self.net_worker.moveToThread(self.net_thread)
-        self.net_pd.sig_canceled.connect(self.net_worker.cancel)
+        self.net_pd.sig_canceled.connect(self.net_worker.cancel, Qt.DirectConnection)
+        self.net_pd.sig_canceled.connect(self.net_thread.terminate)
 
         self.net_worker.base_url = base_url
         self.net_worker.api_key = api_key
@@ -1417,7 +1330,8 @@ class SettingsTool(BaseTool):
         self.test_thread = QThread()
         self.test_worker = LightNetworkWorker()
         self.test_worker.moveToThread(self.test_thread)
-        self.net_pd.sig_canceled.connect(self.test_worker.cancel)
+        self.net_pd.sig_canceled.connect(self.test_worker.cancel, Qt.DirectConnection)
+        self.net_pd.sig_canceled.connect(self.test_thread.terminate)
 
         self.test_worker.base_url = base_url
         self.test_worker.api_key = api_key
@@ -1551,12 +1465,35 @@ class SettingsTool(BaseTool):
 
     def on_save_clicked(self):
         self.widget.setFocus()
+
+        # 1. 保存 LLM 配置
         if hasattr(self, '_sync_llm_data'):
             self._sync_llm_data()
-
         self._save_llm_config()
 
-        # 提取当前输入框的数据
+        # 2. 提取并保存统一的 MCP 配置
+        new_mcp_servers = {}
+        if hasattr(self, 'table_mcp'):
+            for row in range(self.table_mcp.rowCount()):
+                name_item = self.table_mcp.item(row, 1)
+                if not name_item: continue
+
+                name = name_item.text()
+                cfg = name_item.data(Qt.UserRole)
+
+                chk_widget = self.table_mcp.cellWidget(row, 0)
+                if chk_widget and chk_widget.layout():
+                    chk = chk_widget.layout().itemAt(0).widget()
+                    cfg["enabled"] = chk.isChecked()
+                else:
+                    cfg["enabled"] = False
+
+                new_mcp_servers[name] = cfg
+
+            self.config.mcp_servers["mcpServers"] = new_mcp_servers
+            self.config.save_mcp_servers()
+
+        # 3. 提取常规设置
         new_email = self.input_ncbi_email.text().strip()
         new_key = self.input_ncbi_api_key.text().strip()
         new_s2_key = self.input_s2_api_key.text().strip()
@@ -1565,10 +1502,7 @@ class SettingsTool(BaseTool):
         new_proxy_mode = ["system", "off", "custom"][mode_idx]
         new_proxy_url = self.input_proxy.text().strip()
 
-        # 提取网络 MCP 的配置列表
-        net_mcp_configs = self._get_network_mcp_configs()
-
-        # 写入 Config
+        # 写入 user_settings
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
@@ -1583,14 +1517,17 @@ class SettingsTool(BaseTool):
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
             "s2_api_key": new_s2_key,
-            "external_mcp_enabled": self.ext_enabled.isChecked(),
-            "external_python_path": self.python_path_edit.text().strip(),
-            "network_mcps": net_mcp_configs,
+            "external_python_path": getattr(self, 'input_ext_python', QLineEdit()).text().strip(),
             "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked()
         })
+
+        # 清理配置里的旧版残留垃圾
+        for old_key in ["external_mcp_enabled", "network_mcps", "network_mcp_enabled"]:
+            self.config.user_settings.pop(old_key, None)
+
         self.config.save_settings()
 
-        # UI 快速更新与环境变量写入
+        # 4. 应用环境变量与 UI
         setup_global_network_env()
         os.environ["NCBI_API_EMAIL"] = new_email
         os.environ["NCBI_API_KEY"] = new_key
@@ -1600,35 +1537,33 @@ class SettingsTool(BaseTool):
             GlobalSignals().llm_config_changed.emit()
 
         qdarktheme.setup_theme(self.combo_theme.currentText().lower())
+        import logging
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
-        # 唤起进度弹窗
+        # 5. 唤起进度弹窗，启动后台验证
+        from src.ui.components.dialog import ProgressDialog
         self.save_pd = ProgressDialog(
             self.widget, "Applying Settings",
-            "Initializing background tasks...", telemetry_config={}
-        )
-        self.save_pd.btn_cancel.setVisible(False)
-        self.save_pd.show()
+            "Initializing background tasks...",
+            telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
 
+        )
+        self.save_pd.show()
         QApplication.processEvents()
 
         if hasattr(self, 'save_task_mgr') and self.save_task_mgr:
             self.save_task_mgr.cancel_task()
 
+        from src.core.core_task import TaskManager, TaskMode
+        from src.task.settings_tasks import VerifySettingsTask
         self.save_task_mgr = TaskManager()
         self.save_task_mgr.sig_progress.connect(self.save_pd.update_progress)
         self.save_task_mgr.sig_state_changed.connect(self._on_save_task_state_changed)
         self.save_task_mgr.sig_result.connect(self._on_save_task_result)
+        self.save_pd.sig_canceled.connect(self.save_task_mgr.cancel_task)
 
         embed_id = self.combo_embed.currentData()
         rerank_id = self.combo_rerank.currentData()
-        net_mcp_configs = self._get_network_mcp_configs()
-
-        mcp_cfg = {
-            "ext_enabled": self.ext_enabled.isChecked(),
-            "ext_python": self.python_path_edit.text().strip(),
-            "network_mcps": net_mcp_configs
-        }
 
         # 启动后台验证任务
         self.save_task_mgr.start_task(
@@ -1637,8 +1572,9 @@ class SettingsTool(BaseTool):
             mode=TaskMode.THREAD,
             embed_id=embed_id,
             rerank_id=rerank_id,
-            mcp_config=mcp_cfg
+            mcp_config={}
         )
+
 
     def _on_save_task_state_changed(self, state, msg):
         if state == TaskState.FAILED.value:
@@ -1656,43 +1592,19 @@ class SettingsTool(BaseTool):
             return
 
         to_download = result_dict.get("to_download", [])
-        mcp_config = result_dict.get("mcp_config", {})
 
-        # --- 1. 在主 GUI 线程中安全地建立 MCP 异步通讯 ---
         try:
             from src.core.mcp_manager import MCPManager
             mcp_mgr = MCPManager.get_instance()
+            mcp_mgr.bootstrap_servers()
 
-            # 处理 External MCP
-            if mcp_config.get('ext_enabled'):
-                script_path = os.path.join(os.getcwd(), "plugins_ext", "common_server.py")
-                py_path = mcp_config.get('ext_python') or "python"
-                if mcp_mgr.get_server_status("external") != "connected":
-                    mcp_mgr.connect_external_mcp(script_path, py_path)
-            else:
-                mcp_mgr.disconnect_server("external")
-
-            # 处理 Network MCP
-            net_configs = mcp_config.get('network_mcps', [])
-            active_servers = [name for name in mcp_mgr.sessions.keys() if name not in ["builtin", "external"]]
-            enabled_net_names = [c['name'] for c in net_configs if c['enabled']]
-
-            for name in active_servers:
-                if name not in enabled_net_names:
-                    mcp_mgr.disconnect_server(name)
-
-            for net_cfg in net_configs:
-                if net_cfg['enabled']:
-                    if mcp_mgr.get_server_status(net_cfg['name']) != "connected":
-                        mcp_mgr.connect_network_mcp(net_cfg['name'], net_cfg['url'])
-
-            self._refresh_external_status()
+            if hasattr(self, '_refresh_mcp_status'):
+                self._refresh_mcp_status()
         except Exception as e:
             self.logger.error(f"MCP Update Failed: {e}")
-            ToastManager().show(f"MCP Configuration Error: {e}", "error")
 
-        # --- 2. 处理模型下载逻辑 ---
         if not to_download:
+            from src.ui.components.dialog import StandardDialog
             StandardDialog(self.widget, "Success",
                            "Settings saved successfully.\nAll models and LLM APIs are ready.").exec()
             self.check_models_status()
@@ -1701,80 +1613,13 @@ class SettingsTool(BaseTool):
         dl_msg = "The following models need to be downloaded:\n"
         for m in to_download: dl_msg += f"• {m}\n"
 
+        from src.ui.components.dialog import StandardDialog
         dlg = StandardDialog(self.widget, "Download Required", dl_msg, show_cancel=True)
         if dlg.exec():
             self.start_download(to_download)
         else:
             self.check_models_status()
 
-    def _on_save_worker_finished(self, success, msg, to_download):
-        """线程任务结束回调"""
-        if hasattr(self, 'save_pd'):
-            self.save_pd.close_safe()
-
-        if not success:
-            self.logger.error(f"Save process failed: {msg}")
-            ToastManager().show(f"System Error: {msg}", "error")
-            return
-
-        # 如果不需要下载，弹出成功提示并收尾
-        if not to_download:
-            StandardDialog(self.widget, "Success",
-                           "Settings saved successfully.\nAll models and LLM APIs are ready.").exec()
-            self.check_models_status()
-            return
-
-        # 如果需要下载模型，唤起下载框
-        dl_msg = "The following models need to be downloaded:\n"
-        for m in to_download: dl_msg += f"• {m}\n"
-
-        dlg = StandardDialog(self.widget, "Download Required", dl_msg, show_cancel=True)
-        if dlg.exec():
-            self.start_download(to_download)
-        else:
-            self.check_models_status()
-
-    def _on_mcp_restart_finished(self, success, msg):
-        """MCP 重启完后的回调"""
-        if hasattr(self, 'mcp_pd'):
-            self.mcp_pd.close_safe()
-
-        if not success:
-            self.logger.error(f"Failed to hot-restart MCP server: {msg}")
-            ToastManager().show(f"Plugin restart error: {msg}", "error")
-
-        self._finalize_save()
-
-    def _finalize_save(self):
-        """保存流程的最后一步：模型校验与下载提示"""
-        dev = self.dev_mgr.get_optimal_device()
-        embed_id = self.combo_embed.currentData()
-        if embed_id == "embed_auto": embed_id = resolve_auto_model("embedding", dev)
-
-        rerank_id = self.combo_rerank.currentData()
-        if rerank_id == "rerank_auto": rerank_id = resolve_auto_model("reranker", dev)
-
-        to_download = []
-        e_conf = get_model_conf(embed_id, "embedding")
-        if e_conf and not check_model_exists(e_conf.get('hf_repo_id')):
-            to_download.append(e_conf['hf_repo_id'])
-
-        r_conf = get_model_conf(rerank_id, "reranker")
-        if r_conf and not check_model_exists(r_conf.get('hf_repo_id')):
-            to_download.append(r_conf['hf_repo_id'])
-
-        if not to_download:
-            StandardDialog(self.widget, "Success",
-                           "Settings saved successfully.\nAll models and LLM APIs are ready.").exec()
-            self.check_models_status()
-            return
-
-        msg = "The following models need to be downloaded:\n"
-        for m in to_download: msg += f"• {m}\n"
-
-        dlg = StandardDialog(self.widget, "Download Required", msg, show_cancel=True)
-        if dlg.exec():
-            self.start_download(to_download)
 
 
     def _get_active_llm_id(self):

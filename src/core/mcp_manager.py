@@ -5,6 +5,8 @@ import sys
 import os
 import time
 from contextlib import AsyncExitStack
+
+from PySide6.QtWidgets import QApplication
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
@@ -37,10 +39,51 @@ class MCPManager:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
+    def bootstrap_servers(self):
+        """
+        Unified method to load and start all enabled MCP servers from the central configuration.
+        """
+        from src.core.config_manager import ConfigManager
+        config_mgr = ConfigManager()
+        servers = config_mgr.mcp_servers.get("mcpServers", {})
+
+        for server_name, srv_cfg in servers.items():
+            is_enabled = srv_cfg.get("enabled", False)
+            always_on = srv_cfg.get("always_on", False)
+
+            if is_enabled or always_on:
+                logger.info(f"Bootstrapping MCP Server: [{server_name}] via {srv_cfg.get('type')}")
+
+                # Create a deep copy to avoid mutating the original config dict in memory
+                run_cfg = dict(srv_cfg)
+
+                # Special dynamic handling for the builtin academic server (PyInstaller compatibility)
+                if server_name == "builtin":
+                    is_frozen = getattr(sys, 'frozen', False) or not sys.executable.endswith('python.exe')
+                    run_cfg['command'] = sys.executable
+                    if is_frozen:
+                        run_cfg['args'] = ["--run-builtin-mcp"]
+                    else:
+                        run_cfg['args'] = ["-c",
+                                           "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
+
+                # Resolve default Python executable path for external scripts
+                elif run_cfg.get('type') == 'stdio' and run_cfg.get('command') == 'python':
+                    ext_py = config_mgr.user_settings.get("external_python_path", "")
+                    run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
+
+                # Ensure env vars are passed correctly for stdio
+                if run_cfg.get('type') == 'stdio':
+                    env_copy = os.environ.copy()
+                    env_copy.update(run_cfg.get('env', {}))
+                    run_cfg['env'] = env_copy
+
+                self._async_start(server_name, run_cfg)
+
     async def _run_session(self, server_name: str, connection_config: dict):
         self.server_status[server_name] = "connecting"
-
-        self.server_stops[server_name] = asyncio.Event()
+        if server_name not in self.server_stops:
+            self.server_stops[server_name] = asyncio.Event()
 
         try:
             async with AsyncExitStack() as stack:
@@ -52,13 +95,24 @@ class MCPManager:
                     )
                     transport = await stack.enter_async_context(stdio_client(server_params))
                 elif connection_config['type'] == 'sse':
-                    transport = await stack.enter_async_context(sse_client(connection_config['url']))
+                    headers = connection_config.get('headers')
+                    if headers:
+                        transport = await stack.enter_async_context(
+                            sse_client(connection_config['url'], headers=headers))
+                    else:
+                        transport = await stack.enter_async_context(sse_client(connection_config['url']))
                 else:
                     raise ValueError(f"Unsupported connection type: {connection_config['type']}")
 
                 read, write = transport
                 session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
+
+                try:
+                    await asyncio.wait_for(session.initialize(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    raise Exception(
+                        "Initialization handshake timed out. Please check your Headers/API Keys or proxy settings.")
 
                 self.sessions[server_name] = session
                 self.server_status[server_name] = "connected"
@@ -69,41 +123,57 @@ class MCPManager:
 
                 logger.info(f"[{server_name}] Connected. Loaded {len(tools_response.tools)} tools.")
 
-                # 挂起协程，保持连接，直到收到断开信号
                 await self.server_stops[server_name].wait()
 
         except Exception as e:
             logger.error(f"[{server_name}] Connection error: {e}")
             self.server_status[server_name] = f"error: {str(e)}"
-            if server_name in self.sessions: del self.sessions[server_name]
+            self.sessions.pop(server_name, None)
 
-    def connect_sync(self, server_name: str = "external", script_path: str = None, python_path: str = None,
-                     args: list = None) -> bool:
-        """通用同步连接接口，向下兼容 main.py 里的不同调用方式"""
-        if python_path is None:
-            python_path = sys.executable
+            tools_to_remove = [k for k, v in self.tool_map.items() if v == server_name]
+            for tool in tools_to_remove:
+                del self.tool_map[tool]
 
-        cmd_args = args if args is not None else []
-        if script_path:
-            cmd_args = [script_path] + cmd_args
 
-        config = {'type': 'stdio', 'command': python_path, 'args': cmd_args, 'env': os.environ.copy()}
-        return self._sync_start(server_name, config)
+    def connect_manual(self, server_name: str, config: dict) -> bool:
 
-    def connect_external_mcp(self, script_path: str, python_path: str = None) -> bool:
-        """连接本地外部脚本 MCP"""
-        return self.connect_sync(server_name="external", script_path=script_path, python_path=python_path)
+        # 先断开现有的
+        if server_name in self.sessions or server_name in self.server_status:
+            self.disconnect_server(server_name)
 
-    def connect_network_mcp(self, server_name: str, url: str) -> bool:
-        """连接网络 MCP 服务器"""
-        config = {'type': 'sse', 'url': url}
-        return self._sync_start(server_name, config)
-
-    def _sync_start(self, server_name: str, config: dict) -> bool:
+        self.server_status[server_name] = "connecting"
         future = asyncio.run_coroutine_threadsafe(self._run_session(server_name, config), self._loop)
         self.server_tasks[server_name] = future
 
-        for _ in range(20):  # 等待最多 10 秒
+        # 等待最多 10 秒，使用 processEvents 防止 UI 界面假死（转圈动画能动）
+        for _ in range(20):
+            status = self.server_status.get(server_name, "")
+            if status == "connected": return True
+            if "error" in status: return False
+            time.sleep(0.5)
+            QApplication.processEvents()
+
+        return False
+
+    def _async_start(self, server_name: str, config: dict):
+        """非阻塞启动：把任务扔给 asyncio 循环后立即返回，状态靠 UI 的 QTimer 自动刷新"""
+        if server_name in self.sessions or server_name in self.server_status:
+            self.disconnect_server(server_name)
+
+        self.server_status[server_name] = "connecting"
+        future = asyncio.run_coroutine_threadsafe(self._run_session(server_name, config), self._loop)
+        self.server_tasks[server_name] = future
+
+
+    def _sync_start(self, server_name: str, config: dict) -> bool:
+        # Disconnect existing instance if restarting
+        if server_name in self.sessions or server_name in self.server_status:
+            self.disconnect_server(server_name)
+
+        future = asyncio.run_coroutine_threadsafe(self._run_session(server_name, config), self._loop)
+        self.server_tasks[server_name] = future
+
+        for _ in range(20):  # Wait up to 10 seconds
             status = self.server_status.get(server_name, "")
             if status == "connected": return True
             if "error" in status: return False
@@ -111,12 +181,11 @@ class MCPManager:
         return False
 
     def call_tool_sync(self, tool_name: str, arguments: dict) -> str:
-        """调用工具并附加安全沙箱机制"""
         server_name = self.tool_map.get(tool_name)
         if not server_name:
-            raise ValueError(f"Tool '{tool_name}' not found.")
-        session = self.sessions.get(server_name)
+            raise ValueError(f"Tool '{tool_name}' not found in any connected MCP server.")
 
+        session = self.sessions.get(server_name)
         is_trusted = server_name == "builtin"
         timeout = 120.0 if is_trusted else self.TOOL_TIMEOUT
 
@@ -137,7 +206,7 @@ class MCPManager:
             logger.error(err_msg)
             return f"{{\"status\": \"error\", \"message\": \"{err_msg}\"}}"
         except Exception as e:
-            logger.error(f"Tool {tool_name} failed: {e}")
+            logger.error(f"Tool {tool_name} failed on {server_name}: {e}")
             return f"{{\"status\": \"error\", \"message\": \"{str(e)}\"}}"
 
     def is_tool_available(self, tool_name: str) -> bool:
@@ -167,7 +236,6 @@ class MCPManager:
         return all_tools
 
     def disconnect_server(self, server_name: str):
-        """断开指定服务器"""
         if server_name in self.server_stops:
             self._loop.call_soon_threadsafe(self.server_stops[server_name].set)
             time.sleep(0.1)
@@ -179,10 +247,10 @@ class MCPManager:
         if server_name in self.server_stops:
             del self.server_stops[server_name]
 
-        # 清理工具映射
+        # Clean up the tool map
         tools_to_remove = [k for k, v in self.tool_map.items() if v == server_name]
         for tool in tools_to_remove:
             del self.tool_map[tool]
 
         self.server_status[server_name] = "disconnected"
-        logger.info(f"[{server_name}] Disconnected.")
+        logger.info(f"[{server_name}] Disconnected and tools unmapped.")

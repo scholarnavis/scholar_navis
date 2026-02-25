@@ -6,11 +6,11 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QGraphicsDropShadowEffect)
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject
 from PySide6.QtGui import QColor
 
 from src.core.models_registry import EMBEDDING_MODELS
-
+from src.ui.components.param_editor import ParamEditorWidget
 
 
 class BaseDialog(QDialog):
@@ -175,6 +175,187 @@ try:
 except Exception:
     HAS_NVML = False
 
+from src.ui.components.dialog import BaseDialog
+from PySide6.QtWidgets import QWidget, QFormLayout, QLineEdit, QComboBox, QTextEdit
+from PySide6.QtCore import Qt
+import json
+
+
+class McpConfigDialog(BaseDialog):
+    def __init__(self, parent=None, server_name="", server_config=None):
+        title = "编辑 MCP 服务器配置" if server_config else "添加 MCP 服务器"
+        super().__init__(parent, title=title, width=560)
+
+        form_widget = QWidget()
+        self.form_layout = QFormLayout(form_widget)
+        self.form_layout.setSpacing(15)
+        self.form_layout.setLabelAlignment(Qt.AlignRight)
+
+        form_widget.setStyleSheet("""
+            QLabel { color: #aaaaaa; font-size: 13px; border: none; } 
+            QLineEdit, QComboBox { 
+                background-color: #2d2d30; border: 1px solid #444; color: #eeeeee; 
+                border-radius: 4px; padding: 6px; selection-background-color: #05B8CC; 
+            } 
+            QLineEdit:focus, QComboBox:focus { border: 1px solid #05B8CC; }
+            QLineEdit:disabled { background-color: #1e1e1e; color: #666; }
+        """)
+
+        self.inp_name = QLineEdit(server_name)
+        self.inp_name.setPlaceholderText("例如: remote-database-mcp")
+        if server_name in ["builtin", "external"]:
+            self.inp_name.setEnabled(False)
+            self.inp_name.setToolTip("核心组件标识符不可更改")
+
+        self.combo_type = QComboBox()
+        self.combo_type.addItems(["stdio", "sse"])
+
+        self.inp_cmd_url = QLineEdit()
+        self.inp_args = QLineEdit()
+        self.inp_args.setPlaceholderText("arg1, arg2 (使用英文逗号分隔)")
+
+        self.env_editor = ParamEditorWidget()
+
+        env_btn_layout = QHBoxLayout()
+        self.btn_add_env = QPushButton("➕ 添加一条")
+        self.btn_add_env.clicked.connect(lambda: self.env_editor.add_param_row())
+
+        self.btn_add_auth = QPushButton("🔑 一键填入 Authorization")
+        self.btn_add_auth.clicked.connect(self._add_auth_header)
+        self.btn_add_auth.setStyleSheet("color: #e6a23c; font-weight: bold;")
+
+        env_btn_layout.addWidget(self.btn_add_env)
+        env_btn_layout.addWidget(self.btn_add_auth)
+        env_btn_layout.addStretch()
+
+        self.env_container = QWidget()
+        env_layout = QVBoxLayout(self.env_container)
+        env_layout.setContentsMargins(0, 0, 0, 0)
+        env_layout.addWidget(self.env_editor)
+        env_layout.addLayout(env_btn_layout)
+
+        self.lbl_args = QLabel("启动参数:")
+        self.lbl_env = QLabel("环境变量:")
+
+        self.form_layout.addRow("服务器标识:", self.inp_name)
+        self.form_layout.addRow("传输协议:", self.combo_type)
+        self.form_layout.addRow("启动命令/URL:", self.inp_cmd_url)
+        self.form_layout.addRow(self.lbl_args, self.inp_args)
+        self.form_layout.addRow(self.lbl_env, self.env_container)
+
+        if server_config:
+            type_idx = 0 if server_config.get("type", "stdio") == "stdio" else 1
+            self.combo_type.setCurrentIndex(type_idx)
+
+            if type_idx == 0:
+                self.inp_cmd_url.setText(server_config.get("command", ""))
+                self.inp_args.setText(", ".join(server_config.get("args", [])))
+                dict_data = server_config.get("env", {})
+            else:
+                self.inp_cmd_url.setText(server_config.get("url", ""))
+                dict_data = server_config.get("headers", {})
+
+            if dict_data:
+                param_list = [{"name": k, "type": "str", "value": str(v)} for k, v in dict_data.items()]
+                self.env_editor.load_data(param_list)
+
+        self.content_layout.addWidget(form_widget)
+
+        btn_test = self.add_button("🧪 测试连接", self._on_test_clicked)
+        btn_test.setStyleSheet(
+            "QPushButton { background-color: #2b2b2b; color: #ffb86c; border: 1px solid #555; border-radius: 4px; padding: 5px 10px; } QPushButton:hover { background-color: #444; }")
+
+        self.footer_layout.removeWidget(btn_test)
+        self.footer_layout.insertWidget(0, btn_test)
+
+        self.add_button("取消", self.reject)
+        self.add_button("保存", self.accept, is_primary=True)
+
+        self.combo_type.currentIndexChanged.connect(self._on_type_changed)
+        self._on_type_changed()
+        self.adjustSize()
+
+    def _on_type_changed(self):
+        is_stdio = self.combo_type.currentText() == "stdio"
+        self.inp_args.setVisible(is_stdio)
+        self.lbl_args.setVisible(is_stdio)
+        self.btn_add_auth.setVisible(not is_stdio)
+
+        if is_stdio:
+            self.inp_cmd_url.setPlaceholderText("例如: python, npx, /usr/bin/node")
+            self.lbl_env.setText("环境变量:")
+        else:
+            self.inp_cmd_url.setPlaceholderText("例如: http://192.168.1.10:8000/sse")
+            self.lbl_env.setText("HTTP请求头:")
+
+    def _add_auth_header(self):
+        current_data = self.env_editor.extract_data()
+        for p in current_data:
+            if p.get("name") == "Authorization": return
+        current_data.append({"name": "Authorization", "type": "str", "value": "Bearer "})
+        self.env_editor.blockSignals(True)
+        self.env_editor.load_data(current_data)
+        self.env_editor.blockSignals(False)
+        self.adjustSize()
+
+    def get_config(self):
+        name = self.inp_name.text().strip()
+        stype = self.combo_type.currentText()
+        cfg = {"type": stype, "description": f"Custom {stype} server"}
+
+        raw_params = self.env_editor.extract_data()
+        env_dict = {p["name"].strip(): str(p.get("value", "")) for p in raw_params if p.get("name", "").strip()}
+
+        if stype == "stdio":
+            cfg["command"] = self.inp_cmd_url.text().strip()
+            args_raw = self.inp_args.text().strip()
+            cfg["args"] = [a.strip() for a in args_raw.split(",") if a.strip()]
+            if env_dict: cfg["env"] = env_dict
+        else:
+            cfg["url"] = self.inp_cmd_url.text().strip()
+            if env_dict: cfg["headers"] = env_dict
+
+        return name, cfg
+
+    def _on_test_clicked(self):
+        name, cfg = self.get_config()
+        if not name or (not cfg.get("command") and not cfg.get("url")):
+            StandardDialog(self, "信息缺失", "请至少填入服务器标识与命令/URL。").exec()
+            return
+
+        self.pd = ProgressDialog(self, "测试连接", f"正在尝试连接至 [{name}]...\n请稍候...")
+        self.pd.show()
+
+        self.test_thread = QThread()
+        self.test_worker = McpTestWorker(name, cfg)
+        self.test_worker.moveToThread(self.test_thread)
+        self.pd.sig_canceled.connect(self.test_thread.terminate)
+
+        def cleanup_test_mcp():
+            from src.core.mcp_manager import MCPManager
+            try:
+                MCPManager.get_instance().disconnect_server(f"test_{name}")
+            except Exception:
+                pass
+
+        self.pd.sig_canceled.connect(cleanup_test_mcp)
+
+        self.test_thread.started.connect(self.test_worker.run)
+        self.test_worker.sig_finished.connect(self._on_test_finished)
+        self.test_worker.sig_finished.connect(self.test_thread.quit)
+        self.test_worker.sig_finished.connect(self.test_worker.deleteLater)
+        self.test_thread.finished.connect(self.test_thread.deleteLater)
+
+        self.test_thread.start()
+
+    def _on_test_finished(self, success, msg):
+        self.pd.close_safe()
+        if success:
+            StandardDialog(self, "连接成功", f"✅ {msg}").exec()
+        else:
+            err_dialog = StandardDialog(self, "连接失败", f"❌ 无法连接到服务器：\n{msg}")
+            err_dialog.setFixedWidth(500)
+            err_dialog.exec()
 
 class ProgressDialog(BaseDialog):
     sig_canceled = Signal()
@@ -475,3 +656,38 @@ class ProjectEditorDialog(BaseDialog):
             "description": self.inp_desc.toPlainText().strip(),
             "model_id": self.combo_model.currentData()
         }
+
+
+class McpTestWorker(QObject):
+    """后台测试 MCP 连接的线程，防止阻塞主 UI"""
+    sig_finished = Signal(bool, str)
+
+    def __init__(self, server_name, config):
+        super().__init__()
+        self.server_name = server_name
+        # 测试时强制起一个临时名字，防止污染实际的连接池
+        self.test_name = f"test_{server_name}"
+        self.config = config
+
+    def run(self):
+        try:
+            from src.core.mcp_manager import MCPManager
+            mgr = MCPManager.get_instance()
+
+            # 1. 尝试同步连接 (底层最多等待 10 秒)
+            success = mgr._sync_start(self.test_name, self.config)
+            status = mgr.get_server_status(self.test_name)
+
+            # 2. 获取加载的工具数量作为成功提示
+            if success:
+                tool_count = sum(1 for v in mgr.tool_map.values() if v == self.test_name)
+                msg = f"连接成功！共加载了 {tool_count} 个可用工具。"
+            else:
+                msg = status
+
+            # 3. 测试完毕后立即断开清理，不占用系统资源
+            mgr.disconnect_server(self.test_name)
+
+            self.sig_finished.emit(success, msg)
+        except Exception as e:
+            self.sig_finished.emit(False, str(e))
