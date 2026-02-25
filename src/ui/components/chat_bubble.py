@@ -1,10 +1,14 @@
+import os
+import re
+import hashlib
+import tempfile
+import markdown
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QTextBrowser)
-from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer
+from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer, QThread, QUrl
 from PySide6.QtGui import QClipboard, QGuiApplication, QCursor
 from src.ui.components.toast import ToastManager
-import markdown
-import re
+from src.core.network_worker import LightNetworkWorker
 
 
 class ChatBubbleWidget(QWidget):
@@ -26,8 +30,12 @@ class ChatBubbleWidget(QWidget):
         self.loading_dots = 0
         self.is_loading = False
 
-        self.init_ui()
+        # 🌟 异步图片下载管理队列
+        self.downloaded_images = {}
+        self.downloading_urls = set()
+        self.image_threads = []
 
+        self.init_ui()
 
     def init_ui(self):
         self.main_layout = QHBoxLayout(self)
@@ -205,11 +213,9 @@ class ChatBubbleWidget(QWidget):
             self.lbl_text.setMaximumWidth(max_w)
             self.edit_input.setMaximumWidth(max_w)
 
-
     def adjust_edit_height(self):
         doc_h = int(self.edit_input.document().size().height())
         new_h = doc_h + 14
-        # 将最大高度提升至 350，超过后开启滚动条
         if new_h > 350:
             self.edit_input.setFixedHeight(350)
             self.edit_input.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -228,7 +234,6 @@ class ChatBubbleWidget(QWidget):
         act_copy = menu.addAction("📄 复制 (Copy)")
         act_copy.triggered.connect(self.copy_text)
 
-        # 必须同时满足是用户发的消息，且处于“可编辑状态”才显示编辑菜单
         if self.is_user and self._can_edit:
             act_edit = menu.addAction("✎ 编辑 (Edit)")
             act_edit.triggered.connect(self.toggle_edit)
@@ -265,14 +270,11 @@ class ChatBubbleWidget(QWidget):
         try:
             processed_text = text
 
-            # 1. 正则匹配纯文本 DOI 并转换为可点击的超链接 (避免替换已经带有 href= 或 markdown 格式的内容)
             processed_text = re.sub(
                 r'(?<![="\'/])\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b',
                 r'<a href="https://doi.org/\1">\1</a>',
                 processed_text
             )
-
-            # 2. 正则匹配普通 http/https 链接并转换
             processed_text = re.sub(
                 r'(?<![="\'/\[\(])\b(https?://[^\s<>\)\]]+)\b',
                 r'<a href="\1">\1</a>',
@@ -282,9 +284,89 @@ class ChatBubbleWidget(QWidget):
             html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
             html = html.replace("<a href=",
                                 "<a style='color: #4daafc; text-decoration: none; font-weight: bold;' href=")
+
+            def repl_img(match):
+                raw_src_url = match.group(1)
+
+                src_url = raw_src_url.replace("&amp;", "&")
+
+                if src_url.startswith("http"):
+                    if src_url in self.downloaded_images:
+                        # 已经下载完毕
+                        local_path = self.downloaded_images[src_url].replace('\\', '/')
+                        if not local_path.startswith('/'):
+                            local_uri = f"file:///{local_path}"
+                        else:
+                            local_uri = f"file://{local_path}"
+
+                        new_img_tag = f'<img width="420" style="border-radius: 8px; margin-top: 5px;" src="{local_uri}" />'
+                        return f'<a href="{local_uri}">{new_img_tag}</a>'
+                    else:
+                        if src_url not in self.downloading_urls:
+                            self.downloading_urls.add(src_url)
+                            self._start_image_download(src_url)  # 丢给后台下载
+
+                        return '<div style="color:#05B8CC; padding: 20px; border: 2px dashed #05B8CC; border-radius: 8px; width: 400px; text-align: center; margin-top: 5px;">⏳ 正在将图像下载到本地缓存，请稍候...</div>'
+
+                return match.group(0).replace('<img ', '<img width="420" style="border-radius: 8px; margin-top: 5px;" ')
+
+            html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
+
             self.lbl_text.setText(html)
         except Exception as e:
             self.lbl_text.setText(text)
+
+    def clean_up_images(self):
+        for path in self.downloaded_images.values():
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        self.downloaded_images.clear()
+
+
+    def _start_image_download(self, url):
+        """丢进后台线程进行安全下载，不卡主界面"""
+        ext = url.split("?")[0].split(".")[-1]
+        if ext.lower() not in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
+            ext = 'png'
+        file_name = f"navis_img_{hashlib.md5(url.encode()).hexdigest()}.{ext}"
+        save_path = os.path.join(tempfile.gettempdir(), file_name)
+
+        # 命中缓存秒渲染
+        if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+            self._on_image_downloaded(True, url, save_path)
+            return
+
+        thread = QThread(self)
+        worker = LightNetworkWorker()
+        worker.moveToThread(thread)
+
+        # 挂载参数
+        worker.img_url = url
+        worker.img_save_path = save_path
+
+        thread.started.connect(worker.do_download_image)
+        worker.sig_image_downloaded.connect(self._on_image_downloaded)
+        worker.sig_image_downloaded.connect(thread.quit)
+        worker.sig_image_downloaded.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self.image_threads.append(thread)
+        thread.start()
+
+    def _on_image_downloaded(self, success, url, result_path):
+        """后台下载成功后，重发渲染命令更新气泡"""
+        if url in self.downloading_urls:
+            self.downloading_urls.remove(url)
+
+        if success:
+            self.downloaded_images[url] = result_path
+            # 重发渲染：此时缓存已命中，将使用 file:/// 路径渲染图片
+            self.set_content(self.original_text)
+        else:
+            print(f"Failed to fetch image: {result_path}")
 
     def copy_text(self):
         clipboard = QGuiApplication.clipboard()

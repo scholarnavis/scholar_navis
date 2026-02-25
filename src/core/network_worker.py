@@ -51,6 +51,7 @@ def _get_explicit_proxy_kwargs():
 class LightNetworkWorker(QObject):
     sig_models_fetched = Signal(bool, list, str)
     sig_test_finished = Signal(bool, str)
+    sig_image_downloaded = Signal(bool, str, str)
 
     def __init__(self):
         super().__init__()
@@ -182,6 +183,30 @@ class LightNetworkWorker(QObject):
             getattr(self, 'custom_params', {})
         )
 
+    def download_image(self, url, save_path):
+        self._is_cancelled = False
+        self._req_session = requests.Session()
+
+        proxy_cfg = _get_explicit_proxy_kwargs()
+        if "trust_env" in proxy_cfg:
+            self._req_session.trust_env = False
+        elif "proxy" in proxy_cfg:
+            self._req_session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
+
+        try:
+            res = self._req_session.get(url, timeout=30)
+            res.raise_for_status()
+            with open(save_path, 'wb') as f:
+                f.write(res.content)
+            self.sig_image_downloaded.emit(True, url, save_path)
+        except Exception as e:
+            if not self._is_cancelled:
+                self.sig_image_downloaded.emit(False, url, str(e))
+        finally:
+            self._req_session.close()
+
+    def do_download_image(self):
+        self.download_image(getattr(self, 'img_url', ''), getattr(self, 'img_save_path', ''))
 
 class NetworkEmbeddingFunction(EmbeddingFunction):
     """统一管理的网络 Embedding 调用器 (兼容 ChromaDB 接口)"""

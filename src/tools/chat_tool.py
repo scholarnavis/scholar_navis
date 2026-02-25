@@ -45,6 +45,7 @@ from src.ui.components.dialog import StandardDialog
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
 from src.ui.components.pill_button import FollowUpPillButton
+from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
 
@@ -1693,7 +1694,6 @@ class ChatTool(BaseTool):
         processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
 
         # 交给原本的格式化器处理其他 Markdown 元素
-        from src.ui.components.text_formatter import TextFormatter
         return TextFormatter.format_chat_text(
             processed_text, index, getattr(self, 'expanded_thinks', set()), getattr(self, 'user_toggled_thinks', set())
         )
@@ -1913,7 +1913,10 @@ class ChatTool(BaseTool):
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
-            if widget: widget.deleteLater()
+            if widget:
+                if hasattr(widget, 'clean_up_images'):
+                    widget.clean_up_images()
+                widget.deleteLater()
         layout.addStretch()
 
     def handle_link_click(self, url_str):
