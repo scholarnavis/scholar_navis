@@ -9,14 +9,15 @@ import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
 import fitz
+import pymupdf4llm
 import torch
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation
 from PySide6.QtGui import QDesktopServices, QCursor, QAction
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
                                QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
-                               QToolButton, QWidgetAction, QSizePolicy)
+                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect)
 from chromadb.utils import embedding_functions
 from huggingface_hub import snapshot_download
 from langdetect import detect
@@ -32,6 +33,7 @@ from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
 from src.services.file_service import FileService
 from src.tools.base_tool import BaseTool
+from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import StandardDialog
@@ -85,10 +87,12 @@ class AutoResizingTextEdit(QPlainTextEdit):
 
     def adjust_height(self):
         doc_height = int(self.document().size().height())
-        new_height = min(max(doc_height + 12, 40), self.max_height)
+        margins = self.contentsMargins()
+        new_height = min(max(doc_height + margins.top() + margins.bottom() + 10, 40), self.max_height)
         self.setFixedHeight(new_height)
+        # 达到最高时开启滚动条
         self.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded if new_height == self.max_height else Qt.ScrollBarAlwaysOff)
+            Qt.ScrollBarAsNeeded if new_height >= self.max_height else Qt.ScrollBarAlwaysOff)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return and not event.modifiers() & Qt.ShiftModifier:
@@ -878,6 +882,43 @@ class ChatTool(BaseTool):
         self.scroll_area.setWidget(self.chat_container)
         layout.addWidget(self.scroll_area, stretch=1)
 
+        self.btn_scroll_bottom = QPushButton("⬇️", self.scroll_area)
+        self.btn_scroll_bottom.setCursor(Qt.PointingHandCursor)
+        self.btn_scroll_bottom.setFixedSize(40, 40)  # 圆形尺寸
+        self.btn_scroll_bottom.setStyleSheet("""
+                    QPushButton { 
+                        background-color: rgba(5, 184, 204, 0.85); 
+                        color: white; 
+                        border-radius: 20px; /* 宽度的二分之一，形成正圆 */
+                        font-size: 18px;
+                        border: 1px solid rgba(255, 255, 255, 0.2);
+                    }
+                    QPushButton:hover { 
+                        background-color: rgba(0, 122, 204, 1); 
+                        border: 1px solid rgba(255, 255, 255, 0.5);
+                    }
+                """)
+
+        # 透明度动画效果
+        self.opacity_effect = QGraphicsOpacityEffect(self.btn_scroll_bottom)
+        self.btn_scroll_bottom.setGraphicsEffect(self.opacity_effect)
+        self.opacity_effect.setOpacity(0.0)
+        self.btn_scroll_bottom.setVisible(False)
+
+        self.fade_anim = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.fade_anim.setDuration(250)  # 250ms 淡入淡出
+
+        # 绑定点击事件
+        self.btn_scroll_bottom.clicked.connect(self.scroll_to_bottom)
+
+        # 安装事件过滤器，处理位置自适应
+        self.overlay_filter = FloatingOverlayFilter(self.scroll_area, self.btn_scroll_bottom)
+        self.scroll_area.installEventFilter(self.overlay_filter)
+
+        # 监听滚动条数值变化
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._check_scroll_position)
+
+
         # --- 输入区 ---
         self.input_container = ChatInputContainer()
         self.input_container.sig_send_clicked.connect(self.process_send)
@@ -908,14 +949,16 @@ class ChatTool(BaseTool):
             f_name = os.path.basename(path)
             try:
                 if path.lower().endswith('.pdf'):
-                    with fitz.open(path) as doc:
-                        for i, page in enumerate(doc):
-                            text = page.get_text().strip()
-                            if len(text) > 10:  # 过滤空白页
-                                self.external_chunks.append({
-                                    "path": path, "name": f_name,
-                                    "page": i + 1, "content": text
-                                })
+                    md_chunks = pymupdf4llm.to_markdown(path, page_chunks=True)
+
+                    for chunk in md_chunks:
+                        text = chunk.get("text", "").strip()
+                        if len(text) > 10:  # 过滤纯空白或极短无意义的页
+                            self.external_chunks.append({
+                                "path": path, "name": f_name,
+                                "page": chunk.get("metadata", {}).get("page", 1),
+                                "content": text
+                            })
                 else:
                     with open(path, 'r', encoding='utf-8') as f:
                         text = f.read().strip()
@@ -926,7 +969,6 @@ class ChatTool(BaseTool):
                             })
 
                 # 构造气泡上方的可点击链接
-                from urllib.parse import quote
                 link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
                 html_link = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
 
@@ -939,7 +981,6 @@ class ChatTool(BaseTool):
 
         # 更新 UI 提示
         if success_names:
-            # 如果文件较多，做个简单的 UI 文本截断
             if len(success_names) > 2:
                 display_text = f"{success_names[0]}, {success_names[1]} 等 {len(success_names)} 个文件"
             else:
@@ -1004,8 +1045,15 @@ class ChatTool(BaseTool):
         self.clear_layout(self.chat_layout)
         self.is_locked = False
         self.input_container.unlock_input()
+
+        # 恢复默认的发送按钮状态
+        self.input_container.btn_retry.setVisible(False)
+        self.input_container.btn_stop.setVisible(False)
+        self.input_container.btn_send.setVisible(True)
+
         ToastManager().show("Chat history has been cleared.", "success")
         self.logger.info("Chat history cleared by user.")
+
 
     def load_llm_configs(self):
         if hasattr(self, 'model_selector'):
@@ -1146,7 +1194,7 @@ class ChatTool(BaseTool):
 
         self.chat_layout.addWidget(bubble)
         self.chat_layout.addStretch()
-        QThread.msleep(10)
+        QTimer.singleShot(50, self.scroll_to_bottom)
         self.scroll_to_bottom()
         return bubble
 
@@ -1393,15 +1441,18 @@ class ChatTool(BaseTool):
                 try:
                     # 按照 PDF 页数进行精确切片
                     if f_name.lower().endswith('.pdf') or f_path.lower().endswith('.pdf'):
-                        import fitz
-                        with fitz.open(f_path) as doc:
-                            for i, page in enumerate(doc):
-                                text = page.get_text().strip()
+                        try:
+                            chunks = pymupdf4llm.to_markdown(f_path, page_chunks=True)
+                            for chunk in chunks:
+                                text = chunk.get("text", "").strip()
                                 if len(text) > 10:
                                     self.external_chunks.append({
                                         "path": f_path, "name": f_name,
-                                        "page": i + 1, "content": text
+                                        "page": chunk.get("metadata", {}).get("page", 1),
+                                        "content": text
                                     })
+                        except Exception as e:
+                            self.logger.error(f"PyMuPDF4LLM failed for {f_name}: {e}")
                     else:
                         # 🚨 修正：直接原生读取，不用那个根本不存在的 read_file_content
                         with open(f_path, 'r', encoding='utf-8') as f:
@@ -1614,7 +1665,7 @@ class ChatTool(BaseTool):
             layout.addWidget(btn)
         self.chat_layout.addWidget(container)
         self.chat_layout.addStretch()
-        QThread.msleep(10)
+        QTimer.singleShot(50, self.scroll_to_bottom)
         self.scroll_to_bottom()
 
     def _trigger_follow_up(self, text):
@@ -1843,6 +1894,38 @@ class ChatTool(BaseTool):
                 self.kb_id = kb_id
                 if hasattr(self, 'db'): self.db.switch_kb(kb_id)
                 break
+
+    def _check_scroll_position(self):
+        sb = self.scroll_area.verticalScrollBar()
+        should_show = (sb.maximum() - sb.value() > 200)
+
+        # 防止动画重复触发
+        if should_show and not self.btn_scroll_bottom.isVisible():
+            self.btn_scroll_bottom.setVisible(True)
+            self.fade_anim.stop()
+            self.fade_anim.setStartValue(self.opacity_effect.opacity())
+            self.fade_anim.setEndValue(1.0)
+
+            try:
+                self.fade_anim.finished.disconnect()
+            except:
+                pass
+
+            self.fade_anim.start()
+
+        elif not should_show and self.btn_scroll_bottom.isVisible():
+            if self.fade_anim.endValue() != 0.0:
+                self.fade_anim.stop()
+                self.fade_anim.setStartValue(self.opacity_effect.opacity())
+                self.fade_anim.setEndValue(0.0)
+
+                try:
+                    self.fade_anim.finished.disconnect()
+                except:
+                    pass
+                self.fade_anim.finished.connect(self.btn_scroll_bottom.hide)
+
+                self.fade_anim.start()
 
     def execute_task(self):
         pass

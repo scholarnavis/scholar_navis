@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QMessageBox,
                                QScrollArea, QHBoxLayout, QComboBox, QTableWidget, QAbstractItemView, QHeaderView,
                                QTableWidgetItem, QCheckBox, QApplication)
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QEvent
 from huggingface_hub import constants
 
 from src.core.core_task import TaskState, TaskManager, TaskMode
@@ -117,6 +117,18 @@ class BatchDownloadWorker(QObject):
             reason = "Task aborted and residual cache wiped." if not self.is_running else str(e)
             self.sig_finished.emit(False, reason)
 
+class FloatingOverlayFilter(QObject):
+    def __init__(self, parent_widget, btn):
+        super().__init__()
+        self.parent_widget = parent_widget
+        self.btn = btn
+
+    def eventFilter(self, obj, event):
+        if obj == self.parent_widget and event.type() == QEvent.Resize:
+            x = (self.parent_widget.width() - self.btn.width()) // 2
+            y = self.parent_widget.height() - self.btn.height() - 20
+            self.btn.move(x, y)
+        return super().eventFilter(obj, event)
 
 class SettingsTool(BaseTool):
     def __init__(self):
@@ -181,7 +193,11 @@ class SettingsTool(BaseTool):
     def _load_current_settings(self):
         """加载配置到 UI"""
         if hasattr(self, '_load_mcp_servers_to_ui'):
+            self.config.load_settings()
+            self.config.load_mcp_servers()
             self._load_mcp_servers_to_ui()
+
+        ToastManager().show("Changes reverted to the last saved state.", "info")
 
         if hasattr(self, '_refresh_mcp_status'):
             self._refresh_mcp_status()
@@ -512,13 +528,23 @@ class SettingsTool(BaseTool):
         btn_edit.clicked.connect(lambda _, r=row: self._on_edit_mcp_clicked(r))
         al.addWidget(btn_edit)
 
-        if not always_on:
+        if not always_on and name not in ["builtin", "external"]:
             btn_del = QPushButton("🗑️")
             btn_del.setCursor(Qt.PointingHandCursor)
             btn_del.setStyleSheet("background: transparent; border: none;")
-            btn_del.clicked.connect(
-                lambda _, r=row: self.table_mcp.removeRow(self.table_mcp.indexAt(btn_del.pos()).row()))
+
+            def delete_mcp_row(row_idx, srv_name=name):
+                reply = QMessageBox.question(self.widget, "Confirm Delete",
+                                             f"Are you sure you want to delete MCP Server '{srv_name}'?\nThis will disconnect it immediately.",
+                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    from src.core.mcp_manager import MCPManager
+                    MCPManager.get_instance().disconnect_server(srv_name)
+                    self.table_mcp.removeRow(row_idx)
+
+            btn_del.clicked.connect(lambda _, r=row: delete_mcp_row(self.table_mcp.indexAt(btn_del.pos()).row()))
             al.addWidget(btn_del)
+
 
         self.table_mcp.setCellWidget(row, 5, action_widget)
 
@@ -1097,6 +1123,9 @@ class SettingsTool(BaseTool):
         self.editor_model_params.blockSignals(False)
 
         self._is_updating_model_ui = False
+
+
+
 
     def _refresh_model_combo(self, conf):
         self._is_updating_model_ui = True

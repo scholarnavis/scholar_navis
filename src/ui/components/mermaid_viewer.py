@@ -1,6 +1,6 @@
 import json
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar,
                                QFileDialog, QComboBox, QSplitter, QTextEdit)
@@ -106,10 +106,10 @@ class MermaidViewer(QMainWindow):
         self.source_editor.blockSignals(True)
         self.source_editor.setPlainText(self.mermaid_code)
         self.source_editor.blockSignals(False)
-        self.render_diagram()
         self.show()
         self.raise_()
         self.activateWindow()
+        QTimer.singleShot(100, self.render_diagram)
 
     def _toggle_source(self):
         self.source_editor.setVisible(not self.source_editor.isVisible())

@@ -183,6 +183,12 @@ class DownloadWorker(QThread):
         super().__init__()
         self.urls = urls
         self.save_dir = save_dir
+        self.feed_list.itemClicked.connect(self._on_feed_item_clicked)
+
+
+    def _on_feed_item_clicked(self, item):
+        new_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+        item.setCheckState(new_state)
 
     def run(self):
         success_count = 0
@@ -790,15 +796,12 @@ class RSSTool(BaseTool):
             if self.feed_list.item(i).checkState() == Qt.Checked:
                 indices.append(i)
 
-        if not indices:
-            if pos is not None:
-                item = self.feed_list.itemAt(pos)
-                if item:
-                    indices.append(self.feed_list.row(item))
-            else:
-                row = self.feed_list.currentRow()
-                if row >= 0:
-                    indices.append(row)
+        # Only fallback if it's a specific Right-Click context menu action
+        if not indices and pos is not None:
+            item = self.feed_list.itemAt(pos)
+            if item:
+                indices.append(self.feed_list.row(item))
+
 
         return sorted(list(set(indices)), reverse=True)
 
@@ -807,10 +810,9 @@ class RSSTool(BaseTool):
 
         if not indices:
             if action_type == "fetch":
-                indices = list(range(len(self.feeds)))
-            else:
-                ToastManager().show("Please check or select at least one feed.", "warning")
-                return
+                if not indices:
+                    ToastManager().show("Please check the box next to the feeds you want to sync.", "info")
+                    return
 
         if action_type == "unsubscribe":
             reply = QMessageBox.question(self.widget, 'Confirm Bulk Unsubscribe',
@@ -994,7 +996,7 @@ class RSSTool(BaseTool):
         doc = QTextDocument()
         doc.setHtml(html)
 
-        printer = QPrinter(QPrinter.HighResolution)
+        printer = QPrinter(QPrinter.ScreenResolution)
         printer.setOutputFormat(QPrinter.PdfFormat)
 
         margin = QMarginsF(15, 15, 15, 22)
