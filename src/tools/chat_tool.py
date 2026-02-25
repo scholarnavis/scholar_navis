@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
                                QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
-                               QToolButton, QWidgetAction)
+                               QToolButton, QWidgetAction, QSizePolicy)
 from chromadb.utils import embedding_functions
 from huggingface_hub import snapshot_download
 from langdetect import detect
@@ -665,12 +665,17 @@ class ChatWorker(QObject):
                 "1. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
                 "2. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n\n"
 
+                "### REASONING PROTOCOL (CRITICAL):\n"
+                "If you utilize an internal thinking process, you MUST strictly encapsulate ALL reasoning inside <think> and </think> tags.\n"
+                "Immediately after closing the </think> tag, you MUST output the exact string [FINAL_ANSWER] before starting your actual response.\n\n"
+                
                 "### RESPONSE GUIDELINES:\n"
                 "1. GROUNDING: If data comes from Context, append citations (e.g., [1], [2]).\n\n"
 
                 "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
-                "At the very end, provide exactly 6 follow-up questions using this EXACT format:\n"
-                "   💡 Suggested Follow-ups:\n"
+                "At the very end of your response, you MUST output the exact string [FOLLOW_UPS] followed by exactly 6 follow-up questions using this EXACT format:\n"
+                "[FOLLOW_UPS]\n"
+                "💡 Suggested Follow-ups:\n"
                 "   - [Deep Dive] <Question about specific details or mechanisms>\n"
                 "   - [Critical] <Question about limitations, alternatives, or weaknesses>\n"
                 "   - [Broader] <Question about implications or future trends>\n"
@@ -757,7 +762,7 @@ class ChatWorker(QObject):
                     "You MUST NOW provide the final answer directly to the user based on the tool results. "
                     "STRICTLY FORBIDDEN: Do not explain your tool execution process. "
                     "Do not output any JSON argument blocks.\n\n"
-                    "REMEMBER: At the very end of your response, you MUST append exactly 6 follow-up questions using the EXACT format specified in the initial system prompt."
+                    "REMEMBER: At the very end of your response, you MUST output the [FOLLOW_UPS] tag followed by exactly 6 follow-up questions using the EXACT format specified in the initial system prompt."
                 )
                 rag_messages.append({"role": "system", "content": silence_prompt})
 
@@ -1541,23 +1546,20 @@ class ChatTool(BaseTool):
 
         full_text = self.current_ai_text
 
-        # 1. 以 💡 开头
-        # 2. 跟着一行标题 (如 Suggested Follow-ups:)
-        # 3. 后面必须全部是 - 或 * 开头的列表项，一直持续到文本末尾 ($)
-        match = re.search(r'(💡\s*[^\n]*\n(?:\s*[-*]\s+[^\n]+(?:\n|$))+)$', full_text, flags=re.IGNORECASE)
+        match = re.search(r'\[FOLLOW_UPS\]\s*(.*)', full_text, flags=re.IGNORECASE | re.DOTALL)
         questions = []
 
         if match:
             follow_up_block = match.group(1)
-            # 从正文中剥离追问模块
-            clean_text = full_text.replace(follow_up_block, "").strip()
+            clean_text = full_text[:match.start()].strip()
             self.current_ai_text = clean_text
 
             for line in follow_up_block.split('\n'):
                 line = line.strip()
-                if line.startswith('-') or line.startswith('*'):
-                    q = line.lstrip('-*').strip()
-                    if q:
+                # 兼容模型偶尔输出的 💡 前缀或星号
+                if line.startswith('-') or line.startswith('*') or line.startswith('💡'):
+                    q = line.lstrip('-*💡 ').strip()
+                    if q and q.startswith('['):
                         # 匹配 [Tag] 内容
                         tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
                         if tag_match:
