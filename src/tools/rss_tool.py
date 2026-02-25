@@ -273,6 +273,21 @@ class FeedLibraryDialog(QDialog):
 
         self.checkboxes_map = {}
         self._render_table(self.combo_category.currentText())
+        self.table.cellClicked.connect(self._on_cell_clicked)
+
+    def _on_cell_clicked(self, row, col):
+        if col == 1:
+            chk_widget = self.table.cellWidget(row, 0)
+            if chk_widget:
+                chk = chk_widget.layout().itemAt(0).widget()
+                chk.setChecked(not chk.isChecked())
+
+
+    def mousePressEvent(self, event):
+        from PySide6.QtCore import Qt
+        if event.button() == Qt.LeftButton:
+            self.checkbox.setChecked(not self.checkbox.isChecked())
+        super().mousePressEvent(event)
 
     def _filter_library_table(self, text):
         text = text.lower()

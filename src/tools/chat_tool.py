@@ -8,6 +8,7 @@ import re
 import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
+import fitz
 import torch
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl
 from PySide6.QtGui import QDesktopServices, QCursor, QAction
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
                                QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
-                               QToolButton)
+                               QToolButton, QWidgetAction)
 from chromadb.utils import embedding_functions
 from huggingface_hub import snapshot_download
 from langdetect import detect
@@ -148,24 +149,22 @@ class ChatInputContainer(QFrame):
         self.chk_mcp_enable.setChecked(False)
 
         self.btn_mcp_tags = QToolButton()
-        self.btn_mcp_tags.setText("🏷️ Filter Tools: Loading...")
+        self.btn_mcp_tags = QPushButton("🏷️ Filter Tools: Loading...")
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
-        self.btn_mcp_tags.setPopupMode(QToolButton.InstantPopup)
         self.btn_mcp_tags.setStyleSheet(
-            "QToolButton { color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px; }"
-            "QToolButton::menu-indicator { image: none; }"  # 隐藏默认的丑陋小箭头
+            "QPushButton { color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px; }"
+            "QPushButton:hover { background: #333; }"
         )
         self.btn_mcp_tags.setVisible(False)
 
         self.menu_mcp_tags = QMenu(self)
         self.menu_mcp_tags.setStyleSheet(
-            "QMenu { background-color: #2b2b2b; color: #ddd; border: 1px solid #555; }"
-            "QMenu::item { padding: 5px 20px 5px 20px; }"
-            "QMenu::item:selected { background-color: #05B8CC; color: white; }"
+            "QMenu { background-color: #2b2b2b; border: 1px solid #555; border-radius: 6px; padding: 4px; }"
         )
-        self.btn_mcp_tags.setMenu(self.menu_mcp_tags)
-        self.menu_mcp_tags.aboutToShow.connect(self._on_mcp_enable_toggled)
+        self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
+
         self.tag_actions = {}
+        self.user_deselected_tags = set()
         self.known_tags = set()
 
         # 创建一个菜单用于多选
@@ -289,6 +288,10 @@ class ChatInputContainer(QFrame):
         self.btn_send.clicked.connect(self._emit_send)
         self.text_edit.sig_send.connect(self._emit_send)
 
+    def _on_tag_toggled(self, tag, checked):
+        ConfigManager().toggle_mcp_tag(tag, checked)
+        self._update_tag_button_text()
+
     def _on_mcp_enable_toggled(self, checked):
         """当用户勾选/取消勾选 MCP 开关时触发"""
         self.btn_mcp_guide.setVisible(checked)
@@ -297,35 +300,59 @@ class ChatInputContainer(QFrame):
             # 只要开启，就立刻主动刷新一次标签，而不是傻等用户点击菜单
             self.refresh_mcp_tags()
 
+    def _show_filter_menu(self):
+        """完全接管菜单弹出逻辑：确保每次点击绝对会请求最新数据"""
+        self.refresh_mcp_tags()
+        # 计算在按钮正下方弹出
+        pos = self.btn_mcp_tags.mapToGlobal(self.btn_mcp_tags.rect().bottomLeft())
+        pos.setY(pos.y() + 2)  # 向下偏移 2px 更好看
+        self.menu_mcp_tags.popup(pos)
+
     def refresh_mcp_tags(self):
-        """动态获取最新标签"""
-        from src.core.mcp_manager import MCPManager
         try:
             mcp_mgr = MCPManager.get_instance()
+            config_mgr = ConfigManager()
+
             available_tags = mcp_mgr.get_available_tags()
+            deselected_tags = config_mgr.mcp_servers.get("deselected_mcp_tags", [])
+
+            self.menu_mcp_tags.clear()
+            self.tag_actions.clear()
+            self.known_tags.clear()
 
             if not available_tags:
                 self.btn_mcp_tags.setText("🏷️ Filter Tools: None")
+                from PySide6.QtGui import QAction
+                dummy = QAction("⏳ No active MCP servers...", self)
+                dummy.setEnabled(False)
+                self.menu_mcp_tags.addAction(dummy)
                 return
 
-            # 找出新连上的 MCP 带来的新标签
-            new_tags = [t for t in available_tags if t not in self.known_tags]
+            from PySide6.QtWidgets import QCheckBox, QWidgetAction
+            for tag in available_tags:
+                chk = QCheckBox(f"  {tag}")
 
-            if new_tags:
-                for tag in new_tags:
-                    action = QAction(tag, self)
-                    action.setCheckable(True)
-                    action.setChecked(True)
-                    action.triggered.connect(self._update_tag_button_text)
-                    self.menu_mcp_tags.addAction(action)
-                    self.tag_actions[tag] = action
-                    self.known_tags.add(tag)
+                # 干净透明的 UI，配合你的 rss_tool 风格
+                chk.setStyleSheet("""
+                            QCheckBox { color: #ddd; padding: 6px 12px; background: transparent; font-size: 13px; border-radius: 4px; }
+                            QCheckBox:hover { background: #37373d; }
+                        """)
+
+                chk.setChecked(tag not in deselected_tags)
+                chk.setCursor(Qt.PointingHandCursor)
+                chk.toggled.connect(lambda checked, t=tag: self._on_tag_toggled(t, checked))
+
+                wa = QWidgetAction(self)
+                wa.setDefaultWidget(chk)
+                self.menu_mcp_tags.addAction(wa)
+
+                self.tag_actions[tag] = chk
+                self.known_tags.add(tag)
 
             self._update_tag_button_text()
 
         except Exception as e:
             pass
-
 
     def _update_tag_button_text(self):
         selected = self.get_selected_tags()
@@ -337,8 +364,14 @@ class ChatInputContainer(QFrame):
         else:
             self.btn_mcp_tags.setText(f"🏷️ Filter Tools: {len(selected)} selected")
 
+
     def get_selected_tags(self) -> list:
-        return [tag for tag, action in self.tag_actions.items() if action.isChecked()]
+        try:
+            available = MCPManager.get_instance().get_available_tags()
+            deselected = ConfigManager().mcp_servers.get("deselected_mcp_tags", [])
+            return [t for t in available if t not in deselected]
+        except:
+            return []
 
 
     def _emit_send(self):
@@ -590,6 +623,7 @@ class ChatWorker(QObject):
             # Phase 4: Hybrid Agentic RAG (Local DB + MCP Tools)
             self.sig_token.emit("[CLEAR_SEARCH]")
             self.sig_token.emit("[START_LLM_NETWORK]")
+
             mcp_mgr = MCPManager.get_instance()
 
             # 按需过滤加载工具
@@ -631,31 +665,38 @@ class ChatWorker(QObject):
 
             if mcp_tools:
                 try:
-                    response_msg = self.main_llm.chat(
-                        messages=rag_messages,
-                        tools=mcp_tools,
-                        tool_choice="auto",
-                    )
+                    # 🚀 核心修复：引入 Agentic Loop，允许模型最多进行 5 轮连续工具调用
+                    MAX_ITERATIONS = 5
+                    for iteration in range(MAX_ITERATIONS):
+                        response_msg = self.main_llm.chat(
+                            messages=rag_messages,
+                            tools=mcp_tools,
+                            tool_choice="auto",
+                        )
 
-                    tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
-                    content_text = response_msg.get('content', '') if isinstance(response_msg, dict) else str(response_msg)
+                        tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
+                        content_text = response_msg.get('content', '') if isinstance(response_msg, dict) else str(
+                            response_msg)
 
-                    # 🚀 优化点 2：拦截大模型的“格式幻觉”（伪装成调用工具的普通文本）
-                    # 避免拦截用户正常索要的 JSON，只针对特有的暴露语法
-                    if not tool_calls and content_text and re.search(r'(?:Tool_args|tool_calls|arguments):\s*\{', content_text, re.IGNORECASE):
-                        self.logger.warning(f"Intercepted model tool hallucination: {content_text}")
-                        # 抛弃这条幻觉回复，直接进入后续基于系统提示词的最终回答
-                        pass
+                        # 拦截格式幻觉
+                        if not tool_calls and content_text and re.search(r'(?:Tool_args|tool_calls|arguments):\s*\{',
+                                                                         content_text, re.IGNORECASE):
+                            self.logger.warning(f"Intercepted model tool hallucination: {content_text}")
+                            break
 
-                    elif tool_calls:
+                            # 🚀 核心逻辑：如果本次请求没有返回 tool_calls，说明大模型觉得所需数据（如车票）已经全部查完，主动退出循环
+                        if not tool_calls:
+                            break
+
                         tool_executed = True
-                        rag_messages.append(response_msg)
+                        rag_messages.append(response_msg)  # 将模型的调用意图加入上下文
 
+                        # 遍历并执行本次所有的工具请求
                         for tool_call in tool_calls:
                             tool_name = tool_call['function']['name']
                             try:
                                 tool_args = json.loads(tool_call['function']['arguments'])
-                                self.sig_token.emit(f"<i>📡 Requesting academic MCP server: {tool_name}...</i>\n\n")
+                                self.sig_token.emit(f"<i>📡 Requesting MCP server: {tool_name}...</i>\n\n")
 
                                 tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
 
@@ -669,8 +710,9 @@ class ChatWorker(QObject):
 
                             except Exception as e:
                                 self.logger.error(f"MCP tool {tool_name} failed: {e}")
-                                tool_result = "Tool execution failed. Proceed using ONLY local context."
+                                tool_result = f"Tool execution failed: {str(e)}"
 
+                            # 将工具的返回结果追加给大模型，供下一轮判断
                             rag_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call['id'],
@@ -678,20 +720,22 @@ class ChatWorker(QObject):
                                 "content": tool_result
                             })
 
-                        self.sig_token.emit("<i>✅ Data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
+                    # 循环结束后，所有必要的数据一定集齐了
+                    if tool_executed:
+                        self.sig_token.emit(
+                            "<i>✅ All data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
                 except Exception as e:
-                    self.logger.warning(f"Tool calling failed: {e}")
+                    self.logger.warning(f"Tool calling loop failed: {e}")
 
-            # 🚀 优化点 3：工具调用完毕后，注入强硬的闭嘴指令 (Silent Execution)
+            # 🚀 优化闭嘴指令：强化回答，同时强制召回追问格式
             if tool_executed:
                 silence_prompt = (
                     "CRITICAL SYSTEM INSTRUCTION: "
                     "The tools have successfully executed and returned the necessary data. "
-                    "You MUST NOW provide the final answer directly to the user. "
-                    "STRICTLY FORBIDDEN: Do not explain the tool execution process. "
-                    "Do not output phrases like 'I have obtained the data...', 'Based on the tool...', or 'Let me check...'. "
-                    "Do not output any JSON argument blocks. "
-                    "Deliver a clean, direct, and professional response immediately."
+                    "You MUST NOW provide the final answer directly to the user based on the tool results. "
+                    "STRICTLY FORBIDDEN: Do not explain your tool execution process. "
+                    "Do not output any JSON argument blocks.\n\n"
+                    "REMEMBER: At the very end of your response, you MUST append exactly 6 follow-up questions using the EXACT format specified in the initial system prompt."
                 )
                 rag_messages.append({"role": "system", "content": silence_prompt})
 
@@ -837,7 +881,6 @@ class ChatTool(BaseTool):
             f_name = os.path.basename(path)
             try:
                 if path.lower().endswith('.pdf'):
-                    import fitz
                     with fitz.open(path) as doc:
                         for i, page in enumerate(doc):
                             text = page.get_text().strip()

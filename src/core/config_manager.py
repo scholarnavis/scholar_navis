@@ -135,7 +135,8 @@ class ConfigManager:
                     "always_on": False,
                     "description": "Local External Tools (common_server.py)"
                 }
-            }
+            },
+            "deselected_mcp_tags": []
         }
 
         current_servers = {}
@@ -153,17 +154,32 @@ class ConfigManager:
             current_servers = default_mcp_servers.copy()
             is_modified = True
         else:
-            # 确保核心服务器结构不丢失
             for essential_server in ["builtin", "external"]:
                 if essential_server not in current_servers["mcpServers"]:
                     current_servers["mcpServers"][essential_server] = default_mcp_servers["mcpServers"][
                         essential_server]
                     is_modified = True
 
+            if "deselected_mcp_tags" not in current_servers:
+                current_servers["deselected_mcp_tags"] = []
+                is_modified = True
+
         self.mcp_servers = current_servers
 
         if is_modified:
             self.save_mcp_servers()
+
+    def toggle_mcp_tag(self, tag: str, is_checked: bool):
+        tags = self.mcp_servers.get("deselected_mcp_tags", [])
+        if is_checked and tag in tags:
+            tags.remove(tag)
+        elif not is_checked and tag not in tags:
+            tags.append(tag)
+        else:
+            return
+
+        self.mcp_servers["deselected_mcp_tags"] = tags
+        self.save_mcp_servers()
 
     def save_mcp_servers(self):
         os.makedirs(os.path.dirname(self.MCP_SERVERS_PATH), exist_ok=True)

@@ -18,6 +18,7 @@ class GlobalSignals(QObject):
     sig_finished = Signal()
     sig_error = Signal(str)
     sig_toast = Signal(str, str)
+    
 
     def __new__(cls):
         if cls._instance is None:
