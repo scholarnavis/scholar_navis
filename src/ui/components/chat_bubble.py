@@ -205,11 +205,13 @@ class ChatBubbleWidget(QWidget):
             self.lbl_text.setMaximumWidth(max_w)
             self.edit_input.setMaximumWidth(max_w)
 
+
     def adjust_edit_height(self):
         doc_h = int(self.edit_input.document().size().height())
         new_h = doc_h + 14
-        if new_h > 200:
-            self.edit_input.setFixedHeight(200)
+        # 将最大高度提升至 350，超过后开启滚动条
+        if new_h > 350:
+            self.edit_input.setFixedHeight(350)
             self.edit_input.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         else:
             self.edit_input.setFixedHeight(max(40, new_h))
@@ -309,11 +311,14 @@ class ChatBubbleWidget(QWidget):
     def toggle_edit(self):
         if not self.is_editing:
             self.is_editing = True
+
+            current_height = self.lbl_text.height()
+
             self.lbl_text.setVisible(False)
             self.btn_widget.setVisible(False)
-
             self.content_layout.setSpacing(2)
 
+            self.edit_input.setMinimumHeight(current_height)  # 防止塌陷
             self.edit_input.setVisible(True)
             self.edit_btn_widget.setVisible(True)
 

@@ -1,8 +1,10 @@
+import base64
 import functools
 import gc
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import traceback
@@ -23,15 +25,18 @@ from huggingface_hub import snapshot_download
 from langdetect import detect
 
 from src.core.config_manager import ConfigManager
+from src.core.core_task import TaskManager, TaskMode, TaskState
 from src.core.database import DatabaseManager
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
 from src.core.llm_impl import OpenAICompatibleLLM
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
+from src.core.network_worker import NetworkEmbeddingFunction, NetworkRerankerFunction
 from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
 from src.services.file_service import FileService
+from src.task.chat_tasks import ProcessAttachmentTask
 from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget
@@ -69,6 +74,52 @@ def get_cached_translation(text, direction="to_en", llm_instance=None):
         {"role": "system", "content": prompt},
         {"role": "user", "content": text}
     ]).strip()
+
+
+class ChatDropTargetWidget(QWidget):
+    """支持全局拖拽上传文件的容器，并带有视觉叠加层"""
+    sig_files_dropped = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+        # 拖拽时的叠加提示层
+        self.overlay = QLabel("📥 Drop files here to attach", self)
+        self.overlay.setAlignment(Qt.AlignCenter)
+        self.overlay.setStyleSheet("""
+            background-color: rgba(5, 184, 204, 0.85); 
+            color: white; 
+            font-size: 28px; 
+            font-weight: bold; 
+            border-radius: 12px;
+            border: 4px dashed rgba(255, 255, 255, 0.5);
+        """)
+        self.overlay.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 确保叠加层始终覆盖整个组件
+        self.overlay.resize(self.size())
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.overlay.show()
+            self.overlay.raise_()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.overlay.hide()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self.overlay.hide()
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if paths:
+            self.sig_files_dropped.emit(paths)
+        event.acceptProposedAction()
 
 class AutoResizingTextEdit(QPlainTextEdit):
     sig_send = Signal()
@@ -517,17 +568,28 @@ class ChatWorker(QObject):
                     repo_id = conf.get('hf_repo_id')
 
                     try:
-                        model_path = snapshot_download(
-                            repo_id=repo_id,
-                            local_files_only=True,
-                        )
-
-                        embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-                            model_name=model_path,
-                            device=target_device,
-                            trust_remote_code=conf.get('trust_remote_code', False),
-                            normalize_embeddings=True
-                        )
+                        # 网络模型拦截
+                        if conf.get('is_network', False):
+                            self.sig_token.emit("<i>🌐 Calling Network Embedding API...</i>\n\n")
+                            from src.core.network_worker import NetworkEmbeddingFunction
+                            sys_cfg = ConfigManager().user_settings
+                            embed_fn = NetworkEmbeddingFunction(
+                                api_url=sys_cfg.get("network_embed_url", "https://api.openai.com"),
+                                api_key=sys_cfg.get("network_embed_key", ""),
+                                model_name=repo_id
+                            )
+                        else:
+                            # 本地模型加载
+                            model_path = snapshot_download(
+                                repo_id=repo_id,
+                                local_files_only=True,
+                            )
+                            embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+                                model_name=model_path,
+                                device=target_device,
+                                trust_remote_code=conf.get('trust_remote_code', False),
+                                normalize_embeddings=True
+                            )
 
                         if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
                             self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
@@ -572,9 +634,39 @@ class ChatWorker(QObject):
                     # Reranker execution
                     if candidate_docs:
                         candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:45]
-                        final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=15)
+
+                        # 检查 Reranker 模型是否也是网络模型
+                        rerank_conf = get_model_conf(self.main_config.get("rerank_model_id", ""), "reranker") or {}
+
+                        if rerank_conf.get('is_network_api', False):
+                            # 🌐 网络 Reranker
+                            sys_cfg = ConfigManager().user_settings
+                            net_reranker = NetworkRerankerFunction(
+                                api_url=sys_cfg.get("network_rerank_url", "https://api.siliconflow.cn"),
+                                api_key=sys_cfg.get("network_rerank_key", ""),
+                                model_name=rerank_conf.get('hf_repo_id', '')
+                            )
+
+                            doc_texts = [d['content'] for d in candidate_docs]
+                            net_results = net_reranker.rerank(search_query, doc_texts)
+
+                            # 将网络打分映射回原来的文档对象
+                            final_docs = []
+                            for res in net_results:
+                                idx = res.get("index")
+                                score = res.get("relevance_score", 0)
+                                doc_obj = candidate_docs[idx]
+                                doc_obj['score'] = score
+                                final_docs.append(doc_obj)
+
+                            final_docs = sorted(final_docs, key=lambda x: x['score'], reverse=True)[:15]
+
+                        else:
+                            # 💻 本地离线 Reranker
+                            final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=15)
                     else:
                         final_docs = []
+
 
                     diverse_docs = []
                     source_counts = {}
@@ -690,13 +782,24 @@ class ChatWorker(QObject):
                 f"### CONTEXT:\n{context_str}"
             )
             rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
-            rag_messages.append({"role": "user", "content": search_query})
+            images = [chunk for chunk in getattr(self, 'external_context', []) if chunk.get("type") == "image"]
+
+            if images:
+                vision_content = [{"type": "text", "text": search_query}]
+                for img in images:
+                    vision_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": img["base64_url"]}
+                    })
+                rag_messages.append({"role": "user", "content": vision_content})
+            else:
+                # 纯文本请求
+                rag_messages.append({"role": "user", "content": search_query})
 
             tool_executed = False
 
             if mcp_tools:
                 try:
-                    # 🚀 核心修复：引入 Agentic Loop，允许模型最多进行 5 轮连续工具调用
                     MAX_ITERATIONS = 5
                     for iteration in range(MAX_ITERATIONS):
                         response_msg = self.main_llm.chat(
@@ -828,7 +931,8 @@ class ChatTool(BaseTool):
 
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
-        self.widget = QWidget()
+        self.widget = ChatDropTargetWidget()
+        self.widget.sig_files_dropped.connect(self.process_attached_files)
         layout = QVBoxLayout(self.widget)
         layout.setSpacing(10)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -932,71 +1036,99 @@ class ChatTool(BaseTool):
         return self.widget
 
     def attach_from_local(self):
+        """按钮点击触发的文件选择器"""
         paths, _ = QFileDialog.getOpenFileNames(
-            self.widget, "Select Document(s)", "",
-            "Documents (*.pdf *.md *.txt *.csv *.py);;All Files (*.*)"
+            self.widget, "Select Document(s) or Image(s)", "",
+            "All Supported (*.pdf *.md *.txt *.csv *.py *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "Documents (*.pdf *.md *.txt *.csv *.py)"
         )
         if not paths: return
+        self.process_attached_files(paths)
 
+    def process_attached_files(self, paths):
         if not hasattr(self, 'external_chunks'):
             self.external_chunks = []
         if not hasattr(self, 'external_context_html'):
             self.external_context_html = ""
 
-        success_names = []
+        # 防止用户重复狂点
+        self.input_container.btn_attach.setEnabled(False)
+        self.input_container.btn_send.setEnabled(False)
+        self.input_container.show_context_preview("⏳ Loading files into memory...")
 
-        for path in paths:
-            f_name = os.path.basename(path)
-            try:
-                if path.lower().endswith('.pdf'):
-                    md_chunks = pymupdf4llm.to_markdown(path, page_chunks=True)
 
-                    for chunk in md_chunks:
-                        text = chunk.get("text", "").strip()
-                        if len(text) > 10:  # 过滤纯空白或极短无意义的页
-                            self.external_chunks.append({
-                                "path": path, "name": f_name,
-                                "page": chunk.get("metadata", {}).get("page", 1),
-                                "content": text
-                            })
-                else:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        text = f.read().strip()
-                        if text:
-                            self.external_chunks.append({
-                                "path": path, "name": f_name,
-                                "page": 1, "content": text
-                            })
+        if hasattr(self, 'attach_task_mgr'):
+            self.attach_task_mgr.cancel_task()
 
-                # 构造气泡上方的可点击链接
-                link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                html_link = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
+        self.attach_task_mgr = TaskManager()
 
-                self.external_context_html += html_link
-                success_names.append(f_name)
+        # 连接信号
+        self.attach_task_mgr.sig_progress.connect(
+            lambda p, m: self.input_container.show_context_preview(f"⏳ {m}")
+        )
+        self.attach_task_mgr.sig_result.connect(self._on_attachment_result)
+        self.attach_task_mgr.sig_state_changed.connect(self._on_attachment_state_changed)
 
-            except Exception as e:
-                self.logger.error(f"Failed to read file {f_name}: {e}")
-                ToastManager().show(f"Failed to read file: {f_name}", "error")
+        # 以 THREAD 模式启动，避免多进程的大文本序列化开销
+        self.attach_task_mgr.start_task(
+            ProcessAttachmentTask,
+            task_id="process_attachment",
+            mode=TaskMode.THREAD,
+            paths=paths
+        )
 
-        # 更新 UI 提示
-        if success_names:
-            if len(success_names) > 2:
-                display_text = f"{success_names[0]}, {success_names[1]} 等 {len(success_names)} 个文件"
-            else:
-                display_text = ", ".join(success_names)
+    def _on_attachment_state_changed(self, state, msg):
+        if state == TaskState.FAILED.value:
+            self.input_container.btn_attach.setEnabled(True)
+            self.input_container.btn_send.setEnabled(True)
+            self.input_container.hide_context_preview()
+            ToastManager().show(f"Attachment failed: {msg}", "error")
 
+    def _on_attachment_result(self, result):
+        # 接收并应用后台处理结果
+        self.input_container.btn_attach.setEnabled(True)
+        self.input_container.btn_send.setEnabled(True)
+
+        if not result: return
+
+        chunks = result.get("chunks", [])
+        html = result.get("html", "")
+
+        self.external_chunks.extend(chunks)
+        self.external_context_html += html
+
+        if self.external_chunks:
+            names = []
+            for c in self.external_chunks:
+                if c['name'] not in names:
+                    names.append(c['name'])
+
+            display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(names)
             self.input_container.show_context_preview(display_text)
-            ToastManager().show(f"Attached {len(success_names)} local file(s).", "success")
+            ToastManager().show(f"Attached {len(names)} file(s).", "success")
+        else:
+            self.input_container.hide_context_preview()
 
-    def on_kb_modified(self, kb_id):
-        if not self.history: return
-        curr_data = self.combo_kb.currentData()
-        curr_id = curr_data.get("id") if isinstance(curr_data, dict) else curr_data
-        if curr_id == kb_id:
-            self.is_locked = True
-            self.input_container.lock_input()
-            ToastManager().show("The knowledge base was modified. Chat is currently locked.", "warning")
+
+    def _on_attachment_finished(self, chunks, html):
+        self.input_container.btn_attach.setEnabled(True)
+        self.input_container.btn_send.setEnabled(True)
+        self.external_chunks.extend(chunks)
+        self.external_context_html += html
+
+        if self.external_chunks:
+            names = []
+            for c in self.external_chunks:
+                if c['name'] not in names:
+                    names.append(c['name'])
+
+            display_text = f"{names[0]}, {names[1]} 等 {len(names)} 个文件" if len(names) > 2 else ", ".join(names)
+            self.input_container.show_context_preview(display_text)
+            ToastManager().show(f"Attached {len(names)} file(s).", "success")
+        else:
+            self.input_container.hide_context_preview()
+
 
     def export_chat_history(self):
         if not self.history:
@@ -1054,6 +1186,12 @@ class ChatTool(BaseTool):
         ToastManager().show("Chat history has been cleared.", "success")
         self.logger.info("Chat history cleared by user.")
 
+    def scroll_to_user_message(self, bubble_widget):
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        target_y = max(0, bubble_widget.y() - 10)
+        self.scroll_area.verticalScrollBar().setValue(target_y)
 
     def load_llm_configs(self):
         if hasattr(self, 'model_selector'):
@@ -1194,9 +1332,18 @@ class ChatTool(BaseTool):
 
         self.chat_layout.addWidget(bubble)
         self.chat_layout.addStretch()
-        QTimer.singleShot(50, self.scroll_to_bottom)
-        self.scroll_to_bottom()
+
+        if is_user:
+            QTimer.singleShot(50, lambda: self.scroll_to_user_message(bubble))
+        else:
+            QTimer.singleShot(50, self.scroll_to_bottom)
+            self.scroll_to_bottom()
+
         return bubble
+
+
+
+
 
     def scroll_to_bottom(self):
         sb = self.scroll_area.verticalScrollBar()
@@ -1635,6 +1782,23 @@ class ChatTool(BaseTool):
 
         self.current_ai_bubble = None
         self.logger.info("AI response generation finished and UI updated.")
+
+    def on_kb_modified(self, kb_id):
+        """当当前关联的知识库在后台发生变更时触发，锁定对话防止上下文错乱"""
+        if not self.history:
+            return
+
+        curr_data = self.combo_kb.currentData()
+        curr_id = curr_data.get("id") if isinstance(curr_data, dict) else curr_data
+
+        # 如果当前正在聊天的库，刚好就是后台被增删改的库
+        if curr_id == kb_id:
+            self.is_locked = True
+            if hasattr(self, 'input_container'):
+                self.input_container.lock_input()
+            from src.ui.components.toast import ToastManager
+            ToastManager().show("The knowledge base was modified. Chat is currently locked.", "warning")
+
 
     def render_follow_up_buttons(self, questions):
         if self.chat_layout.count() > 0:

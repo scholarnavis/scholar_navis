@@ -310,13 +310,14 @@ class MainWindow(QMainWindow):
         for mid, mtype in [(embed_id, "embedding"), (rerank_id, "reranker")]:
             conf = get_model_conf(mid, mtype)
             if conf:
+                if conf.get('is_network', False):
+                    continue
+
                 repo_id = conf.get('hf_repo_id')
                 if repo_id and not check_model_exists(repo_id):
                     missing_repos.append((repo_id, conf.get('ui_name', mid)))
 
         if missing_repos:
-            # 🛑 关键修改：即使检测失败，也不执行 shutil.rmtree
-            # 仅仅提示用户去设置页面检查
             names = "\n".join([f"• {m[1]}" for m in missing_repos])
             msg = (
                 f"<b>Model Check</b><br><br>"

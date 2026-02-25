@@ -104,23 +104,35 @@ class OpenAICompatibleLLM:
             message["content"] = ""  # 确保 content 不为 None
             return message
 
-        # 如果是正常的文本请求（如翻译、润色），只返回 content 字符串
         content = message.get("content", "") or ""
 
-        # 如果外部明确要求返回工具格式（即使没触发），也返回字典
         if "tools" in kwargs:
             return message
 
-        return content  # 返回字符串，这样 .strip() 就能正常工作了
+        return content
 
     def stream_chat(self, messages: List[Dict[str, str]]) -> Generator[str, None, None]:
-        try:
-            payload = {
-                "model": self.model_name,
-                "messages": messages,
-                "stream": True,
-            }
 
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "stream": True,
+        }
+
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        # 视觉等一次性模型关闭流式输出
+        image_keywords = ['image', 'vision', 'vl', 'dall', 'mj', 'picture', 'cogview']
+        if any(kw in self.model_name.lower() for kw in image_keywords):
+            payload["stream"] = False
+            self.logger.info(f"Auto-disabled streaming for vision/image model: {self.model_name}")
+
+        try:
             models_config = self.config_data.get("models_config", {})
             current_model_conf = models_config.get(self.model_name, {})
 
@@ -149,16 +161,20 @@ class OpenAICompatibleLLM:
             log_kwargs = {k: v for k, v in payload.items() if k != 'messages'}
             self.logger.info(f"Stream generation requested. Config applied [Mode: {param_mode}]: {log_kwargs}")
 
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            url = f"{self.base_url.rstrip('/')}/chat/completions"
+            if not payload.get("stream", True):
+                response = self._httpx_client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                choices = data.get("choices", [])
+                if choices:
+                    content = choices[0].get("message", {}).get("content", "")
+                    if content:
+                        yield content
+                return
 
             is_thinking = False
 
             with self._httpx_client.stream("POST", url, headers=headers, json=payload) as response:
-                # 修复核心：如果报错(例如 400参数错误)，强制提前读取 error body，防止 raise 时抛出 ResponseNotRead
                 if response.status_code >= 400:
                     response.read()
                 response.raise_for_status()
@@ -207,7 +223,26 @@ class OpenAICompatibleLLM:
         except httpx.HTTPStatusError as e:
             err_text = e.response.text
             self.logger.error(f"HTTP Status Error: {e.response.status_code} - {err_text}")
-            yield f"\n\n[API Request Error: HTTP {e.response.status_code}]\n{err_text}\n"
+
+            friendly_msg = ""
+
+            if e.response.status_code == 400 or "1210" in err_text:
+                friendly_msg = (
+                    "\n\n💡 <b>System Tip (HTTP 400 / 1210):</b>\n"
+                    "The model rejected the request. Possible reasons:\n"
+                    "1. <b>Vision Not Supported:</b> You attached an image, but the current model is text-only. Please switch to a multimodal model (e.g., gpt-4o, qwen-vl) in Settings, or remove the image.\n"
+                    "2. <b>Context Limit Exceeded:</b> The attached PDF or text is too long and exceeded the model's maximum context length.\n"
+                    "3. <b>MCP Tools Not Supported:</b> The current model does not support advanced tool calling. Try unchecking 'Enable advanced search' above the input box.\n"
+                )
+
+            elif "1212" in err_text or "SSE" in err_text:
+                friendly_msg = (
+                    "\n\n💡 <b>System Tip (HTTP 1212):</b>\n"
+                    "The selected model does not support streaming (SSE).\n"
+                    "This usually happens if you accidentally selected an Embedding or Reranker model as your Chat Model, or if the specific Vision API restricts streaming. Please switch to a standard Chat Model in Settings."
+                )
+
+            yield f"\n\n[API Request Error: HTTP {e.response.status_code}]\n{err_text}{friendly_msg}\n"
         except Exception as e:
             error_msg = str(e).lower()
             if self._is_cancelled or "closed" in error_msg or "cancelled" in error_msg:

@@ -165,7 +165,6 @@ class StandardDialog(BaseDialog):
         self.adjustSize()
 
 
-# --- 关键修改开始 ---
 
 try:
     import pynvml
@@ -175,10 +174,6 @@ try:
 except Exception:
     HAS_NVML = False
 
-from src.ui.components.dialog import BaseDialog
-from PySide6.QtWidgets import QWidget, QFormLayout, QLineEdit, QComboBox, QTextEdit
-from PySide6.QtCore import Qt
-import json
 
 
 class McpConfigDialog(BaseDialog):
@@ -356,6 +351,68 @@ class McpConfigDialog(BaseDialog):
             err_dialog = StandardDialog(self, "连接失败", f"❌ 无法连接到服务器：\n{msg}")
             err_dialog.setFixedWidth(500)
             err_dialog.exec()
+
+
+class NetworkModelDialog(BaseDialog):
+    def __init__(self, parent=None, providers=[], existing_data=None):
+        title = "Edit Network Model" if existing_data else "Add Network Model"
+        super().__init__(parent, title, 400)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.combo_type = QComboBox()
+        self.combo_type.addItems(["Embedding", "Reranker"])
+
+        self.combo_provider = QComboBox()
+        # 遍历现有的 LLM 服务商
+        for p in providers:
+            self.combo_provider.addItem(p.get("name", p.get("id")), p.get("id"))
+
+        self.inp_model_name = QLineEdit()
+        self.inp_model_name.setPlaceholderText("e.g. BAAI/bge-m3")
+
+        # UI 样式
+        style = "background: #333; color: #fff; padding: 5px; border: 1px solid #555; border-radius: 4px;"
+        self.combo_type.setStyleSheet(style)
+        self.combo_provider.setStyleSheet(style)
+        self.inp_model_name.setStyleSheet(style)
+
+        # 填充旧数据（编辑模式）
+        if existing_data:
+            idx_type = self.combo_type.findText(existing_data.get("type", "Embedding").capitalize())
+            if idx_type >= 0: self.combo_type.setCurrentIndex(idx_type)
+
+            idx_prov = self.combo_provider.findData(existing_data.get("provider_id"))
+            if idx_prov >= 0: self.combo_provider.setCurrentIndex(idx_prov)
+
+            self.inp_model_name.setText(existing_data.get("model_name", ""))
+
+        form.addRow("Type:", self.combo_type)
+        form.addRow("Provider:", self.combo_provider)
+        form.addRow("Model Name:", self.inp_model_name)
+
+        self.content_layout.addLayout(form)
+        self.add_button("Cancel", self.reject)
+        self.add_button("Save", self.accept, is_primary=True)
+
+    def get_data(self):
+        prov_id = self.combo_provider.currentData()
+        prov_name = self.combo_provider.currentText()
+        model_name = self.inp_model_name.text().strip()
+        m_type = self.combo_type.currentText().lower()
+
+        return {
+            "id": f"net_{m_type}_{prov_id}_{model_name.replace('/', '_')}",
+            "type": m_type,
+            "provider_id": prov_id,
+            "provider_name": prov_name,
+            "model_name": model_name
+        }
+
+
+
+
 
 class ProgressDialog(BaseDialog):
     sig_canceled = Signal()

@@ -2,6 +2,7 @@ import os
 import sys
 import time
 
+import qdarktheme
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar, QGraphicsDropShadowEffect
@@ -135,6 +136,9 @@ class AppController(QObject):
         QApplication.processEvents()
 
         self.logger = setup_logger()
+        cfg = ConfigManager().user_settings
+        theme_setting = cfg.get("theme", "Dark").lower()
+        qdarktheme.setup_theme(theme_setting)
         self.logger.info("System Launching.")
 
         self.thread = QThread()

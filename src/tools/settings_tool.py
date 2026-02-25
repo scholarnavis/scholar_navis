@@ -27,7 +27,7 @@ from src.tools.base_tool import BaseTool
 from src.core.config_manager import ConfigManager
 from src.task.hf_download_task import RealTimeHFDownloadTask
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog
+from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, NetworkModelDialog
 from src.ui.components.toast import ToastManager
 
 
@@ -315,6 +315,10 @@ class SettingsTool(BaseTool):
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
         self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
 
+        self.config.load_mcp_servers()  # 从磁盘强行重新读取上次保存的 JSON
+        if hasattr(self, '_load_mcp_servers_to_ui'):
+            self._load_mcp_servers_to_ui()
+
         # 通知用户
         ToastManager().show("Changes reverted to the last saved state.", "info")
 
@@ -365,7 +369,89 @@ class SettingsTool(BaseTool):
         lbl = QLabel(html)
         lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(lbl)
+
+        # ------------------- 嵌入网络模型管理 -------------------
+        self.table_net_models = QTableWidget(0, 3)
+        self.table_net_models.setHorizontalHeaderLabels(["Type", "Provider / Model", "Status"])
+        self.table_net_models.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table_net_models.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_net_models.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_net_models.setStyleSheet(
+            "background: #1e1e1e; color: #ccc; gridline-color: #333; border: 1px solid #444;")
+        self.table_net_models.setFixedHeight(120)
+
+        btn_layout = QHBoxLayout()
+        btn_add = QPushButton("➕ Add Network Model")
+        btn_edit = QPushButton("✏️ Edit")
+        btn_del = QPushButton("🗑️ Delete")
+        for btn in [btn_add, btn_edit, btn_del]:
+            btn.setStyleSheet("padding: 5px 10px; background: #2d2d30; border: 1px solid #555; border-radius: 4px;")
+            btn_layout.addWidget(btn)
+        btn_layout.addStretch()
+
+        btn_add.clicked.connect(self._add_net_model)
+        btn_edit.clicked.connect(self._edit_net_model)
+        btn_del.clicked.connect(self._del_net_model)
+
+        if isinstance(layout, QFormLayout):
+            layout.addRow(QLabel("Network Models:"), btn_layout)
+            layout.addRow("", self.table_net_models)
+        else:
+            layout.addLayout(btn_layout)
+            layout.addWidget(self.table_net_models)
+
+        self.refresh_net_models_table()
         self.layout.addWidget(group)
+
+    def refresh_net_models_table(self):
+        self.table_net_models.setRowCount(0)
+        net_models = self.config.user_settings.get("custom_network_models", [])
+        for m in net_models:
+            row = self.table_net_models.rowCount()
+            self.table_net_models.insertRow(row)
+            self.table_net_models.setItem(row, 0, QTableWidgetItem(m.get("type", "").capitalize()))
+            # 💡 严格按照你要求的 Provider / Model 格式展示
+            self.table_net_models.setItem(row, 1, QTableWidgetItem(f"{m.get('provider_name')} / {m.get('model_name')}"))
+            self.table_net_models.setItem(row, 2, QTableWidgetItem("Active"))
+            self.table_net_models.item(row, 0).setData(Qt.UserRole, m)
+
+    def _add_net_model(self):
+        providers = self.config.user_settings.get("llm_configs", [])  # 获取你的服务商列表
+        dlg = NetworkModelDialog(self.widget, providers=providers)
+        if dlg.exec():
+            new_model = dlg.get_data()
+            net_models = self.config.user_settings.get("custom_network_models", [])
+            net_models.append(new_model)
+            self.config.user_settings["custom_network_models"] = net_models
+            self.refresh_net_models_table()
+            self.config.save_settings()
+
+    def _edit_net_model(self):
+        row = self.table_net_models.currentRow()
+        if row < 0: return
+        old_data = self.table_net_models.item(row, 0).data(Qt.UserRole)
+        providers = self.config.user_settings.get("llm_configs", [])
+
+        dlg = NetworkModelDialog(self.widget, providers=providers, existing_data=old_data)
+        if dlg.exec():
+            new_model = dlg.get_data()
+            net_models = self.config.user_settings.get("custom_network_models", [])
+            idx = net_models.index(old_data)
+            net_models[idx] = new_model
+            self.config.user_settings["custom_network_models"] = net_models
+            self.refresh_net_models_table()
+            self.config.save_settings()
+
+    def _del_net_model(self):
+        row = self.table_net_models.currentRow()
+        if row < 0: return
+        old_data = self.table_net_models.item(row, 0).data(Qt.UserRole)
+        net_models = self.config.user_settings.get("custom_network_models", [])
+        net_models.remove(old_data)
+        self.config.user_settings["custom_network_models"] = net_models
+        self.refresh_net_models_table()
+        self.config.save_settings()
+
 
     def init_ncbi_section(self):
         group = QGroupBox("Academic Databases (NCBI & Semantic Scholar)")
@@ -534,11 +620,15 @@ class SettingsTool(BaseTool):
             btn_del.setStyleSheet("background: transparent; border: none;")
 
             def delete_mcp_row(row_idx, srv_name=name):
-                reply = QMessageBox.question(self.widget, "Confirm Delete",
-                                             f"Are you sure you want to delete MCP Server '{srv_name}'?\nThis will disconnect it immediately.",
-                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.Yes:
-                    from src.core.mcp_manager import MCPManager
+                # 🌟 替换掉原本原生的 QMessageBox，使用你的 StandardDialog
+                dlg = StandardDialog(
+                    self.widget,
+                    "Confirm Delete",
+                    f"Are you sure you want to delete MCP Server '{srv_name}'?\nThis will disconnect it immediately.",
+                    show_cancel=True
+                )
+
+                if dlg.exec():
                     MCPManager.get_instance().disconnect_server(srv_name)
                     self.table_mcp.removeRow(row_idx)
 
@@ -1406,11 +1496,38 @@ class SettingsTool(BaseTool):
         conf = self.llm_configs[idx]
         default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
         if conf.get("id") in default_ids:
-            QMessageBox.warning(self.widget, "Warning", "Built-in default providers cannot be deleted.")
+            StandardDialog(
+                self.widget,
+                "Warning",
+                "Built-in default providers cannot be deleted."
+            ).exec()
             return
 
         del self.llm_configs[idx]
         self.combo_llm_preset.removeItem(idx)
+
+    def init_network_rag_section(self):
+        group = QGroupBox("🌐 Network RAG API (Embedding & Reranker)")
+        group.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
+        layout = QFormLayout(group)
+        layout.setLabelAlignment(Qt.AlignRight)
+
+        self.inp_net_embed_url = QLineEdit()
+        self.inp_net_embed_url.setPlaceholderText("e.g. https://api.siliconflow.cn")
+        self.inp_net_embed_url.setText(self.config.user_settings.get("network_embed_url", ""))
+        self.inp_net_embed_url.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+
+        self.inp_net_embed_key = QLineEdit()
+        self.inp_net_embed_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.inp_net_embed_key.setPlaceholderText("Bearer Token for Network RAG")
+        self.inp_net_embed_key.setText(self.config.user_settings.get("network_embed_key", ""))
+        self.inp_net_embed_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+
+        layout.addRow("API Base URL:", self.inp_net_embed_url)
+        layout.addRow("API Key:", self.inp_net_embed_key)
+
+        self.layout.addWidget(group)
 
     def init_system_section(self):
         group = QGroupBox("System Preferences")

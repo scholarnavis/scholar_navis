@@ -102,14 +102,20 @@ class MermaidViewer(QMainWindow):
             StandardDialog(self, "Export Failed", f"Failed to save SVG:\n{str(e)}").exec()
 
     def load_diagram(self, mermaid_code: str):
-        self.mermaid_code = mermaid_code.strip()
+        cleaned_code = mermaid_code.strip()
+
+        if cleaned_code.lower().startswith("```mermaid"):
+            cleaned_code = cleaned_code[10:]
+        elif cleaned_code.startswith("```"):
+            cleaned_code = cleaned_code[3:]
+
+        if cleaned_code.endswith("```"):
+            cleaned_code = cleaned_code[:-3]
+
+        self.mermaid_code = cleaned_code.strip()
+
         self.source_editor.blockSignals(True)
         self.source_editor.setPlainText(self.mermaid_code)
-        self.source_editor.blockSignals(False)
-        self.show()
-        self.raise_()
-        self.activateWindow()
-        QTimer.singleShot(100, self.render_diagram)
 
     def _toggle_source(self):
         self.source_editor.setVisible(not self.source_editor.isVisible())

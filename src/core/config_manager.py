@@ -43,7 +43,11 @@ class ConfigManager:
             "hf_token": "",
             "theme": "Dark",
             "log_level": "INFO",
-            "is_first_run": True
+            "is_first_run": True,
+            "network_embed_url": "",
+            "network_embed_key": "",
+            "network_rerank_url": "",
+            "network_rerank_key": ""
         }
 
         current_settings = {}

@@ -7,7 +7,14 @@ import zipfile
 import json
 import uuid
 
+from chromadb.utils import embedding_functions
+from huggingface_hub import snapshot_download
+
+from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask, TaskState
+from src.core.device_manager import DeviceManager
+from src.core.kb_manager import KBManager
+from src.core.models_registry import get_model_conf
 
 logger = logging.getLogger("Task.kb")
 
@@ -35,13 +42,6 @@ def _setup_worker_env():
 
 
 def _worker_load_model(kb_id):
-    from chromadb.utils import embedding_functions
-    from huggingface_hub import snapshot_download
-    from src.core.kb_manager import KBManager
-    from src.core.device_manager import DeviceManager
-    from src.core.models_registry import get_model_conf
-    import logging
-
     logger = logging.getLogger("Worker.ModelLoader")
 
 
@@ -53,6 +53,16 @@ def _worker_load_model(kb_id):
 
     model_id = kb_data.get('model_id', 'embed_auto')
     conf = get_model_conf(model_id, "embedding")
+
+    if conf and conf.get('is_network', False):
+        logger.info(f"Using Network Embedding API: {conf.get('hf_repo_id')}")
+        from src.core.network_worker import NetworkEmbeddingFunction
+        sys_cfg = ConfigManager().user_settings
+        return NetworkEmbeddingFunction(
+            api_url=sys_cfg.get("network_embed_url", "https://api.openai.com"),
+            api_key=sys_cfg.get("network_embed_key", ""),
+            model_name=conf.get('hf_repo_id')  # 通常填模型名称，如 text-embedding-3-small
+        )
 
     device_info = dev_mgr.get_optimal_device()
     device = device_info.get('type', 'cpu') if isinstance(device_info, dict) else str(device_info)

@@ -21,11 +21,11 @@ class VerifySettingsTask(BackgroundTask):
 
         to_download = []
         e_conf = get_model_conf(real_embed, "embedding")
-        if e_conf and not check_model_exists(e_conf.get('hf_repo_id')):
+        if e_conf and not e_conf.get('is_network', False) and not check_model_exists(e_conf.get('hf_repo_id')):
             to_download.append(e_conf['hf_repo_id'])
 
         r_conf = get_model_conf(real_rerank, "reranker")
-        if r_conf and not check_model_exists(r_conf.get('hf_repo_id')):
+        if r_conf and not r_conf.get('is_network', False) and not check_model_exists(r_conf.get('hf_repo_id')):
             to_download.append(r_conf['hf_repo_id'])
 
         self.update_progress(90, "Verification complete.")

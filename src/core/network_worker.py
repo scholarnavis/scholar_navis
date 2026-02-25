@@ -2,6 +2,8 @@ import os
 import requests
 import httpx
 from PySide6.QtCore import QObject, Signal
+from chromadb import EmbeddingFunction, Documents, Embeddings
+
 from src.core.config_manager import ConfigManager
 
 
@@ -179,3 +181,77 @@ class LightNetworkWorker(QObject):
             getattr(self, 'model_name', ''),
             getattr(self, 'custom_params', {})
         )
+
+
+class NetworkEmbeddingFunction(EmbeddingFunction):
+    """统一管理的网络 Embedding 调用器 (兼容 ChromaDB 接口)"""
+
+    def __init__(self, api_url, api_key, model_name):
+        self.api_url = api_url.rstrip('/')
+        self.api_key = api_key
+        self.model_name = model_name
+        self.proxy_kwargs = _get_explicit_proxy_kwargs()
+
+    def __call__(self, input: Documents) -> Embeddings:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {"input": input, "model": self.model_name}
+
+        proxies = {}
+        if "proxy" in self.proxy_kwargs:
+            proxies = {"http": self.proxy_kwargs["proxy"], "https": self.proxy_kwargs["proxy"]}
+
+        response = requests.post(
+            f"{self.api_url}/v1/embeddings",
+            headers=headers,
+            json=payload,
+            timeout=30,
+            proxies=proxies,
+            verify=self.proxy_kwargs.get("trust_env", True) is not False
+        )
+        response.raise_for_status()
+        data = response.json()
+        return [item["embedding"] for item in data["data"]]
+
+
+class NetworkRerankerFunction:
+    """统一管理的网络 Reranker 调用器 (兼容标准 Rerank API 格式)"""
+
+    def __init__(self, api_url, api_key, model_name):
+        self.api_url = api_url.rstrip('/')
+        self.api_key = api_key
+        self.model_name = model_name
+        self.proxy_kwargs = _get_explicit_proxy_kwargs()
+
+    def rerank(self, query: str, docs: list) -> list:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        # 常见重排序 API 的 Payload 结构 (例如 Jina, SiliconFlow)
+        payload = {
+            "model": self.model_name,
+            "query": query,
+            "documents": docs
+        }
+
+        proxies = {}
+        if "proxy" in self.proxy_kwargs:
+            proxies = {"http": self.proxy_kwargs["proxy"], "https": self.proxy_kwargs["proxy"]}
+
+        response = requests.post(
+            f"{self.api_url}/v1/rerank",
+            headers=headers,
+            json=payload,
+            timeout=30,
+            proxies=proxies,
+            verify=self.proxy_kwargs.get("trust_env", True) is not False
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        # 将网络返回的结果统一映射为统一结构：{"index": 0, "relevance_score": 0.95}
+        return data.get("results", [])
+
