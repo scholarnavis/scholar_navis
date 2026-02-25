@@ -169,11 +169,18 @@ class ChatInputContainer(QFrame):
 
         # 创建一个菜单用于多选
         self.menu_mcp_tags = QMenu(self)
-        self.menu_mcp_tags.setStyleSheet(
-            "QMenu { background-color: #2b2b2b; color: #ddd; border: 1px solid #555; }"
-            "QMenu::item { padding: 5px 20px 5px 20px; }"
-            "QMenu::item:selected { background-color: #05B8CC; color: white; }"
-        )
+        self.menu_mcp_tags.setStyleSheet("""
+                    QMenu { 
+                        background-color: #2b2b2b; 
+                        border: 1px solid #555; 
+                        border-radius: 6px; 
+                        padding: 4px; 
+                    }
+                    QMenu::item { 
+                        padding: 0px; 
+                        margin: 0px; 
+                    }
+                """)
         self.btn_mcp_tags.setMenu(self.menu_mcp_tags)
 
         # 存储复选框动作的字典
@@ -288,6 +295,12 @@ class ChatInputContainer(QFrame):
         self.btn_send.clicked.connect(self._emit_send)
         self.text_edit.sig_send.connect(self._emit_send)
 
+        GlobalSignals().mcp_status_changed.connect(self._on_mcp_status_changed)
+
+    def _on_mcp_status_changed(self):
+        if self.chk_mcp_enable.isChecked():
+            self.refresh_mcp_tags()
+
     def _on_tag_toggled(self, tag, checked):
         ConfigManager().toggle_mcp_tag(tag, checked)
         self._update_tag_button_text()
@@ -334,9 +347,18 @@ class ChatInputContainer(QFrame):
 
                 # 干净透明的 UI，配合你的 rss_tool 风格
                 chk.setStyleSheet("""
-                            QCheckBox { color: #ddd; padding: 6px 12px; background: transparent; font-size: 13px; border-radius: 4px; }
-                            QCheckBox:hover { background: #37373d; }
-                        """)
+                                    QCheckBox { 
+                                        color: #ddd; 
+                                        padding: 8px 16px; 
+                                        margin: 0px;
+                                        background: transparent; 
+                                        font-size: 13px; 
+                                        border-radius: 4px; 
+                                    }
+                                    QCheckBox:hover { background: #37373d; }
+                                """)
+
+                chk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
                 chk.setChecked(tag not in deselected_tags)
                 chk.setCursor(Qt.PointingHandCursor)

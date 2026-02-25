@@ -14,6 +14,7 @@ from mcp.client.sse import sse_client
 from typing import Dict, List, Optional
 
 from src.core.config_manager import ConfigManager
+from src.core.signals import GlobalSignals
 
 logger = logging.getLogger("MCP.Manager")
 
@@ -133,7 +134,7 @@ class MCPManager:
                     self.tool_map[tool.name] = server_name
 
                 logger.info(f"[{server_name}] Connected. Loaded {len(tools_response.tools)} tools.")
-
+                GlobalSignals().mcp_status_changed.emit()
                 await self.server_stops[server_name].wait()
 
         except Exception as e:
@@ -144,6 +145,8 @@ class MCPManager:
             tools_to_remove = [k for k, v in self.tool_map.items() if v == server_name]
             for tool in tools_to_remove:
                 del self.tool_map[tool]
+
+            GlobalSignals().mcp_status_changed.emit()
 
     def get_available_tags(self) -> list:
         """供 UI 获取所有可选标签"""
@@ -300,3 +303,4 @@ class MCPManager:
 
         self.server_status[server_name] = "disconnected"
         logger.info(f"[{server_name}] Disconnected and tools unmapped.")
+        GlobalSignals().mcp_status_changed.emit()
