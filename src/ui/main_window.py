@@ -2,6 +2,7 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout)
 
@@ -9,6 +10,7 @@ from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf
+from src.core.signals import GlobalSignals
 from src.tools.chat_tool import ChatTool
 # 引入所有工具
 from src.tools.import_tool import ImportTool
@@ -35,7 +37,7 @@ class MainWindow(QMainWindow):
         main_splitter.setStyleSheet("QSplitter::handle { background-color: #333; }")
         self.setCentralWidget(main_splitter)
 
-        # 左侧面板构建 (收窄宽度、更紧凑的边距)
+        # 左侧面板构
         left_panel = QWidget()
         left_panel.setMaximumWidth(220)
 
@@ -43,18 +45,11 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(5, 10, 5, 10)
         left_layout.setSpacing(10)
 
-        # 1. Logo
-        logo_label = QLabel("🧠 Scholar Navis")
-        logo_label.setStyleSheet("""
-            QLabel {
-                color: #05B8CC;
-                font-size: 18px;
-                font-weight: bold;
-                font-family: 'Segoe UI', 'Microsoft YaHei';
-                padding: 10px 5px;
-            }
-        """)
-        left_layout.addWidget(logo_label)
+        # 1. 动态 SVG Logo 替换原有的文本 QLabel
+        self.logo_widget = QSvgWidget()
+        self.logo_widget.setFixedSize(180, 60) # 你可以根据实际 SVG 的比例微调宽高
+        self._update_logo_theme() # 初始化加载对应主题的 Logo
+        left_layout.addWidget(self.logo_widget, alignment=Qt.AlignCenter)
 
         # 2. 导航栏
         self.sidebar = QListWidget()
@@ -151,6 +146,9 @@ class MainWindow(QMainWindow):
         self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
         self.shortcut_translate.activated.connect(self.toggle_quick_translator)
 
+        if hasattr(GlobalSignals(), 'theme_changed'):
+            GlobalSignals().theme_changed.connect(self._update_logo_theme)
+
     # 新增唤醒翻译窗口的方法
     def toggle_quick_translator(self):
         if self.translator_dialog.isHidden() or self.translator_dialog.windowOpacity() == 0.0:
@@ -160,6 +158,17 @@ class MainWindow(QMainWindow):
             self.translator_dialog.input_box.setFocus()
         else:
             self.translator_dialog.hide_with_fade()
+
+    def _update_logo_theme(self):
+        """根据当前配置的主题加载对应的 Logo"""
+        theme = ConfigManager().user_settings.get("theme", "Dark").lower()
+        filename = "logo_light.svg" if theme == "light" else "logo_dark.svg"
+        logo_path = os.path.join(os.getcwd(), "Assets", filename)
+
+        if os.path.exists(logo_path):
+            self.logo_widget.load(logo_path)
+        else:
+            pass
 
     def _setup_mcp_status_bar(self):
         status_widget = QWidget()

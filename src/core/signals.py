@@ -19,7 +19,7 @@ class GlobalSignals(QObject):
     sig_error = Signal(str)
     sig_toast = Signal(str, str)
     mcp_status_changed = Signal()
-
+    theme_changed = Signal()
 
     def __new__(cls):
         if cls._instance is None:

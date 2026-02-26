@@ -354,7 +354,18 @@ class McpConfigDialog(BaseDialog):
 
 
 
+class AddModelDialog(BaseDialog):
+        def __init__(self, parent=None):
+            super().__init__(parent, title="Add Custom Model", width=350)
+            self.inp_name = QLineEdit()
+            self.inp_name.setPlaceholderText("Enter model ID/name...")
+            self.inp_name.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+            self.content_layout.addWidget(self.inp_name)
+            self.add_button("Cancel", self.reject)
+            self.add_button("Add", self.accept, is_primary=True)
 
+        def get_name(self):
+            return self.inp_name.text().strip()
 
 class ProgressDialog(BaseDialog):
     sig_canceled = Signal()

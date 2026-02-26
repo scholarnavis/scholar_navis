@@ -8,25 +8,29 @@ import sys
 import time
 
 import qdarktheme
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QEvent
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QEvent, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QScrollArea, QHBoxLayout, QComboBox, QTableWidget,
                                QAbstractItemView, QHeaderView,
-                               QTableWidgetItem, QCheckBox, QApplication)
+                               QTableWidgetItem, QCheckBox, QApplication, QFrame)
 from huggingface_hub import constants
 
 from src.core.config_manager import ConfigManager
-from src.core.core_task import TaskState, TaskManager
+from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, check_model_exists, resolve_auto_model)
-from src.core.network_worker import setup_global_network_env, LightNetworkWorker
+from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
+from src.core.theme_manager import ThemeManager
 from src.task.hf_download_task import RealTimeHFDownloadTask
+from src.task.settings_tasks import FetchModelsTask, TestApiTask, VerifySettingsTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog
+from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, AddModelDialog
 from src.ui.components.toast import ToastManager
 
 
@@ -116,6 +120,7 @@ class BatchDownloadWorker(QObject):
             reason = "Task aborted and residual cache wiped." if not self.is_running else str(e)
             self.sig_finished.emit(False, reason)
 
+
 class FloatingOverlayFilter(QObject):
     def __init__(self, parent_widget, btn):
         super().__init__()
@@ -129,6 +134,7 @@ class FloatingOverlayFilter(QObject):
             self.btn.move(x, y)
         return super().eventFilter(obj, event)
 
+
 class SettingsTool(BaseTool):
     def __init__(self):
         super().__init__("Global Settings")
@@ -140,16 +146,21 @@ class SettingsTool(BaseTool):
         self._is_updating_model_ui = False
 
         GlobalSignals().request_model_download.connect(self.on_download_requested)
+        ThemeManager().theme_changed.connect(self._apply_theme)
 
     def get_ui_widget(self):
         self.widget = QWidget()
         main_layout = QVBoxLayout(self.widget)
 
-        # 1. 滚动区域设置
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            "QScrollArea { border: none; background-color: transparent; } QWidget#scroll_content { background-color: transparent; }")
         scroll_content = QWidget()
+
         self.layout = QVBoxLayout(scroll_content)
+        self.layout.setSpacing(20)
+        self.layout.setContentsMargins(15, 0, 15, 40)
 
         self.init_hardware_section()
         self.init_system_section()
@@ -159,29 +170,25 @@ class SettingsTool(BaseTool):
         self.init_ncbi_section()
         self.init_mcp_section()
 
-        self.layout.addStretch()  # 防止上方内容被拉伸
+        self.layout.addStretch()
         scroll.setWidget(scroll_content)
-
-        # 将滚动区域优先加入全局布局
         main_layout.addWidget(scroll)
 
-        # 2. 底部固定按钮区
+        # Bottom Button Area
         btn_layout = QHBoxLayout()
-        btn_undo = QPushButton("↺ Revert Changes")
-        btn_undo.setStyleSheet("padding: 10px; font-weight: bold; background-color: #444; color: white;")
-        btn_undo.clicked.connect(self.on_undo_clicked)
 
-        btn_save = QPushButton("💾 Save Settings & Verify")
-        btn_save.setStyleSheet("padding: 10px; font-weight: bold; background-color: #05B8CC; color: white;")
-        btn_save.clicked.connect(self.on_save_clicked)
+        self.btn_undo = QPushButton(" Revert Changes")
+        self.btn_undo.clicked.connect(self.on_undo_clicked)
 
-        btn_layout.addWidget(btn_undo)
-        btn_layout.addWidget(btn_save)
+        self.btn_save = QPushButton(" Save Settings & Verify")
+        self.btn_save.clicked.connect(self.on_save_clicked)
 
-        # 把按钮区域加到 main_layout，脱离滚动条的控制
+        btn_layout.addWidget(self.btn_undo)
+        btn_layout.addWidget(self.btn_save)
         main_layout.addLayout(btn_layout)
 
         self._load_current_settings()
+        self._apply_theme()
 
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._refresh_mcp_status)
@@ -189,8 +196,121 @@ class SettingsTool(BaseTool):
 
         return self.widget
 
+    def _get_input_style(self):
+        tm = ThemeManager()
+        return f"background: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 5px; border-radius: 4px;"
+
+    def _update_all_styles(self):
+        tm = ThemeManager()
+
+        # Update Bottom Action Buttons
+        if hasattr(self, 'btn_undo'): self.btn_undo.setStyleSheet(self._get_btn_style())
+        if hasattr(self, 'btn_save'): self.btn_save.setStyleSheet(self._get_btn_style(btn_type="primary"))
+
+        # Update MCP Buttons
+        if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setStyleSheet(self._get_btn_style(btn_type="success"))
+        if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setStyleSheet(self._get_btn_style())
+
+        # Update LLM/Model Buttons with Colors
+        if hasattr(self, 'btn_add_llm'): self.btn_add_llm.setStyleSheet(self._get_btn_style(btn_type="success"))
+        if hasattr(self, 'btn_del_llm'): self.btn_del_llm.setStyleSheet(self._get_btn_style(btn_type="danger"))
+
+        if hasattr(self, 'btn_add_model'): self.btn_add_model.setStyleSheet(self._get_btn_style(btn_type="success"))
+        if hasattr(self, 'btn_del_model'): self.btn_del_model.setStyleSheet(self._get_btn_style(btn_type="danger"))
+
+        if hasattr(self, 'btn_fetch_models'): self.btn_fetch_models.setStyleSheet(
+            self._get_btn_style(btn_type="primary"))
+        if hasattr(self, 'btn_test_api'): self.btn_test_api.setStyleSheet(self._get_btn_style(btn_type="primary"))
+
+        if hasattr(self, 'btn_add_provider_param'): self.btn_add_provider_param.setStyleSheet(
+            self._get_btn_style(btn_type="success"))
+        if hasattr(self, 'btn_add_model_param'): self.btn_add_model_param.setStyleSheet(
+            self._get_btn_style(btn_type="success"))
+
+        # Default styling for the rest
+        for btn_name in ['btn_help_params', 'btn_copy_params', 'btn_trans_refresh']:
+            if hasattr(self, btn_name):
+                getattr(self, btn_name).setStyleSheet(self._get_btn_style())
+
+        # Update Subtext & Status Labels
+        if hasattr(self, 'lbl_mcp_hint'):
+            self.lbl_mcp_hint.setStyleSheet(f"color: {tm.color('text_muted')}; font-size: 11px;")
+        if hasattr(self, 'lbl_trans_hint'):
+            self.lbl_trans_hint.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 11px; font-style: italic; margin-top: 5px;")
+        if hasattr(self, 'lbl_embed_status'):
+            self.lbl_embed_status.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 11px; margin-bottom: 5px;")
+        if hasattr(self, 'lbl_rerank_status'):
+            self.lbl_rerank_status.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 11px; margin-bottom: 5px;")
+        if hasattr(self, 'chk_low_vram'):
+            self.chk_low_vram.setStyleSheet(f"color: {tm.color('warning')}; font-weight: bold; margin-top: 10px;")
+
+        if hasattr(self, 'table_mcp'):
+            for row in range(self.table_mcp.rowCount()):
+                chk_widget = self.table_mcp.cellWidget(row, 0)
+                if chk_widget and chk_widget.layout():
+                    chk = chk_widget.layout().itemAt(0).widget()
+                    if chk:
+                        chk.setStyleSheet(
+                            f"color: {tm.color('text_main')}; background: transparent; margin-left: 10px;")
+
+
+
+
+    def _apply_theme(self):
+        if not self.widget: return
+        tm = ThemeManager()
+
+        self.widget.setStyleSheet(f"background-color: {tm.color('bg_main')};" + tm.get_custom_qss())
+
+        if hasattr(self, 'table_mcp'):
+            self.table_mcp.setStyleSheet(f"""
+                QTableWidget {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; }}
+                QHeaderView::section {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_muted')}; border: 1px solid {tm.color('border')}; padding: 4px; }}
+            """)
+
+        self._update_all_styles()
+        self._update_all_icons()
+
+        if hasattr(self, '_update_hardware_html'): self._update_hardware_html()
+        if hasattr(self, '_update_ncbi_html'): self._update_ncbi_html()
+        if hasattr(self, '_update_vram_html'): self._update_vram_html()
+
+        if hasattr(self, 'check_models_status'): self.check_models_status()
+        if hasattr(self, '_refresh_mcp_status'): self._refresh_mcp_status()
+
+        if hasattr(self, 'combo_proxy_mode'):
+            self._on_proxy_mode_changed(self.combo_proxy_mode.currentIndex())
+
+
+    def _update_all_icons(self):
+        """Re-assign icons to update their currentColor based on the tinted buttons"""
+        tm = ThemeManager()
+        if hasattr(self, 'btn_undo'): self.btn_undo.setIcon(tm.icon("undo", "text_main"))
+        if hasattr(self, 'btn_save'): self.btn_save.setIcon(tm.icon("save", "bg_main"))
+
+        # Color matched icons for the tinted backgrounds
+        if hasattr(self, 'btn_add_llm'): self.btn_add_llm.setIcon(tm.icon("add", "success"))
+        if hasattr(self, 'btn_del_llm'): self.btn_del_llm.setIcon(tm.icon("delete", "danger"))
+        if hasattr(self, 'btn_add_model'): self.btn_add_model.setIcon(tm.icon("add", "success"))
+        if hasattr(self, 'btn_del_model'): self.btn_del_model.setIcon(tm.icon("delete", "danger"))
+        if hasattr(self, 'btn_fetch_models'): self.btn_fetch_models.setIcon(tm.icon("api", "bg_main"))
+        if hasattr(self, 'btn_test_api'): self.btn_test_api.setIcon(tm.icon("test", "bg_main"))
+        if hasattr(self, 'btn_add_provider_param'): self.btn_add_provider_param.setIcon(tm.icon("add", "success"))
+        if hasattr(self, 'btn_add_model_param'): self.btn_add_model_param.setIcon(tm.icon("add", "success"))
+
+        if hasattr(self, 'btn_help_params'): self.btn_help_params.setIcon(tm.icon("help", "text_main"))
+        if hasattr(self, 'btn_copy_params'): self.btn_copy_params.setIcon(tm.icon("copy", "text_main"))
+        if hasattr(self, 'btn_trans_refresh'): self.btn_trans_refresh.setIcon(tm.icon("refresh", "text_main"))
+        if hasattr(self, 'btn_open_cache'): self.btn_open_cache.setIcon(tm.icon("folder", "accent"))
+
+        if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setIcon(tm.icon("add", "success"))
+        if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setIcon(tm.icon("refresh", "text_main"))
+
+
     def _load_current_settings(self):
-        """加载配置到 UI"""
         if hasattr(self, '_load_mcp_servers_to_ui'):
             self.config.load_settings()
             self.config.load_mcp_servers()
@@ -201,12 +321,9 @@ class SettingsTool(BaseTool):
         if hasattr(self, '_refresh_mcp_status'):
             self._refresh_mcp_status()
 
-
-
-
     def _refresh_mcp_status(self):
         try:
-            from src.core.mcp_manager import MCPManager
+            tm = ThemeManager()
             mcp_mgr = MCPManager.get_instance()
 
             for row in range(self.table_mcp.rowCount()):
@@ -225,26 +342,20 @@ class SettingsTool(BaseTool):
                     status = mcp_mgr.get_server_status(name)
                     if status == "connected":
                         status_lbl.setText("Connected")
-                        status_lbl.setStyleSheet("color: #4caf50; font-weight: bold;")
+                        status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
                     elif "error" in status:
                         status_lbl.setText("Error")
-                        status_lbl.setStyleSheet("color: #ff6b6b;")
+                        status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
                         status_lbl.setToolTip(status)
                     else:
                         status_lbl.setText(status.capitalize())
-                        status_lbl.setStyleSheet("color: #ffb86c;")
+                        status_lbl.setStyleSheet(f"color: {tm.color('warning')};")
                 else:
                     status_lbl.setText("Disabled")
-                    status_lbl.setStyleSheet("color: #888;")
+                    status_lbl.setStyleSheet(f"color: {tm.color('text_muted')};")
 
         except Exception as e:
             self.logger.error(f"Status refresh failed: {e}")
-
-
-
-
-
-
 
     def refresh_model_combos(self):
         curr_embed = self.combo_embed.currentData()
@@ -272,19 +383,15 @@ class SettingsTool(BaseTool):
         self.check_models_status()
 
     def on_undo_clicked(self):
-        """撤销当前 UI 的更改，恢复到上次保存的配置状态"""
-        # 1. 恢复 NCBI / S2 API 密钥配置
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
 
-        # 2. 恢复网络与代理配置
         mode_map = {"system": 0, "off": 1, "custom": 2}
         self.combo_proxy_mode.setCurrentIndex(mode_map.get(self.config.user_settings.get("proxy_mode", "system"), 0))
         self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
         self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
 
-        # 3. 恢复本地模型选项（包括刚刚加的低显存模式）
         curr_embed = self.config.user_settings.get("current_model_id", "embed_auto")
         idx_embed = self.combo_embed.findData(curr_embed)
         self.combo_embed.setCurrentIndex(max(0, idx_embed))
@@ -296,7 +403,6 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'chk_low_vram'):
             self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
 
-        # 4. 恢复 LLM 核心配置文件 (直接从本地 json 文件重新加载)
         self.llm_configs = self._load_llm_config()
 
         active_id = self.config.user_settings.get("active_llm_id", "openai")
@@ -309,16 +415,14 @@ class SettingsTool(BaseTool):
         if idx_trans >= 0:
             self.combo_trans_provider.setCurrentIndex(idx_trans)
 
-        # 5. 恢复系统设置
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
         self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
 
-        self.config.load_mcp_servers()  # 从磁盘强行重新读取上次保存的 JSON
+        self.config.load_mcp_servers()
         if hasattr(self, '_load_mcp_servers_to_ui'):
             self._load_mcp_servers_to_ui()
 
-        # 通知用户
         ToastManager().show("Changes reverted to the last saved state.", "info")
 
     def on_download_requested(self, model_id, model_type):
@@ -339,24 +443,63 @@ class SettingsTool(BaseTool):
                        show_cancel=False).exec()
 
     def init_hardware_section(self):
-        group = QGroupBox("🖥️ System Hardware Info")
-        group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
-        layout = QVBoxLayout(group)
+        self.group_hw = QGroupBox("System Hardware Info")
+        self.group_hw.setObjectName("group_hw")
+        layout = QVBoxLayout(self.group_hw)
+        self.lbl_hw_info = QLabel()
+        self.lbl_hw_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.lbl_hw_info)
+        self.layout.addWidget(self.group_hw)
+        self._update_hardware_html()
 
+    def _get_btn_style(self, btn_type="default"):
+        tm = ThemeManager()
+
+        # Helper to convert hex to rgba for elegant translucent button backgrounds
+        def hex_to_rgba(hex_color, alpha):
+            h = hex_color.lstrip('#')
+            if len(h) < 6: return "transparent"
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return f"rgba({r}, {g}, {b}, {alpha})"
+
+        if btn_type == "primary":
+            bg, hover, text = tm.color('accent'), tm.color('accent_hover'), tm.color('bg_main')
+        elif btn_type == "danger":
+            bg = hex_to_rgba(tm.color('danger'), 0.12)
+            hover = hex_to_rgba(tm.color('danger'), 0.25)
+            text = tm.color('danger')
+        elif btn_type == "success":
+            bg = hex_to_rgba(tm.color('success'), 0.12)
+            hover = hex_to_rgba(tm.color('success'), 0.25)
+            text = tm.color('success')
+        else:
+            bg, hover, text = tm.color('btn_bg'), tm.color('btn_hover'), tm.color('text_main')
+
+        # Only draw border if it's a default button, primary/colored buttons look cleaner without it
+        border = f"1px solid {tm.color('border')}" if btn_type == "default" else "none"
+
+        return f"""
+            QPushButton {{
+                background-color: {bg}; color: {text};
+                border: {border}; border-radius: 4px; padding: 6px 12px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {hover}; }}
+        """
+
+
+    def _update_hardware_html(self):
+        if not hasattr(self, 'lbl_hw_info'): return
+        tm = ThemeManager()
         info = self.dev_mgr.get_sys_info()
         gpu_str = "<br>".join([f"&nbsp;&nbsp;• {g}" for g in info['gpus']])
 
-        status_color = "#4caf50" if info['cuda_support'] else "#ff9800"
+        status_color = tm.color("success") if info['cuda_support'] else tm.color("warning")
         cuda_status = "Available" if info['cuda_support'] else "Not Available"
-
-        if info['cuda_support']:
-            ver_info = f"Toolkit: {info['torch_cuda_ver']} | Driver: {info['gpu_driver_ver']}"
-        else:
-            ver_info = "N/A"
+        ver_info = f"Toolkit: {info['torch_cuda_ver']} | Driver: {info['gpu_driver_ver']}" if info[
+            'cuda_support'] else "N/A"
 
         html = f"""
-        <div style='font-family: Consolas, monospace; font-size: 13px; color: #ddd; line-height: 1.6;'>
+        <div style='font-family: Consolas, monospace; font-size: 13px; color: {tm.color("text_main")}; line-height: 1.6;'>
             <b>OS:</b> {info['os']}<br>
             <b>Python:</b> {info['python_ver']}<br>
             <b>CPU:</b> {info['cpu']} ({info['cpu_cores']})<br>
@@ -365,80 +508,70 @@ class SettingsTool(BaseTool):
             <b>CUDA:</b> <span style='color:{status_color}'>{cuda_status}</span> ({ver_info})
         </div>
         """
-        lbl = QLabel(html)
-        lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(lbl)
-
-        self.layout.addWidget(group)
-
-
-
+        self.lbl_hw_info.setText(html)
 
     def init_ncbi_section(self):
         group = QGroupBox("Academic Databases (NCBI & Semantic Scholar)")
-        group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
         self.input_ncbi_email = QLineEdit()
         self.input_ncbi_email.setPlaceholderText("Required: e.g. user@university.edu")
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
-        self.input_ncbi_email.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
         self.input_ncbi_api_key = QLineEdit()
         self.input_ncbi_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
         self.input_ncbi_api_key.setPlaceholderText("NCBI Key (Optional but recommended)")
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
-        self.input_ncbi_api_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
         self.input_s2_api_key = QLineEdit()
         self.input_s2_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
         self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
-        self.input_s2_api_key.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
-        lbl_hint = QLabel(
-            "💡 <b>Important Notice:</b><br>"
-            "• <b>NCBI:</b> API Key increases limits from 3 to 10 requests/sec. "
-            "<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:#05B8CC; text-decoration:none;'>Get NCBI Key</a>.<br>"
-            "• <b>Semantic Scholar:</b> Prevents '429 Too Many Requests' errors during deep academic RAG tasks. "
-            "<a href='https://www.semanticscholar.org/product/api' style='color:#05B8CC; text-decoration:none;'>Get S2 Key</a>."
-        )
-        lbl_hint.setWordWrap(True)
-        lbl_hint.setOpenExternalLinks(True)
-        lbl_hint.setStyleSheet("color: #aaa; font-size: 11px; margin-top: 5px; margin-bottom: 5px; line-height: 1.4;")
+        self.lbl_ncbi_hint = QLabel()
+        self.lbl_ncbi_hint.setWordWrap(True)
+        self.lbl_ncbi_hint.setOpenExternalLinks(True)
+        ThemeManager().apply_class(self.lbl_ncbi_hint, "hint")
+        self._update_ncbi_html()
 
         layout.addRow("NCBI Email:", self.input_ncbi_email)
         layout.addRow("NCBI API Key:", self.input_ncbi_api_key)
         layout.addRow("S2 API Key:", self.input_s2_api_key)
-        layout.addRow("", lbl_hint)
+        layout.addRow("", self.lbl_ncbi_hint)
 
         self.layout.addWidget(group)
 
+    def _update_ncbi_html(self):
+        if not hasattr(self, 'lbl_ncbi_hint'): return
+        tm = ThemeManager()
+        self.lbl_ncbi_hint.setText(
+            f"💡 <b>Important Notice:</b><br>"
+            f"• <b>NCBI:</b> API Key increases limits from 3 to 10 requests/sec. "
+            f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>Get NCBI Key</a>.<br>"
+            f"• <b>Semantic Scholar:</b> Prevents '429 Too Many Requests' errors during deep academic RAG tasks. "
+            f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>Get S2 Key</a>."
+        )
+
     def init_mcp_section(self):
+        tm = ThemeManager()
         group = QGroupBox("🔌 MCP Servers (Unified)")
-        group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
         layout = QVBoxLayout(group)
 
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("<b>Manage Local & Remote Tools:</b>"))
         header_layout.addStretch()
 
-        btn_add = QPushButton("➕ Add Server")
-        btn_add.clicked.connect(self._on_add_mcp_clicked)
-        btn_add.setStyleSheet("background: #05B8CC; color: white; border-radius: 4px; padding: 4px 10px;")
+        self.btn_add_mcp = QPushButton(" Add Server")
+        self.btn_add_mcp.clicked.connect(self._on_add_mcp_clicked)
 
-        btn_refresh = QPushButton("🔄 Refresh Status")
-        btn_refresh.clicked.connect(self._refresh_mcp_status)
-        btn_refresh.setStyleSheet("background: #444; color: white; border-radius: 4px; padding: 4px 10px;")
+        self.btn_refresh_mcp = QPushButton(" Refresh Status")
+        self.btn_refresh_mcp.clicked.connect(self._refresh_mcp_status)
 
-        header_layout.addWidget(btn_add)
-        header_layout.addWidget(btn_refresh)
+        header_layout.addWidget(self.btn_add_mcp)
+        header_layout.addWidget(self.btn_refresh_mcp)
         layout.addLayout(header_layout)
 
-        # 统一的 Server 列表视图
         self.table_mcp = QTableWidget(0, 6)
         self.table_mcp.setHorizontalHeaderLabels(["Enabled", "Name", "Type", "Target", "Status", "Action"])
         self.table_mcp.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -446,17 +579,12 @@ class SettingsTool(BaseTool):
         self.table_mcp.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.table_mcp.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_mcp.setFixedHeight(220)
-        self.table_mcp.setStyleSheet("""
-            QTableWidget { background-color: #1e1e1e; color: #eee; border: 1px solid #444; }
-            QHeaderView::section { background-color: #2a2d2e; color: #ccc; border: 1px solid #444; padding: 4px; }
-        """)
         self.table_mcp.cellDoubleClicked.connect(self._on_mcp_double_clicked)
         layout.addWidget(self.table_mcp)
 
-        lbl_hint = QLabel(
+        self.lbl_mcp_hint = QLabel(
             "💡 <i>Changes to MCP servers require clicking the blue 'Save Settings & Verify' button below to take effect.</i>")
-        lbl_hint.setStyleSheet("color: #aaa; font-size: 11px;")
-        layout.addWidget(lbl_hint)
+        layout.addWidget(self.lbl_mcp_hint)
 
         self.layout.addWidget(group)
 
@@ -474,7 +602,6 @@ class SettingsTool(BaseTool):
         self._on_edit_mcp_clicked(row)
 
     def _load_mcp_servers_to_ui(self):
-        """将 ConfigManager 中的 JSON 渲染到表格"""
         servers = self.config.mcp_servers.get("mcpServers", {})
         self.table_mcp.setRowCount(0)
         for name, cfg in servers.items():
@@ -491,9 +618,8 @@ class SettingsTool(BaseTool):
         chk = QCheckBox()
         chk.setChecked(is_enabled)
         if always_on:
-            chk.setEnabled(False)  # 保护 builtin 核心不被意外关闭
+            chk.setEnabled(False)
             chk.setToolTip("Core service must remain enabled.")
-        chk.setStyleSheet("color: white; background: transparent; margin-left: 10px;")
         chk_widget = QWidget()
         l = QHBoxLayout(chk_widget)
         l.addWidget(chk)
@@ -503,7 +629,7 @@ class SettingsTool(BaseTool):
 
         # 1. Name
         name_item = QTableWidgetItem(name)
-        name_item.setData(Qt.UserRole, cfg)  # 隐式存储完整配置对象
+        name_item.setData(Qt.UserRole, cfg)
         name_item.setFlags(name_item.flags() ^ Qt.ItemIsEditable)
         self.table_mcp.setItem(row, 1, name_item)
 
@@ -524,24 +650,26 @@ class SettingsTool(BaseTool):
         status_lbl.setAlignment(Qt.AlignCenter)
         self.table_mcp.setCellWidget(row, 4, status_lbl)
 
-        # 5. Actions (Edit / Delete)
+        # 5. Actions
         action_widget = QWidget()
         al = QHBoxLayout(action_widget)
         al.setContentsMargins(0, 0, 0, 0)
 
-        btn_edit = QPushButton("✏️")
+        tm = ThemeManager()
+        btn_edit = QPushButton()
+        btn_edit.setIcon(tm.icon("edit", "accent"))
         btn_edit.setCursor(Qt.PointingHandCursor)
         btn_edit.setStyleSheet("background: transparent; border: none;")
         btn_edit.clicked.connect(lambda _, r=row: self._on_edit_mcp_clicked(r))
         al.addWidget(btn_edit)
 
         if not always_on and name not in ["builtin", "external"]:
-            btn_del = QPushButton("🗑️")
+            btn_del = QPushButton()
+            btn_del.setIcon(tm.icon("delete", "danger"))
             btn_del.setCursor(Qt.PointingHandCursor)
             btn_del.setStyleSheet("background: transparent; border: none;")
 
             def delete_mcp_row(row_idx, srv_name=name):
-                # 🌟 替换掉原本原生的 QMessageBox，使用你的 StandardDialog
                 dlg = StandardDialog(
                     self.widget,
                     "Confirm Delete",
@@ -555,7 +683,6 @@ class SettingsTool(BaseTool):
 
             btn_del.clicked.connect(lambda _, r=row: delete_mcp_row(self.table_mcp.indexAt(btn_del.pos()).row()))
             al.addWidget(btn_del)
-
 
         self.table_mcp.setCellWidget(row, 5, action_widget)
 
@@ -577,11 +704,9 @@ class SettingsTool(BaseTool):
         dlg = McpConfigDialog(self.widget, server_name=old_name, server_config=old_cfg)
         if dlg.exec():
             new_name, new_cfg = dlg.get_config()
-            # 合并保留隐藏属性如 always_on
             new_cfg["always_on"] = old_cfg.get("always_on", False)
             new_cfg["enabled"] = old_cfg.get("enabled", True)
 
-            # 更新 UI
             name_item.setText(new_name)
             name_item.setData(Qt.UserRole, new_cfg)
             self.table_mcp.item(row, 2).setText(new_cfg.get("type", "stdio"))
@@ -589,9 +714,7 @@ class SettingsTool(BaseTool):
             self.table_mcp.item(row, 3).setText(target)
 
     def init_network_section(self):
-        group = QGroupBox("Network & Proxy")
-        group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
+        group = QGroupBox("Network Proxy")
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
@@ -605,15 +728,12 @@ class SettingsTool(BaseTool):
         self.input_proxy = QLineEdit()
         self.input_proxy.setPlaceholderText("e.g. http://127.0.0.1:7890")
         self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
-        self.input_proxy.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
         self.input_mirror = QLineEdit()
         self.input_mirror.setPlaceholderText("Leave empty for default (huggingface.co)")
         self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
-        self.input_mirror.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
         self.combo_proxy_mode.currentIndexChanged.connect(self._on_proxy_mode_changed)
-        self._on_proxy_mode_changed(self.combo_proxy_mode.currentIndex())
 
         layout.addRow("Proxy Mode:", self.combo_proxy_mode)
         layout.addRow("Proxy URL:", self.input_proxy)
@@ -624,15 +744,10 @@ class SettingsTool(BaseTool):
     def _on_proxy_mode_changed(self, index):
         is_custom = (index == 2)
         self.input_proxy.setEnabled(is_custom)
-        if not is_custom:
-            self.input_proxy.setStyleSheet("background: #222; color: #666; border: 1px solid #444; padding: 5px;")
-        else:
-            self.input_proxy.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
     def init_model_section(self):
-        group = QGroupBox("🧠 AI Models Configuration")
-        group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
+        tm = ThemeManager()
+        group = QGroupBox("AI Models Configuration")
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
@@ -640,7 +755,6 @@ class SettingsTool(BaseTool):
         self.lbl_embed_status = QLabel("Checking...")
         self.lbl_embed_status.setTextFormat(Qt.RichText)
         self.lbl_embed_status.setWordWrap(True)
-        self.lbl_embed_status.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 5px;")
 
         for m in EMBEDDING_MODELS:
             self.combo_embed.addItem(m['ui_name'], m['id'])
@@ -654,7 +768,6 @@ class SettingsTool(BaseTool):
         self.lbl_rerank_status = QLabel("Checking...")
         self.lbl_rerank_status.setTextFormat(Qt.RichText)
         self.lbl_rerank_status.setWordWrap(True)
-        self.lbl_rerank_status.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 5px;")
 
         for m in RERANKER_MODELS:
             self.combo_rerank.addItem(m['ui_name'], m['id'])
@@ -664,41 +777,52 @@ class SettingsTool(BaseTool):
         self.combo_rerank.setCurrentIndex(max(0, idx))
         self.combo_rerank.currentIndexChanged.connect(self.check_models_status)
 
-        self.chk_low_vram = QCheckBox("Low VRAM Mode (Release RAG models after search)")
-        self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
-        self.chk_low_vram.setStyleSheet("color: #ff9800; font-weight: bold;")
-        self.chk_low_vram.setToolTip(
-            "Enable this to prevent OOM errors. It will unload Embedding and Reranker models before the LLM starts generating.")
-
         layout.addRow("Embedding:", self.combo_embed)
         layout.addRow("", self.lbl_embed_status)
         layout.addRow("Reranker:", self.combo_rerank)
         layout.addRow("", self.lbl_rerank_status)
 
+        self.btn_open_cache = QPushButton(" Open Model Storage Directory")
+        ThemeManager().apply_class(self.btn_open_cache, "link-btn")
+        self.btn_open_cache.setCursor(Qt.PointingHandCursor)
+        self.btn_open_cache.clicked.connect(self._open_hf_cache)
+        layout.addRow("", self.btn_open_cache)
+
         self.chk_low_vram = QCheckBox("Low VRAM Mode (Release RAG models after search)")
         self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
-        self.chk_low_vram.setStyleSheet("color: #ffb86c; font-weight: bold; margin-top: 10px;")
+        self.chk_low_vram.setToolTip(
+            "Enable this to prevent OOM errors. It will unload Embedding and Reranker models before the LLM starts generating.")
 
-        lbl_vram_desc = QLabel(
-            "<div style='font-size: 11px; color: #aaa; line-height: 1.5; margin-left: 20px;'>"
-            "💡 <b>Turn ON (Low VRAM):</b> Frees up memory immediately after document retrieval.<br>"
-            "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#4caf50;'>👍 Pros: Maximizes LLM context length, prevents Out-of-Memory (OOM) crashes.</span><br>"
-            "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#ff6b6b;'>👎 Cons: Adds 1~3s loading delay to every new query.</span><br>"
-            "💡 <b>Turn OFF (Speed Mode):</b> Keeps RAG models persistently in memory.<br>"
-            "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#4caf50;'>👍 Pros: Lightning-fast multi-turn conversation.</span><br>"
-            "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#ff6b6b;'>👎 Cons: Embedding + Reranker will constantly occupy VRAM/RAM.</span>"
-            "</div>"
-        )
-        lbl_vram_desc.setWordWrap(True)
-        lbl_vram_desc.setTextFormat(Qt.RichText)
+        self.lbl_vram_desc = QLabel()
+        self.lbl_vram_desc.setWordWrap(True)
+        self.lbl_vram_desc.setTextFormat(Qt.RichText)
+        self._update_vram_html()
 
         layout.addRow("", self.chk_low_vram)
-        layout.addRow("", lbl_vram_desc)
-        # ==========================================
+        layout.addRow("", self.lbl_vram_desc)
 
         self.layout.addWidget(group)
         QThread.msleep(50)
         self.check_models_status()
+
+    def _update_vram_html(self):
+        if not hasattr(self, 'lbl_vram_desc'): return
+        tm = ThemeManager()
+        self.lbl_vram_desc.setText(
+            f"<div style='font-size: 11px; color: {tm.color('text_muted')}; line-height: 1.5; margin-left: 20px;'>"
+            f"💡 <b>Turn ON (Low VRAM):</b> Frees up memory immediately after document retrieval.<br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('success')};'>👍 Pros: Maximizes LLM context length, prevents Out-of-Memory (OOM) crashes.</span><br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('danger')};'>👎 Cons: Adds 1~3s loading delay to every new query.</span><br>"
+            f"💡 <b>Turn OFF (Speed Mode):</b> Keeps RAG models persistently in memory.<br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('success')};'>👍 Pros: Lightning-fast multi-turn conversation.</span><br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('danger')};'>👎 Cons: Embedding + Reranker will constantly occupy VRAM/RAM.</span>"
+            f"</div>"
+        )
+
+    def _open_hf_cache(self):
+        hf_home = constants.HF_HOME
+        os.makedirs(hf_home, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(hf_home))
 
     def _load_llm_config(self):
         config_path = os.path.join(os.getcwd(), "config", "llm_config.json")
@@ -737,8 +861,6 @@ class SettingsTool(BaseTool):
                     loaded_configs = json.load(f)
                     for cfg in loaded_configs:
                         cfg.pop("thinking_model_name", None)
-
-                        # Migrate old provider-level params to model-specific structure
                         if "model_params_mode" in cfg and "models_config" not in cfg:
                             m_name = cfg.get("model_name", "default")
                             cfg["models_config"] = {
@@ -778,9 +900,7 @@ class SettingsTool(BaseTool):
         from src.ui.components.param_editor import ParamEditorWidget
         from PySide6.QtWidgets import QFrame
 
-        group = QGroupBox("💬 LLM Generation API")
-        group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
+        group = QGroupBox("LLM Generation API")
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
@@ -791,13 +911,14 @@ class SettingsTool(BaseTool):
         for conf in self.llm_configs:
             self.combo_llm_preset.addItem(conf.get("name", "Unnamed Provider"))
 
-        self.btn_add_llm = QPushButton("➕ Add")
+        self.btn_add_llm = QPushButton(" Add")
         self.btn_add_llm.clicked.connect(self._add_llm_provider)
-        self.btn_del_llm = QPushButton("🗑️ Delete")
+
+        self.btn_del_llm = QPushButton(" Delete")
         self.btn_del_llm.clicked.connect(self._del_llm_provider)
 
-        btn_help_params = QPushButton("❓ Parameter Help")
-        btn_help_params.clicked.connect(lambda: StandardDialog(
+        self.btn_help_params = QPushButton(" Parameter Help")
+        self.btn_help_params.clicked.connect(lambda: StandardDialog(
             self.widget, "Custom Parameter Guide",
             "You can specify request parameters (e.g., temperature, top_p, max_tokens) for the provider or specifically for a model.\n\n"
             "• Priority: Model Custom > Provider Inherit\n"
@@ -809,37 +930,34 @@ class SettingsTool(BaseTool):
         header_layout.addWidget(self.combo_llm_preset, stretch=1)
         header_layout.addWidget(self.btn_add_llm)
         header_layout.addWidget(self.btn_del_llm)
-        header_layout.addWidget(btn_help_params)
+        header_layout.addWidget(self.btn_help_params)
 
         self.input_llm_name = QLineEdit()
         self.input_llm_url = QLineEdit()
         self.input_llm_key = QLineEdit()
         self.input_llm_key.setEchoMode(QLineEdit.Password)
-        for inp in (self.input_llm_name, self.input_llm_url, self.input_llm_key):
-            inp.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
         self.editor_provider_params = ParamEditorWidget()
-        btn_add_provider_param = QPushButton("➕ Add Provider Parameter")
-        btn_add_provider_param.clicked.connect(lambda: self.editor_provider_params.add_param_row())
+        self.btn_add_provider_param = QPushButton(" Add Provider Parameter")
+        self.btn_add_provider_param.clicked.connect(lambda: self.editor_provider_params.add_param_row())
 
         provider_param_layout = QVBoxLayout()
         provider_param_layout.addWidget(self.editor_provider_params)
-        provider_param_layout.addWidget(btn_add_provider_param)
+        provider_param_layout.addWidget(self.btn_add_provider_param)
 
         model_layout = QHBoxLayout()
-        self.combo_llm_model = QComboBox()
-        self.combo_llm_model = BaseComboBox()  # 替换为不可编辑的下拉框
-        self.combo_llm_model.setStyleSheet(
-            "background: #333; color: #fff; border: 1px solid #555; padding: 4px; selection-background-color: #007acc;")
+        self.combo_llm_model = BaseComboBox()
 
-        self.btn_add_model = QPushButton("➕ Add")
+        self.btn_add_model = QPushButton(" Add")
         self.btn_add_model.clicked.connect(self._add_llm_model)
-        self.btn_del_model = QPushButton("🗑️ Delete")
+
+        self.btn_del_model = QPushButton(" Delete")
         self.btn_del_model.clicked.connect(self._del_llm_model)
 
-        self.btn_fetch_models = QPushButton("🔄 Fetch")
+        self.btn_fetch_models = QPushButton(" Fetch")
         self.btn_fetch_models.clicked.connect(self._start_fetch_task)
-        self.btn_test_api = QPushButton("🧪 Test")
+
+        self.btn_test_api = QPushButton(" Test")
         self.btn_test_api.clicked.connect(self._start_test_task)
 
         model_layout.addWidget(self.combo_llm_model, stretch=1)
@@ -854,15 +972,15 @@ class SettingsTool(BaseTool):
         self.editor_model_params = ParamEditorWidget()
 
         model_param_btn_layout = QHBoxLayout()
-        btn_add_model_param = QPushButton("➕ Add Model Parameter")
-        btn_add_model_param.clicked.connect(lambda: self.editor_model_params.add_param_row())
+        self.btn_add_model_param = QPushButton(" Add Model Parameter")
+        self.btn_add_model_param.clicked.connect(lambda: self.editor_model_params.add_param_row())
 
-        btn_copy_params = QPushButton("📥 Copy from Provider")
-        btn_copy_params.setToolTip("Copies global provider parameters to the current model.")
-        btn_copy_params.clicked.connect(self._on_copy_params_clicked)
+        self.btn_copy_params = QPushButton(" Copy from Provider")
+        self.btn_copy_params.setToolTip("Copies global provider parameters to the current model.")
+        self.btn_copy_params.clicked.connect(self._on_copy_params_clicked)
 
-        model_param_btn_layout.addWidget(btn_add_model_param)
-        model_param_btn_layout.addWidget(btn_copy_params)
+        model_param_btn_layout.addWidget(self.btn_add_model_param)
+        model_param_btn_layout.addWidget(self.btn_copy_params)
 
         self.model_param_container = QWidget()
         mp_layout = QVBoxLayout(self.model_param_container)
@@ -875,15 +993,13 @@ class SettingsTool(BaseTool):
         )
 
         # --- 独立翻译层选择 ---
-        trans_group = QGroupBox("🌐 Translation Agent Configuration")
-        trans_group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
+        trans_group = QGroupBox("Translation Agent Configuration")
         trans_layout = QFormLayout(trans_group)
 
         trans_provider_layout = QHBoxLayout()
         self.combo_trans_provider = BaseComboBox()
         self.combo_trans_model = BaseComboBox()
-        self.btn_trans_refresh = QPushButton("🔄 Refresh Models")
+        self.btn_trans_refresh = QPushButton(" Refresh Models")
         self.btn_trans_refresh.setToolTip("从上方 LLM 配置的缓存模型列表中拉取最新数据")
 
         for conf in self.llm_configs:
@@ -895,11 +1011,11 @@ class SettingsTool(BaseTool):
         trans_layout.addRow("Translation Provider:", trans_provider_layout)
         trans_layout.addRow("Translation Model:", self.combo_trans_model)
 
-        lbl_trans_hint = QLabel(
-            "💡 <b>Note:</b> Configure the specific translation model for each provider here. It is highly recommended to select a fast, non-reasoning model (e.g., gpt-4o-mini). Do not use 'thinking' models as they inject unwanted reasoning blocks into translations.")
-        lbl_trans_hint.setWordWrap(True)
-        lbl_trans_hint.setStyleSheet("color: #aaa; font-size: 11px; font-style: italic; margin-top: 5px;")
-        trans_layout.addRow("", lbl_trans_hint)
+        self.lbl_trans_hint = QLabel(
+            "💡 <b>Note:</b> Configure the specific translation model for each provider here. It is highly recommended to select a fast, non-reasoning model (e.g., gpt-4o-mini). Do not use 'thinking' models as they inject unwanted reasoning blocks into translations."
+        )
+        self.lbl_trans_hint.setWordWrap(True)
+        trans_layout.addRow("", self.lbl_trans_hint)
 
         layout.addRow("Service Provider:", header_layout)
         layout.addRow("Provider Name:", self.input_llm_name)
@@ -933,16 +1049,13 @@ class SettingsTool(BaseTool):
         if idx_trans >= 0:
             self.combo_trans_provider.setCurrentIndex(idx_trans)
 
-        # 连接翻译器专用信号
         self.combo_trans_provider.currentIndexChanged.connect(self._on_trans_provider_changed)
         self.combo_trans_model.currentTextChanged.connect(self._sync_trans_model)
         self.btn_trans_refresh.clicked.connect(self._on_trans_refresh_clicked)
 
-        # 初始化显示
         self._on_trans_provider_changed(0)
 
     def _on_trans_refresh_clicked(self):
-        """用户主动点击刷新按钮时触发，包含 Toast 提示"""
         self._refresh_trans_models_ui()
         ToastManager().show("Translation models refreshed from cache.", "success")
 
@@ -955,7 +1068,6 @@ class SettingsTool(BaseTool):
         if idx < 0: return
         conf = self.llm_configs[idx]
 
-        # 尝试读取现有的翻译模型，若没有则用聊天模型兜底
         curr_model = conf.get("trans_model_name", conf.get("model_name", ""))
         fetched = conf.get("fetched_models", [])
 
@@ -976,12 +1088,9 @@ class SettingsTool(BaseTool):
         idx = self.combo_trans_provider.currentIndex()
         if idx >= 0:
             self.llm_configs[idx]["trans_model_name"] = text.strip()
-            self._save_llm_config()  # 静默保存映射关系
-            # 触发全局信号让 Chat 和 QuickTranslator 的下拉栏立即刷新展示文本
+            self._save_llm_config()
             if hasattr(GlobalSignals(), 'llm_config_changed'):
                 GlobalSignals().llm_config_changed.emit()
-
-
 
     def _extract_real_model_name(self, display_text):
         for suffix in [" (⚙️ Custom)", " (🚫 Closed)"]:
@@ -1021,7 +1130,6 @@ class SettingsTool(BaseTool):
                     f"Do you want to overwrite the model's parameter with the provider's?"
                 )
 
-                # 使用自定义的 StandardDialog 解决黑暗主题适配问题
                 dlg = StandardDialog(self.widget, "Duplicate Parameter", msg, show_cancel=True)
                 reply = dlg.exec()
 
@@ -1052,22 +1160,6 @@ class SettingsTool(BaseTool):
         self._load_model_params_to_ui(conf, real_model_name)
 
     def _add_llm_model(self):
-        from src.ui.components.dialog import BaseDialog
-        from PySide6.QtWidgets import QLineEdit
-
-        class AddModelDialog(BaseDialog):
-            def __init__(self, parent=None):
-                super().__init__(parent, title="Add Custom Model", width=350)
-                self.inp_name = QLineEdit()
-                self.inp_name.setPlaceholderText("Enter model ID/name...")
-                self.inp_name.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
-                self.content_layout.addWidget(self.inp_name)
-                self.add_button("Cancel", self.reject)
-                self.add_button("Add", self.accept, is_primary=True)
-
-            def get_name(self):
-                return self.inp_name.text().strip()
-
         dlg = AddModelDialog(self.widget)
         if dlg.exec():
             new_model = dlg.get_name()
@@ -1081,7 +1173,6 @@ class SettingsTool(BaseTool):
                         conf["fetched_models"].insert(0, new_model)
                     self._refresh_model_combo(conf)
 
-                    # 添加完毕后自动选中该模型
                     for i in range(self.combo_llm_model.count()):
                         if self._extract_real_model_name(self.combo_llm_model.itemText(i)) == new_model:
                             self.combo_llm_model.setCurrentIndex(i)
@@ -1139,9 +1230,6 @@ class SettingsTool(BaseTool):
 
         self._is_updating_model_ui = False
 
-
-
-
     def _refresh_model_combo(self, conf):
         self._is_updating_model_ui = True
 
@@ -1168,7 +1256,6 @@ class SettingsTool(BaseTool):
 
         self.combo_llm_model.addItems(items_to_add)
 
-        # 选中正确的项
         idx_to_select = -1
         for i in range(self.combo_llm_model.count()):
             if self._extract_real_model_name(self.combo_llm_model.itemText(i)) == curr_real:
@@ -1283,44 +1370,32 @@ class SettingsTool(BaseTool):
             StandardDialog(self.widget, "Warning", "Please enter API Base URL first.").exec()
             return
 
-        self.net_pd = ProgressDialog(
-            self.widget, "Network Request", "Contacting API...\n(You can cancel at any time)",
-            telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
-        )
+        self.net_pd = ProgressDialog(self.widget, "Network Request", "Contacting API...")
         self.net_pd.show()
 
-        self.net_thread = QThread()
-        self.net_worker = LightNetworkWorker()
-        self.net_worker.moveToThread(self.net_thread)
-        self.net_pd.sig_canceled.connect(self.net_worker.cancel, Qt.DirectConnection)
-        self.net_pd.sig_canceled.connect(self.net_thread.terminate)
+        self.fetch_task_mgr = TaskManager()
+        self.fetch_task_mgr.sig_progress.connect(self.net_pd.update_progress)
+        self.fetch_task_mgr.sig_result.connect(self._on_models_fetched)
+        self.net_pd.sig_canceled.connect(self.fetch_task_mgr.cancel_task)
 
-        self.net_worker.base_url = base_url
-        self.net_worker.api_key = api_key
-        self.net_thread.started.connect(self.net_worker.do_fetch_models)
-        self.net_worker.sig_models_fetched.connect(self._on_models_fetched)
+        self.fetch_task_mgr.start_task(
+            FetchModelsTask, task_id="fetch_models", mode=TaskMode.THREAD,
+            base_url=base_url, api_key=api_key
+        )
 
-        self.net_worker.sig_models_fetched.connect(self.net_thread.quit)
-        self.net_worker.sig_models_fetched.connect(self.net_worker.deleteLater)
-        self.net_thread.finished.connect(self.net_thread.deleteLater)
-
-        self.net_thread.start()
-
-    def _on_models_fetched(self, success, models, msg):
+    def _on_models_fetched(self, result):
         self.net_pd.close_safe()
-
-        if success:
+        if result.get("success"):
+            models = result["models"]
             self.logger.info(f"🔄 Successfully fetched {len(models)} models from API.")
             idx = self.combo_llm_preset.currentIndex()
             if 0 <= idx < len(self.llm_configs):
-                conf = self.llm_configs[idx]
-                conf["fetched_models"] = models
-                self._refresh_model_combo(conf)
-            StandardDialog(self.widget, "Success", msg).exec()
+                self.llm_configs[idx]["fetched_models"] = models
+                self._refresh_model_combo(self.llm_configs[idx])
+            StandardDialog(self.widget, "Success", result["msg"]).exec()
         else:
-            self.logger.warning(f"⚠️ Failed to fetch models: {msg}")
-            ToastManager().show(f"Fetch Models Failed: {msg}", "error")
-            StandardDialog(self.widget, "Information", msg).exec()
+            self.logger.warning(f"⚠️ Failed to fetch models: {result['msg']}")
+            ToastManager().show(f"Fetch Models Failed: {result['msg']}", "error")
 
     def _start_test_task(self):
         self._sync_llm_data()
@@ -1331,75 +1406,50 @@ class SettingsTool(BaseTool):
         api_key = conf.get("api_key", "").strip()
         model_name = self._extract_real_model_name(self.combo_llm_model.currentText().strip())
 
-        models_config = conf.get("models_config", {})
-        current_model_conf = models_config.get(model_name, {})
-
-        param_mode = current_model_conf.get("mode", conf.get("model_params_mode", "inherit"))
-        custom_params_list = []
-
-        if param_mode == "inherit":
-            custom_params_list = conf.get("provider_params", [])
-        elif param_mode == "custom":
-            custom_params_list = current_model_conf.get("params", conf.get("model_params", []))
-
-        parsed_params = {}
-        for p in custom_params_list:
-            name = p.get("name", "").strip()
-            if not name: continue
-            val_str = str(p.get("value", ""))
-            ptype = p.get("type", "str")
-            try:
-                if ptype == "int":
-                    parsed_params[name] = int(val_str)
-                elif ptype == "float":
-                    parsed_params[name] = float(val_str)
-                elif ptype == "bool":
-                    parsed_params[name] = val_str.lower() in ['true', '1', 'yes', 'on']
-                else:
-                    parsed_params[name] = val_str
-            except ValueError:
-                self.logger.warning(f"Test Task: Skipped invalid param {name}")
-
         if not base_url or not model_name:
             StandardDialog(self.widget, "Warning", "Please ensure Base URL and Model Name are provided.").exec()
             return
 
-        self.net_pd = ProgressDialog(
-            self.widget, "API Connection Test",
-            f"Sending test prompt to '{model_name}'...\n(You can cancel at any time)",
-            telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
-        )
+        models_config = conf.get("models_config", {})
+        param_mode = models_config.get(model_name, {}).get("mode", conf.get("model_params_mode", "inherit"))
+        custom_params_list = conf.get("provider_params", []) if param_mode == "inherit" else models_config.get(
+            model_name, {}).get("params", [])
+
+        parsed_params = {}
+        for p in custom_params_list:
+            if not p.get("name"): continue
+            try:
+                if p["type"] == "int":
+                    parsed_params[p["name"]] = int(p["value"])
+                elif p["type"] == "float":
+                    parsed_params[p["name"]] = float(p["value"])
+                elif p["type"] == "bool":
+                    parsed_params[p["name"]] = str(p["value"]).lower() in ['true', '1']
+                else:
+                    parsed_params[p["name"]] = p["value"]
+            except:
+                pass
+
+        self.net_pd = ProgressDialog(self.widget, "API Connection Test", f"Sending test prompt to '{model_name}'...")
         self.net_pd.show()
 
-        self.test_thread = QThread()
-        self.test_worker = LightNetworkWorker()
-        self.test_worker.moveToThread(self.test_thread)
-        self.net_pd.sig_canceled.connect(self.test_worker.cancel, Qt.DirectConnection)
-        self.net_pd.sig_canceled.connect(self.test_thread.terminate)
+        self.test_task_mgr = TaskManager()
+        self.test_task_mgr.sig_progress.connect(self.net_pd.update_progress)
+        self.test_task_mgr.sig_result.connect(self._on_test_finished)
+        self.net_pd.sig_canceled.connect(self.test_task_mgr.cancel_task)
 
-        self.test_worker.base_url = base_url
-        self.test_worker.api_key = api_key
-        self.test_worker.model_name = model_name
-        self.test_worker.custom_params = parsed_params
+        self.test_task_mgr.start_task(
+            TestApiTask, task_id="test_api", mode=TaskMode.THREAD,
+            base_url=base_url, api_key=api_key, model_name=model_name, custom_params=parsed_params
+        )
 
-        self.test_thread.started.connect(self.test_worker.do_test_api)
-        self.test_worker.sig_test_finished.connect(self._on_test_finished)
-
-        self.test_worker.sig_test_finished.connect(self.test_thread.quit)
-        self.test_worker.sig_test_finished.connect(self.test_worker.deleteLater)
-        self.test_thread.finished.connect(self.test_thread.deleteLater)
-
-        self.test_thread.start()
-
-    def _on_test_finished(self, success, msg):
+    def _on_test_finished(self, result):
         self.net_pd.close_safe()
-        if success:
-            self.logger.info("✅ API Connection Test Passed.")
-            StandardDialog(self.widget, "Test Passed", msg).exec()
+        if result.get("success"):
+            StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
         else:
-            self.logger.error(f"❌ API Connection Test Failed: {msg}")
-            ToastManager().show(f"API Test Failed: {msg}", "error")
-            StandardDialog(self.widget, "Test Failed", msg).exec()
+            ToastManager().show(f"API Test Failed", "error")
+            StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
 
     def _add_llm_provider(self):
         new_id = f"custom_{int(time.time())}"
@@ -1431,18 +1481,15 @@ class SettingsTool(BaseTool):
         del self.llm_configs[idx]
         self.combo_llm_preset.removeItem(idx)
 
-
-
     def init_system_section(self):
         group = QGroupBox("System Preferences")
-        group.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #444; margin-top: 10px; padding-top: 15px; background: #252526; }")
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
         self.combo_theme = BaseComboBox()
         self.combo_theme.addItems(["Dark", "Light", "Auto"])
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
+        self.combo_theme.currentTextChanged.connect(self._on_theme_ui_changed)
 
         self.combo_log = BaseComboBox()
         self.combo_log.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -1451,28 +1498,34 @@ class SettingsTool(BaseTool):
         self.input_ext_python = QLineEdit()
         self.input_ext_python.setPlaceholderText("e.g. /usr/bin/python3 or C:/Python310/python.exe")
         self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
-        self.input_ext_python.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
 
         layout.addRow("Theme:", self.combo_theme)
         layout.addRow("Log Level:", self.combo_log)
         layout.addRow("External Python Path:", self.input_ext_python)
         self.layout.addWidget(group)
 
+    def _on_theme_ui_changed(self, theme_text):
+        theme_name = "dark" if theme_text.lower() == "auto" else theme_text.lower()
+        qdarktheme.setup_theme(theme_name)
+        ThemeManager().set_theme(theme_name)
+
+
     def _get_req_html(self, conf):
         if not conf or 'recommended_config' not in conf:
             return ""
+        tm = ThemeManager()
         rc = conf['recommended_config']
         prio = rc.get('device_priority', 'Unknown')
         vram = rc.get('min_vram', 'N/A')
         ram = rc.get('min_ram', 'N/A')
 
-        prio_color = "#ffb86c" if "High-End" in prio or "Required" in prio else "#888"
+        prio_color = tm.color("warning") if "High-End" in prio or "Required" in prio else tm.color("text_muted")
 
         return f"""
-        <div style='margin-top:4px; font-family:Consolas; font-size:10px; color:#aaa;'>
+        <div style='margin-top:4px; font-family:Consolas; font-size:10px; color:{tm.color("text_muted")};'>
            👉 <span style='color:{prio_color}; font-weight:bold;'>[{prio}]</span> 
-           | VRAM: <span style='color:#ccc'>{vram}</span> 
-           | RAM: <span style='color:#ccc'>{ram}</span>
+           | VRAM: <span style='color:{tm.color("text_muted")}'>{vram}</span> 
+           | RAM: <span style='color:{tm.color("text_muted")}'>{ram}</span>
         </div>
         """
 
@@ -1516,12 +1569,10 @@ class SettingsTool(BaseTool):
     def on_save_clicked(self):
         self.widget.setFocus()
 
-        # 1. 保存 LLM 配置
         if hasattr(self, '_sync_llm_data'):
             self._sync_llm_data()
         self._save_llm_config()
 
-        # 2. 提取并保存统一的 MCP 配置
         new_mcp_servers = {}
         if hasattr(self, 'table_mcp'):
             for row in range(self.table_mcp.rowCount()):
@@ -1543,7 +1594,6 @@ class SettingsTool(BaseTool):
             self.config.mcp_servers["mcpServers"] = new_mcp_servers
             self.config.save_mcp_servers()
 
-        # 3. 提取常规设置
         new_email = self.input_ncbi_email.text().strip()
         new_key = self.input_ncbi_api_key.text().strip()
         new_s2_key = self.input_s2_api_key.text().strip()
@@ -1552,7 +1602,6 @@ class SettingsTool(BaseTool):
         new_proxy_mode = ["system", "off", "custom"][mode_idx]
         new_proxy_url = self.input_proxy.text().strip()
 
-        # 写入 user_settings
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
@@ -1571,13 +1620,11 @@ class SettingsTool(BaseTool):
             "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked()
         })
 
-        # 清理配置里的旧版残留垃圾
         for old_key in ["external_mcp_enabled", "network_mcps", "network_mcp_enabled", "custom_network_models"]:
             self.config.user_settings.pop(old_key, None)
 
         self.config.save_settings()
 
-        # 4. 应用环境变量与 UI
         setup_global_network_env()
         os.environ["NCBI_API_EMAIL"] = new_email
         os.environ["NCBI_API_KEY"] = new_key
@@ -1590,13 +1637,11 @@ class SettingsTool(BaseTool):
         import logging
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
-        # 5. 唤起进度弹窗，启动后台验证
         from src.ui.components.dialog import ProgressDialog
         self.save_pd = ProgressDialog(
             self.widget, "Applying Settings",
             "Initializing background tasks...",
             telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
-
         )
         self.save_pd.show()
         QApplication.processEvents()
@@ -1604,18 +1649,18 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'save_task_mgr') and self.save_task_mgr:
             self.save_task_mgr.cancel_task()
 
-        from src.core.core_task import TaskManager, TaskMode
-        from src.task.settings_tasks import VerifySettingsTask
         self.save_task_mgr = TaskManager()
         self.save_task_mgr.sig_progress.connect(self.save_pd.update_progress)
         self.save_task_mgr.sig_state_changed.connect(self._on_save_task_state_changed)
         self.save_task_mgr.sig_result.connect(self._on_save_task_result)
         self.save_pd.sig_canceled.connect(self.save_task_mgr.cancel_task)
 
+        if hasattr(GlobalSignals(), 'theme_changed'):
+            GlobalSignals().theme_changed.emit()
+
         embed_id = self.combo_embed.currentData()
         rerank_id = self.combo_rerank.currentData()
 
-        # 启动后台验证任务
         self.save_task_mgr.start_task(
             VerifySettingsTask,
             task_id="verify_settings",
@@ -1625,7 +1670,6 @@ class SettingsTool(BaseTool):
             mcp_config={}
         )
 
-
     def _on_save_task_state_changed(self, state, msg):
         if state == TaskState.FAILED.value:
             if hasattr(self, 'save_pd'):
@@ -1634,7 +1678,6 @@ class SettingsTool(BaseTool):
             ToastManager().show(f"System Error: {msg}", "error")
 
     def _on_save_task_result(self, result_dict):
-        """主线程收到 TaskManager 传回的结果后，执行 MCP 连接与模型检查"""
         if hasattr(self, 'save_pd'):
             self.save_pd.close_safe()
 
@@ -1669,8 +1712,6 @@ class SettingsTool(BaseTool):
             self.start_download(to_download)
         else:
             self.check_models_status()
-
-
 
     def _get_active_llm_id(self):
         idx = self.combo_llm_preset.currentIndex()

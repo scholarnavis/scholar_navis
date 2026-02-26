@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
                                QHeaderView, QAbstractItemView, QComboBox, QPushButton, QPlainTextEdit)
 from PySide6.QtCore import Qt, Signal
+from src.core.theme_manager import ThemeManager
 
 
 class ParamEditorWidget(QWidget):
@@ -18,15 +19,49 @@ class ParamEditorWidget(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-
-        # 增加表格整体高度，以适应多行文本框
         self.table.setMinimumHeight(160)
-        self.table.setStyleSheet("QTableWidget { background-color: #2b2b2b; color: white; border: 1px solid #444; }")
 
         self.layout.addWidget(self.table)
 
         # Connect cell changes to signal
         self.table.itemChanged.connect(lambda _: self.sig_data_changed.emit())
+
+        # Wire up dynamic theming
+        self._apply_theme()
+        ThemeManager().theme_changed.connect(self._apply_theme)
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+        self.table.setStyleSheet(f"""
+            QTableWidget {{ 
+                background-color: {tm.color('bg_input')}; 
+                color: {tm.color('text_main')}; 
+                border: 1px solid {tm.color('border')}; 
+            }}
+            QHeaderView::section {{ 
+                background-color: {tm.color('bg_card')}; 
+                color: {tm.color('text_muted')}; 
+                border: 1px solid {tm.color('border')}; 
+                padding: 4px; 
+            }}
+            QComboBox {{ 
+                background: transparent; 
+                color: {tm.color('text_main')}; 
+                border: none; 
+            }}
+            QPlainTextEdit {{ 
+                background: {tm.color('bg_main')}; 
+                color: {tm.color('text_main')}; 
+                border: 1px solid {tm.color('border')}; 
+                border-radius: 2px; 
+            }}
+            QPushButton {{ 
+                background: transparent; 
+                color: {tm.color('danger')}; 
+                border: none; 
+                font-weight: bold;
+            }}
+        """)
 
     def add_param_row(self, name="", ptype="str", val=""):
         row = self.table.rowCount()
@@ -40,14 +75,12 @@ class ParamEditorWidget(QWidget):
         combo_type = QComboBox()
         combo_type.addItems(["str", "int", "float", "bool", "json"])
         combo_type.setCurrentText(ptype)
-        combo_type.setStyleSheet("background: #333; color: white; border: none;")
         combo_type.currentTextChanged.connect(lambda _: self.sig_data_changed.emit())
         self.table.setCellWidget(row, 1, combo_type)
 
         # Value
         val_edit = QPlainTextEdit(str(val))
         val_edit.setPlaceholderText("Enter value or valid JSON...")
-        val_edit.setStyleSheet("background: #222; color: #eee; border: 1px solid #444; border-radius: 2px;")
         val_edit.textChanged.connect(lambda: self.sig_data_changed.emit())
         self.table.setCellWidget(row, 2, val_edit)
 
@@ -56,7 +89,6 @@ class ParamEditorWidget(QWidget):
         # Delete Button
         btn_del = QPushButton("❌")
         btn_del.setCursor(Qt.PointingHandCursor)
-        btn_del.setStyleSheet("background: transparent; color: #ff6b6b; border: none;")
         btn_del.clicked.connect(lambda *args, r=row: self._remove_row(btn_del))
         self.table.setCellWidget(row, 3, btn_del)
 
@@ -68,7 +100,6 @@ class ParamEditorWidget(QWidget):
 
     def extract_data(self):
         """Returns a list of dictionaries containing valid parameters."""
-
         self.table.viewport().clearFocus()
         self.table.setCurrentItem(None)
 
@@ -79,8 +110,6 @@ class ParamEditorWidget(QWidget):
             type_combo = self.table.cellWidget(r, 1)
 
             name = name_item.text().strip() if name_item else ""
-
-            # 从 QPlainTextEdit 提取文本，而不是 QTableWidgetItem
             val = val_widget.toPlainText().strip() if val_widget else ""
 
             if not name or not val: continue
