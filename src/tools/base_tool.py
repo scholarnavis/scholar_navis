@@ -2,6 +2,8 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PySide6.QtCore import QObject, Signal, QThread
 import logging
 
+from src.ui.components.toast import ToastManager
+
 
 class BaseTool(QObject):
     """
@@ -26,28 +28,6 @@ class BaseTool(QObject):
         """返回该工具的主界面 Widget"""
         raise NotImplementedError("Tools must implement the get_ui_widget method.")
 
-    def run_async(self, func, *args, **kwargs):
-
-        self.thread = QThread()
-        self.worker = Worker(func, *args, **kwargs)
-        self.worker.moveToThread(self.thread)
-
-        self.thread.started.connect(self.worker.run)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-
-        # 转发 Worker 的信号
-        self.worker.sig_result.connect(self.sig_finished.emit)
-        self.worker.sig_error.connect(self.sig_error.emit)
-
-        self.thread.start()
-        self.log(f"任务已启动...")
-
-    def log(self, msg: str):
-        """统一日志入口"""
-        self.logger.info(msg)
-
 
     def on_task_log(self, level: str, msg: str):
         """
@@ -59,12 +39,10 @@ class BaseTool(QObject):
         elif level == "WARNING":
             self.logger.warning(msg)
             # 局部引入，避免循环依赖
-            from src.ui.components.toast import ToastManager
-            ToastManager().show(f"⚠️ {msg}", "warning")
+            ToastManager().show(f"{msg}", "warning")
         elif level == "ERROR":
             self.logger.error(msg)
-            from src.ui.components.toast import ToastManager
-            ToastManager().show(f"❌ {msg}", "error")
+            ToastManager().show(f"{msg}", "error")
         elif level == "DEBUG":
             self.logger.debug(msg)
         else:
@@ -91,6 +69,6 @@ class Worker(QObject):
             import traceback
             self.sig_error.emit(str(e))
             # 打印堆栈以便调试
-            print(traceback.format_exc())
+            self.logger.error(traceback.format_exc())
         finally:
             self.finished.emit()

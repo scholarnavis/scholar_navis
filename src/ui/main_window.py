@@ -417,3 +417,5 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+
+print()

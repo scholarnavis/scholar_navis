@@ -8,7 +8,7 @@ import tempfile
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFileDialog, QGroupBox, QTableWidget,
                                QHeaderView, QAbstractItemView, QMenu, QLineEdit, QTableWidgetItem)
-from PySide6.QtGui import QAction, QCursor, QColor
+from PySide6.QtGui import QAction, QCursor, QColor, QIcon
 from PySide6.QtCore import Qt
 from src.core.core_task import TaskState, TaskManager
 from src.core.models_registry import get_model_conf, check_model_exists
@@ -155,7 +155,9 @@ class ImportTool(BaseTool):
         text_main = tm.color('text_main')
         text_muted = tm.color('text_muted')
         accent = tm.color('accent')
+        accent_hover = tm.color('accent_hover')
         danger = tm.color('danger')
+        success = tm.color('success')
         btn_bg = tm.color('btn_bg')
         btn_hover = tm.color('btn_hover')
 
@@ -178,22 +180,35 @@ class ImportTool(BaseTool):
         if hasattr(self, 'lbl_staged_status'):
             self.lbl_staged_status.setStyleSheet(f"color: {text_muted}; border: 1px dashed {border}; padding: 10px;")
 
-        # 应用 SVG 图标
-        if hasattr(self, 'btn_new'): self.btn_new.setIcon(tm.icon("add", "text_main"))
+        # --- Functional Button Colors & Icons ---
+        # 1. Neutral / Standard Actions
         if hasattr(self, 'btn_snp'): self.btn_snp.setIcon(tm.icon("archive", "text_main"))
-        if hasattr(self, 'btn_del_kb'):
-            self.btn_del_kb.setIcon(tm.icon("delete", "danger"))
-            self.btn_del_kb.setStyleSheet(
-                f"QPushButton {{ background-color: {btn_bg}; border: 1px solid {border}; border-radius: 4px; padding: 6px 12px; color: {danger}; }} QPushButton:hover {{ background-color: {btn_hover}; }}")
         if hasattr(self, 'btn_edit'): self.btn_edit.setIcon(tm.icon("edit", "text_main"))
-        if hasattr(self, 'btn_add_files'): self.btn_add_files.setIcon(tm.icon("file-text", "text_main"))
         if hasattr(self, 'btn_export'): self.btn_export.setIcon(tm.icon("download", "text_main"))
+
+        # 2. Positive / Creation Actions (Accent / Success)
+        if hasattr(self, 'btn_new'):
+            self.btn_new.setIcon(tm.icon("plus", "accent"))
+            self.btn_new.setStyleSheet(
+                f"QPushButton {{ background-color: transparent; border: 1px solid {accent}; color: {accent}; border-radius: 4px; padding: 6px 12px; }} QPushButton:hover {{ background-color: {accent}; color: {bg_main}; }}")
+
+        if hasattr(self, 'btn_add_files'):
+            self.btn_add_files.setIcon(tm.icon("file-plus", "success"))
+            self.btn_add_files.setStyleSheet(
+                f"QPushButton {{ background-color: transparent; border: 1px solid {success}; color: {success}; border-radius: 4px; padding: 6px 12px; }} QPushButton:hover {{ background-color: {success}; color: {bg_main}; }}")
+
+        # 3. Destructive Actions (Danger)
+        if hasattr(self, 'btn_del_kb'):
+            self.btn_del_kb.setIcon(tm.icon("trash-2", "danger"))
+            self.btn_del_kb.setStyleSheet(
+                f"QPushButton {{ background-color: transparent; border: 1px solid {danger}; color: {danger}; border-radius: 4px; padding: 6px 12px; }} QPushButton:hover {{ background-color: {danger}; color: {bg_main}; }}")
+
+        # 4. Primary Save Action
         if hasattr(self, 'btn_save'):
             self.btn_save.setIcon(tm.icon("save", "bg_main"))
             self.btn_save.setStyleSheet(
-                f"QPushButton:enabled {{ background-color: {accent}; font-weight: bold; color: {bg_main}; height: 35px; }}")
+                f"QPushButton:enabled {{ background-color: {accent}; font-weight: bold; color: {bg_main}; height: 35px; border: none; }} QPushButton:hover:enabled {{ background-color: {accent_hover}; }}")
 
-        # 刷新表格字体颜色
         self.update_file_list()
 
     def _render_table(self):
@@ -211,26 +226,25 @@ class ImportTool(BaseTool):
 
         existing_files = list(kb_data.get('file_map', {}).values())
 
-        # 组装展示数据
+        # Include Icon objects
         display_items = []
         for f in existing_files:
             if f in self.staged_del:
-                display_items.append((f, "Deleted", danger_color))
+                display_items.append((f, "Deleted", danger_color, tm.icon("trash", "danger")))
             elif f in self.staged_rename:
-                display_items.append((self.staged_rename[f], f"Renamed (from {f})", warning_color))
+                display_items.append((self.staged_rename[f], f"Renamed (from {f})", warning_color, tm.icon("edit-2", "warning")))
             else:
-                display_items.append((f, "Synced", text_color))
+                display_items.append((f, "Synced", text_color, tm.icon("check-circle", "success")))
 
         for f in self.staged_add:
-            display_items.append((os.path.basename(f), "Added", success_color))
+            display_items.append((os.path.basename(f), "Added", success_color, tm.icon("plus-circle", "success")))
 
         self.file_table.setRowCount(len(display_items))
-        for row, (name, status, color) in enumerate(display_items):
+        for row, (name, status, color, icon) in enumerate(display_items):
             item_name = QTableWidgetItem(name)
-            item_status = QTableWidgetItem(status)
+            item_status = QTableWidgetItem(icon, status)
             item_size = QTableWidgetItem("--")
 
-            # 应用颜色
             item_name.setForeground(color)
             item_status.setForeground(color)
             item_size.setForeground(color)
@@ -296,24 +310,31 @@ class ImportTool(BaseTool):
     def refresh_kb_list(self):
         self.combo_kb.blockSignals(True)
         self.combo_kb.clear()
-
         self.combo_kb.setPlaceholderText("Select a library...")
 
         kbs = self.kb_manager.get_all_kbs()
-
         from src.core.models_registry import get_model_conf
         target_idx = -1
+        tm = ThemeManager()
 
         for i, kb in enumerate(kbs):
             m = get_model_conf(kb.get('model_id'), "embedding")
             m_ui = m['ui_name'] if m else kb.get('model_id', '?')
-
             status = kb.get('status', 'ready')
-            status_icon = "⚠️ [CORRUPTED] " if status == "corrupted" else (
-                "⏳ [BUILDING] " if status == "building" else "")
 
-            display_text = f"{status_icon}{kb['name']}   [Model: {m_ui} | Docs: {kb.get('doc_count', 0)}]"
-            self.combo_kb.addItem(display_text, kb)
+            icon = QIcon()
+            display_text = f"{kb['name']}   [Model: {m_ui} | Docs: {kb.get('doc_count', 0)}]"
+
+            if status == "corrupted":
+                icon = tm.icon("alert-triangle", "danger")
+                display_text = f"[CORRUPTED] {display_text}"
+            elif status == "building":
+                icon = tm.icon("loader", "warning")
+                display_text = f"[BUILDING] {display_text}"
+            else:
+                icon = tm.icon("database", "accent")
+
+            self.combo_kb.addItem(icon, display_text, kb)
 
             if kb['id'] == getattr(self, 'current_kb_id', None):
                 target_idx = i
@@ -340,7 +361,6 @@ class ImportTool(BaseTool):
             self.file_table.setRowCount(0)
             files = self.kb_manager.get_kb_files(self.current_kb_id)
 
-            # 使用 ThemeManager 颜色
             tm = ThemeManager()
             success_color = QColor(tm.color('success'))
             warning_color = QColor(tm.color('warning'))
@@ -356,17 +376,20 @@ class ImportTool(BaseTool):
                 item_name = QTableWidgetItem(display_name)
                 item_size = QTableWidgetItem(str(f.get('size', '-')))
 
+                # Replace Emoji with Icon
                 if name in self.staged_rename:
-                    status_text = "📝 Renaming..."
+                    status_text = "Renaming..."
                     color = warning_color
+                    icon = tm.icon("edit-2", "warning")
                 else:
-                    status_text = "✅ Indexed"
+                    status_text = "Indexed"
                     color = text_color
+                    icon = tm.icon("check-circle", "success")
 
                 item_name.setForeground(color)
                 item_size.setForeground(color)
 
-                item_status = QTableWidgetItem(status_text)
+                item_status = QTableWidgetItem(icon, status_text)
                 item_status.setForeground(color)
 
                 self.file_table.setItem(row, 0, item_name)
@@ -379,7 +402,8 @@ class ImportTool(BaseTool):
 
                 item_name = QTableWidgetItem(os.path.basename(f_path))
                 item_size = QTableWidgetItem("-")
-                item_status = QTableWidgetItem("⏳ Pending Save")
+
+                item_status = QTableWidgetItem(tm.icon("clock", "warning"), "Pending Save")
 
                 item_name.setForeground(success_color)
                 item_size.setForeground(success_color)
@@ -396,7 +420,8 @@ class ImportTool(BaseTool):
 
         except Exception as e:
             import traceback
-            print(f"GUI Error in update_file_list: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"GUI Error in update_file_list: {e}\n{traceback.format_exc()}")
+
 
     def _update_details_html(self):
         try:
@@ -426,7 +451,7 @@ class ImportTool(BaseTool):
 
         except Exception as e:
             import traceback
-            print(f"🔥 GUI Error in _update_details_html: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"🔥 GUI Error in _update_details_html: {e}\n{traceback.format_exc()}")
 
     def show_context_menu(self, pos):
         indexes = self.file_table.selectedIndexes()
@@ -443,7 +468,7 @@ class ImportTool(BaseTool):
         """)
 
         # 挂载 SVG 图标
-        act_open = QAction(tm.icon("external-link", "text_main"), "Open Source File", self.widget)
+        act_open = QAction(tm.icon("link", "text_main"), "Open Source File", self.widget)
         act_rename = QAction(tm.icon("edit", "text_main"), "Rename (Stage)", self.widget)
         act_del = QAction(tm.icon("delete", "danger"), f"Delete {len(rows)} items (Stage)", self.widget)
 
@@ -512,12 +537,11 @@ class ImportTool(BaseTool):
         kb_status = data.get('status', 'ready') if data else 'ready'
         self._toggle_kb_actions(kb_selected, status=kb_status)
 
-        # 构建常规提示信息
         msg = f"Staged: {len(self.staged_add)} add, {len(self.staged_del)} del, {len(self.staged_rename)} rename"
         if self.staged_meta:
-            msg += " | 📝 Info Edited"
+            msg += " | Info Edited"
         if self.rebuild_required:
-            msg += " | ⚠️ FULL REBUILD"
+            msg += " | FULL REBUILD"
 
         # 覆写提示信息：如果是损坏状态，强制提示用户该怎么做
         is_abnormal = (kb_status != "ready")
