@@ -266,18 +266,19 @@ class ChatBubbleWidget(QWidget):
 
 
     def show_context_menu(self, pos):
+        tm = ThemeManager()
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu { background-color: #2d2d30; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px; } 
-            QMenu::item { padding: 6px 20px; border-radius: 2px; }
-            QMenu::item:selected { background-color: #007acc; }
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }} 
+            QMenu::item {{ padding: 6px 20px; border-radius: 2px; }}
+            QMenu::item:selected {{ background-color: {tm.color('btn_hover')}; }}
         """)
 
-        act_copy = menu.addAction("📄 复制 (Copy)")
+        act_copy = menu.addAction(tm.icon("copy", "text_main"), "复制 (Copy)")
         act_copy.triggered.connect(self.copy_text)
 
         if self.is_user and self._can_edit:
-            act_edit = menu.addAction("✎ 编辑 (Edit)")
+            act_edit = menu.addAction(tm.icon("edit", "text_main"), "编辑 (Edit)")
             act_edit.triggered.connect(self.toggle_edit)
 
         menu.exec(self.lbl_text.mapToGlobal(pos))

@@ -1,6 +1,6 @@
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
@@ -178,7 +178,12 @@ class MainWindow(QMainWindow):
     def _apply_theme(self):
         tm = self.tm
 
-        # Update sidebar
+        # Update base window colors
+        self.setStyleSheet(f"QMainWindow {{ background-color: {tm.color('bg_main')}; }}")
+        self.centralWidget().setStyleSheet(f"QSplitter::handle {{ background-color: {tm.color('border')}; }}")
+        self.tool_stack.setStyleSheet(f"background-color: {tm.color('bg_main')};")
+
+        # Update sidebar list items
         self.sidebar.setStyleSheet(f"""
             QListWidget {{ 
                 border: none; 
@@ -205,14 +210,25 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-        # Update Quick Trans Button
+        self.btn_quick_trans.setText("")
+        self.btn_quick_trans.setIcon(tm.icon("translate", "text_muted"))
+
+
+        self.btn_quick_trans.setIconSize(QSize(24, 24))
+
         self.btn_quick_trans.setStyleSheet(f"""
-            QPushButton {{ background-color: transparent; border: none; color: {tm.color('text_muted')}; font-size: 26px; padding: 6px; margin-left: 5px; border-radius: 8px; }}
-            QPushButton:hover {{ color: {tm.color('accent')}; background-color: rgba(5, 184, 204, 0.1); }}
+            QPushButton {{ 
+                background-color: transparent; 
+                border: none; 
+                padding: 6px; 
+                margin-left: 5px; 
+                border-radius: 8px; 
+            }}
+            QPushButton:hover {{ 
+                background-color: rgba(5, 184, 204, 0.1); 
+            }}
         """)
 
-        # Update Tool Stack
-        self.tool_stack.setStyleSheet(f"background-color: {tm.color('bg_main')};")
         self._update_logo_theme()
 
     def _setup_mcp_status_bar(self):

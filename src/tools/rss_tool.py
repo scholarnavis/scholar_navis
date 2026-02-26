@@ -16,12 +16,12 @@ from PySide6.QtGui import QDesktopServices, QTextDocument, QPageLayout, QAbstrac
     QColor
 from PySide6.QtPrintSupport import QPrinter
 
-from src.core.theme_manager import ThemeManager, get_themed_icon
+from src.core.theme_manager import ThemeManager
 from src.tools.base_tool import BaseTool
 from src.core.core_task import TaskManager, TaskState
 from src.task.rss_tasks import FetchRSSTask
 from src.ui.components.toast import ToastManager
-from src.ui.components.dialog import ProgressDialog
+from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog
 from src.core.signals import GlobalSignals
 
 DEFAULT_FEEDS_DICT = {
@@ -207,247 +207,11 @@ class DownloadWorker(QThread):
         self.sig_msg.emit(f"Batch download complete. Successfully saved {success_count} PDFs.", "success")
 
 
-class FeedLibraryDialog(QDialog):
-    def __init__(self, parent=None, current_feeds=None):
-        super().__init__(parent)
-        self.setWindowTitle("📚 Subscription Manager")
-        self.resize(800, 550)
-        self.setStyleSheet("background-color: #1e1e1e; color: white;")
-        layout = QVBoxLayout(self)
-
-        self.current_user_feeds = current_feeds if current_feeds else []
-        self.subscribed_urls = {f["url"] for f in self.current_user_feeds}
-
-        self.display_dict = {}
-        for cat, feeds in DEFAULT_FEEDS_DICT.items():
-            self.display_dict[cat] = [f.copy() for f in feeds]
-
-        for f in self.current_user_feeds:
-            if not f.get("is_default", False):
-                cat = f.get("category", "Custom Sources")
-                if cat not in self.display_dict:
-                    self.display_dict[cat] = []
-                self.display_dict[cat].append(f.copy())
-
-        top_bar = QHBoxLayout()
-        lbl_cat = QLabel("📂 Category / Journal:")
-        lbl_cat.setStyleSheet("color: #05B8CC; font-weight: bold;")
-        self.combo_category = QComboBox()
-        self.combo_category.addItems(list(self.display_dict.keys()))
-        self.combo_category.setStyleSheet("padding: 5px; background: #252526; border: 1px solid #444;")
-        self.combo_category.currentTextChanged.connect(self._render_table)
-
-        # 弹窗库搜索框
-        self.inp_search_lib = QLineEdit()
-        self.inp_search_lib.setPlaceholderText("🔍 Search journal names...")
-        self.inp_search_lib.setStyleSheet(
-            "padding: 5px; background: #252526; border: 1px solid #444; border-radius: 3px;")
-        self.inp_search_lib.textChanged.connect(self._filter_library_table)
-
-        btn_add_custom = QPushButton("➕ Add Custom Source")
-        btn_add_custom.setStyleSheet("background-color: #333; color: white; padding: 5px 15px; border-radius: 4px;")
-        btn_add_custom.clicked.connect(self._on_add_custom)
-
-        top_bar.addWidget(lbl_cat)
-        top_bar.addWidget(self.combo_category)
-        top_bar.addWidget(self.inp_search_lib, stretch=1)
-        top_bar.addWidget(btn_add_custom)
-        layout.addLayout(top_bar)
-
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Subscribe", "Journal / Source", "RSS URL"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setStyleSheet("QTableWidget { background-color: #252526; gridline-color: #333; }")
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.table)
-
-        btn_box = QHBoxLayout()
-        self.lbl_status = QLabel(f"Selected: {len(self.subscribed_urls)}")
-        self.lbl_status.setStyleSheet("color: #888;")
-
-        btn_save = QPushButton("💾 Save Subscriptions")
-        btn_save.setStyleSheet("background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
-        btn_save.clicked.connect(self.accept)
-
-        btn_box.addWidget(self.lbl_status)
-        btn_box.addStretch()
-        btn_box.addWidget(btn_save)
-        layout.addLayout(btn_box)
-
-        self.checkboxes_map = {}
-        self._render_table(self.combo_category.currentText())
-        self.table.cellClicked.connect(self._on_cell_clicked)
-
-    def _on_cell_clicked(self, row, col):
-        if col == 1:
-            chk_widget = self.table.cellWidget(row, 0)
-            if chk_widget:
-                chk = chk_widget.layout().itemAt(0).widget()
-                chk.setChecked(not chk.isChecked())
-
-
-    def mousePressEvent(self, event):
-        from PySide6.QtCore import Qt
-        if event.button() == Qt.LeftButton:
-            self.checkbox.setChecked(not self.checkbox.isChecked())
-        super().mousePressEvent(event)
-
-    def _filter_library_table(self, text):
-        text = text.lower()
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 1)
-            if item:
-                self.table.setRowHidden(row, text not in item.text().lower())
-
-    def _render_table(self, category):
-        self.table.setRowCount(0)
-        self.checkboxes_map.clear()
-        feeds = self.display_dict.get(category, [])
-        self.table.setRowCount(len(feeds))
-
-        for i, feed in enumerate(feeds):
-            chk = QCheckBox()
-            chk.setChecked(feed["url"] in self.subscribed_urls)
-            chk.toggled.connect(lambda checked, url=feed["url"]: self._on_checkbox_toggled(url, checked))
-
-            chk_widget = QWidget()
-            chk_layout = QHBoxLayout(chk_widget)
-            chk_layout.addWidget(chk)
-            chk_layout.setAlignment(Qt.AlignCenter)
-            chk_layout.setContentsMargins(0, 0, 0, 0)
-
-            name_item = QTableWidgetItem(feed["name"])
-            if feed.get("is_default"):
-                name_item.setToolTip("Built-in Default Source")
-                name_item.setForeground(Qt.white)
-            else:
-                name_item.setToolTip("Custom Source")
-                name_item.setForeground(Qt.cyan)
-
-            self.table.setCellWidget(i, 0, chk_widget)
-            self.table.setItem(i, 1, name_item)
-            self.table.setItem(i, 2, QTableWidgetItem(feed["url"]))
-
-    def _on_checkbox_toggled(self, url, is_checked):
-        if is_checked:
-            self.subscribed_urls.add(url)
-        else:
-            self.subscribed_urls.discard(url)
-        self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
-
-    def refresh_all_feeds(self):
-        if not self.feeds:
-            ToastManager().show("Your tracker list is empty. Add a source first.", "warning")
-            return
-
-        telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
-        self.pd = ProgressDialog(self.widget, "Fetching Literature", "Connecting to servers and detecting OA...",
-                                 telemetry_config=telemetry_off)
-        self.pd.show()
-
-        self.task_mgr.sig_progress.connect(self.pd.update_progress)
-        self.task_mgr.sig_state_changed.connect(self._on_fetch_done)
-        self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
-
-        self.task_mgr.start_task(FetchRSSTask, "rss_fetch", feeds=self.feeds, save_path=self.cache_file)
-
-    def _on_add_custom(self):
-        dlg = FeedEditorDialog(self)
-        if dlg.exec():
-            new_feed = dlg.get_data()
-            if new_feed["url"]:
-                new_feed["is_default"] = False
-                cat = new_feed.get("category", "Custom Sources")
-
-                if cat not in self.display_dict:
-                    self.display_dict[cat] = []
-                    self.combo_category.addItem(cat)
-
-                self.display_dict[cat].append(new_feed)
-                self.subscribed_urls.add(new_feed["url"])
-                self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
-                self.combo_category.setCurrentText(cat)
-
-    def get_final_feeds(self):
-        final_list = []
-        for cat, feeds in self.display_dict.items():
-            for f in feeds:
-                if f["url"] in self.subscribed_urls:
-                    final_list.append(f)
-
-        unique_feeds = {f["url"]: f for f in final_list}
-        return list(unique_feeds.values())
-
-
-class FeedEditorDialog(QDialog):
-    def __init__(self, parent=None, feed_data=None, is_default=False):
-        super().__init__(parent)
-        self.setWindowTitle("Edit Tracker Rule" if is_default else "Custom Feed Settings")
-        self.setFixedSize(450, 180)
-        self.setStyleSheet("background-color: #252526; color: white;")
-        layout = QFormLayout(self)
-
-        self.inp_name = QLineEdit(feed_data.get('name', '') if feed_data else '')
-        self.inp_url = QLineEdit(feed_data.get('url', '') if feed_data else '')
-
-        self.inp_category = QComboBox()
-        self.inp_category.setEditable(True)
-        self.inp_category.addItems(list(DEFAULT_FEEDS_DICT.keys()) + ["Custom Sources"])
-        if feed_data and feed_data.get('category'):
-            self.inp_category.setCurrentText(feed_data['category'])
-        else:
-            self.inp_category.setCurrentText("Custom Sources")
-
-        if is_default:
-            for inp in [self.inp_name, self.inp_url]:
-                inp.setReadOnly(True)
-                inp.setStyleSheet("background:#222; border:1px solid #333; padding:5px; border-radius:3px; color:#888;")
-            self.inp_category.setEnabled(False)
-            self.inp_category.setStyleSheet("background:#222; border:1px solid #333; padding:5px; border-radius:3px; color:#888;")
-            layout.addRow("", QLabel("🔒 Built-in source: Read-only."))
-        else:
-            for inp in [self.inp_name, self.inp_url]:
-                inp.setStyleSheet("background:#1e1e1e; border:1px solid #444; padding:5px; border-radius:3px;")
-            self.inp_category.setStyleSheet("background:#1e1e1e; border:1px solid #444; padding:5px; border-radius:3px;")
-
-        layout.addRow("Source Name:", self.inp_name)
-        layout.addRow("RSS URL:", self.inp_url)
-        layout.addRow("Category:", self.inp_category)
-
-        btn_box = QHBoxLayout()
-        btn_save = QPushButton("Save")
-        if is_default:
-            btn_save.setEnabled(False)
-            btn_save.setStyleSheet("background-color: #444; color: #888; padding: 6px; border-radius: 4px;")
-        else:
-            btn_save.setStyleSheet("background-color: #007acc; color: white; padding: 6px; border-radius: 4px;")
-            btn_save.clicked.connect(self.accept)
-
-        btn_box.addStretch()
-        btn_box.addWidget(btn_save)
-        layout.addRow(btn_box)
-
-    def get_data(self):
-        return {
-            "name": self.inp_name.text().strip(),
-            "url": self.inp_url.text().strip(),
-            "category": self.inp_category.currentText().strip()
-        }
-
-
 class ArticleWidget(QFrame):
     def __init__(self, article_data, parent=None):
         super().__init__(parent)
         self.article_data = article_data
-
-        # 🟢 核心修复 1：指定专属 ID，防止 QFrame 样式污染内部的 Checkbox 和 Label
         self.setObjectName("ArticleFrame")
-        self.setStyleSheet(
-            "QFrame#ArticleFrame { background-color: #252526; border: 1px solid #333; border-radius: 6px; margin-bottom: 10px; padding: 10px; }")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -455,27 +219,23 @@ class ArticleWidget(QFrame):
         header_layout = QHBoxLayout()
 
         self.checkbox = QCheckBox()
-        self.checkbox.setStyleSheet("color: white; background: transparent;")
         header_layout.addWidget(self.checkbox)
         header_layout.addSpacing(5)
 
         title_link = f"<a href='{article_data['link']}' style='color:#05B8CC; text-decoration:none; font-size: 16px; font-weight:bold;'>{article_data['title']}</a>"
-        lbl_title = QLabel(title_link)
-        lbl_title.setOpenExternalLinks(True)
-        lbl_title.setWordWrap(True)
-        lbl_title.setStyleSheet("border: none; background: transparent;")
+        self.lbl_title = QLabel(title_link)
+        self.lbl_title.setOpenExternalLinks(True)
+        self.lbl_title.setWordWrap(True)
 
-        header_layout.addWidget(self.checkbox)
-        header_layout.addWidget(lbl_title, stretch=1)
+        header_layout.addWidget(self.lbl_title, stretch=1)
         layout.addLayout(header_layout)
 
         meta_text = f"🕒 {article_data.get('pub_date', 'Unknown Date')}"
         if article_data.get('doi'): meta_text += f" | 🔗 DOI: {article_data['doi']}"
         if article_data.get('tags'): meta_text += f" | 🏷️ {', '.join(article_data['tags'])}"
 
-        lbl_meta = QLabel(meta_text)
-        lbl_meta.setStyleSheet("color: #888; font-size: 12px; border: none; background: transparent; padding-left: 25px;")
-        layout.addWidget(lbl_meta)
+        self.lbl_meta = QLabel(meta_text)
+        layout.addWidget(self.lbl_meta)
 
         self.text_browser = QLabel()
         self.text_browser.setOpenExternalLinks(True)
@@ -483,43 +243,74 @@ class ArticleWidget(QFrame):
         self.text_browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.text_browser.setWordWrap(True)
         self.text_browser.setText(article_data.get('summary', ''))
-        self.text_browser.setStyleSheet("QLabel { background: transparent; color: #d4d4d4; border: none; font-size: 13px; line-height: 1.5; selection-background-color: #05B8CC; padding-left: 20px;}")
         self.text_browser.installEventFilter(self)
         layout.addWidget(self.text_browser)
 
         btn_layout = QHBoxLayout()
         btn_layout.setContentsMargins(25, 5, 0, 0)
 
-        btn_trans = QPushButton("🌐 Quick Translate")
-        btn_trans.setCursor(Qt.PointingHandCursor)
-        btn_trans.setStyleSheet("QPushButton { background-color: #333; color: #e0e0e0; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: 1px solid #555; } QPushButton:hover { background-color: #05B8CC; color: white; border: 1px solid #05B8CC; }")
-        btn_trans.clicked.connect(self._send_to_translator)
-        btn_layout.addWidget(btn_trans)
+        self.btn_trans = QPushButton(" Quick Translate")
+        self.btn_trans.setCursor(Qt.PointingHandCursor)
+        self.btn_trans.clicked.connect(self._send_to_translator)
+        btn_layout.addWidget(self.btn_trans)
 
-        btn_chat = QPushButton("💬 Send to Chat")
-        btn_chat.setCursor(Qt.PointingHandCursor)
-        btn_chat.setStyleSheet("QPushButton { background-color: #333; color: #e0e0e0; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: 1px solid #555; } QPushButton:hover { background-color: #007acc; color: white; border: 1px solid #007acc; }")
-        btn_chat.clicked.connect(self._send_to_chat)
-        btn_layout.insertWidget(1, btn_chat)
+        self.btn_chat = QPushButton(" Send to Chat")
+        self.btn_chat.setCursor(Qt.PointingHandCursor)
+        self.btn_chat.clicked.connect(self._send_to_chat)
+        btn_layout.insertWidget(1, self.btn_chat)
 
         if article_data.get('pdf_url'):
-            btn_dl = QPushButton("⬇️ Download OA PDF")
-            btn_dl.setCursor(Qt.PointingHandCursor)
-            btn_dl.setStyleSheet("QPushButton { background-color: #28a745; color: white; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: none; font-weight: bold;} QPushButton:hover { background-color: #218838; }")
-            btn_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['pdf_url'])))
-            btn_layout.addWidget(btn_dl)
+            self.btn_dl = QPushButton(" Download OA PDF")
+            self.btn_dl.setCursor(Qt.PointingHandCursor)
+            self.btn_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['pdf_url'])))
+            btn_layout.addWidget(self.btn_dl)
         else:
-            btn_link = QPushButton("🔗 Publisher Link (Non-OA)")
-            btn_link.setCursor(Qt.PointingHandCursor)
-            btn_link.setStyleSheet("QPushButton { background-color: #444; color: #aaa; border-radius: 4px; padding: 4px 10px; font-size: 12px; border: none;} QPushButton:hover { background-color: #555; color: #fff; }")
-            btn_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['link'])))
-            btn_layout.addWidget(btn_link)
+            self.btn_link = QPushButton(" Publisher Link (Non-OA)")
+            self.btn_link.setCursor(Qt.PointingHandCursor)
+            self.btn_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['link'])))
+            btn_layout.addWidget(self.btn_link)
 
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
+        # Connect to theme manager and initialize colors/icons
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+        bg_card = tm.color('bg_card')
+        border = tm.color('border')
+        text_main = tm.color('text_main')
+        btn_bg = tm.color('btn_bg')
+        btn_hover = tm.color('btn_hover')
+
+        # 设置卡片本身的样式
+        self.setStyleSheet(
+            f"QFrame#ArticleFrame {{ background-color: {bg_card}; border: 1px solid {border}; border-radius: 6px; }}")
+
+        # 按钮通用样式
+        btn_style = f"QPushButton {{ background-color: {btn_bg}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 4px 10px; }} QPushButton:hover {{ background-color: {btn_hover}; }}"
+
+        if hasattr(self, 'btn_trans'):
+            self.btn_trans.setIcon(tm.icon("translate", "text_main"))
+            self.btn_trans.setStyleSheet(btn_style)
+
+        if hasattr(self, 'btn_chat'):
+            self.btn_chat.setIcon(tm.icon("send", "text_main"))
+            self.btn_chat.setStyleSheet(btn_style)
+
+        if hasattr(self, 'btn_dl'):
+            self.btn_dl.setIcon(tm.icon("download", "success"))
+            self.btn_dl.setStyleSheet(btn_style)
+
+        if hasattr(self, 'btn_link'):
+            self.btn_link.setIcon(tm.icon("link", "text_main"))
+            self.btn_link.setStyleSheet(btn_style)
+
+
     def _send_to_chat(self):
-        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
+        if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
             clean_summary = clean_html_text(self.article_data.get('summary', ''))
             context_text = f"Title: {self.article_data['title']}\nAbstract: {clean_summary}\nURL: {self.article_data.get('link', '')}"
 
@@ -530,6 +321,10 @@ class ArticleWidget(QFrame):
                 "*(Note: Since this is only an abstract, you may trigger the NCBI/Semantic Scholar tools to retrieve more metadata or related literature if you need deeper context.)*"
             )
             GlobalSignals().sig_send_to_chat.emit(context_text, prompt)
+
+        elif hasattr(GlobalSignals(), 'sig_send_to_chat'):
+            pass
+
 
     def eventFilter(self, obj, event):
         if obj == self.text_browser and event.type() == QEvent.KeyPress:
@@ -578,37 +373,66 @@ class RSSTool(BaseTool):
             return
 
         tm = ThemeManager()
-        bg_base = tm.color('bg_base')
+
+        bg_main = tm.color('bg_main')
         bg_card = tm.color('bg_card')
         border = tm.color('border')
         text_main = tm.color('text_main')
-        text_muted = tm.color('text_muted')
-        primary = tm.color('primary')
-        success = tm.color('success')
+        btn_bg = tm.color('btn_bg')
+        btn_hover = tm.color('btn_hover')
 
-
+        # 列表与输入框
         if hasattr(self, 'feed_list'):
             self.feed_list.setStyleSheet(f"""
-                QListWidget {{ background-color: {bg_base}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 5px; }}
+                QListWidget {{ background-color: {bg_main}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 5px; }}
                 QListWidget::item {{ padding: 4px 0px; border-bottom: 1px dashed {border}; }}
-                QListWidget::item:selected {{ background-color: {tm.color('list_sel_bg')}; color: {tm.color('list_sel_text')}; }}
+                QListWidget::item:selected {{ background-color: {tm.color('accent_hover')}; color: {tm.color('bg_card')}; font-weight: bold; }}
             """)
 
         if hasattr(self, 'inp_search_feed'):
-            self.inp_search_feed.setStyleSheet(
-                f"background-color: {bg_card}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 5px;")
+            self.inp_search_feed.setStyleSheet(f"background-color: {bg_card}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 5px;")
 
+        # 顶部操作栏
         if hasattr(self, 'btn_manage'):
-            self.btn_manage.setStyleSheet(
-                f"background-color: {primary}; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
-            self.btn_manage.setText(" Manage Subscriptions")
-            self.btn_manage.setIcon(get_themed_icon("book", "#ffffff"))
+            self.btn_manage.setIcon(tm.icon("folder", "bg_main"))
+            self.btn_manage.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;")
+
+        if hasattr(self, 'btn_edit'):
+            self.btn_edit.setIcon(tm.icon("edit", "text_main"))
+            self.btn_edit.setStyleSheet(f"background-color: {btn_bg}; color: {text_main}; padding: 6px 15px; border-radius: 4px; border: 1px solid {border};")
+
+        if hasattr(self, 'btn_unsub'):
+            self.btn_unsub.setIcon(tm.icon("delete", "bg_main"))
+            self.btn_unsub.setStyleSheet(f"background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; border: none;")
 
         if hasattr(self, 'btn_refresh'):
-            self.btn_refresh.setStyleSheet(
-                f"background-color: {success}; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
-            self.btn_refresh.setText(" Sync Selected / All")
-            self.btn_refresh.setIcon(get_themed_icon("sync", "#ffffff"))
+            self.btn_refresh.setIcon(tm.icon("sync", "bg_main"))
+            self.btn_refresh.setStyleSheet(f"background-color: {tm.color('success')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;")
+
+        # 小型选择按钮
+        action_btn_style = f"QPushButton {{ background-color: {btn_bg}; color: {text_main}; border: 1px solid {border}; border-radius: 3px; padding: 4px 8px; font-size: 11px; }} QPushButton:hover {{ background-color: {btn_hover}; }}"
+        for btn in [getattr(self, 'btn_feed_sel_all', None), getattr(self, 'btn_feed_sel_inv', None),
+                    getattr(self, 'btn_sel_all', None), getattr(self, 'btn_sel_inv', None)]:
+            if btn: btn.setStyleSheet(action_btn_style)
+
+        if hasattr(self, 'btn_feed_sel_all'): self.btn_feed_sel_all.setIcon(tm.icon("check-circle", "text_main"))
+        if hasattr(self, 'btn_sel_all'): self.btn_sel_all.setIcon(tm.icon("check-circle", "text_main"))
+        if hasattr(self, 'btn_feed_sel_inv'): self.btn_feed_sel_inv.setIcon(tm.icon("refresh", "text_main"))
+        if hasattr(self, 'btn_sel_inv'): self.btn_sel_inv.setIcon(tm.icon("refresh", "text_main"))
+
+        # 右侧快捷操作按钮
+        if hasattr(self, 'btn_batch_chat'):
+            self.btn_batch_chat.setIcon(tm.icon("brain", "accent"))
+            self.btn_batch_chat.setStyleSheet(f"QPushButton {{ color: {tm.color('accent')}; background-color: transparent; border: 1px solid {tm.color('accent')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; }}")
+
+        if hasattr(self, 'btn_export_pdf'):
+            self.btn_export_pdf.setIcon(tm.icon("file-text", "warning"))
+            self.btn_export_pdf.setStyleSheet(f"QPushButton {{ color: {tm.color('warning')}; background-color: transparent; border: 1px solid {tm.color('warning')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; }}")
+
+        if hasattr(self, 'btn_batch_dl'):
+            self.btn_batch_dl.setIcon(tm.icon("download", "success"))
+            self.btn_batch_dl.setStyleSheet(f"QPushButton {{ color: {tm.color('success')}; background-color: transparent; border: 1px solid {tm.color('success')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('success')}; color: {tm.color('bg_main')}; }}")
+
 
 
     def get_ui_widget(self) -> QWidget:
@@ -619,20 +443,20 @@ class RSSTool(BaseTool):
         layout.setContentsMargins(15, 15, 15, 15)
 
         toolbar = QHBoxLayout()
-        self.btn_manage = QPushButton("📚 Manage Subscriptions")
+        self.btn_manage = QPushButton("Manage Subscriptions")
         self.btn_manage.setStyleSheet("background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
         self.btn_manage.clicked.connect(self.open_subscription_manager)
 
-        self.btn_edit = QPushButton("✏️ Edit Source")
+        self.btn_edit = QPushButton("Edit Source")
         self.btn_edit.clicked.connect(self.edit_feed)
 
-        self.btn_unsub = QPushButton("❌ Unsubscribe Selected")
+        self.btn_unsub = QPushButton("Unsubscribe Selected")
         self.btn_unsub.clicked.connect(lambda: self._batch_action("unsubscribe"))
 
         self.lbl_time = QLabel("Last Fetched: Never")
         self.lbl_time.setStyleSheet("color: #888; font-style: italic; margin-left: 10px;")
 
-        self.btn_refresh = QPushButton("🔄 Sync Selected / All")
+        self.btn_refresh = QPushButton("Sync Selected")
         self.btn_refresh.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
         self.btn_refresh.clicked.connect(lambda: self._batch_action("fetch"))
 
@@ -652,15 +476,15 @@ class RSSTool(BaseTool):
 
         # RSS 源搜索框
         self.inp_search_feed = QLineEdit()
-        self.inp_search_feed.setPlaceholderText("🔍 Search feeds...")
+        self.inp_search_feed.setPlaceholderText("Search feeds...")
         self.inp_search_feed.setStyleSheet(
             "background-color: #252526; color: white; border: 1px solid #444; border-radius: 4px; padding: 5px;")
         self.inp_search_feed.textChanged.connect(self._filter_feed_list)
         left_layout.addWidget(self.inp_search_feed)
 
         left_action_bar = QHBoxLayout()
-        self.btn_feed_sel_all = QPushButton("☑ Select All")
-        self.btn_feed_sel_inv = QPushButton("🔲 Invert")
+        self.btn_feed_sel_all = QPushButton("Select All")
+        self.btn_feed_sel_inv = QPushButton("Invert")
 
         for btn in [self.btn_feed_sel_all, self.btn_feed_sel_inv]:
             btn.setCursor(Qt.PointingHandCursor)
@@ -669,8 +493,6 @@ class RSSTool(BaseTool):
                                 QPushButton:hover { background-color: #444; color: white; }
                             """)
 
-        self.btn_feed_sel_all.clicked.connect(lambda: self._batch_select_feeds(True))
-        self.btn_feed_sel_inv.clicked.connect(lambda: self._batch_select_feeds("invert"))
 
         left_action_bar.addWidget(self.btn_feed_sel_all)
         left_action_bar.addWidget(self.btn_feed_sel_inv)
@@ -698,30 +520,26 @@ class RSSTool(BaseTool):
         right_layout.setContentsMargins(0, 0, 0, 0)
 
         action_bar = QHBoxLayout()
-        self.btn_sel_all = QPushButton("☑ Select All")
-        self.btn_sel_inv = QPushButton("🔲 Invert")
+        self.btn_sel_all = QPushButton("Select All")
+        self.btn_sel_inv = QPushButton("Invert")
         self.btn_sel_all.clicked.connect(lambda: self._batch_select(True))
         self.btn_sel_inv.clicked.connect(lambda: self._batch_select("invert"))
 
-        self.btn_batch_chat = QPushButton("💬 Analyze Selected")
+        self.btn_batch_chat = QPushButton("Analyze Selected")
         self.btn_batch_chat.setStyleSheet("color: #8be9fd;")
         self.btn_batch_chat.clicked.connect(self.batch_send_to_chat)
 
-        self.btn_export_pdf = QPushButton("📤 Export to PDF")
+        self.btn_export_pdf = QPushButton("Export to PDF")
         self.btn_export_pdf.setStyleSheet("color: #ffb86c;")
         self.btn_export_pdf.clicked.connect(self.export_to_pdf)
 
-        self.btn_batch_dl = QPushButton("⬇️ Download Selected OA")
+        self.btn_batch_dl = QPushButton("⬇Download Selected OA")
         self.btn_batch_dl.setStyleSheet("color: #50fa7b;")
         self.btn_batch_dl.clicked.connect(self.batch_download_pdfs)
-
-        hint = QLabel("💡 Hint: Select text and press Space to translate.")
-        hint.setStyleSheet("color: #aaa; font-style: italic; font-size: 11px;")
 
         action_bar.addWidget(self.btn_sel_all)
         action_bar.addWidget(self.btn_sel_inv)
         action_bar.addStretch()
-        action_bar.addWidget(hint)
         action_bar.addWidget(self.btn_batch_chat)
         action_bar.addWidget(self.btn_export_pdf)
         action_bar.addWidget(self.btn_batch_dl)
@@ -752,7 +570,7 @@ class RSSTool(BaseTool):
         self._load_cache()
         self._refresh_feed_ui()
         self.task_mgr.sig_log.connect(self.on_task_log)
-
+        self._apply_theme()
         return self.widget
 
     def _clear_articles(self):
@@ -783,14 +601,19 @@ class RSSTool(BaseTool):
             clean_summary = clean_html_text(art.get('summary', ''))
             context += f"[{i + 1}] Title: {art['title']}\nAbstract: {clean_summary}\nURL: {art.get('link', '')}\n\n"
 
-        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
-            prompt = (
-                "Based on the Titles and Abstracts of these selected articles, please provide a synthesized summary:\n"
-                "1. **Thematic Overview**: Identify the overarching research trends or common problems addressed in these papers.\n"
-                "2. **Methodological/Finding Breakdown**: Briefly categorize their distinct methodologies or highlight overlapping conclusions.\n"
-                "3. **Synthesis**: Are there any contradictions or synergistic implications among these studies?"
-            )
+        prompt = (
+            "Based on the Titles and Abstracts of these selected articles, please provide a synthesized summary:\n"
+            "1. **Thematic Overview**: Identify the overarching research trends or common problems addressed in these papers.\n"
+            "2. **Methodological/Finding Breakdown**: Briefly categorize their distinct methodologies or highlight overlapping conclusions.\n"
+            "3. **Synthesis**: Are there any contradictions or synergistic implications among these studies?\n\n"
+            "*(Note: You may use your connected Literature MCP tools to fetch deeper context or metadata if needed.)*"
+        )
+
+        if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
+            GlobalSignals().sig_route_to_chat_with_mcp.emit(context, prompt, "Literature")
+        elif hasattr(GlobalSignals(), 'sig_send_to_chat'):
             GlobalSignals().sig_send_to_chat.emit(context, prompt)
+
 
     def edit_feed(self):
         row = self.feed_list.currentRow()
@@ -873,7 +696,7 @@ class RSSTool(BaseTool):
             self.refresh_specific_feeds(target_feeds)
 
     def open_subscription_manager(self):
-        dlg = FeedLibraryDialog(self.widget, self.feeds)
+        dlg = FeedLibraryDialog(self.widget, self.feeds, DEFAULT_FEEDS_DICT)
         if dlg.exec():
             self.feeds = dlg.get_final_feeds()
             self._save_config()

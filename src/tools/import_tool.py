@@ -12,7 +12,7 @@ from PySide6.QtGui import QAction, QCursor, QColor
 from PySide6.QtCore import Qt
 from src.core.core_task import TaskState, TaskManager
 from src.core.models_registry import get_model_conf, check_model_exists
-from src.core.theme_manager import ThemeManager,get_themed_icon
+from src.core.theme_manager import ThemeManager
 from src.tools.base_tool import BaseTool
 from src.core.kb_manager import KBManager
 from src.core.signals import GlobalSignals
@@ -25,6 +25,7 @@ from src.ui.components.dialog import ProjectEditorDialog, ProgressDialog, Standa
 class ImportTool(BaseTool):
     def __init__(self):
         super().__init__("Library Manager")
+        self.widget = None
         self.kb_manager = KBManager()
         self.task_mgr = TaskManager()
         self.logger = logging.getLogger("ImportTool")
@@ -42,22 +43,12 @@ class ImportTool(BaseTool):
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
-
     def get_ui_widget(self) -> QWidget:
         if hasattr(self, 'widget') and self.widget: return self.widget
         self.widget = QWidget()
         layout = QVBoxLayout(self.widget)
         layout.setSpacing(15)
         layout.setContentsMargins(20, 20, 20, 20)
-
-        self.widget.setStyleSheet("""
-            QWidget { background-color: #1e1e1e; color: #e0e0e0; border: none; }
-            QGroupBox { border: 1px solid #333; border-radius: 6px; margin-top: 12px; padding-top: 25px; background-color: #252526; }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #888; }
-            QPushButton { background-color: #3e3e42; border: 1px solid #444; border-radius: 4px; padding: 6px 12px; }
-            QPushButton:hover { background-color: #4e4e52; }
-            QPushButton:disabled { color: #555; background-color: #2d2d30; border: 1px solid #333; }
-        """)
 
         # 1. 顶部：模型缺失 Banner
         self.banner = QWidget()
@@ -72,26 +63,25 @@ class ImportTool(BaseTool):
         banner_layout.addWidget(btn_dl)
         layout.addWidget(self.banner)
 
-        # 2. 项目管理 (Kill 更名为 Del)
-        kb_group = QGroupBox("🗂️ Project / Library Management")
+        # 2. 项目管理
+        kb_group = QGroupBox("Project / Library Management")
         kb_layout = QHBoxLayout(kb_group)
-        self.combo_kb = BaseComboBox(min_height=55)
+        self.combo_kb = BaseComboBox(min_height=55)  # 恢复了 combo_kb
         self.combo_kb.currentIndexChanged.connect(self.on_kb_switched)
 
         btn_col = QVBoxLayout()
         row1 = QHBoxLayout()
-        btn_new = QPushButton("➕ New")
-        btn_new.clicked.connect(self.create_new_kb)
-        btn_snp = QPushButton("📦 Import .snp")
-        btn_snp.clicked.connect(self.import_external_kb)
-        row1.addWidget(btn_new)
-        row1.addWidget(btn_snp)
+        self.btn_new = QPushButton(" New")
+        self.btn_new.clicked.connect(self.create_new_kb)
+        self.btn_snp = QPushButton(" Import .snp")
+        self.btn_snp.clicked.connect(self.import_external_kb)
+        row1.addWidget(self.btn_new)
+        row1.addWidget(self.btn_snp)
 
         row2 = QHBoxLayout()
-        self.btn_edit = QPushButton("✏️ Edit")
+        self.btn_edit = QPushButton(" Edit")
         self.btn_edit.clicked.connect(self.edit_current_kb)
-        self.btn_del_kb = QPushButton("🗑️ Del")
-        self.btn_del_kb.setStyleSheet("color: #ff6b6b;")
+        self.btn_del_kb = QPushButton(" Delete")
         self.btn_del_kb.clicked.connect(self.delete_current_kb)
         row2.addWidget(self.btn_edit)
         row2.addWidget(self.btn_del_kb)
@@ -102,15 +92,14 @@ class ImportTool(BaseTool):
         kb_layout.addLayout(btn_col, stretch=3)
         layout.addWidget(kb_group)
 
-        # 3. 详情与操作 (导入导出上移)
+        # 3. 详情与操作
         action_bar = QHBoxLayout()
         self.lbl_kb_info = QLabel("Select a library...")
-        self.lbl_kb_info.setStyleSheet("color: #bbb; font-size: 12px;")
 
         ctrl_col = QVBoxLayout()
-        self.btn_add_files = QPushButton("📂 Add PDF Files")
+        self.btn_add_files = QPushButton(" Add Files")
         self.btn_add_files.clicked.connect(self.select_files)
-        self.btn_export = QPushButton("📤 Export Project")
+        self.btn_export = QPushButton(" Export Project")
         self.btn_export.clicked.connect(self.export_current_kb)
         ctrl_col.addWidget(self.btn_add_files)
         ctrl_col.addWidget(self.btn_export)
@@ -123,43 +112,25 @@ class ImportTool(BaseTool):
         self.file_table = QTableWidget(0, 3)
         self.file_table.cellDoubleClicked.connect(self._on_table_double_click)
         self.file_table.setHorizontalHeaderLabels(["Filename", "Size", "Status"])
-
-        # --- 列宽自适应控制 ---
-        # 第一列 (Filename) 伸展占据所有剩余空间
         self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        # 第二列 (Size) 根据内容自动贴合宽度，防止换行
         self.file_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        # 第三列 (Status) 根据内容自动贴合宽度，彻底解决文字换行问题
         self.file_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-
-        # --- 行高限制与外观一致性优化 ---
-        # 1. 禁止用户鼠标拖拽拉伸行高
         self.file_table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        # 2. 设定尽可能一致的舒适行高 (36px)
         self.file_table.verticalHeader().setDefaultSectionSize(36)
-        # 3. 文件名过长时，中间显示省略号，保持行高不被撑大
         self.file_table.setTextElideMode(Qt.ElideMiddle)
-
-        # --- 基础交互配置 ---
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.file_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_table.customContextMenuRequested.connect(self.show_context_menu)
-        self.file_table.setStyleSheet(
-            "QTableWidget { background-color: #1e1e1e; border: 1px solid #333; gridline-color: #252526; }"
-        )
 
         layout.addWidget(self.file_table)
         layout.addStretch(1)
 
         # 5. 底部保存区
-        save_group = QGroupBox("📥 Changes Staging")
+        save_group = QGroupBox("Changes Staging")
         save_layout = QVBoxLayout(save_group)
         self.lbl_staged_status = QLabel("Ready.")
-        self.lbl_staged_status.setStyleSheet("color: #888; border: 1px dashed #444; padding: 10px;")
-        self.btn_save = QPushButton("🚀 Save & Apply All Changes")
+        self.btn_save = QPushButton(" Save & Apply All Changes")
         self.btn_save.setEnabled(False)
-        self.btn_save.setStyleSheet(
-            "QPushButton:enabled { background-color: #007acc; font-weight: bold; color: white; height: 35px; }")
         self.btn_save.clicked.connect(self.commit_changes)
         save_layout.addWidget(self.lbl_staged_status)
         save_layout.addWidget(self.btn_save)
@@ -167,6 +138,10 @@ class ImportTool(BaseTool):
 
         self._toggle_kb_actions(False)
         self.refresh_kb_list()
+
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
         return self.widget
 
     def _apply_theme(self):
@@ -174,45 +149,96 @@ class ImportTool(BaseTool):
             return
 
         tm = ThemeManager()
-
-        # 获取主题颜色
-        bg_base = tm.color('bg_base')  # e.g., #1e1e1e
-        bg_card = tm.color('bg_card')  # e.g., #252526
-        border = tm.color('border')  # e.g., #333333
-        text_main = tm.color('text_main')  # e.g., #e0e0e0
+        bg_main = tm.color('bg_main')
+        bg_card = tm.color('bg_card')
+        border = tm.color('border')
+        text_main = tm.color('text_main')
         text_muted = tm.color('text_muted')
-        primary = tm.color('primary')  # e.g., #007acc
-        danger = tm.color('danger')  # e.g., #ff6b6b
-        btn_bg = tm.color('btn_bg')  # e.g., #3e3e42
+        accent = tm.color('accent')
+        danger = tm.color('danger')
+        btn_bg = tm.color('btn_bg')
         btn_hover = tm.color('btn_hover')
 
-        # 全局 Widget 样式
         self.widget.setStyleSheet(f"""
-            QWidget {{ background-color: {bg_base}; color: {text_main}; border: none; }}
+            QWidget {{ background-color: {bg_main}; color: {text_main}; border: none; }}
             QGroupBox {{ border: 1px solid {border}; border-radius: 6px; margin-top: 12px; padding-top: 25px; background-color: {bg_card}; }}
-            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: {text_muted}; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: {text_muted}; font-weight: bold; }}
             QPushButton {{ background-color: {btn_bg}; border: 1px solid {border}; border-radius: 4px; padding: 6px 12px; color: {text_main}; }}
             QPushButton:hover {{ background-color: {btn_hover}; }}
-            QPushButton:disabled {{ color: {text_muted}; background-color: {bg_base}; border: 1px solid {border}; }}
+            QPushButton:disabled {{ color: {text_muted}; background-color: {bg_main}; border: 1px dashed {border}; }}
         """)
 
-        # 表格样式
         self.file_table.setStyleSheet(f"""
-            QTableWidget {{ background-color: {bg_base}; border: 1px solid {border}; gridline-color: {bg_card}; color: {text_main}; }}
-            QHeaderView::section {{ background-color: {bg_card}; color: {text_muted}; border: none; padding: 4px; }}
+            QTableWidget {{ background-color: {bg_main}; border: 1px solid {border}; gridline-color: {bg_card}; color: {text_main}; }}
+            QHeaderView::section {{ background-color: {bg_card}; color: {text_muted}; border: none; padding: 4px; border-right: 1px solid {border}; border-bottom: 1px solid {border}; }}
+            QTableWidget::item:selected {{ background-color: {btn_hover}; color: {text_main}; }}
         """)
 
-        # 替换文本为图标
-        self.btn_new.setText(" New")
-        self.btn_new.setIcon(get_themed_icon("add", text_main))
+        if hasattr(self, 'lbl_kb_info'): self.lbl_kb_info.setStyleSheet(f"color: {text_muted}; font-size: 12px;")
+        if hasattr(self, 'lbl_staged_status'):
+            self.lbl_staged_status.setStyleSheet(f"color: {text_muted}; border: 1px dashed {border}; padding: 10px;")
 
-        self.btn_del_kb.setText(" Del")
-        self.btn_del_kb.setIcon(get_themed_icon("delete", danger))
-        self.btn_del_kb.setStyleSheet(f"color: {danger};")
+        # 应用 SVG 图标
+        if hasattr(self, 'btn_new'): self.btn_new.setIcon(tm.icon("add", "text_main"))
+        if hasattr(self, 'btn_snp'): self.btn_snp.setIcon(tm.icon("archive", "text_main"))
+        if hasattr(self, 'btn_del_kb'):
+            self.btn_del_kb.setIcon(tm.icon("delete", "danger"))
+            self.btn_del_kb.setStyleSheet(
+                f"QPushButton {{ background-color: {btn_bg}; border: 1px solid {border}; border-radius: 4px; padding: 6px 12px; color: {danger}; }} QPushButton:hover {{ background-color: {btn_hover}; }}")
+        if hasattr(self, 'btn_edit'): self.btn_edit.setIcon(tm.icon("edit", "text_main"))
+        if hasattr(self, 'btn_add_files'): self.btn_add_files.setIcon(tm.icon("file-text", "text_main"))
+        if hasattr(self, 'btn_export'): self.btn_export.setIcon(tm.icon("download", "text_main"))
+        if hasattr(self, 'btn_save'):
+            self.btn_save.setIcon(tm.icon("save", "bg_main"))
+            self.btn_save.setStyleSheet(
+                f"QPushButton:enabled {{ background-color: {accent}; font-weight: bold; color: {bg_main}; height: 35px; }}")
 
-        self.btn_save.setStyleSheet(
-            f"QPushButton:enabled {{ background-color: {primary}; font-weight: bold; color: white; height: 35px; }}")
-        self.btn_save.setIcon(get_themed_icon("send", "#ffffff"))
+        # 刷新表格字体颜色
+        self.update_file_list()
+
+    def _render_table(self):
+        self.file_table.setRowCount(0)
+        if not self.current_kb_id: return
+
+        tm = ThemeManager()
+        success_color = QColor(tm.color('success'))
+        danger_color = QColor(tm.color('danger'))
+        warning_color = QColor(tm.color('warning'))
+        text_color = QColor(tm.color('text_main'))
+
+        kb_data = self.kb_manager.get_kb_by_id(self.current_kb_id)
+        if not kb_data: return
+
+        existing_files = list(kb_data.get('file_map', {}).values())
+
+        # 组装展示数据
+        display_items = []
+        for f in existing_files:
+            if f in self.staged_del:
+                display_items.append((f, "Deleted", danger_color))
+            elif f in self.staged_rename:
+                display_items.append((self.staged_rename[f], f"Renamed (from {f})", warning_color))
+            else:
+                display_items.append((f, "Synced", text_color))
+
+        for f in self.staged_add:
+            display_items.append((os.path.basename(f), "Added", success_color))
+
+        self.file_table.setRowCount(len(display_items))
+        for row, (name, status, color) in enumerate(display_items):
+            item_name = QTableWidgetItem(name)
+            item_status = QTableWidgetItem(status)
+            item_size = QTableWidgetItem("--")
+
+            # 应用颜色
+            item_name.setForeground(color)
+            item_status.setForeground(color)
+            item_size.setForeground(color)
+
+            self.file_table.setItem(row, 0, item_name)
+            self.file_table.setItem(row, 1, item_status)
+            self.file_table.setItem(row, 2, item_size)
+
 
 
     def _toggle_kb_actions(self, enabled: bool, status: str = "ready"):
@@ -314,27 +340,54 @@ class ImportTool(BaseTool):
             self.file_table.setRowCount(0)
             files = self.kb_manager.get_kb_files(self.current_kb_id)
 
+            # 使用 ThemeManager 颜色
+            tm = ThemeManager()
+            success_color = QColor(tm.color('success'))
+            warning_color = QColor(tm.color('warning'))
+            text_color = QColor(tm.color('text_main'))
+
             for f in files:
                 name = f['name']
                 if name in self.staged_del: continue
                 row = self.file_table.rowCount()
                 self.file_table.insertRow(row)
                 display_name = self.staged_rename.get(name, name)
-                self.file_table.setItem(row, 0, QTableWidgetItem(display_name))
-                self.file_table.setItem(row, 1, QTableWidgetItem(str(f.get('size', '-'))))
-                status = "✅ Indexed" if name not in self.staged_rename else "📝 Renaming..."
-                self.file_table.setItem(row, 2, QTableWidgetItem(status))
+
+                item_name = QTableWidgetItem(display_name)
+                item_size = QTableWidgetItem(str(f.get('size', '-')))
+
+                if name in self.staged_rename:
+                    status_text = "📝 Renaming..."
+                    color = warning_color
+                else:
+                    status_text = "✅ Indexed"
+                    color = text_color
+
+                item_name.setForeground(color)
+                item_size.setForeground(color)
+
+                item_status = QTableWidgetItem(status_text)
+                item_status.setForeground(color)
+
+                self.file_table.setItem(row, 0, item_name)
+                self.file_table.setItem(row, 1, item_size)
+                self.file_table.setItem(row, 2, item_status)
 
             for f_path in self.staged_add:
                 row = self.file_table.rowCount()
                 self.file_table.insertRow(row)
-                item = QTableWidgetItem(os.path.basename(f_path))
-                item.setForeground(QColor("#05B8CC"))
-                self.file_table.setItem(row, 0, item)
-                self.file_table.setItem(row, 1, QTableWidgetItem("-"))
-                status_item = QTableWidgetItem("⏳ Pending Save")
-                status_item.setForeground(Qt.yellow)
-                self.file_table.setItem(row, 2, status_item)
+
+                item_name = QTableWidgetItem(os.path.basename(f_path))
+                item_size = QTableWidgetItem("-")
+                item_status = QTableWidgetItem("⏳ Pending Save")
+
+                item_name.setForeground(success_color)
+                item_size.setForeground(success_color)
+                item_status.setForeground(success_color)
+
+                self.file_table.setItem(row, 0, item_name)
+                self.file_table.setItem(row, 1, item_size)
+                self.file_table.setItem(row, 2, item_status)
 
             self._update_details_html()
 
@@ -343,7 +396,7 @@ class ImportTool(BaseTool):
 
         except Exception as e:
             import traceback
-            print(f"🔥 GUI Error in update_file_list: {e}\n{traceback.format_exc()}")
+            print(f"GUI Error in update_file_list: {e}\n{traceback.format_exc()}")
 
     def _update_details_html(self):
         try:
@@ -375,17 +428,24 @@ class ImportTool(BaseTool):
             import traceback
             print(f"🔥 GUI Error in _update_details_html: {e}\n{traceback.format_exc()}")
 
-
     def show_context_menu(self, pos):
         indexes = self.file_table.selectedIndexes()
         if not indexes: return
         rows = sorted(set(idx.row() for idx in indexes))
-        menu = QMenu()
-        menu.setStyleSheet("QMenu { background-color: #2d2d30; color: white; border: 1px solid #444; }")
 
-        act_open = QAction("📄 Open", self.widget)
-        act_rename = QAction("✏️ Rename (Stage)", self.widget)
-        act_del = QAction(f"🗑️ Delete {len(rows)} items (Stage)", self.widget)
+        tm = ThemeManager()
+        menu = QMenu()
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }} 
+            QMenu::item {{ padding: 6px 25px 6px 20px; border-radius: 2px; }}
+            QMenu::item:selected {{ background-color: {tm.color('btn_hover')}; }}
+            QMenu::separator {{ height: 1px; background: {tm.color('border')}; margin: 4px 0px; }}
+        """)
+
+        # 挂载 SVG 图标
+        act_open = QAction(tm.icon("external-link", "text_main"), "Open Source File", self.widget)
+        act_rename = QAction(tm.icon("edit", "text_main"), "Rename (Stage)", self.widget)
+        act_del = QAction(tm.icon("delete", "danger"), f"Delete {len(rows)} items (Stage)", self.widget)
 
         act_open.triggered.connect(lambda: self._handle_open(rows))
         act_rename.triggered.connect(lambda: self._stage_rename_dialog(rows[0]))
@@ -396,6 +456,7 @@ class ImportTool(BaseTool):
         menu.addSeparator()
         menu.addAction(act_del)
         menu.exec(QCursor.pos())
+
 
     def _stage_rename_dialog(self, row):
         """重命名暂存逻辑：自动补充后缀"""
@@ -418,7 +479,9 @@ class ImportTool(BaseTool):
         # 使用你提供的 BaseDialog
         dlg = BaseDialog(self.widget, title="Rename File", width=400)
         inp = QLineEdit(os.path.splitext(old_display_name)[0])
-        inp.setStyleSheet("background:#2d2d30; color:white; border:1px solid #555; padding:5px;")
+        tm = ThemeManager()
+        inp.setStyleSheet(
+            f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 5px; border-radius: 4px;")
 
         dlg.content_layout.addWidget(QLabel(f"New name (Extension '{ext}' will be auto-added):"))
         dlg.content_layout.addWidget(inp)

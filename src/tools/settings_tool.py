@@ -555,7 +555,7 @@ class SettingsTool(BaseTool):
 
     def init_mcp_section(self):
         tm = ThemeManager()
-        group = QGroupBox("🔌 MCP Servers (Unified)")
+        group = QGroupBox("MCP Servers (Unified)")
         layout = QVBoxLayout(group)
 
         header_layout = QHBoxLayout()
@@ -810,12 +810,12 @@ class SettingsTool(BaseTool):
         tm = ThemeManager()
         self.lbl_vram_desc.setText(
             f"<div style='font-size: 11px; color: {tm.color('text_muted')}; line-height: 1.5; margin-left: 20px;'>"
-            f"💡 <b>Turn ON (Low VRAM):</b> Frees up memory immediately after document retrieval.<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('success')};'>👍 Pros: Maximizes LLM context length, prevents Out-of-Memory (OOM) crashes.</span><br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('danger')};'>👎 Cons: Adds 1~3s loading delay to every new query.</span><br>"
-            f"💡 <b>Turn OFF (Speed Mode):</b> Keeps RAG models persistently in memory.<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('success')};'>👍 Pros: Lightning-fast multi-turn conversation.</span><br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('danger')};'>👎 Cons: Embedding + Reranker will constantly occupy VRAM/RAM.</span>"
+            f"<b>Turn ON (Low VRAM):</b> Frees up memory immediately after document retrieval.<br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('success')};'>Pros: Maximizes LLM context length, prevents Out-of-Memory (OOM) crashes.</span><br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('danger')};'>Cons: Adds 1~3s loading delay to every new query.</span><br>"
+            f"<b>Turn OFF (Speed Mode):</b> Keeps RAG models persistently in memory.<br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('success')};'>Pros: Lightning-fast multi-turn conversation.</span><br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('danger')};'>Cons: Embedding + Reranker will constantly occupy VRAM/RAM.</span>"
             f"</div>"
         )
 

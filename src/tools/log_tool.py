@@ -54,6 +54,8 @@ class LogTool(BaseTool):
 
         self.lbl_title.setStyleSheet(f"color: {tm.color('text_main')};")
 
+        self.btn_clear.setText(" Clear Logs") # 移除 🧹
+        self.btn_clear.setIcon(tm.icon("delete", "text_main")) # 添加标准的删除图标
         self.btn_clear.setStyleSheet(f"""
             QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; }}
             QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
@@ -67,9 +69,6 @@ class LogTool(BaseTool):
             }}
         """)
 
-        self.log_viewer.clear()
-        for level, msg in self._all_logs:
-            self._render_html(level, msg)
 
     def clear_logs(self):
         self._all_logs.clear()

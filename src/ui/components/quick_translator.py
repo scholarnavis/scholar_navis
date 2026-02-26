@@ -371,13 +371,22 @@ class QuickTranslatorWindow(QWidget):
         self.combo_src.setStyleSheet(combo_style)
         self.combo_tgt.setStyleSheet(combo_style)
 
-        self.btn_clear.setStyleSheet(
-            f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px;")
+        # Apply Icons and Semantic Colors to Translator Buttons
+        self.btn_trans.setText(" Translate / Polish")
+        self.btn_trans.setIcon(tm.icon("send", "bg_main"))
+        self.btn_trans.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 6px; padding: 6px; font-weight: bold;")
+
+        self.btn_stop.setText(" Stop")
+        self.btn_stop.setIcon(tm.icon("close", "bg_main"))
+        self.btn_stop.setStyleSheet(f"background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; padding: 6px; font-weight: bold;")
+
+        self.btn_clear.setText(" Clear")
+        self.btn_clear.setIcon(tm.icon("clear", "text_main"))
+        self.btn_clear.setStyleSheet(f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px;")
 
     def _on_token(self, token):
         self.current_out_text += token
 
-        # 💡 核心：只渲染剥离 <think> 后的干净正文
         clean_text = TextFormatter.hide_think_tags(self.current_out_text)
 
         self.output_box.setHtml(clean_text.replace('\n', '<br>'))

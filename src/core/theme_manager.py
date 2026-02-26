@@ -1,3 +1,4 @@
+import logging
 import os
 from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon, Qt
 from PySide6.QtCore import QObject, Signal
@@ -6,23 +7,6 @@ from PySide6.QtSvg import QSvgRenderer
 from src.core.config_manager import ConfigManager
 
 
-def get_themed_icon(icon_name: str, color_hex: str) -> QIcon:
-    """加载 SVG 并动态渲染成指定的主题颜色"""
-    path = os.path.join(os.getcwd(), "assets", "icons", f"{icon_name}.svg")
-    if not os.path.exists(path):
-        return QIcon()  # Fallback
-
-    renderer = QSvgRenderer(path)
-    pixmap = QPixmap(24, 24)
-    pixmap.fill(Qt.transparent)
-
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-    painter.fillRect(pixmap.rect(), QColor(color_hex))
-    painter.end()
-
-    return QIcon(pixmap)
 
 class ThemeManager(QObject):
     theme_changed = Signal()
@@ -30,23 +14,19 @@ class ThemeManager(QObject):
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
-            cls._instance = super(ThemeManager, cls).__new__(cls, *args, **kwargs)
+            cls._instance = super().__new__(cls)
             cls._instance._is_initialized = False
         return cls._instance
 
     def __init__(self):
-        if self._is_initialized:
+        if getattr(self, '_is_initialized', False):
             return
         super().__init__()
         self._is_initialized = True
+        self.logger = logging.getLogger("ThemeManager")
         self._init_themes()
 
     def _init_themes(self):
-        try:
-            saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
-        except Exception:
-            saved_theme = "dark"
-
         self.themes = {
             "dark": {
                 "bg_main": "#1e1e1e",
@@ -81,11 +61,14 @@ class ThemeManager(QObject):
                 "btn_hover": "#d5d5d5"
             }
         }
+        self.current_theme = "dark"
 
-        if saved_theme in self.themes:
-            self.current_theme = saved_theme
-        else:
-            self.current_theme = "dark"
+        try:
+            saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
+            if saved_theme in self.themes:
+                self.current_theme = saved_theme
+        except Exception:
+            pass
 
     def set_theme(self, theme_name: str):
         theme_name = theme_name.lower()
@@ -96,16 +79,23 @@ class ThemeManager(QObject):
     def color(self, role: str) -> str:
         return self.themes[self.current_theme].get(role, "#ff00ff")
 
-    def icon(self, icon_name: str, color_role: str = "text_main") -> QIcon:
-        path = os.path.join(os.getcwd(), "Assets", "icons", f"{icon_name}.svg")
-        if not os.path.exists(path): return QIcon()
+    def icon(self, icon_name: str, color_key: str) -> QIcon:
+        path = os.path.join(os.getcwd(), "assets", "icons", f"{icon_name}.svg")
 
-        pixmap = QPixmap(path)
-        if pixmap.isNull(): return QIcon()
+        if not os.path.exists(path):
+            self.logger.warning(f"Missing icon SVG file: '{icon_name}.svg' at {path}")
+            return QIcon()
+
+        color_hex = self.color(color_key)
+
+        renderer = QSvgRenderer(path)
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.transparent)
 
         painter = QPainter(pixmap)
+        renderer.render(painter)
         painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), QColor(self.color(color_role)))
+        painter.fillRect(pixmap.rect(), QColor(color_hex))
         painter.end()
 
         return QIcon(pixmap)

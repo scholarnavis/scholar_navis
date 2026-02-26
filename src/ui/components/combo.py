@@ -1,9 +1,9 @@
 from PySide6.QtWidgets import QComboBox, QListView
 from PySide6.QtCore import Qt
+from src.core.theme_manager import ThemeManager
 
 
 class BaseComboBox(QComboBox):
-
 
     def __init__(self, parent=None, min_height=None, min_width=None, max_width=None):
         super().__init__(parent)
@@ -21,6 +21,29 @@ class BaseComboBox(QComboBox):
             self.setMaximumWidth(max_width)
 
         self.setFocusPolicy(Qt.StrongFocus)
+
+        # 挂载 ThemeManager 监听主题切换
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+
+        self.view().setStyleSheet(f"""
+            QListView {{
+                background-color: {tm.color('bg_card')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                outline: none;
+            }}
+            QListView::item {{
+                padding: 4px 6px;
+            }}
+            QListView::item:selected {{
+                background-color: {tm.color('btn_hover')};
+                color: {tm.color('text_main')};
+            }}
+        """)
 
     def wheelEvent(self, e):
         if not self.hasFocus():

@@ -5,7 +5,8 @@ import torch
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
-                               QSizePolicy, QGraphicsDropShadowEffect)
+                               QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
+                               QCheckBox, QTableWidgetItem)
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject
 from PySide6.QtGui import QColor
 
@@ -204,6 +205,239 @@ try:
 except Exception:
     HAS_NVML = False
 
+
+class FeedEditorDialog(BaseDialog):
+    def __init__(self, parent=None, feed_data=None, is_default=False, categories=None):
+        title = "Edit Tracker Rule" if is_default else "Custom Feed Settings"
+        super().__init__(parent, title=title, width=450)
+
+        self.form_widget = QWidget()
+        self.form_layout = QFormLayout(self.form_widget)
+        self.form_layout.setSpacing(15)
+        self.form_layout.setLabelAlignment(Qt.AlignRight)
+
+        self.inp_name = QLineEdit(feed_data.get('name', '') if feed_data else '')
+        self.inp_url = QLineEdit(feed_data.get('url', '') if feed_data else '')
+
+        self.inp_category = QComboBox()
+        self.inp_category.setEditable(True)
+        cats = categories or []
+        if "Custom Sources" not in cats:
+            cats.append("Custom Sources")
+        self.inp_category.addItems(cats)
+
+        if feed_data and feed_data.get('category'):
+            self.inp_category.setCurrentText(feed_data['category'])
+        else:
+            self.inp_category.setCurrentText("Custom Sources")
+
+        if is_default:
+            self.inp_name.setReadOnly(True)
+            self.inp_url.setReadOnly(True)
+            self.inp_category.setEnabled(False)
+            self.form_layout.addRow("", QLabel("🔒 Built-in source: Read-only."))
+
+        self.form_layout.addRow("Source Name:", self.inp_name)
+        self.form_layout.addRow("RSS URL:", self.inp_url)
+        self.form_layout.addRow("Category:", self.inp_category)
+
+        self.content_layout.addWidget(self.form_widget)
+
+        self.add_button("Cancel", self.reject)
+        self.btn_save = self.add_button("Save", self.accept, is_primary=True)
+        if is_default:
+            self.btn_save.setEnabled(False)
+
+        self._apply_theme()
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+
+        style = f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;"
+        disabled_style = f"background-color: {tm.color('bg_main')}; color: {tm.color('text_muted')}; border: 1px dashed {tm.color('border')}; padding: 6px; border-radius: 4px;"
+
+        if not self.inp_name.isReadOnly():
+            self.inp_name.setStyleSheet(style)
+            self.inp_url.setStyleSheet(style)
+            self.inp_category.setStyleSheet(style)
+        else:
+            self.inp_name.setStyleSheet(disabled_style)
+            self.inp_url.setStyleSheet(disabled_style)
+            self.inp_category.setStyleSheet(disabled_style)
+
+    def get_data(self):
+        return {
+            "name": self.inp_name.text().strip(),
+            "url": self.inp_url.text().strip(),
+            "category": self.inp_category.currentText().strip()
+        }
+
+
+class FeedLibraryDialog(BaseDialog):
+    def __init__(self, parent=None, current_feeds=None, default_feeds_dict=None):
+        super().__init__(parent, title="Subscription Manager", width=850)
+        self.setMinimumHeight(650)
+
+        self.current_user_feeds = current_feeds if current_feeds else []
+        self.subscribed_urls = {f["url"] for f in self.current_user_feeds}
+        self.display_dict = {}
+        self.default_feeds_dict = default_feeds_dict or {}
+
+        for cat, feeds in self.default_feeds_dict.items():
+            self.display_dict[cat] = [f.copy() for f in feeds]
+
+        for f in self.current_user_feeds:
+            if not f.get("is_default", False):
+                cat = f.get("category", "Custom Sources")
+                if cat not in self.display_dict:
+                    self.display_dict[cat] = []
+                self.display_dict[cat].append(f.copy())
+
+        top_bar = QHBoxLayout()
+        lbl_cat = QLabel("Category / Journal:")  # 🧹 Removed Emoji
+        self.combo_category = QComboBox()
+        self.combo_category.addItems(list(self.display_dict.keys()))
+        self.combo_category.currentTextChanged.connect(self._render_table)
+
+        self.inp_search_lib = QLineEdit()
+        self.inp_search_lib.setPlaceholderText("Search journal names...")  # 🧹 Removed Emoji
+        self.inp_search_lib.textChanged.connect(self._filter_library_table)
+
+        self.btn_add_custom = QPushButton(" Add Custom Source")  # 🧹 Removed Emoji
+        self.btn_add_custom.setCursor(Qt.PointingHandCursor)
+        self._tracked_buttons.append((self.btn_add_custom, "default"))
+        self.btn_add_custom.clicked.connect(self._on_add_custom)
+
+        top_bar.addWidget(lbl_cat)
+        top_bar.addWidget(self.combo_category)
+        top_bar.addWidget(self.inp_search_lib, stretch=1)
+        top_bar.addWidget(self.btn_add_custom)
+        self.content_layout.addLayout(top_bar)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Subscribe", "Journal / Source", "RSS URL"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)  # Looks cleaner
+        self.content_layout.addWidget(self.table)
+
+        self.lbl_status = QLabel(f"Selected: {len(self.subscribed_urls)}")
+        self.footer_layout.insertWidget(0, self.lbl_status)
+
+        self.add_button("Cancel", self.reject)
+        self.add_button("Save Subscriptions", self.accept, is_primary=True)
+
+        self.checkboxes_map = {}
+        self._render_table(self.combo_category.currentText())
+        self.table.cellClicked.connect(self._on_cell_clicked)
+
+        self._apply_theme()
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.btn_add_custom.setIcon(tm.icon("add", "text_main"))  # Added SVG
+
+        self.table.setStyleSheet(f"""
+            QTableWidget {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; gridline-color: {tm.color('bg_main')}; outline: none; }}
+            QHeaderView::section {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_muted')}; border: none; padding: 6px; border-right: 1px solid {tm.color('border')}; border-bottom: 1px solid {tm.color('border')}; font-weight: bold; }}
+            QTableWidget::item:selected {{ background-color: {tm.color('btn_hover')}; }}
+        """)
+        self.combo_category.setStyleSheet(
+            f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
+        self.inp_search_lib.setStyleSheet(
+            f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
+        self.lbl_status.setStyleSheet(f"color: {tm.color('text_muted')}; font-weight: bold;")
+
+        self._render_table(self.combo_category.currentText())
+
+
+    def _render_table(self, category):
+        self.table.setRowCount(0)
+        self.checkboxes_map.clear()
+        feeds = self.display_dict.get(category, [])
+        self.table.setRowCount(len(feeds))
+        tm = self.tm
+
+        for i, feed in enumerate(feeds):
+            chk = QCheckBox()
+            chk.setChecked(feed["url"] in self.subscribed_urls)
+            chk.toggled.connect(lambda checked, url=feed["url"]: self._on_checkbox_toggled(url, checked))
+
+            chk_widget = QWidget()
+            chk_layout = QHBoxLayout(chk_widget)
+            chk_layout.addWidget(chk)
+            chk_layout.setAlignment(Qt.AlignCenter)
+            chk_layout.setContentsMargins(0, 0, 0, 0)
+
+            name_item = QTableWidgetItem(f" {feed['name']}")
+
+            if feed.get("is_default"):
+                name_item.setToolTip("Built-in Default Source")
+                name_item.setIcon(tm.icon("lock", "text_muted"))
+                name_item.setForeground(QColor(tm.color('text_muted')))
+            else:
+                name_item.setToolTip("Custom Source")
+                name_item.setIcon(tm.icon("tag", "accent"))
+                name_item.setForeground(QColor(tm.color('text_main')))
+
+            self.table.setCellWidget(i, 0, chk_widget)
+            self.table.setItem(i, 1, name_item)
+            self.table.setItem(i, 2, QTableWidgetItem(feed["url"]))
+
+    def _on_cell_clicked(self, row, col):
+        if col == 1:
+            chk_widget = self.table.cellWidget(row, 0)
+            if chk_widget:
+                chk = chk_widget.layout().itemAt(0).widget()
+                chk.setChecked(not chk.isChecked())
+
+    def _filter_library_table(self, text):
+        text = text.lower()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            if item:
+                self.table.setRowHidden(row, text not in item.text().lower())
+
+
+    def _on_checkbox_toggled(self, url, is_checked):
+        if is_checked:
+            self.subscribed_urls.add(url)
+        else:
+            self.subscribed_urls.discard(url)
+        self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
+
+    def _on_add_custom(self):
+        dlg = FeedEditorDialog(self, categories=list(self.default_feeds_dict.keys()))
+        if dlg.exec():
+            new_feed = dlg.get_data()
+            if new_feed["url"]:
+                new_feed["is_default"] = False
+                cat = new_feed.get("category", "Custom Sources")
+
+                if cat not in self.display_dict:
+                    self.display_dict[cat] = []
+                    self.combo_category.addItem(cat)
+
+                self.display_dict[cat].append(new_feed)
+                self.subscribed_urls.add(new_feed["url"])
+                self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
+                self.combo_category.setCurrentText(cat)
+
+    def get_final_feeds(self):
+        final_list = []
+        for cat, feeds in self.display_dict.items():
+            for f in feeds:
+                if f["url"] in self.subscribed_urls:
+                    final_list.append(f)
+
+        unique_feeds = {f["url"]: f for f in final_list}
+        return list(unique_feeds.values())
 
 class McpConfigDialog(BaseDialog):
     def __init__(self, parent=None, server_name="", server_config=None):

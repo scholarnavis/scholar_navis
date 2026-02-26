@@ -131,13 +131,13 @@ class AutoResizingTextEdit(QPlainTextEdit):
         super().__init__(parent)
         self.setPlaceholderText("Ask a question... (Enter to send, Shift+Enter for new line)")
         self.setStyleSheet("""
-            QPlainTextEdit { background-color: transparent; color: #eeeeee; border: none; font-size: 14px; }
-            QScrollBar:vertical { background: #2b2b2b; width: 6px; }
+            QPlainTextEdit { background-color: transparent; border: none; font-size: 14px; }
         """)
         self.setFixedHeight(40)
         self.max_height = 200
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.textChanged.connect(self.adjust_height)
+
 
     def adjust_height(self):
         doc_height = int(self.document().size().height())
@@ -202,7 +202,7 @@ class ChatInputContainer(QFrame):
         main_layout.addWidget(self.context_banner)
 
         self.mcp_toolbar = QHBoxLayout()
-        self.chk_mcp_enable = QCheckBox("🚀 Enable advanced search (MCP Tools - Requires model support)")
+        self.chk_mcp_enable = QCheckBox("Enable advanced search (MCP Tools - Requires model support)")
         self.chk_mcp_enable.setStyleSheet("color: #05B8CC; font-weight: bold;")
         self.chk_mcp_enable.setChecked(False)
 
@@ -363,13 +363,33 @@ class ChatInputContainer(QFrame):
         self.setStyleSheet(
             f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
 
+        # 修复浅色模式下输入框文本看不清的问题
+        self.text_edit.setStyleSheet(f"""
+            QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; }}
+            QScrollBar:vertical {{ background: {tm.color('bg_main')}; width: 6px; }}
+        """)
+
         tool_btn_style = f"""
-             QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: 'Segoe UI'; font-size: 13px;}}
+             QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: 'Segoe UI'; font-size: 13px; text-align: left; }}
              QPushButton:hover {{ background-color: {tm.color('btn_hover')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')};}}
          """
+
+        self.btn_export.setText("Export")
+        self.btn_export.setIcon(tm.icon("download", "text_muted"))
         self.btn_export.setStyleSheet(tool_btn_style)
+
+        self.btn_clear.setText("Clear")
+        self.btn_clear.setIcon(tm.icon("delete", "text_muted"))
         self.btn_clear.setStyleSheet(tool_btn_style)
+
+        self.btn_attach.setText("Attach")
+        self.btn_attach.setIcon(tm.icon("link", "text_muted"))
         self.btn_attach.setStyleSheet(tool_btn_style)
+
+        self.menu_mcp_tags.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
+            QMenu::item {{ padding: 0px; margin: 0px; color: {tm.color('text_main')}; }}
+        """)
 
 
     def _on_mcp_status_changed(self):
@@ -867,6 +887,9 @@ class ChatTool(BaseTool):
         if hasattr(GlobalSignals(), 'sig_send_to_chat'):
             GlobalSignals().sig_send_to_chat.connect(self.handle_external_send)
 
+        if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
+            GlobalSignals().sig_route_to_chat_with_mcp.connect(self.handle_external_send_with_mcp)
+
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
         self.widget = ChatDropTargetWidget()
@@ -880,21 +903,23 @@ class ChatTool(BaseTool):
 
         #  模型选择组件
         row1_layout = QHBoxLayout()
-        # Chat 用的模型
-        self.model_selector = ModelSelectorWidget(label_text="🧠 Model:", config_key="active_llm_id",
+        lbl_model = QLabel(" Model:")
+        lbl_model.setPixmap(ThemeManager().icon("ai_model", "text_main").pixmap(16, 16))  # 添加图标
+        self.model_selector = ModelSelectorWidget(label_text=" Model:", config_key="active_llm_id",
                                                   model_key="model_name")
         row1_layout.addWidget(self.model_selector)
 
         row1_layout.addSpacing(15)
-        # 翻译用的模型 (指向 trans_model_name)
-        self.trans_selector = ModelSelectorWidget(label_text="🌐 Translator:", config_key="trans_llm_id",
+        self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="trans_llm_id",
                                                   model_key="trans_model_name")
         row1_layout.addWidget(self.trans_selector)
         row1_layout.addStretch()
 
+
         # 第二行：知识库选择
         row2_layout = QHBoxLayout()
-        row2_layout.addWidget(QLabel("🗂️ Knowledge Base:"))
+        lbl_kb = QLabel(" Knowledge Base:")
+        row2_layout.addWidget(lbl_kb)
         self.combo_kb = BaseComboBox(min_width=250)
         self.refresh_kb_list()
         row2_layout.addWidget(self.combo_kb)
@@ -924,21 +949,20 @@ class ChatTool(BaseTool):
         self.scroll_area.setWidget(self.chat_container)
         layout.addWidget(self.scroll_area, stretch=1)
 
-        self.btn_scroll_bottom = QPushButton("⬇️", self.scroll_area)
+        self.btn_scroll_bottom = QPushButton("", self.scroll_area)
+        self.btn_scroll_bottom.setIcon(ThemeManager().icon("down", "bg_main"))
         self.btn_scroll_bottom.setCursor(Qt.PointingHandCursor)
-        self.btn_scroll_bottom.setFixedSize(40, 40)  # 圆形尺寸
-        self.btn_scroll_bottom.setStyleSheet("""
-                    QPushButton { 
-                        background-color: rgba(5, 184, 204, 0.85); 
-                        color: white; 
-                        border-radius: 20px; /* 宽度的二分之一，形成正圆 */
-                        font-size: 18px;
-                        border: 1px solid rgba(255, 255, 255, 0.2);
-                    }
-                    QPushButton:hover { 
-                        background-color: rgba(0, 122, 204, 1); 
-                        border: 1px solid rgba(255, 255, 255, 0.5);
-                    }
+        self.btn_scroll_bottom.setFixedSize(40, 40)
+        # 将原有的背景色也根据主题变量提取一下
+        self.btn_scroll_bottom.setStyleSheet(f"""
+                    QPushButton {{ 
+                        background-color: {ThemeManager().color('accent')}; 
+                        border-radius: 20px;
+                        border: 1px solid {ThemeManager().color('border')};
+                    }}
+                    QPushButton:hover {{ 
+                        background-color: {ThemeManager().color('accent_hover')}; 
+                    }}
                 """)
 
         # 透明度动画效果
@@ -1391,6 +1415,31 @@ class ChatTool(BaseTool):
                 "</div>"
             )
             self.scroll_to_bottom()
+
+    def handle_external_send_with_mcp(self, context_text, prompt_text, target_tag):
+
+        if hasattr(self, 'input_container') and hasattr(self.input_container, 'chk_mcp_enable'):
+            if not self.input_container.chk_mcp_enable.isChecked():
+                self.input_container.chk_mcp_enable.setChecked(True)
+
+        config_mgr = ConfigManager()
+        available_tags = MCPManager.get_instance().get_available_tags()
+
+        deselected = set(config_mgr.mcp_servers.get("deselected_mcp_tags", []))
+        for tag in available_tags:
+            if tag.lower() == target_tag.lower():
+                deselected.discard(tag)
+            else:
+                deselected.add(tag)
+
+        config_mgr.mcp_servers["deselected_mcp_tags"] = list(deselected)
+        config_mgr.save_settings()
+
+        if hasattr(self, 'input_container') and hasattr(self.input_container, 'refresh_mcp_tags'):
+            self.input_container.refresh_mcp_tags()
+
+        self.handle_external_send(context_text, prompt_text)
+
 
     def handle_external_send(self, context_text, prompt_text=""):
         import tempfile

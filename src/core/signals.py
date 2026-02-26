@@ -14,6 +14,7 @@ class GlobalSignals(QObject):
     navigate_to_tool = Signal(str)  # 触发主窗口左侧导航切换 (参数: tool_name)
     request_model_download = Signal(str, str)  # 触发设置页面的下载逻辑 (参数: model_id, model_type)
     sig_send_to_chat = Signal(str, str)
+    sig_route_to_chat_with_mcp = Signal(str, str, str)
     sig_token = Signal(str)
     sig_finished = Signal()
     sig_error = Signal(str)
