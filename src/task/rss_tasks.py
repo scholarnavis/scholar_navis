@@ -260,3 +260,66 @@ class FetchRSSTask(BackgroundTask):
             final_articles = list(executor.map(_detect_oa_for_article, raw_articles))
 
         return final_articles
+
+
+class DownloadOATask(BackgroundTask):
+    def _execute(self):
+        _setup_worker_env()
+        urls_info = self.kwargs.get('urls_info', [])
+        save_dir = self.kwargs.get('save_dir', '')
+
+        if not urls_info or not save_dir:
+            self.send_log("ERROR", "无效的下载参数。")
+            return {"success": False}
+
+        total = len(urls_info)
+        success_count = 0
+        skip_count = 0
+
+        import requests
+        session = requests.Session()
+        if os.environ.get("NO_PROXY") == "*":
+            session.trust_env = False
+
+        for i, info in enumerate(urls_info):
+            # 响应取消操作
+            if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
+                self.send_log("WARNING", "下载被用户取消。")
+                break
+
+            url = info['url']
+            raw_name = info.get('filename', 'document')
+
+            # 清理文件名中的非法字符
+            safe_name = "".join([c for c in raw_name if c.isalnum() or c in ' .-_()[]']).strip()
+            if not safe_name.lower().endswith('.pdf'):
+                safe_name += '.pdf'
+
+            filepath = os.path.join(save_dir, safe_name)
+
+            # 文件存在则跳过
+            if os.path.exists(filepath):
+                self.send_log("INFO", f"已存在，跳过: {safe_name}")
+                skip_count += 1
+                self.update_progress(int(((i + 1) / total) * 100),
+                                     f"[{i + 1}/{total}] 已存在，跳过: {safe_name[:20]}...")
+                continue
+
+            self.update_progress(int((i / total) * 100), f"[{i + 1}/{total}] 正在下载: {safe_name[:20]}...")
+
+            try:
+                res = session.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+                res.raise_for_status()
+                with open(filepath, 'wb') as f:
+                    f.write(res.content)
+                success_count += 1
+                self.send_log("INFO", f"下载成功: {safe_name}")
+            except Exception as e:
+                self.send_log("ERROR", f"下载失败 {safe_name}: {str(e)}")
+
+            self.update_progress(int(((i + 1) / total) * 100), f"[{i + 1}/{total}] 处理完毕")
+
+        return {"success": True, "downloaded": success_count, "skipped": skip_count}
+
+
+

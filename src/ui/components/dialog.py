@@ -315,22 +315,24 @@ class FeedLibraryDialog(BaseDialog):
         top_bar.addWidget(self.btn_add_custom)
         self.content_layout.addLayout(top_bar)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Subscribe", "Journal / Source", "RSS URL"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Subscribe", "Journal / Source", "RSS URL", "Actions"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 操作列
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.verticalHeader().setVisible(False)  # Looks cleaner
+        self.table.verticalHeader().setVisible(False)
         self.content_layout.addWidget(self.table)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
         self.lbl_status = QLabel(f"Selected: {len(self.subscribed_urls)}")
         self.footer_layout.insertWidget(0, self.lbl_status)
 
         self.add_button("Cancel", self.reject)
-        self.add_button("Save Subscriptions", self.accept, is_primary=True)
+        self.add_button("Save", self.accept, is_primary=True)
 
         self.checkboxes_map = {}
         self._render_table(self.combo_category.currentText())
@@ -390,6 +392,92 @@ class FeedLibraryDialog(BaseDialog):
             self.table.setItem(i, 1, name_item)
             self.table.setItem(i, 2, QTableWidgetItem(feed["url"]))
 
+            #  列操作按钮区
+            action_widget = QWidget()
+            action_layout = QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(5, 2, 5, 2)
+            action_layout.setSpacing(8)
+
+            if not feed.get("is_default"):
+                # 编辑按钮
+                btn_edit = QPushButton()
+                btn_edit.setIcon(tm.icon("edit", "text_main"))
+                btn_edit.setToolTip("Edit Source")
+                btn_edit.setCursor(Qt.PointingHandCursor)
+                btn_edit.setStyleSheet("background: transparent; border: none; padding: 2px;")
+                btn_edit.clicked.connect(lambda checked=False, f=feed: self._edit_custom_feed(f))
+
+                # 删除按钮
+                btn_delete = QPushButton()
+                btn_delete.setIcon(tm.icon("delete", "danger"))
+                btn_delete.setToolTip("Delete Source")
+                btn_delete.setCursor(Qt.PointingHandCursor)
+                btn_delete.setStyleSheet("background: transparent; border: none; padding: 2px;")
+                btn_delete.clicked.connect(lambda checked=False, f=feed: self._delete_custom_feed(f))
+
+                action_layout.addWidget(btn_edit)
+                action_layout.addWidget(btn_delete)
+            else:
+                action_layout.addStretch() # 内置源占位，保持排版对其
+
+            self.table.setCellWidget(i, 3, action_widget)
+
+    def _on_cell_double_clicked(self, row, col):
+        """双击任意列触发编辑"""
+        category = self.combo_category.currentText()
+        feeds = self.display_dict.get(category, [])
+        if row < len(feeds):
+            feed = feeds[row]
+            if not feed.get("is_default"):
+                self._edit_custom_feed(feed)
+
+    def _edit_custom_feed(self, feed):
+        old_cat = feed.get("category", "Custom Sources")
+        old_url = feed["url"]
+
+        dlg = FeedEditorDialog(self, feed_data=feed, is_default=False, categories=list(self.default_feeds_dict.keys()))
+        if dlg.exec():
+            new_data = dlg.get_data()
+            if new_data["url"]:
+                new_data["is_default"] = False
+                new_cat = new_data.get("category", "Custom Sources")
+
+                # 从旧分类中移除
+                if old_cat in self.display_dict:
+                    self.display_dict[old_cat] = [f for f in self.display_dict[old_cat] if f["url"] != old_url]
+
+                # 加入新分类
+                if new_cat not in self.display_dict:
+                    self.display_dict[new_cat] = []
+                    self.combo_category.addItem(new_cat)
+                self.display_dict[new_cat].append(new_data)
+
+                # 更新订阅状态缓存
+                if old_url in self.subscribed_urls:
+                    self.subscribed_urls.remove(old_url)
+                    self.subscribed_urls.add(new_data["url"])
+
+                # 刷新 UI
+                self.combo_category.setCurrentText(new_cat)
+                self._render_table(self.combo_category.currentText())
+
+    def _delete_custom_feed(self, feed):
+        cat = feed.get("category", "Custom Sources")
+        url = feed["url"]
+
+        # 从字典缓存中剥离
+        if cat in self.display_dict:
+            self.display_dict[cat] = [f for f in self.display_dict[cat] if f["url"] != url]
+
+        # 从已订阅列表中剥离
+        self.subscribed_urls.discard(url)
+        self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
+
+        # 刷新视图
+        self._render_table(self.combo_category.currentText())
+
+
+
     def _on_cell_clicked(self, row, col):
         if col == 1:
             chk_widget = self.table.cellWidget(row, 0)
@@ -428,6 +516,8 @@ class FeedLibraryDialog(BaseDialog):
                 self.subscribed_urls.add(new_feed["url"])
                 self.lbl_status.setText(f"Selected: {len(self.subscribed_urls)}")
                 self.combo_category.setCurrentText(cat)
+
+                self._render_table(cat)
 
     def get_final_feeds(self):
         final_list = []

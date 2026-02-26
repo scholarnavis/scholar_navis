@@ -19,9 +19,9 @@ from PySide6.QtPrintSupport import QPrinter
 from src.core.theme_manager import ThemeManager
 from src.tools.base_tool import BaseTool
 from src.core.core_task import TaskManager, TaskState
-from src.task.rss_tasks import FetchRSSTask
+from src.task.rss_tasks import FetchRSSTask, DownloadOATask
 from src.ui.components.toast import ToastManager
-from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog
+from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog, StandardDialog
 from src.core.signals import GlobalSignals
 
 DEFAULT_FEEDS_DICT = {
@@ -176,35 +176,6 @@ def clean_html_text(raw_text):
     text = html.unescape(text)
     text = re.sub(r'\n\s*\n', '\n\n', text).strip()
     return text
-
-class DownloadWorker(QThread):
-    sig_msg = Signal(str, str)
-
-    def __init__(self, urls, save_dir):
-        super().__init__()
-        self.urls = urls
-        self.save_dir = save_dir
-        self.feed_list.itemClicked.connect(self._on_feed_item_clicked)
-
-
-    def _on_feed_item_clicked(self, item):
-        new_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
-        item.setCheckState(new_state)
-
-    def run(self):
-        success_count = 0
-        for url in self.urls:
-            try:
-                res = requests.get(url, timeout=15)
-                if res.status_code == 200:
-                    name = url.split('/')[-1]
-                    if not name.endswith('.pdf'): name += ".pdf"
-                    with open(os.path.join(self.save_dir, name), 'wb') as f:
-                        f.write(res.content)
-                    success_count += 1
-            except Exception:
-                pass
-        self.sig_msg.emit(f"Batch download complete. Successfully saved {success_count} PDFs.", "success")
 
 
 class ArticleWidget(QFrame):
@@ -401,6 +372,13 @@ class RSSTool(BaseTool):
             self.btn_edit.setIcon(tm.icon("edit", "text_main"))
             self.btn_edit.setStyleSheet(f"background-color: {btn_bg}; color: {text_main}; padding: 6px 15px; border-radius: 4px; border: 1px solid {border};")
 
+        if hasattr(self, 'btn_add'):
+            self.btn_add.setIcon(tm.icon("add", "bg_main"))
+            self.btn_add.setStyleSheet(
+                f"background-color: {tm.color('success')}; color: {tm.color('bg_main')}; "
+                f"padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;"
+            )
+
         if hasattr(self, 'btn_unsub'):
             self.btn_unsub.setIcon(tm.icon("delete", "bg_main"))
             self.btn_unsub.setStyleSheet(f"background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; border: none;")
@@ -460,6 +438,10 @@ class RSSTool(BaseTool):
         self.btn_refresh.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
         self.btn_refresh.clicked.connect(lambda: self._batch_action("fetch"))
 
+        self.btn_add = QPushButton(" Add Custom Source")
+        self.btn_add.clicked.connect(self.add_custom_feed)
+
+
         toolbar.addWidget(self.btn_manage)
         toolbar.addWidget(self.btn_edit)
         toolbar.addWidget(self.btn_unsub)
@@ -500,6 +482,7 @@ class RSSTool(BaseTool):
         left_layout.addLayout(left_action_bar)
 
         self.feed_list = QListWidget()
+        self.feed_list.itemDoubleClicked.connect(lambda item: self.edit_feed())
         self.feed_list.currentRowChanged.connect(self._on_feed_selected)
         self.feed_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.feed_list.customContextMenuRequested.connect(self._show_feed_context_menu)
@@ -590,6 +573,18 @@ class RSSTool(BaseTool):
             if item.widget():
                 item.widget().deleteLater()
 
+    def add_custom_feed(self):
+        new_feed = {"name": "", "url": "", "category": "Custom"}
+        dlg = FeedEditorDialog(self.widget, new_feed, is_default=False)
+        if dlg.exec():
+            data = dlg.get_data()
+            if data.get('url'):
+                data['is_default'] = False
+                self.feeds.append(data)
+                self._save_config()
+                self._refresh_feed_ui()  # 立刻刷新 UI
+                ToastManager().show("Custom source added successfully.", "success")
+
     def batch_send_to_chat(self):
         selected = [w.article_data for w in self.current_article_widgets if w.is_checked()]
         if not selected:
@@ -675,15 +670,19 @@ class RSSTool(BaseTool):
 
         if not indices:
             if action_type == "fetch":
-                if not indices:
-                    ToastManager().show("Please check the box next to the feeds you want to sync.", "info")
-                    return
+                ToastManager().show("Please check the box next to the feeds you want to sync.", "info")
+            return
 
         if action_type == "unsubscribe":
-            reply = QMessageBox.question(self.widget, 'Confirm Bulk Unsubscribe',
-                                         f"Are you sure you want to remove {len(indices)} feeds from your tracker?",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if reply == QMessageBox.Yes:
+            # --- 使用你的现代主题对话框 ---
+            dlg = StandardDialog(
+                self.widget,
+                title="Confirm Bulk Unsubscribe",
+                message=f"Are you sure you want to remove {len(indices)} feeds from your tracker?",
+                show_cancel=True
+            )
+
+            if dlg.exec():
                 for idx in indices:
                     del self.feeds[idx]
                 self._save_config()
@@ -742,16 +741,6 @@ class RSSTool(BaseTool):
             self.pd.close_safe()
             ToastManager().show(f"Fetch failed: {msg}", "error")
 
-    def _clear_articles(self):
-        for w in self.current_article_widgets:
-            self.article_layout.removeWidget(w)
-            w.hide()
-        self.current_article_widgets = []
-
-        while self.article_layout.count() > 1:
-            item = self.article_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
 
     def _on_feed_selected(self, row):
         if row < 0: return
@@ -771,7 +760,7 @@ class RSSTool(BaseTool):
 
         if not articles:
             lbl = QLabel("No data available. Select feed and click 'Sync' to pull data.")
-            lbl.setStyleSheet("color: #888; padding: 20px;")
+            lbl.setStyleSheet(f"color: {ThemeManager().color('text_muted')}; padding: 20px;")
             self.article_layout.insertWidget(0, lbl)
             return
 
@@ -904,21 +893,46 @@ class RSSTool(BaseTool):
         ToastManager().show(f"PDF exported successfully ({page_count} pages).", "success")
 
     def batch_download_pdfs(self):
-        selected_urls = [w.article_data['pdf_url'] for w in self.current_article_widgets if
-                         w.is_checked() and w.article_data.get('pdf_url')]
-        if not selected_urls:
+        selected = [w.article_data for w in self.current_article_widgets if
+                    w.is_checked() and w.article_data.get('pdf_url')]
+        if not selected:
             ToastManager().show("None of the selected articles have OA PDF links available.", "warning")
             return
 
         save_dir = QFileDialog.getExistingDirectory(self.widget, "Select Folder to Save PDFs")
         if not save_dir: return
 
-        self.dl_thread = DownloadWorker(selected_urls, save_dir)
-        self.dl_thread.sig_msg.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
-        self.dl_thread.finished.connect(self.dl_thread.deleteLater)
-        self.dl_thread.start()
+        urls_info = [{"url": art['pdf_url'], "filename": art['title']} for art in selected]
 
-        ToastManager().show("Batch download started in background...", "info")
+        telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
+        self.dl_pd = ProgressDialog(self.widget, "Downloading PDFs", f"Starting download of {len(urls_info)} files...",
+                                    telemetry_config=telemetry_off)
+        self.dl_pd.show()
+
+        self.task_mgr.sig_progress.connect(self.dl_pd.update_progress)
+        self.task_mgr.sig_state_changed.connect(self._on_download_done)
+        self.dl_pd.sig_canceled.connect(self.task_mgr.cancel_task)
+
+        # 启动基于 core_task 的下载任务
+        self.task_mgr.start_task(DownloadOATask, "dl_oa_pdfs", urls_info=urls_info, save_dir=save_dir)
+
+
+    def _on_download_done(self, state, msg):
+        try:
+            self.task_mgr.sig_state_changed.disconnect(self._on_download_done)
+        except:
+            pass
+        try:
+            self.task_mgr.sig_progress.disconnect(self.dl_pd.update_progress)
+        except:
+            pass
+
+        if state == TaskState.SUCCESS.value:
+            self.dl_pd.show_success_state("Complete", "Download task finished.")
+        else:
+            self.dl_pd.close_safe()
+            ToastManager().show(f"Download aborted or failed: {msg}", "error")
+
 
     def _load_config(self):
         saved_feeds = []
@@ -970,26 +984,31 @@ class RSSTool(BaseTool):
 
         self.feeds.sort(key=lambda x: (x.get('category', 'Z'), x['name']))
 
+        tm = ThemeManager()
+        color_default = QColor(tm.color('text_muted'))
+        color_custom = QColor(tm.color('text_main'))
+
         for feed in self.feeds:
             cat_prefix = f"[{feed.get('category', 'Other')}] "
             kws = feed.get('keywords', '')
-
-            icon = "🔒" if feed.get("is_default") else "📰"
             suffix = " 🔍" if kws else ""
 
-            item_text = f"{icon} {cat_prefix}{feed['name']}{suffix}"
+            item_text = f"{cat_prefix}{feed['name']}{suffix}"
             item = QListWidgetItem(item_text)
-            item.setData(Qt.UserRole, feed['url'])
 
+            if feed.get("is_default"):
+                # 内置源：使用 lock 图标，颜色用次要文本色
+                item.setIcon(tm.icon("lock", "text_muted"))
+                item.setForeground(color_default)
+            else:
+                item.setIcon(tm.icon("link", "accent"))
+                item.setForeground(color_custom)
+
+            item.setData(Qt.UserRole, feed['url'])
             item.setToolTip(f"Category: {feed.get('category', 'Other')}\nSource: {feed['name']}\nURL: {feed['url']}")
 
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
-
-            if feed.get("is_default"):
-                item.setForeground(Qt.lightGray)
-            else:
-                item.setForeground(Qt.cyan)
 
             self.feed_list.addItem(item)
 
