@@ -1,30 +1,49 @@
-# plugins/bio_ncbi_server.py
+# plugins/academic_mcp_server.py
 import json
 import logging
 import os
 import socket
-import urllib
+import urllib.parse
+import time
+from functools import wraps
 
 import requests
 from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
 
+# 复用主程序的全局配置与网络核心（完美同步主 UI 的 Proxy 设置）
+from src.core.config_manager import ConfigManager
+from src.core.network_worker import setup_global_network_env, _get_explicit_proxy_kwargs
+
 logger = logging.getLogger("Academic.Server")
 
+# ==========================================
+# 0. 基础配置与本地工作区初始化
+# ==========================================
+# 确保配置文件被加载并同步代理环境变量
+ConfigManager()
+setup_global_network_env()
 
 ncbi_email = os.environ.get("NCBI_API_EMAIL", "scholar.navis.admin@example.com").strip()
 ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
 s2_api_key = os.environ.get("S2_API_KEY", "").strip()
 
+# 初始化本地文件落盘工作区 (与 Nuitka 环境根目录对齐)
+WORKSPACE_DIR = os.path.abspath(os.path.join(os.getcwd(), "mcp_workspace", "downloads"))
+os.makedirs(WORKSPACE_DIR, exist_ok=True)
+logger.info(f"Local Workspace initialized at: {WORKSPACE_DIR}")
+
+http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+if http_proxy:
+    logger.info(f"MCP Server is running with global proxy: {http_proxy}")
+
 Entrez.email = ncbi_email
 Entrez.tool = "ScholarNavis"
 if ncbi_api_key:
     Entrez.api_key = ncbi_api_key
-    logger.info("NCBI API Key authenticated.")
-else:
-    logger.warning("No NCBI API Key. Rate limits apply.")
 
 mcp = FastMCP("ScholarNavis-Academic-Plugin")
+
 
 class UDPLogHandler(logging.Handler):
     def __init__(self, port):
@@ -35,14 +54,10 @@ class UDPLogHandler(logging.Handler):
     def emit(self, record):
         try:
             msg = record.getMessage()
-            if record.exc_info:
-                if not record.exc_text:
-                    self.formatter = logging.Formatter()
-                    record.exc_text = self.formatter.formatException(record.exc_info)
-                msg += f"\n{record.exc_text}"
-
-            payload = f"{record.levelname}|{msg}"
-            payload = payload[:65000]
+            if record.exc_info and not record.exc_text:
+                record.exc_text = self.formatter.formatException(record.exc_info)
+            if record.exc_text: msg += f"\n{record.exc_text}"
+            payload = f"{record.levelname}|{msg}"[:65000]
             self.sock.sendto(payload.encode('utf-8'), self.address)
         except Exception:
             pass
@@ -50,586 +65,634 @@ class UDPLogHandler(logging.Handler):
 
 log_port_str = os.environ.get("SCHOLAR_NAVIS_LOG_PORT", "")
 if log_port_str.isdigit():
-    udp_handler = UDPLogHandler(int(log_port_str))
-    logger.addHandler(udp_handler)
+    logger.addHandler(UDPLogHandler(int(log_port_str)))
     logger.info(f"Connected to Main UI Log System via UDP port {log_port_str}.")
 
-if ncbi_email:
-    logger.info(f"NCBI Email detected. Enabling NCBI MCP tools.")
-    Entrez.email = ncbi_email
-    if ncbi_api_key:
-        Entrez.api_key = ncbi_api_key
-    Entrez.tool = "ScholarNavis"
+
+# ==========================================
+# 核心网络封装与重试装饰器
+# ==========================================
+def mcp_request(method: str, url: str, **kwargs):
+    """包装 requests 库，强制注入 src.core.network_worker 提供的精准代理配置。"""
+    proxy_cfg = _get_explicit_proxy_kwargs()
+    if "trust_env" in proxy_cfg:
+        kwargs.setdefault("trust_env", False)
+    elif "proxy" in proxy_cfg:
+        kwargs.setdefault("proxies", {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]})
+    return requests.request(method, url, **kwargs)
 
 
-    @mcp.tool(
-        name="search_pubmed_literature",
-        description=(
-                "[Tags: Literature] "
-                "[Requires API Key] Search PubMed for scientific literature. "
-                "Use this to search for broad topics (e.g., 'male sterility') OR specific exact article titles to retrieve precise metadata (authors, journal, publication date, DOI). "
-                "Returns metadata including PMID, Title, Abstract, DOI, and PMC links. "
-                "CRITICAL: If the user asks for Open Access (OA) articles and download links, first use this tool to find relevant papers and extract their DOIs, then IMMEDIATELY pass those DOIs to the `fetch_open_access_pdf` tool."
-        )
-    )
-    def search_pubmed_literature(query: str, max_results: int = 5) -> str:
-        logger.info(f"Task: PubMed Search | Query: '{query}'")
-        try:
-            search_handle = Entrez.esearch(db="pubmed", term=query, retmax=max_results)
-            search_results = Entrez.read(search_handle)
-            search_handle.close()
+def simple_retry(max_attempts=3, delay=2):
+    """防抖装饰器：遇到网络波动自动重试，提升查询鲁棒性"""
 
-            ids = search_results.get("IdList", [])
-            if not ids: return json.dumps({"status": "success", "results": [], "count": 0})
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_attempts - 1: raise e
+                    time.sleep(delay)
 
-            summary_handle = Entrez.esummary(db="pubmed", id=",".join(ids))
-            summaries = Entrez.read(summary_handle)
-            summary_handle.close()
+        return wrapper
 
-            parsed_results = []
-            if isinstance(summaries, list):
-                doc_list = summaries
-            elif isinstance(summaries, dict) and "DocumentSummarySet" in summaries:
-                doc_list = summaries["DocumentSummarySet"].get("DocumentSummary", [])
-            else:
-                doc_list = [summaries]
-
-            for doc in doc_list:
-                doi_val = next(
-                    (aid.get("Value", "") for aid in doc.get("ArticleIds", []) if
-                     isinstance(aid, dict) and aid.get("IdType") == "doi"), "")
-                pmc_val = next(
-                    (aid.get("Value", "") for aid in doc.get("ArticleIds", []) if
-                     isinstance(aid, dict) and aid.get("IdType") == "pmc"), "")
-                final_doi = doc.get("DOI", "") or doi_val
-
-                parsed_results.append({
-                    "pmid": str(doc.get("Id", "")),
-                    "title": doc.get("Title", ""),
-                    "authors": list(doc.get("AuthorList", [])),
-                    "journal": doc.get("Source", ""),
-                    "pub_date": doc.get("PubDate", ""),
-                    "doi": final_doi,
-                    "pmc_id": pmc_val
-                })
-            return json.dumps({"status": "success", "results": parsed_results})
-        except Exception as e:
-            return json.dumps({"status": "error", "message": str(e)})
+    return decorator
 
 
-    @mcp.tool(
-        name="fetch_sequence_fasta",
-        description=(
-                "[Tags: Genomics] "
-                "Download raw FASTA sequences for nucleotides (DNA/RNA) or proteins. "
-                "Use this WHENEVER the user requests exact genetic sequences, nucleotide codes (A, T, C, G), or protein amino acid sequences for specific accession IDs (e.g., NM_100000)."
-        )
-    )
-    def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
-        logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
-        try:
-            if db_type not in ["nuccore", "protein"]:
-                return json.dumps({"status": "error", "message": "Invalid database. Use 'nuccore' or 'protein'."})
-
-            fetch_handle = Entrez.efetch(db=db_type, id=accession_id, rettype="fasta", retmode="text")
-            data = fetch_handle.read()
-            fetch_handle.close()
-
-            if not data:
-                return json.dumps({"status": "error", "message": "Empty sequence returned."})
-
-            return json.dumps({
-                "status": "success",
-                "accession": accession_id,
-                "db": db_type,
-                "fasta": data.strip()
-            })
-        except Exception as e:
-            logger.error(f"Sequence retrieval failed: {str(e)}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-    @mcp.tool(
-        name="search_sra_datasets",
-        description=(
-                "[Tags: Genomics] "
-                "Search the Sequence Read Archive (SRA) for high-throughput sequencing metadata. "
-                "Use this to find raw multi-omics datasets (e.g., RNA-Seq, ChIP-Seq, WGS), biosample details, and Run IDs (SRR) associated with specific phenotypes, treatments, or organisms."
-        )
-    )
-    def search_sra_datasets(query: str, max_results: int = 5) -> str:
-        logger.info(f"Task: SRA Metadata Search | Query: '{query}'")
-        try:
-            search_handle = Entrez.esearch(db="sra", term=query, retmax=max_results)
-            search_results = Entrez.read(search_handle)
-            search_handle.close()
-
-            ids = search_results.get("IdList", [])
-            if not ids:
-                return json.dumps({"status": "success", "results": []})
-
-            summary_handle = Entrez.esummary(db="sra", id=",".join(ids))
-            summaries = Entrez.read(summary_handle)
-            summary_handle.close()
-
-            parsed_results = []
-            if isinstance(summaries, list):
-                doc_list = summaries
-            elif isinstance(summaries, dict) and "DocumentSummarySet" in summaries:
-                doc_list = summaries["DocumentSummarySet"].get("DocumentSummary", [])
-            else:
-                doc_list = [summaries]
-
-            for doc in doc_list:
-                exp_xml = doc.get("ExpXml", "")
-                import re
-
-                run_match = re.search(r'acc="([S|E|D]RR\d+)"', exp_xml)
-                run_id = run_match.group(1) if run_match else "Unknown"
-
-                org_match = re.search(r'<Organism[^>]*>([^<]+)</Organism>', exp_xml)
-                organism_name = org_match.group(1) if org_match else ""
-
-                biosample_val = doc.get("Biosample", "")
-                biosample_id = biosample_val if isinstance(biosample_val, str) else str(biosample_val)
-
-                parsed_results.append({
-                    "sra_id": doc.get("Id", ""),
-                    "run_accession": run_id,
-                    "title": doc.get("ExpTitle", ""),
-                    "platform": doc.get("Instrument", ""),
-                    "strategy": doc.get("Library_strategy", ""),
-                    "organism": organism_name,
-                    "biosample": biosample_id,
-                    "create_date": doc.get("CreateDate", "")
-                })
-
-            return json.dumps({"status": "success", "results": parsed_results})
-        except Exception as e:
-            logger.error(f"SRA search encountered an error: {str(e)}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-    @mcp.tool(
-        name="fetch_protein_summary",
-        description=(
-                "[Tags: Protein] "
-                "Retrieve structural metadata, lengths, and basic summaries from the NCBI Protein database. "
-                "Use this when the user asks about protein structure, sequence size, or taxonomy mapping for a specific protein target."
-        )
-    )
-    def fetch_protein_summary(protein_query: str, organism: str = "") -> str:
-        logger.info(f"Task: Protein Summary Retrieval | Query: {protein_query}")
-        try:
-            term = f"{protein_query}"
-            if organism:
-                term += f" AND {organism}[Organism]"
-
-            search_handle = Entrez.esearch(db="protein", term=term, retmax=3)
-            search_results = Entrez.read(search_handle)
-            search_handle.close()
-
-            ids = search_results.get("IdList", [])
-            if not ids:
-                return json.dumps({"status": "success", "results": []})
-
-            summary_handle = Entrez.esummary(db="protein", id=",".join(ids))
-            summaries = Entrez.read(summary_handle)
-            summary_handle.close()
-
-            parsed_results = []
-            if isinstance(summaries, list):
-                doc_list = summaries
-            elif isinstance(summaries, dict) and "DocumentSummarySet" in summaries:
-                doc_list = summaries["DocumentSummarySet"].get("DocumentSummary", [])
-            else:
-                doc_list = [summaries]
-            for doc in doc_list:
-                parsed_results.append({
-                    "accession": doc.get("AccessionVersion", ""),
-                    "title": doc.get("Title", ""),
-                    "length_aa": doc.get("Length", ""),
-                    "update_date": doc.get("UpdateDate", ""),
-                    "tax_id": doc.get("TaxId", "")
-                })
-
-            return json.dumps({"status": "success", "results": parsed_results})
-        except Exception as e:
-            logger.error(f"Protein retrieval error: {str(e)}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-    @mcp.tool(
-        name="universal_ncbi_summary",
-        description=(
-                "[Tags: any NCBI] "
-                "A universal tool to search ANY NCBI database (e.g., 'omim', 'clinvar', 'assembly', 'mesh', 'genome'). "
-                "Returns the basic summary metadata for the matching records. "
-                "Use this when a specific tool for the database does not exist."
-        )
-    )
-    def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> str:
-        logger.info(f"Task: Universal NCBI Search | DB: {database} | Query: '{query}'")
-        try:
-            search_handle = Entrez.esearch(db=database, term=query, retmax=max_results)
-            search_results = Entrez.read(search_handle)
-            search_handle.close()
-
-            ids = search_results.get("IdList", [])
-            if not ids:
-                return json.dumps({"status": "success", "results": [], "message": f"No records found in {database}."})
-
-            summary_handle = Entrez.esummary(db=database, id=",".join(ids))
-            summaries = Entrez.read(summary_handle)
-            summary_handle.close()
-
-            parsed_results = []
-            if isinstance(summaries, list):
-                doc_list = summaries
-            elif isinstance(summaries, dict) and "DocumentSummarySet" in summaries:
-                doc_list = summaries["DocumentSummarySet"].get("DocumentSummary", [])
-            else:
-                doc_list = [summaries]
-
-            for doc in doc_list:
-                clean_doc = {k: str(v) for k, v in doc.items() if not k.startswith("Item")}
-                parsed_results.append(clean_doc)
-
-            return json.dumps({"status": "success", "database": database, "results": parsed_results})
-        except Exception as e:
-            logger.error(f"Universal search failed on db '{database}': {str(e)}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-    @mcp.tool(
-        name="search_geo_datasets",
-        description=(
-                "[Tags: Genomics] "
-                "Search the GEO DataSets (gds) database for gene expression studies, RNA-seq, and microarray datasets. "
-                "Returns accession numbers (e.g., GSE IDs) and study summaries."
-        )
-    )
-    def search_geo_datasets(query: str, max_results: int = 3) -> str:
-        logger.info(f"Task: GEO Search | Query: '{query}'")
-        try:
-            search_handle = Entrez.esearch(db="gds", term=query, retmax=max_results)
-            search_results = Entrez.read(search_handle)
-            search_handle.close()
-
-            ids = search_results.get("IdList", [])
-            if not ids:
-                return json.dumps({"status": "success", "results": []})
-
-            summary_handle = Entrez.esummary(db="gds", id=",".join(ids))
-            summaries = Entrez.read(summary_handle)
-            summary_handle.close()
-
-            parsed_results = []
-            if isinstance(summaries, list):
-                doc_list = summaries
-            elif isinstance(summaries, dict) and "DocumentSummarySet" in summaries:
-                doc_list = summaries["DocumentSummarySet"].get("DocumentSummary", [])
-            else:
-                doc_list = [summaries]
-            for doc in doc_list:
-                parsed_results.append({
-                    "accession": doc.get("Accession", ""),
-                    "title": doc.get("title", ""),
-                    "summary": doc.get("summary", ""),
-                    "platform": doc.get("GPL", ""),
-                    "sample_count": doc.get("n_samples", ""),
-                    "study_type": doc.get("gdsType", ""),
-                    "taxon": doc.get("taxon", "")
-                })
-
-            return json.dumps({"status": "success", "results": parsed_results})
-        except Exception as e:
-            logger.error(f"GEO search failed: {str(e)}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-    @mcp.tool(
-        name="fetch_taxonomy_info",
-        description=(
-                "[Tags: Taxonomy] "
-                "Search the NCBI Taxonomy database to get the exact scientific name, TaxID, and evolutionary lineage of an organism."
-        )
-    )
-    def fetch_taxonomy_info(organism_name: str) -> str:
-        logger.info(f"Task: Taxonomy Fetch | Organism: '{organism_name}'")
-        try:
-            search_handle = Entrez.esearch(db="taxonomy", term=organism_name, retmax=1)
-            search_results = Entrez.read(search_handle)
-            search_handle.close()
-
-            ids = search_results.get("IdList", [])
-            if not ids:
-                return json.dumps({"status": "success", "message": f"Organism '{organism_name}' not found."})
-
-            fetch_handle = Entrez.efetch(db="taxonomy", id=ids[0], retmode="xml")
-            tax_records = Entrez.read(fetch_handle)
-            fetch_handle.close()
-
-            if not tax_records:
-                return json.dumps({"status": "error", "message": "Failed to retrieve taxonomy details."})
-
-            record = tax_records[0]
-            result = {
-                "tax_id": record.get("TaxId", ""),
-                "scientific_name": record.get("ScientificName", ""),
-                "common_name": record.get("OtherNames", {}).get("GenbankCommonName", ""),
-                "rank": record.get("Rank", ""),
-                "lineage": record.get("Lineage", ""),
-                "genetic_code": record.get("GeneticCode", {}).get("GCId", "")
-            }
-
-            return json.dumps({"status": "success", "result": result})
-        except Exception as e:
-            logger.error(f"Taxonomy fetch failed: {str(e)}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-else:
-    logger.warning("NCBI_API_EMAIL is missing. NCBI MCP tools are disabled and hidden from LLM.")
-
-
-
-if s2_api_key:
-    logger.info("Semantic Scholar API Key detected. Enabling S2 MCP tool.")
-
-
-    @mcp.tool(
-        name="search_semantic_scholar",
-        description=(
-                "[Tags: Literature] "
-                "[Requires API Key] Search Semantic Scholar for global academic papers. "
-                "Highly effective for searching specific exact article titles (e.g., 'Triptycene as a scaffold in metallocene catalyzed olefin polymerization') to retrieve exact metadata (authors, journal, date, citation count). "
-                "Useful for cross-disciplinary queries."
-        )
-    )
-    def search_semantic_scholar(query: str, max_results: int = 5) -> str:
-        logger.info(f"Task: S2 Search | Query: '{query}'")
-        try:
-            base_url = "https://api.semanticscholar.org/graph/v1/paper/search"
-            headers = {"x-api-key": s2_api_key}
-            params = {"query": query, "limit": max_results,
-                      "fields": "title,authors,year,abstract,citationCount,isOpenAccess,url"}
-
-            response = requests.get(base_url, params=params, headers=headers, timeout=15)
-            response.raise_for_status()
-            data = response.json()
-
-            parsed_results = []
-            for p in data.get("data", []):
-                parsed_results.append({
-                    "title": p.get("title", ""),
-                    "year": p.get("year", "Unknown"),
-                    "authors": [a["name"] for a in p.get("authors", [])][:5],
-                    "citation_count": p.get("citationCount", 0),
-                    "abstract": p.get("abstract", "No abstract")[:600] + "...",
-                    "url": p.get("url", "")
-                })
-            return json.dumps({"status": "success", "results": parsed_results})
-        except Exception as e:
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-else:
-    logger.warning("S2_API_KEY is missing. Semantic Scholar MCP tool is disabled and hidden from LLM.")
-
-
-
+# ==========================================
+# 1. 统一文献检索工具 (跨平台级联搜索 + 分页)
+# ==========================================
 @mcp.tool(
-    name="search_pmc_literature_fallback",
+    name="search_academic_literature",
     description=(
-        "[Tags: Literature] "
-        "[Always Enabled / Fallback] Search PubMed Central (PMC) for Open Access literature. "
-        "Use this if specific API keys for other search tools are missing or fail."
+            "[Tags: Literature] "
+            "Search global academic literature for metadata (authors, journal, date, citation count, DOI). "
+            "Supports pagination via the 'offset' parameter (e.g., offset=5 for page 2). "
+            "Automatically cascades to Semantic Scholar, OpenAlex, Crossref, or PubMed based on query context. "
+            "Use this for broad topic searches or exact article title matching."
     )
 )
-def search_pmc_literature_fallback(query: str, max_results: int = 5) -> str:
-    logger.info(f"Task: PMC Fallback Search | Query: '{query}'")
+@simple_retry(max_attempts=2, delay=1)
+def search_academic_literature(query: str, max_results: int = 5, offset: int = 0, source: str = "auto") -> str:
+    logger.info(f"Task: Unified Literature Search | Query: '{query}' | Offset: {offset} | Source: {source}")
     try:
-        search_handle = Entrez.esearch(db="pmc", term=query, retmax=max_results)
-        search_results = Entrez.read(search_handle)
-        search_handle.close()
+        # 优先级 1: Semantic Scholar
+        if s2_api_key and source in ["auto", "semantic_scholar"]:
+            url = "https://api.semanticscholar.org/graph/v1/paper/search"
+            params = {"query": query, "limit": max_results, "offset": offset,
+                      "fields": "title,authors,year,abstract,citationCount,isOpenAccess,url,externalIds"}
+            try:
+                res = mcp_request("GET", url, params=params, headers={"x-api-key": s2_api_key}, timeout=15)
+                res.raise_for_status()
+                parsed = [{"title": p.get("title", ""), "year": p.get("year", "Unknown"),
+                           "authors": [a["name"] for a in p.get("authors", [])][:5],
+                           "citation_count": p.get("citationCount", 0),
+                           "abstract": (p.get("abstract") or "No abstract")[:600] + "...",
+                           "doi": p.get("externalIds", {}).get("DOI", ""), "url": p.get("url", ""),
+                           "source_db": "Semantic Scholar"} for p in res.json().get("data", [])]
+                if parsed: return json.dumps({"status": "success", "source": "semantic_scholar", "results": parsed})
+            except Exception as e:
+                logger.warning(f"S2 search failed: {e}")
 
-        ids = search_results.get("IdList", [])
-        if not ids: return json.dumps({"status": "success", "results": []})
+        # 优先级 2: OpenAlex
+        if source in ["auto", "openalex"]:
+            page = (offset // max_results) + 1
+            url = f"https://api.openalex.org/works?search={urllib.parse.quote(query)}&mailto={ncbi_email}&per-page={max_results}&page={page}"
+            try:
+                res = mcp_request("GET", url, timeout=15)
+                res.raise_for_status()
+                parsed = []
+                for p in res.json().get("results", []):
+                    abs_idx = p.get("abstract_inverted_index")
+                    abstract_text = "No abstract"
+                    if abs_idx:
+                        words = [(pos, w) for w, positions in abs_idx.items() for pos in positions]
+                        words.sort()
+                        abstract_text = " ".join([w for p, w in words])[:600] + "..."
+                    parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
+                                   "authors": [a.get("author", {}).get("display_name", "") for a in
+                                               p.get("authorships", [])][:5],
+                                   "citation_count": p.get("cited_by_count", 0), "abstract": abstract_text,
+                                   "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
+                                   "url": p.get("id", ""), "source_db": "OpenAlex"})
+                if parsed: return json.dumps({"status": "success", "source": "openalex", "results": parsed})
+            except Exception as e:
+                logger.warning(f"OpenAlex search failed: {e}")
 
-        summary_handle = Entrez.esummary(db="pmc", id=",".join(ids))
-        summaries = Entrez.read(summary_handle)
-        summary_handle.close()
+        # 优先级 3: Crossref
+        if source in ["auto", "crossref"]:
+            url = f"https://api.crossref.org/works?query={urllib.parse.quote(query)}&mailto={ncbi_email}&rows={max_results}&offset={offset}"
+            try:
+                res = mcp_request("GET", url, timeout=15)
+                res.raise_for_status()
+                parsed = []
+                for p in res.json().get("message", {}).get("items", []):
+                    authors = [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in p.get("author", [])]
+                    parsed.append({"title": p.get("title", [""])[0],
+                                   "year": p.get("created", {}).get("date-parts", [["Unknown"]])[0][0],
+                                   "authors": authors[:5], "citation_count": p.get("is-referenced-by-count", 0),
+                                   "abstract": p.get("abstract", "No abstract")[:600].replace("<jats:p>", "").replace(
+                                       "</jats:p>", "") + "...", "doi": p.get("DOI", ""), "url": p.get("URL", ""),
+                                   "source_db": "Crossref"})
+                if parsed: return json.dumps({"status": "success", "source": "crossref", "results": parsed})
+            except Exception as e:
+                logger.warning(f"Crossref search failed: {e}")
 
-        if isinstance(summaries, list):
-            doc_list = summaries
-        elif isinstance(summaries, dict) and "DocumentSummarySet" in summaries:
-            doc_list = summaries["DocumentSummarySet"].get("DocumentSummary", [])
-        else:
-            doc_list = [summaries]
+        # 优先级 4: PubMed 兜底
+        if ncbi_email and source in ["auto", "pubmed"]:
+            search_handle = Entrez.esearch(db="pubmed", term=query, retstart=offset, retmax=max_results)
+            ids = Entrez.read(search_handle).get("IdList", [])
+            search_handle.close()
+            if ids:
+                summary_handle = Entrez.esummary(db="pubmed", id=",".join(ids))
+                doc_list = Entrez.read(summary_handle)
+                if isinstance(doc_list, dict): doc_list = doc_list.get("DocumentSummarySet", {}).get("DocumentSummary",
+                                                                                                     [])
+                summary_handle.close()
+                parsed = [{"title": d.get("Title", ""), "year": d.get("PubDate", "")[:4],
+                           "authors": list(d.get("AuthorList", [])), "abstract": "Fetch via fetch_pubmed_abstract.",
+                           "doi": next(
+                               (a.get("Value", "") for a in d.get("ArticleIds", []) if a.get("IdType") == "doi"), ""),
+                           "url": f"https://pubmed.ncbi.nlm.nih.gov/{d.get('Id', '')}/", "source_db": "PubMed"} for d in
+                          doc_list]
+                return json.dumps({"status": "success", "source": "pubmed", "results": parsed})
 
-        parsed_results = []
-        for doc in doc_list:
-            doi_val = next(
-                (aid.get("Value", "") for aid in doc.get("ArticleIds", []) if
-                 isinstance(aid, dict) and aid.get("IdType") == "doi"), "")
-
-            parsed_results.append({
-                "pmcid": str(doc.get("Id", "")),
-                "title": doc.get("Title", ""),
-                "authors": list(doc.get("AuthorList", [])),
-                "journal": doc.get("Source", ""),
-                "pub_date": doc.get("PubDate", ""),
-                "doi": doi_val
-            })
-        return json.dumps({"status": "success", "results": parsed_results})
+        return json.dumps(
+            {"status": "success", "results": [], "message": "No results found across available databases."})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# OA 全文下载统一兜底 (PDF Retrieval Cascade)
+# ==========================================
+# 2. 引文追踪引擎 (Citation Graph)
+# ==========================================
+@mcp.tool(
+    name="traverse_citation_graph",
+    description=(
+            "[Tags: Literature] "
+            "Find the references (papers this article cites) or citations (papers that cite this article) for a given DOI. "
+            "Direction MUST be either 'references' or 'citations'. "
+            "Use this for tracing the history of a technique or finding follow-up research."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def traverse_citation_graph(doi: str, direction: str = "references", max_results: int = 10) -> str:
+    logger.info(f"Task: Citation Graph | DOI: {doi} | Direction: {direction}")
+    if direction not in ["references", "citations"]: return json.dumps(
+        {"status": "error", "message": "direction must be 'references' or 'citations'"})
+    clean_doi = doi.replace("https://doi.org/", "").strip()
+
+    if s2_api_key:
+        try:
+            url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/{direction}?fields=title,authors,year,citationCount,externalIds&limit={max_results}"
+            res = mcp_request("GET", url, headers={"x-api-key": s2_api_key}, timeout=15)
+            res.raise_for_status()
+            parsed = []
+            for item in res.json().get("data", []):
+                p = item.get("citedPaper") if direction == "references" else item.get("citingPaper")
+                if not p or not p.get("title"): continue
+                parsed.append({
+                    "title": p.get("title", ""), "year": p.get("year", "Unknown"),
+                    "authors": [a["name"] for a in p.get("authors", [])][:3],
+                    "citation_count": p.get("citationCount", 0),
+                    "doi": p.get("externalIds", {}).get("DOI", "")
+                })
+            return json.dumps(
+                {"status": "success", "source": "Semantic Scholar", "direction": direction, "results": parsed})
+        except Exception as e:
+            logger.warning(f"S2 citation graph failed: {e}")
+
+    try:
+        if direction == "references":
+            work_res = mcp_request("GET",
+                                   f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={ncbi_email}").json()
+            ref_ids = work_res.get("referenced_works", [])[:max_results]
+            if not ref_ids: return json.dumps({"status": "success", "results": []})
+            filter_str = "|".join([r.split("/")[-1] for r in ref_ids])
+            url = f"https://api.openalex.org/works?filter=openalex:{filter_str}&mailto={ncbi_email}"
+        else:
+            url = f"https://api.openalex.org/works?filter=cites:https://doi.org/{clean_doi}&per-page={max_results}&mailto={ncbi_email}"
+
+        res = mcp_request("GET", url, timeout=15).json()
+        parsed = [{"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
+                   "citation_count": p.get("cited_by_count", 0),
+                   "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else ""} for p in
+                  res.get("results", [])]
+        return json.dumps({"status": "success", "source": "OpenAlex", "direction": direction, "results": parsed})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ==========================================
+# 3. 开放获取链接提取
+# ==========================================
 @mcp.tool(
     name="fetch_open_access_pdf",
     description=(
-        "[Tags: Literature] "
-        "[Always Enabled] Find a direct Open Access PDF download link for a given DOI. "
-        "CRITICAL: Use this tool WHENEVER the user asks for full-text download links, OA links, or PDF links for an article. "
-        "Cascade Strategy: Semantic Scholar (if Key) -> Unpaywall -> PubMed OA Web Service (PMC)."
+            "[Tags: Literature] "
+            "[Always Enabled] Find a direct Open Access PDF download link for a given DOI. "
+            "If you want to read the full text, pass this URL to 'read_paper_fulltext'."
     )
 )
+@simple_retry()
 def fetch_open_access_pdf(doi: str) -> str:
     logger.info(f"Task: Fetch OA PDF | DOI: '{doi}'")
+    clean_doi = doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip()
+    encoded = urllib.parse.quote(clean_doi)
+    landing_url = f"https://doi.org/{clean_doi}"
+
+    if s2_api_key:
+        try:
+            res = mcp_request("GET",
+                              f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}?fields=isOpenAccess,openAccessPdf",
+                              headers={"x-api-key": s2_api_key}, timeout=5).json()
+            if res.get("isOpenAccess") and res.get("openAccessPdf"):
+                return json.dumps({"status": "success", "is_oa": True, "pdf_url": res["openAccessPdf"].get("url", ""),
+                                   "landing_page_url": landing_url, "source": "Semantic Scholar"})
+        except:
+            pass
+
     try:
-        clean_doi = doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip()
-        encoded_doi = urllib.parse.quote(clean_doi)
-        landing_url = f"https://doi.org/{clean_doi}"
+        res = mcp_request("GET", f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={ncbi_email}",
+                          timeout=5).json()
+        if res.get("open_access", {}).get("is_oa") and res.get("open_access", {}).get("oa_url"):
+            return json.dumps({"status": "success", "is_oa": True, "pdf_url": res["open_access"]["oa_url"],
+                               "landing_page_url": landing_url, "source": "OpenAlex"})
+    except:
+        pass
 
-        if s2_api_key:
-            try:
-                s2_url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}?fields=isOpenAccess,openAccessPdf"
-                res = requests.get(s2_url, headers={"x-api-key": s2_api_key}, timeout=5)
-                if res.status_code == 200:
-                    data = res.json()
-                    if data.get("isOpenAccess") and data.get("openAccessPdf"):
-                        pdf_url = data["openAccessPdf"].get("url", "")
-                        if pdf_url:
-                            return json.dumps({
-                                "status": "success", "is_oa": True,
-                                "pdf_url": pdf_url, "landing_page_url": landing_url,
-                                "source": "Semantic Scholar"
-                            })
-            except Exception as e:
-                logger.warning(f"S2 PDF fetch failed/missed: {e}")
+    try:
+        res = mcp_request("GET", f"https://api.unpaywall.org/v2/{encoded}?email={ncbi_email}", timeout=5).json()
+        if res.get("is_oa") and res.get("best_oa_location", {}).get("url_for_pdf"):
+            return json.dumps({"status": "success", "is_oa": True, "pdf_url": res["best_oa_location"]["url_for_pdf"],
+                               "landing_page_url": res["best_oa_location"].get("url_for_landing_page", landing_url),
+                               "source": "Unpaywall"})
+    except:
+        pass
 
-        try:
-            unpaywall_url = f"https://api.unpaywall.org/v2/{encoded_doi}?email={ncbi_email}"
-            response = requests.get(unpaywall_url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("is_oa"):
-                    best_oa = data.get("best_oa_location", {})
-                    if best_oa and best_oa.get("url_for_pdf"):
-                        return json.dumps({
-                            "status": "success", "is_oa": True,
-                            "pdf_url": best_oa.get("url_for_pdf"),
-                            "landing_page_url": best_oa.get("url_for_landing_page", landing_url),
-                            "source": "Unpaywall"
-                        })
-        except Exception as e:
-            logger.warning(f"Unpaywall PDF fetch failed/missed: {e}")
+    try:
+        conv_res = mcp_request("GET",
+                               f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={encoded}&format=json&email={ncbi_email}",
+                               timeout=5)
+        if conv_res.status_code == 200:
+            records = conv_res.json().get("records", [])
+            if records and "pmcid" in records[0]:
+                pmcid = records[0]["pmcid"]
+                oa_res = mcp_request("GET", f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}", timeout=5)
+                if oa_res.status_code == 200 and "<OA>" in oa_res.text:
+                    import re
+                    match = re.search(r'<link[^>]+format="pdf"[^>]+href="([^"]+)"', oa_res.text)
+                    pdf_url = match.group(1).replace("ftp://",
+                                                     "https://") if match else f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
+                    return json.dumps({"status": "success", "is_oa": True, "pdf_url": pdf_url,
+                                       "landing_page_url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/",
+                                       "source": "PubMed_OA"})
+    except:
+        pass
 
-        logger.info("Falling back to PubMed OA Web Service API...")
-        try:
-            conv_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={encoded_doi}&format=json&email={ncbi_email}"
-            conv_res = requests.get(conv_url, timeout=5)
-
-            if conv_res.status_code == 200:
-                conv_data = conv_res.json()
-                records = conv_data.get("records", [])
-                if records and "pmcid" in records[0]:
-                    pmcid = records[0]["pmcid"]
-
-                    oa_api_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}"
-                    oa_res = requests.get(oa_api_url, timeout=5)
-
-                    if oa_res.status_code == 200 and "<OA>" in oa_res.text:
-                        import re
-                        official_pdf_url = ""
-                        match = re.search(r'<link[^>]+format="pdf"[^>]+href="([^"]+)"', oa_res.text)
-
-                        if match:
-                            official_pdf_url = match.group(1).replace("ftp://", "https://")
-                        else:
-                            official_pdf_url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
-
-                        return json.dumps({
-                            "status": "success", "is_oa": True,
-                            "pdf_url": official_pdf_url,
-                            "landing_page_url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/",
-                            "source": "PubMed_OA_WebService"
-                        })
-        except Exception as e:
-            logger.warning(f"PMC fetch failed: {e}")
-
-        return json.dumps({
-            "status": "success",
-            "is_oa": False,
-            "landing_page_url": landing_url,
-            "message": "The paper is paywalled (Closed Access). Only publisher redirect link is available."
-        })
-
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+    return json.dumps({"status": "success", "is_oa": False, "landing_page_url": landing_url,
+                       "message": "Paywalled. No OA PDF found."})
 
 
-# 生物学基础数据工具 (基因、物种、组学等)
+# ==========================================
+# 4. 全文自动阅读器 (PDF 下载 + 解析 + 长文本本地工作区托管)
+# ==========================================
 @mcp.tool(
-    name="fetch_gene_information",
+    name="read_paper_fulltext",
     description=(
-        "[Tags: Genomics] "
-        "Query the NCBI Gene database to retrieve detailed gene descriptions, official symbols, and functional summaries. "
-        "Use this when the user asks 'What is the function of gene X?' or needs basic biological context and pathways about a specific gene in a given organism."
+            "[Tags: Literature] "
+            "Download and read the full text of an Open Access PDF. "
+            "Pass the direct PDF URL (obtained from fetch_open_access_pdf). "
+            "Returns the Markdown text of the paper. If the paper is very long, it will automatically save it locally and return a context link."
     )
 )
-def fetch_gene_information(gene_symbol: str, organism: str = "") -> str:
+def read_paper_fulltext(pdf_url: str) -> str:
+    logger.info(f"Task: PDF Auto-Read | URL: {pdf_url}")
     try:
-        term = f"{gene_symbol}[Gene Name]" + (f" AND {organism}[Organism]" if organism else "")
-        search_handle = Entrez.esearch(db="gene", term=term, retmax=3)
-        ids = Entrez.read(search_handle).get("IdList", [])
-        search_handle.close()
-        if not ids: return json.dumps({"status": "success", "results": []})
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = mcp_request("GET", pdf_url, headers=headers, stream=True, timeout=20)
+        res.raise_for_status()
 
-        summary_handle = Entrez.esummary(db="gene", id=",".join(ids))
-        summaries = Entrez.read(summary_handle).get("DocumentSummarySet", {}).get("DocumentSummary", [])
-        summary_handle.close()
+        safe_name = f"paper_{int(time.time())}.pdf"
+        pdf_path = os.path.join(WORKSPACE_DIR, safe_name)
 
-        res = [{"symbol": d.get("Name"), "summary": d.get("Summary")} for d in summaries]
-        return json.dumps({"status": "success", "results": res})
+        with open(pdf_path, 'wb') as f:
+            for chunk in res.iter_content(chunk_size=8192): f.write(chunk)
+
+        try:
+            import pymupdf4llm
+            md_text = pymupdf4llm.to_markdown(pdf_path)
+
+            # 长文本保护：超过 15000 字符强制落盘，不撑爆 LLM 窗口
+            if len(md_text) > 15000:
+                md_path = pdf_path.replace(".pdf", ".md")
+                with open(md_path, 'w', encoding='utf-8') as f: f.write(md_text)
+                cite_link = f"cite://view?path={urllib.parse.quote(md_path)}&page=1&name={urllib.parse.quote('Full Text (Markdown)')}"
+                return json.dumps({
+                    "status": "success",
+                    "message": "Paper downloaded and parsed successfully. Content is too long for direct display. Instruct the user to click the link below to view it or use it as context.",
+                    "local_path": md_path,
+                    "cite_link": cite_link,
+                    "preview": md_text[:2000] + "\n...[TRUNCATED]"
+                })
+
+            return json.dumps({"status": "success", "content": md_text})
+        except ImportError:
+            # 环境中没有 pymupdf4llm 时，只存盘返回系统调用链接
+            cite_link = f"cite://view?path={urllib.parse.quote(pdf_path)}&page=1&name={urllib.parse.quote('Downloaded PDF')}"
+            return json.dumps(
+                {"status": "success", "message": "PDF downloaded to local workspace. Markdown parsing unavailable.",
+                 "cite_link": cite_link})
+
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
 
+# ==========================================
+# 5. 生物大分子检索 (NCBI + UniProt 整合)
+# ==========================================
+@mcp.tool(
+    name="search_biological_entity",
+    description=(
+            "[Tags: Genomics, Protein] "
+            "Query biological entities (Genes or Proteins) to retrieve functional summaries, lengths, taxonomic info, and metadata. "
+            "Combines NCBI Gene and UniProt databases. "
+            "Use this when the user asks 'What is the function of gene/protein X?'"
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def search_biological_entity(query: str, entity_type: str = "gene", organism: str = "") -> str:
+    logger.info(f"Task: Biol Entity Search | Type: {entity_type} | Query: '{query}' | Org: '{organism}'")
+    try:
+        if entity_type.lower() == "protein":
+            search_query = f"({query})"
+            if organism: search_query += f" AND (organism_name:{organism})"
+            url = f"https://rest.uniprot.org/uniprotkb/search?query={urllib.parse.quote(search_query)}&format=json&size=3"
+            res = mcp_request("GET", url, timeout=10)
+            res.raise_for_status()
+            results = []
+            for p in res.json().get("results", []):
+                results.append({
+                    "accession": p.get("primaryAccession", ""),
+                    "protein_name": p.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get(
+                        "value", ""),
+                    "gene_name": p.get("genes", [{}])[0].get("geneName", {}).get("value", "") if p.get("genes") else "",
+                    "organism": p.get("organism", {}).get("scientificName", ""),
+                    "sequence_length": p.get("sequence", {}).get("length", 0),
+                    "function_summary": next((c.get("texts", [{}])[0].get("value", "") for c in p.get("comments", []) if
+                                              c.get("commentType") == "FUNCTION"), "No function summary.")
+                })
+            return json.dumps({"status": "success", "db": "UniProt", "results": results})
+        else:
+            term = f"{query}[Gene Name]" + (f" AND {organism}[Organism]" if organism else "")
+            search_handle = Entrez.esearch(db="gene", term=term, retmax=3)
+            ids = Entrez.read(search_handle).get("IdList", [])
+            search_handle.close()
+            if not ids: return json.dumps({"status": "success", "results": []})
+
+            summary_handle = Entrez.esummary(db="gene", id=",".join(ids))
+            summaries = Entrez.read(summary_handle).get("DocumentSummarySet", {}).get("DocumentSummary", [])
+            summary_handle.close()
+
+            results = [{"symbol": d.get("Name"), "description": d.get("Description"),
+                        "organism": d.get("Organism", {}).get("ScientificName", ""),
+                        "summary": d.get("Summary", "No summary available."), "map_location": d.get("MapLocation", "")}
+                       for d in summaries]
+            return json.dumps({"status": "success", "db": "NCBI Gene", "results": results})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ==========================================
+# 6. 植物组学引擎 (JGI Phytozome/PhytoMine)
+# ==========================================
+@mcp.tool(
+    name="search_phytozome_phytomine",
+    description=(
+            "[Tags: Genomics, Plant] "
+            "Search the JGI Phytozome (PhytoMine) database for plant genomics data. "
+            "Use this to find plant-specific genes, proteins, orthologs, and families across assembled plant genomes without requiring a login."
+    )
+)
+@simple_retry()
+def search_phytozome_phytomine(query: str) -> str:
+    logger.info(f"Task: Phytozome Search | Query: '{query}'")
+    try:
+        url = f"https://phytozome-next.jgi.doe.gov/phytomine/service/search?q={urllib.parse.quote(query)}&format=json"
+        res = mcp_request("GET", url, timeout=15)
+        res.raise_for_status()
+
+        parsed = [{"type": r.get("type", ""), "name": r.get("fields", {}).get("name", ""),
+                   "primaryIdentifier": r.get("fields", {}).get("primaryIdentifier", ""),
+                   "description": r.get("fields", {}).get("description", ""),
+                   "organism": r.get("fields", {}).get("organism.shortName", "")} for r in
+                  res.json().get("results", [])[:5]]
+        return json.dumps({"status": "success", "db": "Phytozome", "results": parsed})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ==========================================
+# 7. 组学数据集联搜 (SRA + GEO)
+# ==========================================
+@mcp.tool(
+    name="search_omics_datasets",
+    description=(
+            "[Tags: Genomics] "
+            "Search high-throughput sequencing and microarray datasets (SRA / GEO). "
+            "Use this to find raw multi-omics datasets (RNA-Seq, ChIP-Seq, WGS), biosample details, and accession IDs associated with specific phenotypes, treatments, or organisms. "
+            "Provide db_type as 'sra' for raw sequencing reads or 'geo' for expression/array studies."
+    )
+)
+@simple_retry()
+def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5) -> str:
+    logger.info(f"Task: Omics Dataset Search | DB: {db_type} | Query: '{query}'")
+    try:
+        db = "gds" if db_type.lower() == "geo" else "sra"
+        search_handle = Entrez.esearch(db=db, term=query, retmax=max_results)
+        ids = Entrez.read(search_handle).get("IdList", [])
+        search_handle.close()
+
+        if not ids: return json.dumps({"status": "success", "results": []})
+
+        summary_handle = Entrez.esummary(db=db, id=",".join(ids))
+        summaries = Entrez.read(summary_handle)
+        summary_handle.close()
+
+        doc_list = summaries if isinstance(summaries, list) else summaries.get("DocumentSummarySet", {}).get(
+            "DocumentSummary", [])
+        if isinstance(doc_list, dict): doc_list = [doc_list]
+
+        parsed_results = []
+        for doc in doc_list:
+            if db == "sra":
+                import re
+                exp_xml = doc.get("ExpXml", "")
+                run_match = re.search(r'acc="([S|E|D]RR\d+)"', exp_xml)
+                org_match = re.search(r'<Organism[^>]*>([^<]+)</Organism>', exp_xml)
+                parsed_results.append({"accession": run_match.group(1) if run_match else doc.get("Id", ""),
+                                       "title": doc.get("ExpTitle", ""), "platform": doc.get("Instrument", ""),
+                                       "strategy": doc.get("Library_strategy", ""),
+                                       "organism": org_match.group(1) if org_match else ""})
+            else:
+                parsed_results.append({"accession": doc.get("Accession", ""), "title": doc.get("title", ""),
+                                       "summary": doc.get("summary", ""), "study_type": doc.get("gdsType", ""),
+                                       "taxon": doc.get("taxon", "")})
+
+        return json.dumps({"status": "success", "db": db_type.upper(), "results": parsed_results})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ==========================================
+# 8. 蛋白质结构检索 (RCSB PDB)
+# ==========================================
+@mcp.tool(
+    name="search_protein_structure",
+    description=(
+            "[Tags: Protein, Structure] "
+            "Search the RCSB PDB (Protein Data Bank) for 3D protein structures, experimental methods (X-ray, Cryo-EM), and resolution details. "
+            "Use this when the user needs structural biology information."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def search_protein_structure(query: str, max_results: int = 3) -> str:
+    logger.info(f"Task: PDB Structure Search | Query: '{query}'")
+    try:
+        url = "https://search.rcsb.org/rcsbsearch/v2/query"
+        payload = {"query": {"type": "terminal", "service": "text", "parameters": {"value": query}},
+                   "return_type": "entry", "request_options": {"paginate": {"start": 0, "rows": max_results}}}
+        res = mcp_request("POST", url, json=payload, timeout=10)
+        res.raise_for_status()
+
+        pdb_ids = [item["identifier"] for item in res.json().get("result_set", [])]
+        if not pdb_ids: return json.dumps({"status": "success", "results": []})
+
+        results = []
+        for pid in pdb_ids:
+            det_res = mcp_request("GET", f"https://data.rcsb.org/rest/v1/core/entry/{pid}", timeout=5)
+            if det_res.status_code == 200:
+                d = det_res.json()
+                results.append({"pdb_id": pid, "title": d.get("struct", {}).get("title", ""),
+                                "method": d.get("exptl", [{}])[0].get("method", "Unknown"),
+                                "resolution": d.get("rcsb_entry_info", {}).get("resolution_estimated_by_xray", "N/A"),
+                                "organism": d.get("rcsb_entity_source_organism", [{}])[0].get("ncbi_scientific_name",
+                                                                                              "Unknown")})
+        return json.dumps({"status": "success", "results": results})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ==========================================
+# 9. FASTA 序列下载 (大文件落盘保护)
+# ==========================================
+@mcp.tool(
+    name="fetch_sequence_fasta",
+    description=(
+            "[Tags: Genomics, Protein] "
+            "Download raw FASTA sequences for nucleotides or proteins. "
+            "If the sequence is massive (e.g., full genome), it automatically saves to the local workspace and returns a viewable link."
+    )
+)
+@simple_retry()
+def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
+    logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
+    try:
+        fetch_handle = Entrez.efetch(db=db_type, id=accession_id, rettype="fasta", retmode="text")
+        data = fetch_handle.read()
+        fetch_handle.close()
+
+        if not data: return json.dumps({"status": "error", "message": "Empty sequence."})
+
+        if len(data) > 15000:
+            file_name = f"{accession_id}_{db_type}.fasta"
+            file_path = os.path.join(WORKSPACE_DIR, file_name)
+            with open(file_path, "w", encoding='utf-8') as f: f.write(data)
+            cite_link = f"cite://view?path={urllib.parse.quote(file_path)}&page=1&name={urllib.parse.quote(file_name)}"
+            return json.dumps({
+                "status": "success",
+                "message": "Sequence is extremely large. Saved to local workspace.",
+                "local_path": file_path,
+                "cite_link": cite_link,
+                "preview_header": data[:500] + "\n..."
+            })
+
+        return json.dumps({"status": "success", "accession": accession_id, "fasta": data.strip()})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ==========================================
+# 10. NCBI 分类学信息
+# ==========================================
+@mcp.tool(
+    name="fetch_taxonomy_info",
+    description=(
+            "[Tags: Taxonomy] "
+            "Search the NCBI Taxonomy database to get the exact scientific name, TaxID, and evolutionary lineage of an organism."
+    )
+)
+@simple_retry()
+def fetch_taxonomy_info(organism_name: str) -> str:
+    logger.info(f"Task: Taxonomy Fetch | Organism: '{organism_name}'")
+    try:
+        search_handle = Entrez.esearch(db="taxonomy", term=organism_name, retmax=1)
+        ids = Entrez.read(search_handle).get("IdList", [])
+        search_handle.close()
+
+        if not ids: return json.dumps({"status": "success", "message": f"Organism '{organism_name}' not found."})
+
+        fetch_handle = Entrez.efetch(db="taxonomy", id=ids[0], retmode="xml")
+        tax_records = Entrez.read(fetch_handle)
+        fetch_handle.close()
+
+        record = tax_records[0]
+        result = {"tax_id": record.get("TaxId", ""), "scientific_name": record.get("ScientificName", ""),
+                  "common_name": record.get("OtherNames", {}).get("GenbankCommonName", ""),
+                  "rank": record.get("Rank", ""), "lineage": record.get("Lineage", "")}
+        return json.dumps({"status": "success", "result": result})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ==========================================
+# 11. PubMed 摘要提取
+# ==========================================
 @mcp.tool(
     name="fetch_pubmed_abstract",
     description=(
-        "[Tags:Literature] "
-        "[Core Academic Tool] Fetch the full-text abstract of a specific PubMed article. "
-        "Use this when the user asks for details or a summary of a specific paper."
+            "[Tags: Literature] "
+            "[Core Academic Tool] Fetch the full-text abstract of a specific PubMed article using its PMID."
     )
 )
+@simple_retry()
 def fetch_pubmed_abstract(pmid: str) -> str:
     logger.info(f"Task: Fetch Abstract | PMID: {pmid}")
     try:
         handle = Entrez.efetch(db="pubmed", id=pmid, rettype="abstract", retmode="text")
         abstract_text = handle.read()
         handle.close()
-
-        if not abstract_text.strip():
-            return json.dumps({"status": "warning", "message": "No abstract available for this PMID."})
-
         return json.dumps({"status": "success", "pmid": pmid, "abstract": abstract_text.strip()})
     except Exception as e:
-        logger.error(f"Failed to fetch abstract for {pmid}: {e}")
         return json.dumps({"status": "error", "message": str(e)})
+
+
+# ==========================================
+# 12. NCBI 全局兜底
+# ==========================================
+@mcp.tool(
+    name="universal_ncbi_summary",
+    description=(
+            "[Tags: any NCBI] "
+            "A universal tool to search ANY NCBI database (e.g., 'omim', 'clinvar', 'assembly', 'mesh', 'genome'). "
+            "Returns the basic summary metadata for the matching records."
+    )
+)
+@simple_retry()
+def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> str:
+    try:
+        search_handle = Entrez.esearch(db=database, term=query, retmax=max_results)
+        ids = Entrez.read(search_handle).get("IdList", [])
+        search_handle.close()
+
+        if not ids: return json.dumps(
+            {"status": "success", "results": [], "message": f"No records found in {database}."})
+
+        summary_handle = Entrez.esummary(db=database, id=",".join(ids))
+        summaries = Entrez.read(summary_handle)
+        summary_handle.close()
+
+        doc_list = summaries if isinstance(summaries, list) else summaries.get("DocumentSummarySet", {}).get(
+            "DocumentSummary", [])
+        if isinstance(doc_list, dict): doc_list = [doc_list]
+
+        parsed_results = [{"id": d.get("Id", ""), **{k: str(v) for k, v in d.items() if not k.startswith("Item")}} for d
+                          in doc_list]
+        return json.dumps({"status": "success", "database": database, "results": parsed_results})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
 
 if __name__ == "__main__":
     logger.info("Academic MCP Server initialized.")

@@ -1371,7 +1371,7 @@ class ChatTool(BaseTool):
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
 
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
-        self.sig_finished.connect(self.worker_thread.quit)
+        self.worker.sig_finished.connect(self.worker_thread.quit)
         self.worker_thread.start()
 
     def cancel_generation(self):
