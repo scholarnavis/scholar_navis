@@ -2,6 +2,8 @@ import os
 import re
 import hashlib
 import tempfile
+import time
+
 import markdown
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QTextBrowser)
@@ -30,10 +32,15 @@ class ChatBubbleWidget(QWidget):
         self.loading_dots = 0
         self.is_loading = False
 
-        # 🌟 异步图片下载管理队列
+        # 异步图片下载管理队列
         self.downloaded_images = {}
         self.downloading_urls = set()
+        self.download_failed_urls = {}
         self.image_threads = []
+        self.image_loading_timer = QTimer(self)
+        self.image_loading_timer.timeout.connect(self._animate_image_loading)
+        self.image_loading_dots = 0
+        self.download_timeouts = {}
 
         self.init_ui()
 
@@ -223,6 +230,29 @@ class ChatBubbleWidget(QWidget):
             self.edit_input.setFixedHeight(max(40, new_h))
             self.edit_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
+    def _animate_image_loading(self):
+        if not self.downloading_urls:
+            self.image_loading_timer.stop()
+            return
+
+        self.image_loading_dots = (self.image_loading_dots + 1) % 4
+
+        current_time = time.time()
+        timed_out_urls = []
+        for url in list(self.downloading_urls):
+            if current_time > self.download_timeouts.get(url, current_time + 30):
+                timed_out_urls.append(url)
+
+        if timed_out_urls:
+            for url in timed_out_urls:
+                self.downloading_urls.remove(url)
+                if getattr(self, 'download_failed_urls', None) is None:
+                    self.download_failed_urls = {}
+                self.download_failed_urls[url] = "网络下载超时 (Timeout)"
+
+        self.set_content(self.original_text)
+
+
     def show_context_menu(self, pos):
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -263,6 +293,7 @@ class ChatBubbleWidget(QWidget):
         self.loading_dots = (self.loading_dots + 1) % 4
         self.lbl_text.setText("Thinking" + "." * self.loading_dots)
 
+
     def set_content(self, text):
         self.original_text = text
         if self.is_loading: return
@@ -270,16 +301,10 @@ class ChatBubbleWidget(QWidget):
         try:
             processed_text = text
 
-            processed_text = re.sub(
-                r'(?<![="\'/])\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b',
-                r'<a href="https://doi.org/\1">\1</a>',
-                processed_text
-            )
-            processed_text = re.sub(
-                r'(?<![="\'/\[\(])\b(https?://[^\s<>\)\]]+)\b',
-                r'<a href="\1">\1</a>',
-                processed_text
-            )
+            processed_text = re.sub(r'(?<![="\'/])\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b',
+                                    r'<a href="https://doi.org/\1">\1</a>', processed_text)
+            processed_text = re.sub(r'(?<![="\'/\[\(])\b(https?://[^\s<>\)\]]+)\b', r'<a href="\1">\1</a>',
+                                    processed_text)
 
             html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
             html = html.replace("<a href=",
@@ -287,12 +312,10 @@ class ChatBubbleWidget(QWidget):
 
             def repl_img(match):
                 raw_src_url = match.group(1)
-
                 src_url = raw_src_url.replace("&amp;", "&")
 
                 if src_url.startswith("http"):
                     if src_url in self.downloaded_images:
-                        # 已经下载完毕
                         local_path = self.downloaded_images[src_url].replace('\\', '/')
                         if not local_path.startswith('/'):
                             local_uri = f"file:///{local_path}"
@@ -301,20 +324,30 @@ class ChatBubbleWidget(QWidget):
 
                         new_img_tag = f'<img width="420" style="border-radius: 8px; margin-top: 5px;" src="{local_uri}" />'
                         return f'<a href="{local_uri}">{new_img_tag}</a>'
+
+                    elif src_url in getattr(self, 'download_failed_urls', {}):
+                        error_msg = self.download_failed_urls[src_url]
+                        return f'<div style="color:#ff6b6b; padding: 15px; border: 2px dashed #ff6b6b; border-radius: 8px; width: 400px; margin-top: 5px;">❌ <b>图像下载失败</b><br><span style="font-size: 12px;">{error_msg}</span></div>'
+
                     else:
                         if src_url not in self.downloading_urls:
                             self.downloading_urls.add(src_url)
-                            self._start_image_download(src_url)  # 丢给后台下载
+                            self.download_timeouts[src_url] = time.time() + 30  # 🌟 设置 30 秒超时
+                            self._start_image_download(src_url)
 
-                        return '<div style="color:#05B8CC; padding: 20px; border: 2px dashed #05B8CC; border-radius: 8px; width: 400px; text-align: center; margin-top: 5px;">⏳ 正在将图像下载到本地缓存，请稍候...</div>'
+                            # 启动动画计时器
+                            if not self.image_loading_timer.isActive():
+                                self.image_loading_timer.start(500)
 
-                return match.group(0).replace('<img ', '<img width="420" style="border-radius: 8px; margin-top: 5px;" ')
+                        dots = "." * getattr(self, 'image_loading_dots', 0)
+                        return f'<div style="color:#05B8CC; padding: 20px; border: 2px dashed #05B8CC; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">正在将图像下载到本地缓存，请稍候{dots}</span></div>'
 
             html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
 
             self.lbl_text.setText(html)
         except Exception as e:
             self.lbl_text.setText(text)
+
 
     def clean_up_images(self):
         for path in self.downloaded_images.values():
@@ -341,9 +374,9 @@ class ChatBubbleWidget(QWidget):
 
         thread = QThread(self)
         worker = LightNetworkWorker()
+        thread.worker = worker
         worker.moveToThread(thread)
 
-        # 挂载参数
         worker.img_url = url
         worker.img_save_path = save_path
 
@@ -357,16 +390,21 @@ class ChatBubbleWidget(QWidget):
         thread.start()
 
     def _on_image_downloaded(self, success, url, result_path):
-        """后台下载成功后，重发渲染命令更新气泡"""
         if url in self.downloading_urls:
             self.downloading_urls.remove(url)
 
         if success:
             self.downloaded_images[url] = result_path
-            # 重发渲染：此时缓存已命中，将使用 file:/// 路径渲染图片
-            self.set_content(self.original_text)
         else:
+            if not hasattr(self, 'download_failed_urls'):
+                self.download_failed_urls = {}
+            self.download_failed_urls[url] = result_path
             print(f"Failed to fetch image: {result_path}")
+
+        if not self.downloading_urls and hasattr(self, 'image_loading_timer'):
+            self.image_loading_timer.stop()
+
+        self.set_content(self.original_text)
 
     def copy_text(self):
         clipboard = QGuiApplication.clipboard()

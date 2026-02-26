@@ -1,10 +1,13 @@
 import os
+import logging
 import requests
 import httpx
 from PySide6.QtCore import QObject, Signal
 from chromadb import EmbeddingFunction, Documents, Embeddings
 
 from src.core.config_manager import ConfigManager
+
+logger = logging.getLogger("NetworkWorker")
 
 
 def setup_global_network_env():
@@ -15,6 +18,7 @@ def setup_global_network_env():
 
     if hf_mirror:
         os.environ["HF_ENDPOINT"] = hf_mirror
+        logger.debug(f"HF_ENDPOINT set to: {hf_mirror}")
     else:
         os.environ.pop("HF_ENDPOINT", None)
 
@@ -23,20 +27,23 @@ def setup_global_network_env():
         os.environ.pop("HTTPS_PROXY", None)
         os.environ.pop("ALL_PROXY", None)
         os.environ["NO_PROXY"] = "*"
+        logger.debug("Global proxy disabled (NO_PROXY=*).")
     elif proxy_mode == "custom" and proxy_url:
         os.environ["HTTP_PROXY"] = proxy_url
         os.environ["HTTPS_PROXY"] = proxy_url
         os.environ["ALL_PROXY"] = proxy_url
         os.environ.pop("NO_PROXY", None)
+        logger.debug(f"Global custom proxy set to: {proxy_url}")
     else:
         os.environ.pop("HTTP_PROXY", None)
         os.environ.pop("HTTPS_PROXY", None)
         os.environ.pop("ALL_PROXY", None)
         os.environ.pop("NO_PROXY", None)
+        logger.debug("Using system default proxy settings.")
 
 
 def _get_explicit_proxy_kwargs():
-    """读取配置，生成请求库所需的显式代理参数"""
+    """Reads configuration to generate explicit proxy arguments for request libraries."""
     cfg = ConfigManager().user_settings
     proxy_mode = cfg.get("proxy_mode", "system")
     proxy_url = cfg.get("proxy_url", "").strip()
@@ -60,17 +67,18 @@ class LightNetworkWorker(QObject):
         self._httpx_client = None
 
     def cancel(self):
+        logger.info("Network operation cancelled by user.")
         self._is_cancelled = True
         if self._req_session:
             try:
                 self._req_session.close()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing requests session: {e}")
         if self._httpx_client:
             try:
                 self._httpx_client.close()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing httpx client: {e}")
 
     def fetch_models(self, base_url, api_key):
         self._is_cancelled = False
@@ -82,11 +90,11 @@ class LightNetworkWorker(QObject):
         elif "proxy" in proxy_cfg:
             self._req_session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
 
+        url = f"{base_url.rstrip('/')}/models"
+        logger.info(f"Fetching models from: {url}")
+
         try:
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            clean_url = base_url.rstrip('/')
-            url = f"{clean_url}/models"
-
             res = self._req_session.get(url, headers=headers, timeout=8)
             res.raise_for_status()
 
@@ -94,16 +102,19 @@ class LightNetworkWorker(QObject):
             models = sorted([m['id'] for m in data.get('data', [])])
 
             if not models:
+                logger.warning("API returned an empty model list.")
                 self.sig_models_fetched.emit(False, [],
                                              "API returned an empty list. Please check your key or enter manually.")
                 return
 
+            logger.info(f"Successfully fetched {len(models)} models.")
             self.sig_models_fetched.emit(True, models, f"Successfully fetched {len(models)} available models!")
 
         except requests.exceptions.RequestException as e:
             if self._is_cancelled:
                 self.sig_models_fetched.emit(False, [], "Operation cancelled by user.")
             else:
+                logger.error(f"Failed to fetch models: {str(e)}")
                 self.sig_models_fetched.emit(False, [], f"Network request failed: {str(e)}")
         finally:
             self._req_session.close()
@@ -112,17 +123,19 @@ class LightNetworkWorker(QObject):
         self._is_cancelled = False
         custom_params = custom_params or {}
 
-        # 配置代理环境
         httpx_kwargs = {"timeout": 15.0}
-        httpx_kwargs.update(_get_explicit_proxy_kwargs())
+        proxy_cfg = _get_explicit_proxy_kwargs()
 
-        if "proxy" in httpx_kwargs:
-            httpx_kwargs["proxies"] = httpx_kwargs.pop("proxy")
+        if "proxy" in proxy_cfg:
+            httpx_kwargs["proxy"] = proxy_cfg["proxy"]
+        elif "trust_env" in proxy_cfg:
+            httpx_kwargs["trust_env"] = proxy_cfg["trust_env"]
 
         self._httpx_client = httpx.Client(**httpx_kwargs)
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        logger.info(f"Testing API endpoint: {url} with model: {model_name}")
 
         try:
-            url = f"{base_url.rstrip('/')}/chat/completions"
             headers = {
                 "Authorization": f"Bearer {api_key or 'sk-test'}",
                 "Content-Type": "application/json"
@@ -134,7 +147,6 @@ class LightNetworkWorker(QObject):
                 "max_tokens": 5
             }
 
-            # 融合自定义参数（跳过影响测试的保留字段）
             for k, v in custom_params.items():
                 if k not in ["model", "messages", "stream"]:
                     payload[k] = v
@@ -158,16 +170,20 @@ class LightNetworkWorker(QObject):
                     raw_content = "[Empty Response / Filtered by Provider]"
 
             reply = raw_content.strip()
+            logger.info(f"API Test successful. Model replied: {reply}")
             self.sig_test_finished.emit(True,
                                         f"✅ API connectivity is excellent!\nModel '{model_name}' responded successfully:\n'{reply}'")
 
         except httpx.HTTPStatusError as e:
             err_text = e.response.text
+            logger.error(f"API Test failed with HTTP {e.response.status_code}: {err_text}")
             self.sig_test_finished.emit(False, f"Test failed: HTTP {e.response.status_code}\n{err_text}")
         except Exception as e:
             if self._is_cancelled or "closed" in str(e).lower():
+                logger.info("API Test cancelled.")
                 self.sig_test_finished.emit(False, "Operation cancelled by user.")
             else:
+                logger.error(f"API Test encountered an exception: {str(e)}")
                 self.sig_test_finished.emit(False, f"Test failed: {str(e)}")
         finally:
             self._httpx_client.close()
@@ -193,23 +209,34 @@ class LightNetworkWorker(QObject):
         elif "proxy" in proxy_cfg:
             self._req_session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
 
+        logger.info(f"Downloading image from: {url}")
+
         try:
-            res = self._req_session.get(url, timeout=30)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            res = self._req_session.get(url, timeout=30, headers=headers)
             res.raise_for_status()
+
             with open(save_path, 'wb') as f:
                 f.write(res.content)
+
+            logger.info(f"Image successfully downloaded to: {save_path}")
             self.sig_image_downloaded.emit(True, url, save_path)
+
         except Exception as e:
             if not self._is_cancelled:
-                self.sig_image_downloaded.emit(False, url, str(e))
+                logger.error(f"Image download failed for {url}: {str(e)}")
+                self.sig_image_downloaded.emit(False, url, f"Download failed: {str(e)}")
         finally:
             self._req_session.close()
 
     def do_download_image(self):
         self.download_image(getattr(self, 'img_url', ''), getattr(self, 'img_save_path', ''))
 
+
 class NetworkEmbeddingFunction(EmbeddingFunction):
-    """统一管理的网络 Embedding 调用器 (兼容 ChromaDB 接口)"""
+    """Network Embedding Caller (ChromaDB Compatible)"""
 
     def __init__(self, api_url, api_key, model_name):
         self.api_url = api_url.rstrip('/')
@@ -228,21 +255,27 @@ class NetworkEmbeddingFunction(EmbeddingFunction):
         if "proxy" in self.proxy_kwargs:
             proxies = {"http": self.proxy_kwargs["proxy"], "https": self.proxy_kwargs["proxy"]}
 
-        response = requests.post(
-            f"{self.api_url}/v1/embeddings",
-            headers=headers,
-            json=payload,
-            timeout=30,
-            proxies=proxies,
-            verify=self.proxy_kwargs.get("trust_env", True) is not False
-        )
-        response.raise_for_status()
-        data = response.json()
-        return [item["embedding"] for item in data["data"]]
+        logger.debug(f"Requesting embeddings for {len(input)} documents using {self.model_name}")
+
+        try:
+            response = requests.post(
+                f"{self.api_url}/v1/embeddings",
+                headers=headers,
+                json=payload,
+                timeout=30,
+                proxies=proxies,
+                verify=True
+            )
+            response.raise_for_status()
+            data = response.json()
+            return [item["embedding"] for item in data["data"]]
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network Embedding Error: {str(e)}")
+            raise RuntimeError(f"Failed to fetch embeddings from network: {str(e)}")
 
 
 class NetworkRerankerFunction:
-    """统一管理的网络 Reranker 调用器 (兼容标准 Rerank API 格式)"""
+    """Network Reranker Caller (Compatible with standard Rerank APIs)"""
 
     def __init__(self, api_url, api_key, model_name):
         self.api_url = api_url.rstrip('/')
@@ -255,7 +288,6 @@ class NetworkRerankerFunction:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        # 常见重排序 API 的 Payload 结构 (例如 Jina, SiliconFlow)
         payload = {
             "model": self.model_name,
             "query": query,
@@ -266,17 +298,21 @@ class NetworkRerankerFunction:
         if "proxy" in self.proxy_kwargs:
             proxies = {"http": self.proxy_kwargs["proxy"], "https": self.proxy_kwargs["proxy"]}
 
-        response = requests.post(
-            f"{self.api_url}/v1/rerank",
-            headers=headers,
-            json=payload,
-            timeout=30,
-            proxies=proxies,
-            verify=self.proxy_kwargs.get("trust_env", True) is not False
-        )
-        response.raise_for_status()
-        data = response.json()
+        logger.debug(f"Requesting rerank for {len(docs)} documents using {self.model_name}")
 
-        # 将网络返回的结果统一映射为统一结构：{"index": 0, "relevance_score": 0.95}
-        return data.get("results", [])
-
+        try:
+            response = requests.post(
+                f"{self.api_url}/v1/rerank",
+                headers=headers,
+                json=payload,
+                timeout=30,
+                proxies=proxies,
+                verify=True
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("results", [])
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network Reranker Error: {str(e)}")
+            # Return empty list to prevent application crash during a search
+            return []

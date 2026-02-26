@@ -1174,18 +1174,21 @@ class ChatTool(BaseTool):
             self.logger.error(f"Failed to export chat history: {str(e)}")
 
     def clear_chat_history(self):
+        self.cancel_generation()
+        self.current_ai_bubble = None
+
         self.history.clear()
         self.clear_layout(self.chat_layout)
         self.is_locked = False
         self.input_container.unlock_input()
 
-        # 恢复默认的发送按钮状态
         self.input_container.btn_retry.setVisible(False)
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
 
         ToastManager().show("Chat history has been cleared.", "success")
         self.logger.info("Chat history cleared by user.")
+
 
     def scroll_to_user_message(self, bubble_widget):
         from PySide6.QtWidgets import QApplication
@@ -1909,6 +1912,7 @@ class ChatTool(BaseTool):
         self.external_chunks = old_chunks
         self.start_ai_response(kb_id)
 
+
     def clear_layout(self, layout):
         while layout.count():
             item = layout.takeAt(0)
@@ -1918,6 +1922,7 @@ class ChatTool(BaseTool):
                     widget.clean_up_images()
                 widget.deleteLater()
         layout.addStretch()
+
 
     def handle_link_click(self, url_str):
 
