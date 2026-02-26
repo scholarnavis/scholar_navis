@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QObject, QPropertyAnimation
 from src.core.config_manager import ConfigManager
 from src.core.llm_impl import OpenAICompatibleLLM
 from src.core.network_worker import setup_global_network_env
+from src.core.theme_manager import ThemeManager
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.core.signals import GlobalSignals
 from src.ui.components.text_formatter import TextFormatter
@@ -119,6 +120,9 @@ class QuickTranslatorWindow(QWidget):
         self.cfg_mgr = ConfigManager()
         self._setup_ui()
         self._center_on_screen()
+        ThemeManager().theme_changed.connect(self._apply_theme)
+
+        self._apply_theme()
 
         if hasattr(GlobalSignals(), 'sig_invoke_translator'):
             GlobalSignals().sig_invoke_translator.connect(self.receive_and_translate)
@@ -351,6 +355,24 @@ class QuickTranslatorWindow(QWidget):
         self.btn_stop.setVisible(False)
         self.btn_trans.setVisible(True)
         self.btn_trans.setEnabled(True)
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+
+        self.main_frame.setStyleSheet(
+            f"QWidget {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 12px; }}"
+        )
+
+        input_style = f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 8px;"
+        self.input_box.setStyleSheet(input_style)
+        self.output_box.setStyleSheet(input_style + " font-size: 14px;")
+
+        combo_style = f"background: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px;"
+        self.combo_src.setStyleSheet(combo_style)
+        self.combo_tgt.setStyleSheet(combo_style)
+
+        self.btn_clear.setStyleSheet(
+            f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px;")
 
     def _on_token(self, token):
         self.current_out_text += token

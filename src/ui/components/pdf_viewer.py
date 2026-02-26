@@ -11,7 +11,7 @@ from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QTextCharFormat, QT
 from PySide6.QtCore import Qt, QRect, QSize, QPoint, Signal, QUrl, QEvent
 
 from src.core.signals import GlobalSignals
-
+from src.core.theme_manager import ThemeManager
 
 
 # 支持鼠标划词的交互式 Label
@@ -62,11 +62,12 @@ class InteractivePDFLabel(QLabel):
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu { background-color: #2d2d30; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px; }
-            QMenu::item { padding: 6px 25px; border-radius: 2px; }
-            QMenu::item:selected { background-color: #007acc; }
-        """)
+        tm = ThemeManager()
+        menu.setStyleSheet(f"""
+                    QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }}
+                    QMenu::item {{ padding: 6px 25px; border-radius: 2px; }}
+                    QMenu::item:selected {{ background-color: {tm.color('accent')}; }}
+                """)
 
         has_text = bool(self.selected_text)
 
@@ -138,6 +139,30 @@ class InternalPDFViewer(QMainWindow):
                                                                                      'sig_invoke_translator') else None)
         # 拦截滚动条事件，实现滚轮翻页
         self.scroll_area.verticalScrollBar().installEventFilter(self)
+
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+        # 统一背景色
+        self.scroll_area.setStyleSheet(f"background-color: {tm.color('bg_main')};")
+
+        # 提取并更新所有 ToolBar 的样式
+        tb_style = f"""
+            QToolBar {{ background: {tm.color('bg_card')}; padding: 6px; border: none; border-bottom: 1px solid {tm.color('border')}; }} 
+            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; }} 
+            QToolButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
+        """
+        for tb in self.findChildren(QToolBar):
+            tb.setStyleSheet(tb_style)
+
+        # 更新提示文本颜色
+        for lbl in self.findChildren(QLabel):
+            if "(💡 Tip:" in lbl.text():
+                lbl.setStyleSheet(
+                    f"color: {tm.color('text_muted')}; font-style: italic; font-size: 13px; padding-left: 10px;")
+
 
     def _setup_toolbar(self):
         tb1 = QToolBar()
@@ -379,6 +404,34 @@ class InternalTextViewer(QMainWindow):
         self.text_browser.installEventFilter(self)
 
         self._setup_toolbar()
+
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+        self.text_browser.setStyleSheet(f"""
+            QTextBrowser {{
+                background-color: {tm.color('bg_main')};
+                color: {tm.color('text_main')};
+                font-size: 14px;
+                font-family: 'Consolas', 'Microsoft YaHei', monospace;
+                padding: 20px;
+                border: none;
+                selection-background-color: {tm.color('accent')};
+                selection-color: {tm.color('bg_card')};
+            }}
+        """)
+
+        # 同样更新 ToolBar 样式
+        tb_style = f"""
+            QToolBar {{ background: {tm.color('bg_card')}; border-bottom: 1px solid {tm.color('border')}; padding: 6px; }} 
+            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; }} 
+            QToolButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
+        """
+        for tb in self.findChildren(QToolBar):
+            tb.setStyleSheet(tb_style)
+
 
     def _setup_toolbar(self):
         tb1 = QToolBar()

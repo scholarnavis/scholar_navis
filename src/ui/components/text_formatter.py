@@ -1,10 +1,17 @@
 import re
 
+from src.core.theme_manager import ThemeManager
+
 
 class TextFormatter:
     @staticmethod
     def format_chat_text(text, index, expanded_indices, user_toggled_thinks):
-        """为聊天窗口生成带有交互折叠功能的 Think 块，采用最高优先级锚点物理截断"""
+        tm = ThemeManager()
+        primary_color = tm.color('primary')   # 替换原来的 #05B8CC
+        think_bg = tm.color('bg_card')        # 替换原来的 #222
+        think_border = tm.color('border')     # 替换原来的 #555
+        text_muted = tm.color('text_muted')   # 替换原来的 #aaa / #999
+
         think_content = ""
         main_text = text
         is_closed = True

@@ -16,6 +16,7 @@ from PySide6.QtGui import QDesktopServices, QTextDocument, QPageLayout, QAbstrac
     QColor
 from PySide6.QtPrintSupport import QPrinter
 
+from src.core.theme_manager import ThemeManager, get_themed_icon
 from src.tools.base_tool import BaseTool
 from src.core.core_task import TaskManager, TaskState
 from src.task.rss_tasks import FetchRSSTask
@@ -568,6 +569,47 @@ class RSSTool(BaseTool):
         self.task_mgr = TaskManager()
         os.makedirs(self.workspace_dir, exist_ok=True)
         self._load_config()
+
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        if not hasattr(self, 'widget') or not self.widget:
+            return
+
+        tm = ThemeManager()
+        bg_base = tm.color('bg_base')
+        bg_card = tm.color('bg_card')
+        border = tm.color('border')
+        text_main = tm.color('text_main')
+        text_muted = tm.color('text_muted')
+        primary = tm.color('primary')
+        success = tm.color('success')
+
+
+        if hasattr(self, 'feed_list'):
+            self.feed_list.setStyleSheet(f"""
+                QListWidget {{ background-color: {bg_base}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 5px; }}
+                QListWidget::item {{ padding: 4px 0px; border-bottom: 1px dashed {border}; }}
+                QListWidget::item:selected {{ background-color: {tm.color('list_sel_bg')}; color: {tm.color('list_sel_text')}; }}
+            """)
+
+        if hasattr(self, 'inp_search_feed'):
+            self.inp_search_feed.setStyleSheet(
+                f"background-color: {bg_card}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 5px;")
+
+        if hasattr(self, 'btn_manage'):
+            self.btn_manage.setStyleSheet(
+                f"background-color: {primary}; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+            self.btn_manage.setText(" Manage Subscriptions")
+            self.btn_manage.setIcon(get_themed_icon("book", "#ffffff"))
+
+        if hasattr(self, 'btn_refresh'):
+            self.btn_refresh.setStyleSheet(
+                f"background-color: {success}; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
+            self.btn_refresh.setText(" Sync Selected / All")
+            self.btn_refresh.setIcon(get_themed_icon("sync", "#ffffff"))
+
 
     def get_ui_widget(self) -> QWidget:
         if hasattr(self, 'widget'): return self.widget

@@ -2,6 +2,8 @@ from PySide6.QtWidgets import QFrame, QLabel, QHBoxLayout, QSizePolicy
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor
 
+from src.core.theme_manager import ThemeManager
+
 
 class FollowUpPillButton(QFrame):
     """
@@ -39,6 +41,14 @@ class FollowUpPillButton(QFrame):
         self._hover_style = f"""
             QFrame {{ background-color: #2d2d30; border: 1px solid {self.color}; border-radius: 12px; }}
         """
+        self.setStyleSheet(self._default_style)
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+        self._default_style = f"QFrame {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 12px; }}"
+        self._hover_style = f"QFrame {{ background-color: {tm.color('bg_input')}; border: 1px solid {self.color}; border-radius: 12px; }}"
         self.setStyleSheet(self._default_style)
 
     def enterEvent(self, event):

@@ -9,9 +9,20 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QTextBrowser)
 from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer, QThread, QUrl
 from PySide6.QtGui import QClipboard, QGuiApplication, QCursor
+
+from src.core.theme_manager import ThemeManager
 from src.ui.components.toast import ToastManager
 from src.core.network_worker import LightNetworkWorker
 
+def hex_to_rgba(hex_color, alpha):
+    """将 #RRGGBB 格式的十六进制颜色转换为 rgba(r, g, b, alpha) 字符串"""
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 3:
+        hex_color = ''.join([c*2 for c in hex_color])
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
 
 class ChatBubbleWidget(QWidget):
     sig_edit_confirmed = Signal(int, str)
@@ -41,8 +52,9 @@ class ChatBubbleWidget(QWidget):
         self.image_loading_timer.timeout.connect(self._animate_image_loading)
         self.image_loading_dots = 0
         self.download_timeouts = {}
-
         self.init_ui()
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
 
     def init_ui(self):
         self.main_layout = QHBoxLayout(self)
@@ -276,6 +288,40 @@ class ChatBubbleWidget(QWidget):
             self.btn_edit.setVisible(False)
         if self.is_editing:
             self.cancel_edit()
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+        font_family = "'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif"
+
+        # User vs AI Bubble Colors
+        if self.is_user:
+            bg_color = hex_to_rgba(tm.color('success'), 0.15) if tm.current_theme == 'dark' else hex_to_rgba(
+                tm.color('success'), 0.1)
+            border_color = tm.color('success')
+        else:
+            bg_color = tm.color('bg_card')
+            border_color = tm.color('border')
+
+        self.lbl_text.setStyleSheet(f"""
+            QLabel {{
+                background-color: {bg_color}; color: {tm.color('text_main')};
+                border: 1px solid {border_color}; border-radius: 8px;
+                padding: 10px 14px; font-size: 14px; font-family: {font_family}; line-height: 1.5;
+            }}
+        """)
+
+        self.edit_input.setStyleSheet(f"""
+            QTextEdit {{ 
+                background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('accent')}; 
+                border-radius: 6px; padding: 6px 10px; font-family: {font_family}; font-size: 14px;
+            }}
+        """)
+
+        btn_style = f"QPushButton {{ background-color: transparent; border: none; color: {tm.color('text_muted')}; font-size: 12px; padding: 2px 4px; border-radius: 4px; }} QPushButton:hover {{ color: {tm.color('text_main')}; background-color: {tm.color('btn_hover')}; }}"
+        self.btn_copy.setStyleSheet(btn_style)
+        if hasattr(self, 'btn_edit'): self.btn_edit.setStyleSheet(btn_style)
+        if hasattr(self, 'btn_cancel'): self.btn_cancel.setStyleSheet(btn_style)
+
 
     def set_loading(self, loading: bool):
         self.is_loading = loading

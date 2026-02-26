@@ -202,5 +202,10 @@ class AppController(QObject):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
+    qdarktheme.setup_theme(saved_theme)
+
     controller = AppController()
+
     sys.exit(app.exec())

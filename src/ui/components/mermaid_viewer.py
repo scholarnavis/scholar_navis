@@ -5,6 +5,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar,
                                QFileDialog, QComboBox, QSplitter, QTextEdit)
 
+from src.core.theme_manager import ThemeManager
 # 🌟 引入你的自定义 Dialog
 from src.ui.components.dialog import StandardDialog
 
@@ -34,6 +35,34 @@ class MermaidViewer(QMainWindow):
         self.splitter.setSizes([300, 900])
 
         self._setup_toolbar()
+
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+
+        # 1. 更新源码编辑器
+        self.source_editor.setStyleSheet(f"""
+            background-color: {tm.color('bg_input')}; 
+            color: {tm.color('text_main')}; 
+            font-family: Consolas, monospace;
+            border: 1px solid {tm.color('border')};
+        """)
+
+        # 2. 更新工具栏
+        tb_style = f"""
+            QToolBar {{ background: {tm.color('bg_card')}; padding: 6px; border: none; border-bottom: 1px solid {tm.color('border')}; }} 
+            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; }} 
+            QToolButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
+        """
+        for tb in self.findChildren(QToolBar):
+            tb.setStyleSheet(tb_style)
+
+        # 3. 如果当前有图表代码，重新渲染以应用新的网页背景色
+        if self.mermaid_code:
+            self.render_diagram()
+
 
     def _setup_toolbar(self):
         tb = QToolBar()
@@ -125,19 +154,28 @@ class MermaidViewer(QMainWindow):
         self.render_diagram()
 
     def render_diagram(self, theme=None):
-        if not theme:
-            theme = self.theme_combo.currentText()
+        tm = ThemeManager()
+
+        # 联动机制：如果用户选择了 "default"，则跟随系统的深色/浅色模式
+        current_combo_theme = self.theme_combo.currentText()
+        if current_combo_theme == "default":
+            mermaid_theme = 'dark' if tm.current_theme == 'dark' else 'default'
+        else:
+            mermaid_theme = current_combo_theme
 
         safe_code = json.dumps(self.mermaid_code)
 
-        # 内嵌 HTML 与 Mermaid 引擎
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="utf-8">
             <style>
-                body {{ background-color: {'#1e1e1e' if theme == 'dark' else '#ffffff'}; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; overflow: auto; }}
+                body {{ 
+                    background-color: {tm.color('bg_main')}; 
+                    display: flex; justify-content: center; align-items: center; 
+                    height: 100vh; margin: 0; overflow: auto; 
+                }}
                 .mermaid {{ transform-origin: top left; }}
             </style>
             <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
@@ -145,7 +183,7 @@ class MermaidViewer(QMainWindow):
         <body>
             <div class="mermaid" id="graphDiv"></div>
             <script>
-                mermaid.initialize({{ startOnLoad: false, theme: '{theme}', securityLevel: 'loose' }});
+                mermaid.initialize({{ startOnLoad: false, theme: '{mermaid_theme}', securityLevel: 'loose' }});
                 const code = {safe_code};
 
                 async function draw() {{
@@ -153,7 +191,7 @@ class MermaidViewer(QMainWindow):
                         const {{ svg }} = await mermaid.render('mermaid-svg', code);
                         document.getElementById('graphDiv').innerHTML = svg;
                     }} catch (e) {{
-                        document.getElementById('graphDiv').innerHTML = `<pre style="color:red;">Error rendering graph:<br>${{e.message}}</pre>`;
+                        document.getElementById('graphDiv').innerHTML = `<pre style="color:{tm.color('danger')};">Error rendering graph:<br>${{e.message}}</pre>`;
                     }}
                 }}
                 draw();

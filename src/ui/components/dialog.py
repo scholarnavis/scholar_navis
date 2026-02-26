@@ -9,8 +9,10 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject
 from PySide6.QtGui import QColor
 
+from src.core.mcp_manager import MCPManager
 from src.core.models_registry import EMBEDDING_MODELS
 from src.ui.components.param_editor import ParamEditorWidget
+from src.core.theme_manager import ThemeManager
 
 
 class BaseDialog(QDialog):
@@ -21,15 +23,11 @@ class BaseDialog(QDialog):
         self.setFixedWidth(width)
         self._drag_pos = None
 
+        self.tm = ThemeManager()
+        self._tracked_buttons = []
+
         self.main_frame = QFrame(self)
         self.main_frame.setObjectName("MainFrame")
-        self.main_frame.setStyleSheet("""
-            QFrame#MainFrame {
-                background-color: #1e1e1e;
-                border: 1px solid #444;
-                border-radius: 6px;
-            }
-        """)
 
         # 阴影
         shadow = QGraphicsDropShadowEffect(self)
@@ -46,28 +44,16 @@ class BaseDialog(QDialog):
         # --- 标题栏 ---
         self.title_bar = QWidget()
         self.title_bar.setFixedHeight(40)
-        self.title_bar.setStyleSheet("""
-            background-color: #252526; 
-            border-top-left-radius: 6px; 
-            border-top-right-radius: 6px; 
-            border-bottom: 1px solid #333;
-        """)
         title_layout = QHBoxLayout(self.title_bar)
         title_layout.setContentsMargins(15, 0, 10, 0)
 
         self.lbl_title = QLabel(title)
-        self.lbl_title.setStyleSheet(
-            "color: #e0e0e0; font-weight: bold; font-family: 'Segoe UI'; font-size: 13px; border: none;")
         title_layout.addWidget(self.lbl_title)
         title_layout.addStretch()
 
         self.btn_close = QPushButton("✕")
         self.btn_close.setFixedSize(30, 30)
         self.btn_close.clicked.connect(self.reject)
-        self.btn_close.setStyleSheet("""
-            QPushButton { border: none; color: #888; background: transparent; font-weight: bold; font-size: 14px; }
-            QPushButton:hover { color: #fff; background-color: #c42b1c; border-radius: 4px; }
-        """)
         title_layout.addWidget(self.btn_close)
         self.v_layout.addWidget(self.title_bar)
 
@@ -81,12 +67,7 @@ class BaseDialog(QDialog):
         # --- 底部按钮区 ---
         self.footer_widget = QWidget()
         self.footer_widget.setFixedHeight(55)
-        self.footer_widget.setStyleSheet("""
-            background-color: #252526; 
-            border-bottom-left-radius: 6px; 
-            border-bottom-right-radius: 6px; 
-            border-top: 1px solid #333;
-        """)
+
         self.footer_layout = QHBoxLayout(self.footer_widget)
         self.footer_layout.setContentsMargins(15, 0, 15, 0)
         self.footer_layout.addStretch()
@@ -98,6 +79,66 @@ class BaseDialog(QDialog):
 
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
 
+        self.tm.theme_changed.connect(self._apply_theme)
+
+    def _apply_theme(self):
+        tm = self.tm
+        self.main_frame.setStyleSheet(f"""
+            QFrame#MainFrame {{
+                background-color: {tm.color('bg_main')};
+                border: 1px solid {tm.color('border')};
+                border-radius: 6px;
+            }}
+        """)
+
+        self.title_bar.setStyleSheet(f"""
+            background-color: {tm.color('bg_card')}; 
+            border-top-left-radius: 6px; 
+            border-top-right-radius: 6px; 
+            border-bottom: 1px solid {tm.color('border')};
+        """)
+
+        self.lbl_title.setStyleSheet(f"""
+            color: {tm.color('text_main')}; font-weight: bold; font-family: 'Segoe UI'; font-size: 13px; border: none;
+        """)
+
+        self.btn_close.setStyleSheet(f"""
+            QPushButton {{ border: none; color: {tm.color('text_muted')}; background: transparent; font-weight: bold; font-size: 14px; }}
+            QPushButton:hover {{ color: {tm.color('bg_main')}; background-color: {tm.color('danger')}; border-radius: 4px; }}
+        """)
+
+        self.footer_widget.setStyleSheet(f"""
+            background-color: {tm.color('bg_card')}; 
+            border-bottom-left-radius: 6px; 
+            border-bottom-right-radius: 6px; 
+            border-top: 1px solid {tm.color('border')};
+        """)
+
+        # 更新所有被跟踪的按钮样式
+        for btn, b_type in self._tracked_buttons:
+            self._update_button_style(btn, b_type)
+
+    def _update_button_style(self, btn, b_type):
+        tm = self.tm
+        base_style = "QPushButton { border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500; }"
+
+        if b_type == "primary":
+            style = base_style + f"""
+                QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border: 1px solid {tm.color('accent')}; }}
+                QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
+            """
+        elif b_type == "danger":
+            style = base_style + f"""
+                QPushButton {{ background-color: transparent; color: {tm.color('danger')}; border: 1px solid {tm.color('danger')}; }}
+                QPushButton:hover {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; }}
+            """
+        else:
+            style = base_style + f"""
+                QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; }}
+                QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
+            """
+        btn.setStyleSheet(style)
+
     def add_button(self, text, callback, is_primary=False, is_danger=False):
         btn = QPushButton(text)
         btn.setFixedSize(90, 32)
@@ -106,26 +147,10 @@ class BaseDialog(QDialog):
         if callback:
             btn.clicked.connect(lambda *args, cb=callback: cb())
 
-        base_style = "QPushButton { border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500; }"
+        b_type = "primary" if is_primary else ("danger" if is_danger else "default")
+        self._tracked_buttons.append((btn, b_type))
+        self._update_button_style(btn, b_type)
 
-        if is_primary:
-            style = base_style + """
-                QPushButton { background-color: #007acc; color: white; border: 1px solid #007acc; }
-                QPushButton:hover { background-color: #0062a3; }
-                QPushButton:pressed { background-color: #005a9e; }
-            """
-        elif is_danger:
-            style = base_style + """
-                QPushButton { background-color: #2d2d30; color: #ff6b6b; border: 1px solid #ff6b6b; }
-                QPushButton:hover { background-color: #ff6b6b; color: white; }
-            """
-        else:
-            style = base_style + """
-                QPushButton { background-color: #3e3e42; color: #cccccc; border: 1px solid #555; }
-                QPushButton:hover { background-color: #4e4e52; }
-            """
-
-        btn.setStyleSheet(style)
         self.footer_layout.addWidget(btn)
         return btn
 
@@ -154,16 +179,21 @@ class BaseDialog(QDialog):
 class StandardDialog(BaseDialog):
     def __init__(self, parent=None, title="Notification", message="", show_cancel=False):
         super().__init__(parent, title=title, width=420)
-        msg_label = QLabel(message)
-        msg_label.setWordWrap(True)
-        msg_label.setStyleSheet("color: #d4d4d4; font-size: 14px; padding: 5px; border: none;")
-        self.content_layout.addWidget(msg_label)
+        self.msg_label = QLabel(message)
+        self.msg_label.setWordWrap(True)
+        self.content_layout.addWidget(self.msg_label)
 
         if show_cancel:
             self.add_button("Cancel", self.reject)
         self.add_button("OK", self.accept, is_primary=True)
+
+        self._apply_theme()
         self.adjustSize()
 
+    def _apply_theme(self):
+        super()._apply_theme()
+        self.msg_label.setStyleSheet(
+            f"color: {self.tm.color('text_main')}; font-size: 14px; padding: 5px; border: none;")
 
 
 try:
@@ -175,26 +205,15 @@ except Exception:
     HAS_NVML = False
 
 
-
 class McpConfigDialog(BaseDialog):
     def __init__(self, parent=None, server_name="", server_config=None):
         title = "编辑 MCP 服务器配置" if server_config else "添加 MCP 服务器"
         super().__init__(parent, title=title, width=560)
 
-        form_widget = QWidget()
-        self.form_layout = QFormLayout(form_widget)
+        self.form_widget = QWidget()
+        self.form_layout = QFormLayout(self.form_widget)
         self.form_layout.setSpacing(15)
         self.form_layout.setLabelAlignment(Qt.AlignRight)
-
-        form_widget.setStyleSheet("""
-            QLabel { color: #aaaaaa; font-size: 13px; border: none; } 
-            QLineEdit, QComboBox { 
-                background-color: #2d2d30; border: 1px solid #444; color: #eeeeee; 
-                border-radius: 4px; padding: 6px; selection-background-color: #05B8CC; 
-            } 
-            QLineEdit:focus, QComboBox:focus { border: 1px solid #05B8CC; }
-            QLineEdit:disabled { background-color: #1e1e1e; color: #666; }
-        """)
 
         self.inp_name = QLineEdit(server_name)
         self.inp_name.setPlaceholderText("例如: remote-database-mcp")
@@ -217,7 +236,6 @@ class McpConfigDialog(BaseDialog):
 
         self.btn_add_auth = QPushButton("🔑 一键填入 Authorization")
         self.btn_add_auth.clicked.connect(self._add_auth_header)
-        self.btn_add_auth.setStyleSheet("color: #e6a23c; font-weight: bold;")
 
         env_btn_layout.addWidget(self.btn_add_env)
         env_btn_layout.addWidget(self.btn_add_auth)
@@ -254,21 +272,38 @@ class McpConfigDialog(BaseDialog):
                 param_list = [{"name": k, "type": "str", "value": str(v)} for k, v in dict_data.items()]
                 self.env_editor.load_data(param_list)
 
-        self.content_layout.addWidget(form_widget)
+        self.content_layout.addWidget(self.form_widget)
 
-        btn_test = self.add_button("🧪 测试连接", self._on_test_clicked)
-        btn_test.setStyleSheet(
-            "QPushButton { background-color: #2b2b2b; color: #ffb86c; border: 1px solid #555; border-radius: 4px; padding: 5px 10px; } QPushButton:hover { background-color: #444; }")
-
-        self.footer_layout.removeWidget(btn_test)
-        self.footer_layout.insertWidget(0, btn_test)
+        self.btn_test = self.add_button("🧪 测试连接", self._on_test_clicked)
+        self.footer_layout.removeWidget(self.btn_test)
+        self.footer_layout.insertWidget(0, self.btn_test)
 
         self.add_button("取消", self.reject)
         self.add_button("保存", self.accept, is_primary=True)
 
         self.combo_type.currentIndexChanged.connect(self._on_type_changed)
         self._on_type_changed()
+
+        self._apply_theme()
         self.adjustSize()
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.form_widget.setStyleSheet(f"""
+            QLabel {{ color: {tm.color('text_muted')}; font-size: 13px; border: none; }} 
+            QLineEdit, QComboBox {{ 
+                background-color: {tm.color('bg_input')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')}; 
+                border-radius: 4px; padding: 6px; selection-background-color: {tm.color('accent')}; 
+            }} 
+            QLineEdit:focus, QComboBox:focus {{ border: 1px solid {tm.color('accent')}; }}
+            QLineEdit:disabled {{ background-color: {tm.color('bg_main')}; color: {tm.color('text_muted')}; }}
+        """)
+        self.btn_add_auth.setStyleSheet(
+            f"color: {tm.color('warning')}; font-weight: bold; background: transparent; border: none;")
+        self.btn_add_env.setStyleSheet(f"color: {tm.color('text_main')}; background: transparent; border: none;")
+        self.btn_test.setStyleSheet(
+            f"QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('warning')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 5px 10px; }} QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}")
 
     def _on_type_changed(self):
         is_stdio = self.combo_type.currentText() == "stdio"
@@ -327,7 +362,6 @@ class McpConfigDialog(BaseDialog):
         self.pd.sig_canceled.connect(self.test_thread.terminate)
 
         def cleanup_test_mcp():
-            from src.core.mcp_manager import MCPManager
             try:
                 MCPManager.get_instance().disconnect_server(f"test_{name}")
             except Exception:
@@ -353,19 +387,27 @@ class McpConfigDialog(BaseDialog):
             err_dialog.exec()
 
 
-
 class AddModelDialog(BaseDialog):
-        def __init__(self, parent=None):
-            super().__init__(parent, title="Add Custom Model", width=350)
-            self.inp_name = QLineEdit()
-            self.inp_name.setPlaceholderText("Enter model ID/name...")
-            self.inp_name.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
-            self.content_layout.addWidget(self.inp_name)
-            self.add_button("Cancel", self.reject)
-            self.add_button("Add", self.accept, is_primary=True)
+    def __init__(self, parent=None):
+        super().__init__(parent, title="Add Custom Model", width=350)
+        self.inp_name = QLineEdit()
+        self.inp_name.setPlaceholderText("Enter model ID/name...")
+        self.content_layout.addWidget(self.inp_name)
 
-        def get_name(self):
-            return self.inp_name.text().strip()
+        self.add_button("Cancel", self.reject)
+        self.add_button("Add", self.accept, is_primary=True)
+
+        self._apply_theme()
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.inp_name.setStyleSheet(
+            f"background: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
+
+    def get_name(self):
+        return self.inp_name.text().strip()
+
 
 class ProgressDialog(BaseDialog):
     sig_canceled = Signal()
@@ -383,7 +425,6 @@ class ProgressDialog(BaseDialog):
         # --- UI 初始化 ---
         self.lbl_message = QLabel(message)
         self.lbl_message.setWordWrap(True)
-        self.lbl_message.setStyleSheet("font-size: 13px; color: #dddddd; margin-bottom: 5px; border: none;")
         self.content_layout.addWidget(self.lbl_message)
 
         self.pbar = QProgressBar()
@@ -391,33 +432,16 @@ class ProgressDialog(BaseDialog):
         self.pbar.setRange(0, 0)
         self.pbar.setAlignment(Qt.AlignCenter)
         self.pbar.setTextVisible(True)
-        self.pbar.setStyleSheet("""
-                    QProgressBar { 
-                        border: 1px solid #444; 
-                        background-color: #1e1e1e; 
-                        border-radius: 4px; 
-                        color: white; 
-                        font-weight: bold; 
-                        font-size: 11px; 
-                        text-align: center; 
-                    }
-                    QProgressBar::chunk { background-color: #05B8CC; border-radius: 3px; }
-                """)
         self.content_layout.addWidget(self.pbar)
 
         self.lbl_metrics = QLabel("Initializing App Profiler...")
         self.lbl_metrics.setWordWrap(True)
-        self.lbl_metrics.setStyleSheet("""
-            QLabel {
-                font-family: 'Consolas', 'Courier New', monospace; 
-                color: #a5d6a7; font-size: 11px; background-color: #1e1e1e;
-                border: 1px solid #333; border-radius: 4px; padding: 6px; margin-top: 5px;
-            }
-        """)
         self.content_layout.addWidget(self.lbl_metrics)
         self.content_layout.addStretch()
 
         self.btn_cancel = self.add_button("Cancel Task", self.on_cancel_clicked, is_danger=True)
+
+        self._apply_theme()
         self.adjustSize()
 
         self.main_process = psutil.Process(os.getpid())
@@ -440,6 +464,38 @@ class ProgressDialog(BaseDialog):
             self.metric_timer.start(1000)
         else:
             self.lbl_metrics.setVisible(False)
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.lbl_message.setStyleSheet(
+            f"font-size: 13px; color: {tm.color('text_main')}; margin-bottom: 5px; border: none;")
+        self.pbar.setStyleSheet(f"""
+            QProgressBar {{ 
+                border: 1px solid {tm.color('border')}; 
+                background-color: {tm.color('bg_input')}; 
+                border-radius: 4px; 
+                color: {tm.color('text_main')}; 
+                font-weight: bold; 
+                font-size: 11px; 
+                text-align: center; 
+            }}
+            QProgressBar::chunk {{ background-color: {tm.color('accent')}; border-radius: 3px; }}
+        """)
+        self.lbl_metrics.setStyleSheet(f"""
+            QLabel {{
+                font-family: 'Consolas', 'Courier New', monospace; 
+                color: {tm.color('success')}; font-size: 11px; background-color: {tm.color('bg_main')};
+                border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 6px; margin-top: 5px;
+            }}
+        """)
+
+        # 处理在 show_success_state 中修改过的按钮样式
+        if self.btn_cancel.text() == "OK":
+            self.btn_cancel.setStyleSheet(f"""
+                QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 4px; border: none; font-weight:bold;}}
+                QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
+            """)
 
     def _format_speed(self, bytes_per_sec):
         if bytes_per_sec >= 1024 * 1024:
@@ -569,10 +625,13 @@ class ProgressDialog(BaseDialog):
         self.lbl_message.setText(message)
         self.btn_cancel.setText("OK")
         self.btn_cancel.setEnabled(True)
-        self.btn_cancel.setStyleSheet("""
-            QPushButton { background-color: #007acc; color: white; border-radius: 4px; border: none; font-weight:bold;}
-            QPushButton:hover { background-color: #0062a3; }
+
+        tm = self.tm
+        self.btn_cancel.setStyleSheet(f"""
+            QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 4px; border: none; font-weight:bold;}}
+            QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
         """)
+
         try:
             self.btn_cancel.clicked.disconnect()
         except:
@@ -602,25 +661,15 @@ class ProgressDialog(BaseDialog):
         super().closeEvent(event)
 
 
-# ... (ProjectEditorDialog 保持不变) ...
 class ProjectEditorDialog(BaseDialog):
     def __init__(self, parent=None, is_edit=False, current_data=None):
         title = "Edit Library Info" if is_edit else "Create New Library"
         super().__init__(parent, title=title, width=480)
 
-        form_widget = QWidget()
-        self.form_layout = QFormLayout(form_widget)
+        self.form_widget = QWidget()
+        self.form_layout = QFormLayout(self.form_widget)
         self.form_layout.setSpacing(15)
         self.form_layout.setLabelAlignment(Qt.AlignRight)
-
-        form_widget.setStyleSheet("""
-            QLabel { color: #aaaaaa; font-size: 13px; border: none; } 
-            QLineEdit, QTextEdit, QComboBox { 
-                background-color: #2d2d30; border: 1px solid #444; color: #eeeeee; 
-                border-radius: 4px; padding: 5px; selection-background-color: #007acc; 
-            } 
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus { border: 1px solid #007acc; }
-        """)
 
         self.inp_name = QLineEdit()
         self.inp_name.setPlaceholderText("e.g. Cotton Genomics")
@@ -641,7 +690,7 @@ class ProjectEditorDialog(BaseDialog):
             self.combo_model.addItem(m['ui_name'], m['id'])
         self.form_layout.addRow("AI Model:", self.combo_model)
 
-        self.content_layout.addWidget(form_widget)
+        self.content_layout.addWidget(self.form_widget)
 
         if is_edit and current_data:
             self.inp_name.setText(current_data.get('name', ''))
@@ -652,12 +701,28 @@ class ProjectEditorDialog(BaseDialog):
             if idx >= 0: self.combo_model.setCurrentIndex(idx)
             self.model_warn = QLabel(
                 "Changing the model invalidates existing vector data. Index rebuild required after saving.")
-            self.model_warn.setStyleSheet("color: #e6a23c; font-size: 11px; font-weight: bold; border: none;")
             self.model_warn.setWordWrap(True)
             self.form_layout.addRow("", self.model_warn)
 
         self.add_button("Cancel", self.reject)
         self.add_button("Save", self.accept, is_primary=True)
+
+        self._apply_theme()
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.form_widget.setStyleSheet(f"""
+            QLabel {{ color: {tm.color('text_muted')}; font-size: 13px; border: none; }} 
+            QLineEdit, QTextEdit, QComboBox {{ 
+                background-color: {tm.color('bg_input')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')}; 
+                border-radius: 4px; padding: 5px; selection-background-color: {tm.color('accent')}; 
+            }} 
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{ border: 1px solid {tm.color('accent')}; }}
+        """)
+        if hasattr(self, 'model_warn'):
+            self.model_warn.setStyleSheet(
+                f"color: {tm.color('warning')}; font-size: 11px; font-weight: bold; border: none;")
 
     def get_data(self):
         return {
@@ -681,7 +746,6 @@ class McpTestWorker(QObject):
 
     def run(self):
         try:
-            from src.core.mcp_manager import MCPManager
             mgr = MCPManager.get_instance()
 
             # 1. 尝试同步连接 (底层最多等待 10 秒)

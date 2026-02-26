@@ -12,6 +12,7 @@ from PySide6.QtGui import QAction, QCursor, QColor
 from PySide6.QtCore import Qt
 from src.core.core_task import TaskState, TaskManager
 from src.core.models_registry import get_model_conf, check_model_exists
+from src.core.theme_manager import ThemeManager,get_themed_icon
 from src.tools.base_tool import BaseTool
 from src.core.kb_manager import KBManager
 from src.core.signals import GlobalSignals
@@ -37,6 +38,10 @@ class ImportTool(BaseTool):
         self.pd = None
 
         GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
+
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
 
     def get_ui_widget(self) -> QWidget:
         if hasattr(self, 'widget') and self.widget: return self.widget
@@ -163,6 +168,52 @@ class ImportTool(BaseTool):
         self._toggle_kb_actions(False)
         self.refresh_kb_list()
         return self.widget
+
+    def _apply_theme(self):
+        if not hasattr(self, 'widget') or not self.widget:
+            return
+
+        tm = ThemeManager()
+
+        # 获取主题颜色
+        bg_base = tm.color('bg_base')  # e.g., #1e1e1e
+        bg_card = tm.color('bg_card')  # e.g., #252526
+        border = tm.color('border')  # e.g., #333333
+        text_main = tm.color('text_main')  # e.g., #e0e0e0
+        text_muted = tm.color('text_muted')
+        primary = tm.color('primary')  # e.g., #007acc
+        danger = tm.color('danger')  # e.g., #ff6b6b
+        btn_bg = tm.color('btn_bg')  # e.g., #3e3e42
+        btn_hover = tm.color('btn_hover')
+
+        # 全局 Widget 样式
+        self.widget.setStyleSheet(f"""
+            QWidget {{ background-color: {bg_base}; color: {text_main}; border: none; }}
+            QGroupBox {{ border: 1px solid {border}; border-radius: 6px; margin-top: 12px; padding-top: 25px; background-color: {bg_card}; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: {text_muted}; }}
+            QPushButton {{ background-color: {btn_bg}; border: 1px solid {border}; border-radius: 4px; padding: 6px 12px; color: {text_main}; }}
+            QPushButton:hover {{ background-color: {btn_hover}; }}
+            QPushButton:disabled {{ color: {text_muted}; background-color: {bg_base}; border: 1px solid {border}; }}
+        """)
+
+        # 表格样式
+        self.file_table.setStyleSheet(f"""
+            QTableWidget {{ background-color: {bg_base}; border: 1px solid {border}; gridline-color: {bg_card}; color: {text_main}; }}
+            QHeaderView::section {{ background-color: {bg_card}; color: {text_muted}; border: none; padding: 4px; }}
+        """)
+
+        # 替换文本为图标
+        self.btn_new.setText(" New")
+        self.btn_new.setIcon(get_themed_icon("add", text_main))
+
+        self.btn_del_kb.setText(" Del")
+        self.btn_del_kb.setIcon(get_themed_icon("delete", danger))
+        self.btn_del_kb.setStyleSheet(f"color: {danger};")
+
+        self.btn_save.setStyleSheet(
+            f"QPushButton:enabled {{ background-color: {primary}; font-weight: bold; color: white; height: 35px; }}")
+        self.btn_save.setIcon(get_themed_icon("send", "#ffffff"))
+
 
     def _toggle_kb_actions(self, enabled: bool, status: str = "ready"):
         if not enabled:

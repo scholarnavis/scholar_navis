@@ -2,6 +2,7 @@ from PySide6.QtWidgets import QComboBox, QStyledItemDelegate, QListView, QStyle
 from PySide6.QtCore import Qt, QRect, QSize
 from PySide6.QtGui import QColor, QPen, QFont, QBrush
 
+from src.core.theme_manager import ThemeManager
 from src.ui.components.combo import BaseComboBox
 
 
@@ -22,12 +23,12 @@ class KBDelegate(QStyledItemDelegate):
         model = data.get('model_ui_name', 'Unknown Model')
         count = str(data.get('doc_count', 0)) + " Docs"
 
-        # 状态处理 (鼠标悬停/选中)
-        painter.save()
+        tm = ThemeManager()
+
         if option.state & QStyle.State.State_Selected:
-            painter.fillRect(option.rect, QColor("#37373d"))
+            painter.fillRect(option.rect, QColor(tm.color('btn_hover')))
         else:
-            painter.fillRect(option.rect, QColor("#252526"))
+            painter.fillRect(option.rect, QColor(tm.color('bg_card')))
 
         # 布局参数
         rect = option.rect
@@ -36,14 +37,14 @@ class KBDelegate(QStyledItemDelegate):
         # 1. 绘制名称 (大字，白色)
         title_font = QFont("Segoe UI", 11, QFont.Bold)
         painter.setFont(title_font)
-        painter.setPen(QColor("#ffffff"))
+        painter.setPen(QColor(tm.color('text_main')))
         title_rect = QRect(rect.left() + margin, rect.top() + 5, rect.width() - 100, 20)
         painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, name)
 
         # 2. 绘制描述 (小字，灰色)
         desc_font = QFont("Segoe UI", 9)
         painter.setFont(desc_font)
-        painter.setPen(QColor("#888888"))
+        painter.setPen(QColor(tm.color('text_muted')))
         desc_rect = QRect(rect.left() + margin, rect.top() + 25, rect.width() - 100, 15)
         # 文本截断
         metrics = painter.fontMetrics()
@@ -58,7 +59,7 @@ class KBDelegate(QStyledItemDelegate):
 
         # 画圆角矩形背景
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor("#007acc")))
+        painter.setBrush(QBrush(QColor(tm.color('accent'))))
         painter.drawRoundedRect(model_rect, 4, 4)
 
         # 画字

@@ -11,6 +11,7 @@ from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf
 from src.core.signals import GlobalSignals
+from src.core.theme_manager import ThemeManager
 from src.tools.chat_tool import ChatTool
 # 引入所有工具
 from src.tools.import_tool import ImportTool
@@ -146,6 +147,10 @@ class MainWindow(QMainWindow):
         self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
         self.shortcut_translate.activated.connect(self.toggle_quick_translator)
 
+        self.tm = ThemeManager()
+        self.tm.theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
         if hasattr(GlobalSignals(), 'theme_changed'):
             GlobalSignals().theme_changed.connect(self._update_logo_theme)
 
@@ -169,6 +174,46 @@ class MainWindow(QMainWindow):
             self.logo_widget.load(logo_path)
         else:
             pass
+
+    def _apply_theme(self):
+        tm = self.tm
+
+        # Update sidebar
+        self.sidebar.setStyleSheet(f"""
+            QListWidget {{ 
+                border: none; 
+                background-color: transparent; 
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 14px; 
+                outline: none; 
+            }}
+            QListWidget::item {{ 
+                padding: 12px 15px; 
+                border-left: 3px solid transparent;
+                color: {tm.color('text_muted')};
+                border-radius: 6px;
+                margin-bottom: 2px;
+            }}
+            QListWidget::item:selected {{ 
+                background-color: {tm.color('btn_bg')}; 
+                color: {tm.color('text_main')}; 
+                border-left: 3px solid {tm.color('accent')};
+                font-weight: bold;
+            }}
+            QListWidget::item:hover:!selected {{ 
+                background-color: {tm.color('btn_hover')}; 
+            }}
+        """)
+
+        # Update Quick Trans Button
+        self.btn_quick_trans.setStyleSheet(f"""
+            QPushButton {{ background-color: transparent; border: none; color: {tm.color('text_muted')}; font-size: 26px; padding: 6px; margin-left: 5px; border-radius: 8px; }}
+            QPushButton:hover {{ color: {tm.color('accent')}; background-color: rgba(5, 184, 204, 0.1); }}
+        """)
+
+        # Update Tool Stack
+        self.tool_stack.setStyleSheet(f"background-color: {tm.color('bg_main')};")
+        self._update_logo_theme()
 
     def _setup_mcp_status_bar(self):
         status_widget = QWidget()

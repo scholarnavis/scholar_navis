@@ -35,6 +35,7 @@ from src.core.models_registry import get_model_conf, resolve_auto_model, ModelMa
 from src.core.network_worker import NetworkEmbeddingFunction, NetworkRerankerFunction
 from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
+from src.core.theme_manager import ThemeManager
 from src.services.file_service import FileService
 from src.task.chat_tasks import ProcessAttachmentTask
 from src.task.kb_tasks import _worker_load_model
@@ -353,6 +354,23 @@ class ChatInputContainer(QFrame):
         self.text_edit.sig_send.connect(self._emit_send)
 
         GlobalSignals().mcp_status_changed.connect(self._on_mcp_status_changed)
+
+        ThemeManager().theme_changed.connect(self._apply_theme)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        tm = ThemeManager()
+        self.setStyleSheet(
+            f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
+
+        tool_btn_style = f"""
+             QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: 'Segoe UI'; font-size: 13px;}}
+             QPushButton:hover {{ background-color: {tm.color('btn_hover')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')};}}
+         """
+        self.btn_export.setStyleSheet(tool_btn_style)
+        self.btn_clear.setStyleSheet(tool_btn_style)
+        self.btn_attach.setStyleSheet(tool_btn_style)
+
 
     def _on_mcp_status_changed(self):
         if self.chk_mcp_enable.isChecked():
@@ -1329,9 +1347,8 @@ class ChatTool(BaseTool):
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
 
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
-        self.sig_finished.connect(self.thread.quit)
-
-        self.thread.start()
+        self.sig_finished.connect(self.worker_thread.quit)
+        self.worker_thread.start()
 
     def cancel_generation(self):
         """Handle the stop button click to abort AI generation."""

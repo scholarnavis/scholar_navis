@@ -1,7 +1,28 @@
 import os
-from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon
+from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon, Qt
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtSvg import QSvgRenderer
 
+from src.core.config_manager import ConfigManager
+
+
+def get_themed_icon(icon_name: str, color_hex: str) -> QIcon:
+    """加载 SVG 并动态渲染成指定的主题颜色"""
+    path = os.path.join(os.getcwd(), "assets", "icons", f"{icon_name}.svg")
+    if not os.path.exists(path):
+        return QIcon()  # Fallback
+
+    renderer = QSvgRenderer(path)
+    pixmap = QPixmap(24, 24)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(pixmap.rect(), QColor(color_hex))
+    painter.end()
+
+    return QIcon(pixmap)
 
 class ThemeManager(QObject):
     theme_changed = Signal()
@@ -21,7 +42,10 @@ class ThemeManager(QObject):
         self._init_themes()
 
     def _init_themes(self):
-        self.current_theme = "dark"
+        try:
+            saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
+        except Exception:
+            saved_theme = "dark"
 
         self.themes = {
             "dark": {
@@ -58,6 +82,11 @@ class ThemeManager(QObject):
             }
         }
 
+        if saved_theme in self.themes:
+            self.current_theme = saved_theme
+        else:
+            self.current_theme = "dark"
+
     def set_theme(self, theme_name: str):
         theme_name = theme_name.lower()
         if theme_name in self.themes and self.current_theme != theme_name:
@@ -83,23 +112,42 @@ class ThemeManager(QObject):
 
     def get_custom_qss(self):
         return f"""
-        QGroupBox {{
-            margin-top: 15px;
-        }}
+        QGroupBox {{ margin-top: 15px; }}
         QGroupBox::title {{
             color: {self.color('title_blue')} !important;
-            font-weight: bold !important;
-            font-size: 14px;
-            subcontrol-origin: margin;
-            left: 5px; 
+            font-weight: bold !important; font-size: 14px;
+            subcontrol-origin: margin; left: 5px; 
         }}
 
         QLineEdit, QPlainTextEdit, QComboBox {{
-            background-color: {self.color('bg_input')};
+            background-color: {self.color('bg_input')}; color: {self.color('text_main')};
+            border: 1px solid {self.color('border')}; border-radius: 4px; padding: 5px;
+        }}
+
+        QComboBox QAbstractItemView {{
+            background-color: {self.color('bg_card')};
             color: {self.color('text_main')};
-            border: 1px solid {self.color('border')};
+            border: 2px solid {self.color('accent')}; /* 用醒目的主色框起来与外部隔离 */
+            selection-background-color: {self.color('btn_hover')};
+            outline: none;
+        }}
+
+        QScrollBar:vertical {{
+            background: {self.color('bg_main')};
+            width: 8px;
+            border-left: 1px solid {self.color('border')};
+            margin: 0px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {self.color('text_muted')};
+            min-height: 20px;
             border-radius: 4px;
-            padding: 5px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {self.color('accent')};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0px; 
         }}
 
         QLineEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, 
@@ -111,7 +159,6 @@ class ThemeManager(QObject):
 
         QLabel[cssClass="hint"] {{ color: {self.color('text_muted')}; font-size: 11px; }}
         QLabel[cssClass="warning"] {{ color: {self.color('warning')}; font-weight: bold; }}
-
         QLabel[cssClass="status-success"] {{ color: {self.color('success')}; font-weight: bold; }}
         QLabel[cssClass="status-error"] {{ color: {self.color('danger')}; font-weight: bold; }}
         QLabel[cssClass="status-pending"] {{ color: {self.color('warning')}; }}
@@ -122,6 +169,8 @@ class ThemeManager(QObject):
             text-align: left; border: none; font-weight: bold;
         }}
         """
+
+
 
     def apply_class(self, widget, class_name):
         widget.setProperty("cssClass", class_name)
