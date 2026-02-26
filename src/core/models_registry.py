@@ -341,3 +341,82 @@ class ModelManager:
             return False, f"Reranker Model ({ui_name})", rerank_id, "reranker"
 
         return True, None, None, None
+
+
+def get_onnx_cache_dir(repo_id):
+    """获取模型的专属 ONNX 本地缓存目录"""
+    hf_home = _get_hf_home()
+    return os.path.join(hf_home, "onnx_cache", repo_id.replace("/", "--"))
+
+
+def get_model_type_by_repo(repo_id):
+    for m in EMBEDDING_MODELS:
+        if m.get('hf_repo_id') == repo_id: return "embedding"
+    for m in RERANKER_MODELS:
+        if m.get('hf_repo_id') == repo_id: return "reranker"
+    return "embedding"
+
+
+def ensure_onnx_model(repo_id, model_type=None):
+    """确保模型已被转换为 ONNX，自动识别官方 ONNX 并屏蔽底层追踪警告"""
+    logger = logging.getLogger("ModelRegistry.ONNX")
+    if not model_type:
+        model_type = get_model_type_by_repo(repo_id)
+
+    onnx_dir = get_onnx_cache_dir(repo_id)
+
+    # 1. 检查我们的私有缓存是否已经转换过
+    if os.path.exists(onnx_dir) and any(f.endswith('.onnx') for f in os.listdir(onnx_dir)):
+        return onnx_dir
+
+    logger.info(f"Preparing ONNX format for {repo_id} ({model_type}). This may take a moment...")
+
+    try:
+        # 获取 Hugging Face 的原始缓存路径
+        model_path = snapshot_download(repo_id=repo_id, local_files_only=True)
+
+        source_has_onnx = False
+        for root, dirs, files in os.walk(model_path):
+            if any(f.endswith('.onnx') for f in files):
+                source_has_onnx = True
+                break
+
+        should_export = not source_has_onnx
+
+        if source_has_onnx:
+            logger.info("Detected official ONNX files in repository. Skipping forced re-export.")
+        else:
+            logger.info("No official ONNX files found. Starting PyTorch to ONNX conversion trace...")
+
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+
+            if model_type == "embedding":
+                model = ORTModelForFeatureExtraction.from_pretrained(
+                    model_path,
+                    export=should_export,
+                    provider="CPUExecutionProvider"
+                )
+            else:
+                model = ORTModelForSequenceClassification.from_pretrained(
+                    model_path,
+                    export=should_export,
+                    provider="CPUExecutionProvider"
+                )
+
+        os.makedirs(onnx_dir, exist_ok=True)
+        model.save_pretrained(onnx_dir)
+        tokenizer.save_pretrained(onnx_dir)
+
+        logger.info(f"ONNX processing successful and saved to: {onnx_dir}")
+        return onnx_dir
+
+    except Exception as e:
+        logger.error(f"ONNX conversion failed for {repo_id}: {e}")
+        raise e
+
+
+
+

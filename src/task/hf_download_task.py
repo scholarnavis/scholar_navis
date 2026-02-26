@@ -87,7 +87,18 @@ class RealTimeHFDownloadTask(BackgroundTask):
                     resume_download=True,
                     max_workers=8,
                 )
-            self.send_log("INFO", f"Download Finished: {repo_id}")
+            self.send_log("INFO", f"Download Finished: {repo_id}. Starting ONNX Conversion...")
+
+            # 自动启动 ONNX 永久转换，并在 Dialog 提示
+            self.queue.put({
+                "state": TaskState.PROCESSING.value,
+                "progress": 99,
+                "msg": f"[{repo_id}] Converting to ONNX format (First time only)..."
+            })
+            from src.core.models_registry import ensure_onnx_model
+            ensure_onnx_model(repo_id)
+
+            self.send_log("INFO", f"ONNX Complete: {repo_id}")
 
         except Exception as e:
             self.send_log("ERROR", f"Download Error: {str(e)}")

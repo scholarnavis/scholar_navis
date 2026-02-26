@@ -7,14 +7,17 @@ import zipfile
 import json
 import uuid
 
+from chromadb import Documents, Embeddings, EmbeddingFunction
 from chromadb.utils import embedding_functions
 from huggingface_hub import snapshot_download
-
+from optimum.onnxruntime import ORTModelForFeatureExtraction
+from transformers import AutoTokenizer
+import torch.nn.functional as F
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask, TaskState
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
-from src.core.models_registry import get_model_conf
+from src.core.models_registry import get_model_conf, ensure_onnx_model
 
 logger = logging.getLogger("Task.kb")
 
@@ -44,7 +47,6 @@ def _setup_worker_env():
 def _worker_load_model(kb_id):
     logger = logging.getLogger("Worker.ModelLoader")
 
-
     kb_mgr = KBManager()
     dev_mgr = DeviceManager()
     kb_data = kb_mgr.get_kb_by_id(kb_id)
@@ -54,39 +56,41 @@ def _worker_load_model(kb_id):
     model_id = kb_data.get('model_id', 'embed_auto')
     conf = get_model_conf(model_id, "embedding")
 
-    if conf and conf.get('is_network', False):
-        logger.info(f"Using Network Embedding API: {conf.get('hf_repo_id')}")
-        from src.core.network_worker import NetworkEmbeddingFunction
-        sys_cfg = ConfigManager().user_settings
-        return NetworkEmbeddingFunction(
-            api_url=sys_cfg.get("network_embed_url", "https://api.openai.com"),
-            api_key=sys_cfg.get("network_embed_key", ""),
-            model_name=conf.get('hf_repo_id')  # 通常填模型名称，如 text-embedding-3-small
-        )
-
     device_info = dev_mgr.get_optimal_device()
     device = device_info.get('type', 'cpu') if isinstance(device_info, dict) else str(device_info)
     repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
 
     try:
-        model_path = snapshot_download(
-            repo_id=repo_id,
-            local_files_only=True
-        )
+        onnx_dir = ensure_onnx_model(repo_id, "embedding")
+        logger.info(f"Loading cached ONNX model from: {onnx_dir}")
 
-        logger.info(f"Cache verification successful. Path: {model_path}")
-
-        embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=model_path,
-            device=device,
-            normalize_embeddings=True
-        )
+        embed_fn = ONNXEmbeddingFunction(onnx_dir, device=device)
         return embed_fn
 
     except Exception as e:
-        error_info = f"FATAL: Model {repo_id} not found in system default cache."
+        error_info = f"FATAL: Model {repo_id} load failed. Check ONNX conversion or cache."
         logger.error(f"{error_info} | {e}")
         raise RuntimeError(error_info)
+
+
+class ONNXEmbeddingFunction(EmbeddingFunction):
+    def __init__(self, onnx_cache_dir, device="cpu"):
+        self.tokenizer = AutoTokenizer.from_pretrained(onnx_cache_dir)
+        provider = "CUDAExecutionProvider" if "cuda" in str(device) else "CPUExecutionProvider"
+        self.model = ORTModelForFeatureExtraction.from_pretrained(
+            onnx_cache_dir,
+            export=False,
+            provider=provider
+        )
+
+    def __call__(self, input: Documents) -> Embeddings:
+        inputs = self.tokenizer(input, padding=True, truncation=True, return_tensors="pt", max_length=512)
+        outputs = self.model(**inputs)
+        embeddings = outputs.last_hidden_state[:, 0, :]
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        return embeddings.tolist()
+
+
 
 class ImportFilesTask(BackgroundTask):
     def _execute(self):

@@ -37,6 +37,7 @@ from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
 from src.services.file_service import FileService
 from src.task.chat_tasks import ProcessAttachmentTask
+from src.task.kb_tasks import _worker_load_model
 from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget
@@ -548,11 +549,10 @@ class ChatWorker(QObject):
 
             self.sig_token.emit("[CLEAR_SEARCH]")
 
-            # ==========================================
+
             # Phase 2 & 3: Vector Retrieval & Reranking (Only if KB is selected)
-            # ==========================================
             if self.kb_id and self.kb_id != "none":
-                self.sig_token.emit("<i>🔍 Loading vector model and retrieving local literature...</i>\n\n")
+                self.sig_token.emit("<i>🔍 Loading local vector model and retrieving literature...</i>\n\n")
 
                 kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
                 if kb_info:
@@ -569,28 +569,7 @@ class ChatWorker(QObject):
                     repo_id = conf.get('hf_repo_id')
 
                     try:
-                        # 网络模型拦截
-                        if conf.get('is_network', False):
-                            self.sig_token.emit("<i>🌐 Calling Network Embedding API...</i>\n\n")
-                            from src.core.network_worker import NetworkEmbeddingFunction
-                            sys_cfg = ConfigManager().user_settings
-                            embed_fn = NetworkEmbeddingFunction(
-                                api_url=sys_cfg.get("network_embed_url", "https://api.openai.com"),
-                                api_key=sys_cfg.get("network_embed_key", ""),
-                                model_name=repo_id
-                            )
-                        else:
-                            # 本地模型加载
-                            model_path = snapshot_download(
-                                repo_id=repo_id,
-                                local_files_only=True,
-                            )
-                            embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-                                model_name=model_path,
-                                device=target_device,
-                                trust_remote_code=conf.get('trust_remote_code', False),
-                                normalize_embeddings=True
-                            )
+                        embed_fn = _worker_load_model(self.kb_id)
 
                         if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
                             self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
@@ -636,69 +615,9 @@ class ChatWorker(QObject):
                     if candidate_docs:
                         candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:45]
 
-                        # 检查 Reranker 模型是否也是网络模型
-                        rerank_conf = get_model_conf(self.main_config.get("rerank_model_id", ""), "reranker") or {}
-
-                        if rerank_conf.get('is_network_api', False):
-                            # 🌐 网络 Reranker
-                            sys_cfg = ConfigManager().user_settings
-                            net_reranker = NetworkRerankerFunction(
-                                api_url=sys_cfg.get("network_rerank_url", "https://api.siliconflow.cn"),
-                                api_key=sys_cfg.get("network_rerank_key", ""),
-                                model_name=rerank_conf.get('hf_repo_id', '')
-                            )
-
-                            doc_texts = [d['content'] for d in candidate_docs]
-                            net_results = net_reranker.rerank(search_query, doc_texts)
-
-                            # 将网络打分映射回原来的文档对象
-                            final_docs = []
-                            for res in net_results:
-                                idx = res.get("index")
-                                score = res.get("relevance_score", 0)
-                                doc_obj = candidate_docs[idx]
-                                doc_obj['score'] = score
-                                final_docs.append(doc_obj)
-
-                            final_docs = sorted(final_docs, key=lambda x: x['score'], reverse=True)[:15]
-
-                        else:
-                            # 💻 本地离线 Reranker
-                            final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=15)
+                        final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=15)
                     else:
                         final_docs = []
-
-
-                    diverse_docs = []
-                    source_counts = {}
-
-                    if final_docs:
-                        for doc in final_docs:
-                            if doc.get('score', 0) < -5.0: continue
-                            src_name = doc['metadata'].get('source', 'Unknown')
-                            source_counts[src_name] = source_counts.get(src_name, 0) + 1
-                            if source_counts[src_name] <= 3:
-                                diverse_docs.append(doc)
-                            if len(diverse_docs) >= 8: break
-
-                    if diverse_docs:
-                        for i, doc_obj in enumerate(diverse_docs):
-                            ref_id = i + 1
-                            meta = doc_obj['metadata']
-                            content = doc_obj['content'].replace('\n', ' ')
-                            sources_map[ref_id] = {
-                                "path": meta.get('file_path', ''),
-                                "page": meta.get('page', 1),
-                                "name": meta.get('source', 'Document'),
-                                "search_text": content[:100]
-                            }
-                            context_str += (
-                                f"--- [Document {ref_id}] ---\n"
-                                f"Source: {meta.get('source', 'Unknown')} (Page {meta.get('page', '?')})\n"
-                                f"Content: {content}\n\n"
-                            )
-            else:
-                self.sig_token.emit("<i>ℹ️ No Knowledge Base selected. Entering direct chat mode...</i>\n\n")
 
             # ==========================================
             # Phase 3.5: Inject External Context (e.g., RSS, Selected Docs)
@@ -1379,7 +1298,7 @@ class ChatTool(BaseTool):
         self.input_container.btn_stop.setVisible(True)
 
         # 实例化后台 Worker
-        self.thread = QThread()
+        self.worker_thread = QThread()
         self.worker = ChatWorker(
             main_config=main_config,
             trans_config=trans_config,
@@ -1393,7 +1312,7 @@ class ChatTool(BaseTool):
         self.external_chunks = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()
-        self.worker.moveToThread(self.thread)
+        self.worker.moveToThread(self.worker_thread)
 
         try:
             self.input_container.btn_stop.clicked.disconnect()
@@ -1401,13 +1320,13 @@ class ChatTool(BaseTool):
             pass
         self.input_container.btn_stop.clicked.connect(self.cancel_generation)
 
-        self.thread.started.connect(self.worker.run)
+        self.worker_thread.started.connect(self.worker.run)
         self.worker.sig_token.connect(self.update_ai_bubble)
         self.worker.sig_finished.connect(self.on_chat_finished)
         self.worker.sig_error.connect(self.on_chat_error)
-        self.worker.sig_finished.connect(self.thread.quit)
+        self.worker.sig_finished.connect(self.worker_thread.quit)
         self.worker.sig_finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
 
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
         self.sig_finished.connect(self.thread.quit)
@@ -1436,8 +1355,8 @@ class ChatTool(BaseTool):
         self.input_container.btn_retry.setVisible(True)
 
         # 5. 强制退出后台线程
-        if hasattr(self, 'thread') and self.thread.isRunning():
-            self.thread.quit()
+        if getattr(self, 'worker_thread', None) is not None and self.worker_thread.isRunning():
+            self.worker_thread.quit()
 
         self.logger.info("AI generation cancelled by user.")
         self.scroll_to_bottom()

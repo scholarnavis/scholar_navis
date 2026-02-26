@@ -7,7 +7,9 @@ from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar, QGraphicsDropShadowEffect
 
+from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
+from src.core.models_registry import resolve_auto_model, get_model_conf, check_model_exists, ensure_onnx_model
 from src.core.network_worker import setup_global_network_env
 from src.core.config_manager import ConfigManager
 from src.core.logger import setup_logger
@@ -56,6 +58,32 @@ class StartupWorker(QObject):
             setup_global_network_env()
             time.sleep(0.1)
 
+            #  Step 2.5: ONNX 格式化检查与静默转换
+            self.sig_progress.emit(40, "Checking local AI models format (ONNX)...")
+
+            cfg = ConfigManager().user_settings
+            dev = DeviceManager().get_optimal_device()
+            dev_str = dev.get('type', 'cpu') if isinstance(dev, dict) else str(dev)
+
+            embed_id = cfg.get("current_model_id", "embed_auto")
+            if embed_id == "embed_auto":
+                embed_id = resolve_auto_model("embedding", dev_str)
+
+            rerank_id = cfg.get("rerank_model_id", "rerank_auto")
+            if rerank_id == "rerank_auto":
+                rerank_id = resolve_auto_model("reranker", dev_str)
+
+            for mid, mtype in [(embed_id, "embedding"), (rerank_id, "reranker")]:
+                conf = get_model_conf(mid, mtype)
+                if conf and not conf.get('is_network', False):
+                    repo_id = conf.get('hf_repo_id')
+                    if repo_id and check_model_exists(repo_id):
+                        self.sig_progress.emit(45, f"Optimizing {mtype} model for ultra-fast startup...")
+                        # 如果没有转换过，这里会触发转换并占用启动时间；如果已经存在，瞬间返回
+                        ensure_onnx_model(repo_id, mtype)
+            time.sleep(0.1)
+
+
             # Step 3: MCP 懒加载准备 (不再这里执行耗时连接)
             self.sig_progress.emit(60, "Preparing MCP Subsystems (Lazy Mode)...")
             time.sleep(0.1)
@@ -77,7 +105,7 @@ class SplashScreen(QWidget):
     """精美的学术风启动界面"""
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(480, 260)
 
