@@ -1,5 +1,7 @@
 import logging
 import os
+import sys
+
 from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon, Qt
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtSvg import QSvgRenderer
@@ -70,6 +72,16 @@ class ThemeManager(QObject):
         except Exception:
             pass
 
+
+    @staticmethod
+    def get_resource_path(*paths):
+        if getattr(sys, 'frozen', False) or '__compiled__' in globals():
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.getcwd()
+        return os.path.join(base_dir, *paths)
+
+
     def set_theme(self, theme_name: str):
         theme_name = theme_name.lower()
         if theme_name in self.themes and self.current_theme != theme_name:
@@ -80,7 +92,7 @@ class ThemeManager(QObject):
         return self.themes[self.current_theme].get(role, "#ff00ff")
 
     def icon(self, icon_name: str, color_key: str) -> QIcon:
-        path = os.path.join(os.getcwd(), "assets", "icons", f"{icon_name}.svg")
+        path = self.get_resource_path("assets", "icons", f"{icon_name}.svg")
 
         if not os.path.exists(path):
             self.logger.warning(f"Missing icon SVG file: '{icon_name}.svg' at {path}")

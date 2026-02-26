@@ -3,8 +3,9 @@ import sys
 import time
 
 import qdarktheme
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot
 from PySide6.QtGui import QFont, QColor
+from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar, QGraphicsDropShadowEffect
 
 from src.core.device_manager import DeviceManager
@@ -13,6 +14,7 @@ from src.core.models_registry import resolve_auto_model, get_model_conf, check_m
 from src.core.network_worker import setup_global_network_env
 from src.core.config_manager import ConfigManager
 from src.core.logger import setup_logger
+from src.core.theme_manager import ThemeManager
 from src.ui.main_window import MainWindow
 
 
@@ -37,8 +39,7 @@ os.environ["SCARF_NO_ANALYTICS"] = "true"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 
-class StartupWorker(QObject):
-    """后台启动任务，防止卡死主 UI 线程"""
+class StartupWorker(QThread):
     sig_progress = Signal(int, str)
     sig_finished = Signal()
 
@@ -58,7 +59,7 @@ class StartupWorker(QObject):
             setup_global_network_env()
             time.sleep(0.1)
 
-            #  Step 2.5: ONNX 格式化检查与静默转换
+            # Step 2.5: ONNX 格式化检查与静默转换
             self.sig_progress.emit(40, "Checking local AI models format (ONNX)...")
 
             cfg = ConfigManager().user_settings
@@ -79,12 +80,10 @@ class StartupWorker(QObject):
                     repo_id = conf.get('hf_repo_id')
                     if repo_id and check_model_exists(repo_id):
                         self.sig_progress.emit(45, f"Optimizing {mtype} model for ultra-fast startup...")
-                        # 如果没有转换过，这里会触发转换并占用启动时间；如果已经存在，瞬间返回
                         ensure_onnx_model(repo_id, mtype)
             time.sleep(0.1)
 
-
-            # Step 3: MCP 懒加载准备 (不再这里执行耗时连接)
+            # Step 3: MCP 懒加载准备
             self.sig_progress.emit(60, "Preparing MCP Subsystems (Lazy Mode)...")
             time.sleep(0.1)
 
@@ -103,45 +102,47 @@ class StartupWorker(QObject):
 
 class SplashScreen(QWidget):
     """精美的学术风启动界面"""
-    def __init__(self):
+
+    def __init__(self, theme="dark"):
         super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(480, 260)
 
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(20)
-        shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(0, 0, 0, 160))
-        self.setGraphicsEffect(shadow)
+        # 根据主题设置启动页颜色
+        is_light = theme == "light"
+        bg_color = "#ffffff" if is_light else "#1e1e1e"
+        text_main = "#222222" if is_light else "#05B8CC"
+        text_sub = "#666666" if is_light else "#888888"
+        border_color = "#cccccc" if is_light else "#333333"
 
         container = QWidget(self)
         container.setFixedSize(460, 240)
         container.move(10, 10)
-        container.setStyleSheet("""
-            QWidget { background-color: #1e1e1e; border-radius: 12px; border: 1px solid #333333; }
+        container.setStyleSheet(f"""
+            QWidget {{ background-color: {bg_color}; border-radius: 12px; border: 1px solid {border_color}; }}
         """)
 
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(30, 40, 30, 30)
 
-        self.title = QLabel("🧠 Scholar Navis")
-        self.title.setStyleSheet("""
-            QLabel { color: #05B8CC; font-size: 28px; font-weight: bold; font-family: 'Segoe UI', 'Microsoft YaHei'; border: none; }
-        """)
+        self.logo = QSvgWidget(ThemeManager.get_resource_path("Assets", "ico.svg"))
+        self.logo.setFixedSize(60, 60)
+        layout.addWidget(self.logo, alignment=Qt.AlignCenter)
+
+        self.title = QLabel("Scholar Navis")
+        self.title.setStyleSheet(f"color: {text_main}; font-size: 24px; font-weight: bold; border: none;")
         self.title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title)
 
         self.subtitle = QLabel("AI-Powered Research Assistant")
-        self.subtitle.setStyleSheet("color: #888888; font-size: 13px; border: none;")
+        self.subtitle.setStyleSheet(f"color: {text_sub}; font-size: 13px; border: none;")
         self.subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.subtitle)
 
         layout.addStretch()
 
         self.lbl_status = QLabel("Initializing engine...")
-        self.lbl_status.setStyleSheet("color: #cccccc; font-size: 12px; border: none;")
+        self.lbl_status.setStyleSheet(f"color: {text_sub}; font-size: 12px; border: none;")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_status)
 
@@ -169,30 +170,24 @@ class AppController(QObject):
         qdarktheme.setup_theme(theme_setting)
         self.logger.info("System Launching.")
 
-        self.thread = QThread()
         self.worker = StartupWorker(self.logger)
-        self.worker.moveToThread(self.thread)
-
         self.worker.sig_progress.connect(self.update_splash)
         self.worker.sig_finished.connect(self.on_startup_finished)
-        self.thread.started.connect(self.worker.run)
+        self.worker.start()  # 直接启动 QThread
 
-        self.thread.start()
-
+    @Slot(int, str)
     def update_splash(self, val, msg):
         self.splash.progress.setValue(val)
         self.splash.lbl_status.setText(msg)
 
+    @Slot()
     def on_startup_finished(self):
         self.splash.progress.setValue(100)
         self.splash.lbl_status.setText("Ready.")
 
         self.main_window = MainWindow()
 
-        self.thread.quit()
-        self.thread.wait()
         self.worker.deleteLater()
-        self.thread.deleteLater()
 
         self.main_window.show()
         self.splash.close()

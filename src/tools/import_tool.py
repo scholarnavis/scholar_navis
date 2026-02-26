@@ -188,18 +188,18 @@ class ImportTool(BaseTool):
 
         # 2. Positive / Creation Actions (Accent / Success)
         if hasattr(self, 'btn_new'):
-            self.btn_new.setIcon(tm.icon("plus", "accent"))
+            self.btn_new.setIcon(tm.icon("add", "accent"))
             self.btn_new.setStyleSheet(
                 f"QPushButton {{ background-color: transparent; border: 1px solid {accent}; color: {accent}; border-radius: 4px; padding: 6px 12px; }} QPushButton:hover {{ background-color: {accent}; color: {bg_main}; }}")
 
         if hasattr(self, 'btn_add_files'):
-            self.btn_add_files.setIcon(tm.icon("file-plus", "success"))
+            self.btn_add_files.setIcon(tm.icon("attach", "success"))
             self.btn_add_files.setStyleSheet(
                 f"QPushButton {{ background-color: transparent; border: 1px solid {success}; color: {success}; border-radius: 4px; padding: 6px 12px; }} QPushButton:hover {{ background-color: {success}; color: {bg_main}; }}")
 
         # 3. Destructive Actions (Danger)
         if hasattr(self, 'btn_del_kb'):
-            self.btn_del_kb.setIcon(tm.icon("trash-2", "danger"))
+            self.btn_del_kb.setIcon(tm.icon("delete", "danger"))
             self.btn_del_kb.setStyleSheet(
                 f"QPushButton {{ background-color: transparent; border: 1px solid {danger}; color: {danger}; border-radius: 4px; padding: 6px 12px; }} QPushButton:hover {{ background-color: {danger}; color: {bg_main}; }}")
 
@@ -230,7 +230,7 @@ class ImportTool(BaseTool):
         display_items = []
         for f in existing_files:
             if f in self.staged_del:
-                display_items.append((f, "Deleted", danger_color, tm.icon("trash", "danger")))
+                display_items.append((f, "Deleted", danger_color, tm.icon("delete", "danger")))
             elif f in self.staged_rename:
                 display_items.append((self.staged_rename[f], f"Renamed (from {f})", warning_color, tm.icon("edit-2", "warning")))
             else:
@@ -326,7 +326,7 @@ class ImportTool(BaseTool):
             display_text = f"{kb['name']}   [Model: {m_ui} | Docs: {kb.get('doc_count', 0)}]"
 
             if status == "corrupted":
-                icon = tm.icon("alert-triangle", "danger")
+                icon = tm.icon("alert", "danger")
                 display_text = f"[CORRUPTED] {display_text}"
             elif status == "building":
                 icon = tm.icon("loader", "warning")

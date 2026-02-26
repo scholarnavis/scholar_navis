@@ -1,19 +1,20 @@
 import os
+import sys
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
-                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout)
+                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem)
 
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf
-from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
+from src.tools.about_tool import AboutTool
 from src.tools.chat_tool import ChatTool
-# 引入所有工具
+
 from src.tools.import_tool import ImportTool
 from src.tools.log_tool import LogTool
 from src.tools.rss_tool import RSSTool
@@ -22,6 +23,15 @@ from src.ui.components.dialog import StandardDialog
 from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
 
+def set_window_titlebar_theme(hwnd, is_dark: bool):
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            # 20 是 DWMWA_USE_IMMERSIVE_DARK_MODE 的常量值
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                int(hwnd), 20, ctypes.byref(ctypes.c_int(1 if is_dark else 0)), 4)
+        except Exception:
+            pass
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -29,132 +39,103 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Scholar Navis - Research Assistant")
         self.resize(1280, 800)
 
-        # Toast
+        # 应用全局窗体图标
+        self.setWindowIcon(QIcon(ThemeManager.get_resource_path("Assets", "ico.svg")))
+
         ToastManager().set_parent(self)
 
         # 主分割器
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_splitter.setHandleWidth(2)
-        main_splitter.setStyleSheet("QSplitter::handle { background-color: #333; }")
-        self.setCentralWidget(main_splitter)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setHandleWidth(1)  # 更现代的细线分割
+        self.setCentralWidget(self.main_splitter)
 
-        # 左侧面板构
-        left_panel = QWidget()
-        left_panel.setMaximumWidth(220)
+        # --- 左侧面板 ---
+        self.left_panel = QWidget()
+        self.left_panel.setFixedWidth(220)
 
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(5, 10, 5, 10)
+        left_layout = QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(10, 15, 10, 15)
         left_layout.setSpacing(10)
 
-        # 1. 动态 SVG Logo 替换原有的文本 QLabel
-        self.logo_widget = QSvgWidget()
-        self.logo_widget.setFixedSize(180, 60) # 你可以根据实际 SVG 的比例微调宽高
-        self._update_logo_theme() # 初始化加载对应主题的 Logo
-        left_layout.addWidget(self.logo_widget, alignment=Qt.AlignCenter)
+        # 顶部：汉堡菜单(折叠按钮) + Logo
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(5, 0, 5, 0)
 
-        # 2. 导航栏
+
+        self.logo_widget = QSvgWidget(ThemeManager.get_resource_path("Assets", "ico.svg"))
+        self.logo_widget.setFixedSize(36, 36)
+
+        self.lbl_app_name = QLabel("Scholar Navis")
+        self.lbl_app_name.setStyleSheet("font-weight: bold; font-size: 16px;")
+
+        top_bar.addWidget(self.logo_widget)
+        top_bar.addWidget(self.lbl_app_name, stretch=1)
+        left_layout.addLayout(top_bar)
+
+        # 导航栏
         self.sidebar = QListWidget()
         self.sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.sidebar.setStyleSheet("""
-            QListWidget { 
-                border: none; 
-                background-color: transparent; 
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 14px; 
-                outline: none; 
-            }
-            QListWidget::item { 
-                padding: 12px 15px; 
-                border-left: 3px solid transparent;
-                color: #cccccc;
-                border-radius: 6px;
-                margin-bottom: 2px;
-            }
-            QListWidget::item:selected { 
-                background-color: #37373d; 
-                color: white; 
-                border-left: 3px solid #05B8CC;
-                font-weight: bold;
-            }
-            QListWidget::item:hover:!selected { 
-                background-color: #2a2d2e; 
-            }
-        """)
         self.sidebar.currentRowChanged.connect(self.switch_tool)
         left_layout.addWidget(self.sidebar)
 
-
-        # 灵动翻译入口
-        self.btn_quick_trans = QPushButton("🌐")
+        # 左下角翻译按钮 (要求：圆形底纹，学术蓝)
+        self.btn_quick_trans = QPushButton()
         self.btn_quick_trans.setToolTip("Quick Translate (Ctrl+Shift+T)")
         self.btn_quick_trans.setCursor(Qt.PointingHandCursor)
-        self.btn_quick_trans.setStyleSheet("""
-                    QPushButton {
-                        background-color: transparent;
-                        border: none;
-                        color: #555555; 
-                        font-size: 26px; 
-                        padding: 6px;
-                        margin-left: 5px;
-                        border-radius: 8px; 
-                    }
-                    QPushButton:hover {
-                        color: #05B8CC; 
-                        background-color: rgba(5, 184, 204, 0.1);
-                    }
-                    QPushButton:pressed {
-                        color: #0497A7;
-                        background-color: rgba(5, 184, 204, 0.2);
-                    }
-                """)
+        self.btn_quick_trans.setFixedSize(48, 48)  # 完美的圆形尺寸
         self.btn_quick_trans.clicked.connect(self.toggle_quick_translator)
 
-        # 靠左下角对齐
-        left_layout.addWidget(self.btn_quick_trans, alignment=Qt.AlignLeft | Qt.AlignBottom)
+        # 包裹在一个布局里使其居中或靠左不拉伸
+        trans_layout = QHBoxLayout()
+        trans_layout.addWidget(self.btn_quick_trans)
+        trans_layout.addStretch()
+        left_layout.addLayout(trans_layout)
 
-        main_splitter.addWidget(left_panel)
+        self.main_splitter.addWidget(self.left_panel)
 
-        # 右侧主面板构建
+        # --- 右侧主面板 ---
         self.tool_stack = QStackedWidget()
-        self.tool_stack.setStyleSheet("background-color: #1e1e1e;")
-        main_splitter.addWidget(self.tool_stack)
+        self.main_splitter.addWidget(self.tool_stack)
 
-        # --- 加载工具 ---
+        # 锁定分割线不可拖拽，纯靠代码控制折叠（更符合现代UI逻辑）
+        self.main_splitter.setCollapsible(0, False)
+        self.main_splitter.setCollapsible(1, False)
+        handle = self.main_splitter.handle(1)
+        handle.setDisabled(True)
+
         self.tools = []
 
-        self.import_tool = ImportTool()
-        self.add_tool(self.import_tool)
+        self.tm = ThemeManager()
+        self.icon_map = {
+            "Library Manager": "folder",
+            "Chat Assistant": "send",
+            "Literature Tracker": "rss",
+            "System Logs": "list",
+            "Global Settings": "settings",
+            "About": "info"
+        }
 
-
+        # 注册所有工具
+        self.add_tool(ImportTool())
         self.add_tool(ChatTool())
-        self.rss_tool = RSSTool()
-        self.add_tool(self.rss_tool)
-
+        self.add_tool(RSSTool())
         self.add_tool(SettingsTool())
-
-        self.log_tool = LogTool()
-        self.add_tool(self.log_tool)
+        self.add_tool(LogTool())
+        self.add_tool(AboutTool())
 
         self.sidebar.setCurrentRow(0)
         self.perform_startup_checks()
         self.clean_old_logs()
-
         self._setup_mcp_status_bar()
 
-        # 注册全局翻译快捷键
         self.translator_dialog = QuickTranslatorWindow(None)
         self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
         self.shortcut_translate.activated.connect(self.toggle_quick_translator)
 
-        self.tm = ThemeManager()
         self.tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
-        if hasattr(GlobalSignals(), 'theme_changed'):
-            GlobalSignals().theme_changed.connect(self._update_logo_theme)
-
-    # 新增唤醒翻译窗口的方法
     def toggle_quick_translator(self):
         if self.translator_dialog.isHidden() or self.translator_dialog.windowOpacity() == 0.0:
             self.translator_dialog.setWindowOpacity(1.0)
@@ -165,7 +146,6 @@ class MainWindow(QMainWindow):
             self.translator_dialog.hide_with_fade()
 
     def _update_logo_theme(self):
-        """根据当前配置的主题加载对应的 Logo"""
         theme = ConfigManager().user_settings.get("theme", "Dark").lower()
         filename = "logo_light.svg" if theme == "light" else "logo_dark.svg"
         logo_path = os.path.join(os.getcwd(), "Assets", filename)
@@ -177,13 +157,20 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self):
         tm = self.tm
+        is_dark = tm.current_theme == "dark"
 
-        # Update base window colors
+        set_window_titlebar_theme(self.winId(), is_dark)
+
         self.setStyleSheet(f"QMainWindow {{ background-color: {tm.color('bg_main')}; }}")
-        self.centralWidget().setStyleSheet(f"QSplitter::handle {{ background-color: {tm.color('border')}; }}")
+        self.main_splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {tm.color('border')}; }}")
         self.tool_stack.setStyleSheet(f"background-color: {tm.color('bg_main')};")
 
-        # Update sidebar list items
+        for i in range(self.sidebar.count()):
+            item = self.sidebar.item(i)
+            tool_name = self.tools[i].tool_name
+            icon_name = self.icon_map.get(tool_name, "tag")
+            item.setIcon(tm.icon(icon_name, "text_main"))
+
         self.sidebar.setStyleSheet(f"""
             QListWidget {{ 
                 border: none; 
@@ -193,16 +180,14 @@ class MainWindow(QMainWindow):
                 outline: none; 
             }}
             QListWidget::item {{ 
-                padding: 12px 15px; 
-                border-left: 3px solid transparent;
+                padding: 10px 8px; 
                 color: {tm.color('text_muted')};
                 border-radius: 6px;
-                margin-bottom: 2px;
+                margin-bottom: 4px;
             }}
             QListWidget::item:selected {{ 
                 background-color: {tm.color('btn_bg')}; 
                 color: {tm.color('text_main')}; 
-                border-left: 3px solid {tm.color('accent')};
                 font-weight: bold;
             }}
             QListWidget::item:hover:!selected {{ 
@@ -210,26 +195,25 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-        self.btn_quick_trans.setText("")
-        self.btn_quick_trans.setIcon(tm.icon("translate", "text_muted"))
+        self.lbl_app_name.setStyleSheet(f"color: {tm.color('title_blue')}; font-weight: bold; font-size: 16px;")
 
-
-        self.btn_quick_trans.setIconSize(QSize(24, 24))
-
+        self.btn_quick_trans.setIcon(tm.icon("translate", "bg_main"))
+        self.btn_quick_trans.setIconSize(QSize(22, 22))
         self.btn_quick_trans.setStyleSheet(f"""
             QPushButton {{ 
-                background-color: transparent; 
-                border: none; 
-                padding: 6px; 
-                margin-left: 5px; 
-                border-radius: 8px; 
+                background-color: {tm.color('accent')}; 
+                border: 2px solid {tm.color('border')};
+                border-radius: 24px;
             }}
             QPushButton:hover {{ 
-                background-color: rgba(5, 184, 204, 0.1); 
+                background-color: {tm.color('accent_hover')}; 
+            }}
+            QPushButton:pressed {{ 
+                background-color: {tm.color('title_blue')}; 
             }}
         """)
 
-        self._update_logo_theme()
+
 
     def _setup_mcp_status_bar(self):
         status_widget = QWidget()
@@ -345,24 +329,23 @@ class MainWindow(QMainWindow):
         if not is_first:
             self.check_model_integrity()
 
-
-
     def add_tool(self, tool):
         self.tools.append(tool)
         widget = tool.get_ui_widget()
         self.tool_stack.addWidget(widget)
-        self.sidebar.addItem(tool.tool_name)
 
-        if hasattr(tool, 'sig_log'):
-            tool.sig_log.connect(lambda msg: self.dispatch_log("INFO", msg))
+        icon_name = self.icon_map.get(tool.tool_name, "tag")
+        item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {tool.tool_name}")
+        self.sidebar.addItem(item)
+
 
     def switch_tool(self, index):
         self.tool_stack.setCurrentIndex(index)
 
+
     def check_model_integrity(self):
         """
         启动自检
-        🌟 修复：不再自动删除文件，只提示。
         """
         cfg = ConfigManager()
         dev = DeviceManager().get_optimal_device()
