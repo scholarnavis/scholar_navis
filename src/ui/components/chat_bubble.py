@@ -15,6 +15,9 @@ from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 from src.core.network_worker import LightNetworkWorker
 
+
+
+
 def hex_to_rgba(hex_color, alpha):
     """将 #RRGGBB 格式的十六进制颜色转换为 rgba(r, g, b, alpha) 字符串"""
     hex_color = hex_color.lstrip('#')
@@ -61,22 +64,25 @@ class ChatBubbleWidget(QWidget):
         tm = ThemeManager()
 
         self.main_layout = QHBoxLayout(self)
-        self.main_layout.setContentsMargins(10, 5, 10, 15)
+        self.main_layout.setContentsMargins(10, 5, 10, 5)
         self.main_layout.setSpacing(10)
 
         self.spacer = QWidget()
         self.spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self.content_container = QWidget()
+        self.content_container.setObjectName("BubbleWrapper")
+        self.content_container.setAttribute(Qt.WA_StyledBackground, True)
         self.content_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self.content_layout = QVBoxLayout(self.content_container)
-        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setContentsMargins(12, 12, 12, 12)
         self.content_layout.setSpacing(6)
         self.content_layout.setAlignment(Qt.AlignTop)
 
         font_family = tm.font_family()
 
+        # 附件上下文框
         if self.is_user and self.context_html:
             self.ctx_frame = QFrame()
             self.ctx_frame.setStyleSheet("""
@@ -108,6 +114,7 @@ class ChatBubbleWidget(QWidget):
             ctx_layout.addWidget(ctx_content)
             self.content_layout.addWidget(self.ctx_frame)
 
+        # 正文文本框
         self.lbl_text = QLabel()
         self.lbl_text.setWordWrap(True)
         self.lbl_text.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -117,42 +124,19 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
 
         if self.is_user:
-            bg_color = "#124126"
-            border_color = "#1e5e38"
-            self.lbl_text.setStyleSheet(f"""
-                QLabel {{
-                    background-color: {bg_color}; color: #e0e0e0;
-                    border: 1px solid {border_color}; border-radius: 8px;
-                    padding: 10px 14px; font-size: 14px; font-family: {font_family}; line-height: 1.5;
-                }}
-            """)
             self.main_layout.addWidget(self.spacer)
             self.main_layout.addWidget(self.content_container)
             btn_alignment = Qt.AlignRight
         else:
-            bg_color = "#333333"
-            border_color = "#444444"
-            self.lbl_text.setStyleSheet(f"""
-                QLabel {{
-                    background-color: {bg_color}; color: #e0e0e0;
-                    border: 1px solid {border_color}; border-radius: 8px;
-                    padding: 10px 14px; font-size: 14px; font-family: {font_family}; line-height: 1.5;
-                }}
-            """)
             self.main_layout.addWidget(self.content_container)
             self.main_layout.addWidget(self.spacer)
             btn_alignment = Qt.AlignLeft
 
         self.set_content(self.original_text)
 
+        # 编辑输入框
         self.edit_input = QTextEdit()
         self.edit_input.setVisible(False)
-        self.edit_input.setStyleSheet(f"""
-            QTextEdit {{ 
-                background-color: #2b2b2b; color: #fff; border: 1px solid #007acc; 
-                border-radius: 6px; padding: 6px 10px; font-family: {font_family}; font-size: 14px;
-            }}
-        """)
         self.edit_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.edit_input.installEventFilter(self)
         self.edit_input.textChanged.connect(self.adjust_edit_height)
@@ -160,21 +144,16 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.addWidget(self.lbl_text)
         self.content_layout.addWidget(self.edit_input)
 
+        # 底部按钮栏 (Copy, Edit, Retry 等)
         self.btn_widget = QWidget()
         self.btn_layout = QHBoxLayout(self.btn_widget)
         self.btn_layout.setContentsMargins(0, 0, 5, 0)
         self.btn_layout.setSpacing(10)
         self.btn_layout.setAlignment(btn_alignment)
 
-        btn_style = """
-            QPushButton { background-color: transparent; border: none; color: #777; font-size: 12px; padding: 2px 4px; border-radius: 4px; } 
-            QPushButton:hover { color: #ccc; background-color: #444; }
-        """
-
         self.btn_copy = QPushButton(" Copy")
         self.btn_copy.setIcon(tm.icon("copy", "text_muted"))
         self.btn_copy.setCursor(Qt.PointingHandCursor)
-        self.btn_copy.setStyleSheet(btn_style)
         self.btn_copy.clicked.connect(self.copy_text)
         self.btn_layout.addWidget(self.btn_copy)
 
@@ -194,12 +173,12 @@ class ChatBubbleWidget(QWidget):
             self.btn_edit = QPushButton("Edit")
             self.btn_edit.setIcon(tm.icon("edit", "text_muted"))
             self.btn_edit.setCursor(Qt.PointingHandCursor)
-            self.btn_edit.setStyleSheet(btn_style)
             self.btn_edit.clicked.connect(self.toggle_edit)
             self.btn_layout.addWidget(self.btn_edit)
 
         self.content_layout.addWidget(self.btn_widget)
 
+        # 编辑确认栏 (仅用户侧有)
         if self.is_user:
             self.edit_btn_widget = QWidget()
             self.edit_btn_layout = QHBoxLayout(self.edit_btn_widget)
@@ -209,8 +188,9 @@ class ChatBubbleWidget(QWidget):
 
             self.btn_cancel = QPushButton(" Cancel")
             self.btn_cancel.setIcon(tm.icon("close", "text_muted"))
+            self.btn_cancel.clicked.connect(self.cancel_edit)
 
-            self.btn_confirm = QPushButton(" Confirm)")
+            self.btn_confirm = QPushButton(" Confirm")
             self.btn_confirm.setIcon(tm.icon("check-circle", "bg_main"))
             confirm_style = """
                 QPushButton { background-color: #007acc; border: none; color: white; font-size: 12px; padding: 5px 12px; border-radius: 4px; font-weight: bold;} 
@@ -298,7 +278,6 @@ class ChatBubbleWidget(QWidget):
         tm = ThemeManager()
         font_family = tm.font_family()
 
-        # User vs AI Bubble Colors
         if self.is_user:
             bg_color = hex_to_rgba(tm.color('success'), 0.15) if tm.current_theme == 'dark' else hex_to_rgba(
                 tm.color('success'), 0.1)
@@ -307,11 +286,19 @@ class ChatBubbleWidget(QWidget):
             bg_color = tm.color('bg_card')
             border_color = tm.color('border')
 
+        self.content_container.setStyleSheet(f"""
+            QWidget#BubbleWrapper {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 8px;
+            }}
+        """)
+
         self.lbl_text.setStyleSheet(f"""
             QLabel {{
-                background-color: {bg_color}; color: {tm.color('text_main')};
-                border: 1px solid {border_color}; border-radius: 8px;
-                padding: 10px 14px; font-size: 14px; font-family: {font_family}; line-height: 1.5;
+                background-color: transparent; color: {tm.color('text_main')};
+                border: none; padding: 0px; 
+                font-size: 14px; font-family: {font_family}; line-height: 1.5;
             }}
         """)
 

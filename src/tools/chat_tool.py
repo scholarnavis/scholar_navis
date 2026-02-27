@@ -43,9 +43,10 @@ from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import StandardDialog
+from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
-from src.ui.components.pill_button import FollowUpPillButton
+from src.ui.components.pill_button import FollowUpPillButton, FollowUpGroupWidget
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
@@ -892,96 +893,100 @@ class ChatTool(BaseTool):
 
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
+
+        # 1. 主容器与全局布局
         self.widget = ChatDropTargetWidget()
         self.widget.sig_files_dropped.connect(self.process_attached_files)
-        layout = QVBoxLayout(self.widget)
-        layout.setSpacing(10)
-        layout.setContentsMargins(10, 10, 10, 10)
 
+        # 设置主布局间距为0，靠内部组件的 margins 控制，防止多重间距叠加
+        main_layout = QVBoxLayout(self.widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        # 2. 顶部工具栏 (模型与知识库选择)
         top_bar = QVBoxLayout()
         top_bar.setSpacing(8)
+        top_bar.setContentsMargins(0, 0, 0, 10)  # 底部留白
 
-        #  模型选择组件
+        # 第一行：模型与翻译器选择
         row1_layout = QHBoxLayout()
-        lbl_model = QLabel(" Model:")
-        lbl_model.setPixmap(ThemeManager().icon("ai_model", "text_main").pixmap(16, 16))  # 添加图标
         self.model_selector = ModelSelectorWidget(label_text=" Model:", config_key="active_llm_id",
                                                   model_key="model_name")
-        row1_layout.addWidget(self.model_selector)
-
-        row1_layout.addSpacing(15)
         self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="trans_llm_id",
                                                   model_key="trans_model_name")
+        row1_layout.addWidget(self.model_selector)
+        row1_layout.addSpacing(15)
         row1_layout.addWidget(self.trans_selector)
         row1_layout.addStretch()
 
         # 第二行：知识库选择
         row2_layout = QHBoxLayout()
         lbl_kb = QLabel(" Knowledge Base:")
-        row2_layout.addWidget(lbl_kb)
         self.combo_kb = BaseComboBox(min_width=250)
         self.refresh_kb_list()
+        row2_layout.addWidget(lbl_kb)
         row2_layout.addWidget(self.combo_kb)
         row2_layout.addStretch()
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
-        layout.addLayout(top_bar)
+        main_layout.addLayout(top_bar)
 
-        # 加载本地配置文件并填充两个下拉框
+        # 加载配置
         self.load_llm_configs()
 
-        # --- 对话展示区 ---
+        # 3. 对话展示滚动区 (仅存放消息气泡)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("""
-                    QScrollArea { border: none; background-color: transparent; }
-                """)
+        self.scroll_area.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background-color: transparent;")
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setSpacing(15)
-        self.chat_layout.setAlignment(Qt.AlignTop)
-        self.chat_layout.setContentsMargins(10, 10, 10, 10)
-        self.scroll_area.setWidget(self.chat_container)
-        layout.addWidget(self.scroll_area, stretch=1)
+        self.chat_layout.setContentsMargins(10, 10, 10, 5)
 
+        # 【关键】强制靠顶，移除所有 Spacer
+        self.chat_layout.setAlignment(Qt.AlignTop)
+
+        self.scroll_area.setWidget(self.chat_container)
+        main_layout.addWidget(self.scroll_area, stretch=1)
+
+        # --- 悬浮滚动到底部按钮 ---
         self.btn_scroll_bottom = QPushButton("", self.scroll_area)
         self.btn_scroll_bottom.setIcon(ThemeManager().icon("down", "bg_main"))
-        self.btn_scroll_bottom.setCursor(Qt.PointingHandCursor)
         self.btn_scroll_bottom.setFixedSize(40, 40)
-        # 将原有的背景色也根据主题变量提取一下
+        self.btn_scroll_bottom.setCursor(Qt.PointingHandCursor)
         self.btn_scroll_bottom.setStyleSheet(f"""
-                    QPushButton {{ 
-                        background-color: {ThemeManager().color('accent')}; 
-                        border-radius: 20px;
-                        border: 1px solid {ThemeManager().color('border')};
-                    }}
-                    QPushButton:hover {{ 
-                        background-color: {ThemeManager().color('accent_hover')}; 
-                    }}
-                """)
-
-        # 透明度动画效果
+            QPushButton {{ 
+                background-color: {ThemeManager().color('accent')}; 
+                border-radius: 20px; border: 1px solid {ThemeManager().color('border')};
+            }}
+            QPushButton:hover {{ background-color: {ThemeManager().color('accent_hover')}; }}
+        """)
         self.opacity_effect = QGraphicsOpacityEffect(self.btn_scroll_bottom)
         self.btn_scroll_bottom.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(0.0)
         self.btn_scroll_bottom.setVisible(False)
-
         self.fade_anim = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.fade_anim.setDuration(250)  # 250ms 淡入淡出
-
-        # 绑定点击事件
+        self.fade_anim.setDuration(250)
         self.btn_scroll_bottom.clicked.connect(self.scroll_to_bottom)
-
-        # 安装事件过滤器，处理位置自适应
         self.overlay_filter = FloatingOverlayFilter(self.scroll_area, self.btn_scroll_bottom)
         self.scroll_area.installEventFilter(self.overlay_filter)
-
-        # 监听滚动条数值变化
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._check_scroll_position)
 
-        # --- 输入区 ---
+        # 4. 【核心重构】追问建议区域 (shelf) - 位于滚动区之外，输入框之上
+        self.follow_up_shelf = QWidget()
+        self.follow_up_shelf.setObjectName("FollowUpShelf")
+        self.follow_up_shelf.setVisible(False)  # 初始隐藏
+        self.follow_up_shelf_layout = QVBoxLayout(self.follow_up_shelf)
+        self.follow_up_shelf_layout.setContentsMargins(10, 5, 10, 5)
+        self.follow_up_shelf_layout.setSpacing(5)
+
+        # 将 shelf 添加到主布局
+        main_layout.addWidget(self.follow_up_shelf)
+
+        # 5. 底部输入区
         self.input_container = ChatInputContainer()
         self.input_container.sig_send_clicked.connect(self.process_send)
         self.input_container.sig_export_clicked.connect(self.export_chat_history)
@@ -990,7 +995,8 @@ class ChatTool(BaseTool):
         self.input_container.sig_attach_clicked.connect(self.show_attachment_menu)
         self.input_container.sig_clear_context_clicked.connect(self.clear_attached_context)
 
-        layout.addWidget(self.input_container)
+        main_layout.addWidget(self.input_container)
+
         return self.widget
 
     def attach_from_local(self):
@@ -1208,22 +1214,23 @@ class ChatTool(BaseTool):
             ToastManager().show(f"Failed to export document: {str(e)}", "error")
             self.logger.error(f"Failed to export document: {str(e)}")
 
+    def clear_follow_up_shelf(self):
+        while self.follow_up_shelf_layout.count() > 0:
+            item = self.follow_up_shelf_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.follow_up_shelf.setVisible(False)
 
     def clear_chat_history(self):
         self.cancel_generation()
         self.current_ai_bubble = None
-
         self.history.clear()
         self.clear_layout(self.chat_layout)
-        self.is_locked = False
+
+        self.clear_follow_up_shelf()
+
         self.input_container.unlock_input()
-
-        self.input_container.btn_retry.setVisible(False)
-        self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_send.setVisible(True)
-
-        ToastManager().show("Chat history has been cleared.", "success")
-        self.logger.info("Chat history cleared by user.")
+        ToastManager().show("Chat history cleared.", "success")
 
     def scroll_to_user_message(self, bubble_widget):
         QApplication.processEvents()
@@ -1292,7 +1299,7 @@ class ChatTool(BaseTool):
         self.input_container.btn_stop.setVisible(True)
 
         if not is_retry:
-            self.logger.info(f"🗣️ User asked: {text[:50]}... (KB: {kb_id})")
+            self.logger.info(f"User asked: {text[:50]}... (KB: {kb_id})")
             self.input_container.clear_text()
 
             # 将上下文的 HTML 链接渲染在气泡上方
@@ -1343,8 +1350,10 @@ class ChatTool(BaseTool):
             self.process_send(last_user_msg.get('display_text', last_user_msg['content']), is_retry=True)
 
 
+
     def add_bubble(self, text, is_user, context_html=None):
         if is_user:
+            self.remove_old_follow_ups()
             for i in range(self.chat_layout.count()):
                 item = self.chat_layout.itemAt(i)
                 if item and item.widget():
@@ -1370,9 +1379,9 @@ class ChatTool(BaseTool):
                 QTimer.singleShot(50, lambda: self.scroll_to_user_message(bubble))
             else:
                 QTimer.singleShot(50, self.scroll_to_bottom)
-                self.scroll_to_bottom()
 
         return bubble
+
 
     def scroll_to_bottom(self):
         sb = self.scroll_area.verticalScrollBar()
@@ -1437,6 +1446,78 @@ class ChatTool(BaseTool):
         self.worker.sig_finished.connect(self.worker_thread.quit)
         self.worker_thread.start()
 
+    def handle_edit_resend(self, index, new_text):
+        if getattr(self, 'is_locked', False):
+            ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
+            old_msg = self.history[index]
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget() and hasattr(item.widget(), 'index'):
+                    if item.widget().index == index:
+                        item.widget().set_content(
+                            self._format_response(old_msg.get('display_text', old_msg['content']), index))
+            return
+
+        last_user_idx = -1
+        for i in range(len(self.history) - 1, -1, -1):
+            if self.history[i]['role'] == 'user':
+                last_user_idx = i
+                break
+
+        if index != last_user_idx:
+            ToastManager().show("You can only edit your most recent message.", "warning")
+            return
+
+        old_msg = self.history[index]
+        old_context_html = old_msg.get('context_html')
+        old_chunks = old_msg.get('external_chunks', [])
+
+        self.history = self.history[:index]
+
+        v_bar = self.scroll_area.verticalScrollBar()
+        current_scroll = v_bar.value()
+        self._is_editing = True
+
+        self.clear_layout(self.chat_layout)
+        temp_history = list(self.history)
+        self.history = []
+
+        for msg in temp_history:
+            display_text = msg.get('display_text', msg['content'])
+            ctx_html = msg.get('context_html')
+            self.add_bubble(display_text, is_user=(msg['role'] == 'user'), context_html=ctx_html)
+            self.history.append(msg)
+
+        kb_data = self.combo_kb.currentData()
+        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
+
+        self.add_bubble(new_text, is_user=True, context_html=old_context_html)
+
+        QApplication.processEvents()
+        v_bar.setValue(current_scroll)
+        self._is_editing = False
+
+        llm_text = new_text
+        if old_chunks:
+            context_block = "\n".join(
+                [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in old_chunks]
+            )
+            llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{new_text}"
+        elif "Context Info:\n" in old_msg['content'] and "\n\nQuestion:\n" in old_msg['content']:
+            context_part = old_msg['content'].split("\n\nQuestion:\n")[0]
+            llm_text = f"{context_part}\n\nQuestion:\n{new_text}"
+
+        self.history.append({
+            "role": "user",
+            "content": llm_text,
+            "display_text": new_text,
+            "context_html": old_context_html,
+            "external_chunks": old_chunks
+        })
+
+        self.external_chunks = old_chunks
+        self.start_ai_response(kb_id)
+
     def cancel_generation(self):
         if hasattr(self, 'worker') and self.worker:
             self.worker.cancel()
@@ -1461,6 +1542,19 @@ class ChatTool(BaseTool):
 
         self.logger.info("AI generation cancelled by user.")
         self.scroll_to_bottom()
+
+    def _trigger_follow_up(self, text):
+        if getattr(self, 'is_locked', False):
+            ToastManager().show("Cannot send: The current library has been modified. Please clear chat.", "warning")
+            return
+        self.process_send(text)
+
+    def _edit_follow_up(self, text):
+        if getattr(self, 'is_locked', False):
+            ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
+            return
+        self.input_container.set_text(text)
+
 
     def _show_slow_connection_warning(self):
         if self.current_ai_bubble and getattr(self, '_is_waiting_llm', False):
@@ -1723,24 +1817,6 @@ class ChatTool(BaseTool):
 
         processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
 
-        # 2. 增加：为 <think> 标签添加区分底纹
-        think_pattern = r'<think>(.*?)</think>'
-
-        def repl_think(match):
-            think_content = match.group(1).strip()
-            tm = ThemeManager()
-            bg_color = tm.color('bg_input')
-            border_color = tm.color('accent')
-            text_color = tm.color('text_main')
-
-            return (
-                f"<div style='background-color: {bg_color}; border-left: 4px solid {border_color}; "
-                f"padding: 12px; margin: 10px 0; border-radius: 4px; color: {text_color}; font-size: 14.5px;'>"
-                f"<span style='font-size: 16px;'>💡</span> <b>Thinking Process:</b><br>{think_content}</div>"
-            )
-
-        processed_text = re.sub(think_pattern, repl_think, processed_text, flags=re.DOTALL | re.IGNORECASE)
-
         return TextFormatter.format_chat_text(
             processed_text, index, getattr(self, 'expanded_thinks', set()), getattr(self, 'user_toggled_thinks', set())
         )
@@ -1851,132 +1927,28 @@ class ChatTool(BaseTool):
                 self.input_container.lock_input()
             ToastManager().show("The knowledge base was modified. Chat is currently locked.", "warning")
 
+
     def render_follow_up_buttons(self, questions):
-        container = QWidget()
-        container.setStyleSheet("background: transparent;")
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(60, 10, 60, 20)
-        layout.setSpacing(8)
+        if not questions: return
 
-        lbl = QLabel("<b>Explore deeper (Left-click to send, Right-click to edit):</b>")
-        lbl.setStyleSheet("color: #888888; font-size: 12px; border: none;")
-        layout.addWidget(lbl)
+        self.follow_up_group = FollowUpGroupWidget(
+            questions,
+            self._trigger_follow_up,
+            self._edit_follow_up
+        )
 
-        color_map = {
-            "Deep Dive": ("warning", "search"),
-            "Critical": ("danger", "warning"),
-            "Broader": ("success", "explore"),
-            "Brainstorm": ("accent", "lightbulb"),
-            "Similar": ("accent_hover", "link"),
-            "Application": ("title_blue", "rocket"),
-            "General": ("text_muted", "help")
-        }
-
-        for q_obj in questions:
-            tag = q_obj.get("tag", "General") if isinstance(q_obj, dict) else "General"
-            raw_text = q_obj.get("text", q_obj) if isinstance(q_obj, dict) else q_obj
-            clean_text = re.sub(r'\[\s*\d+\s*(?:,\s*\d+\s*)*\]', '', raw_text)
-            clean_text = clean_text.replace('**', '').strip()
-
-            color_key, icon_name = color_map.get(tag, ("text_muted", "help"))
-            btn = FollowUpPillButton(tag, clean_text, color_key, icon_name)
-
-            if getattr(self, 'is_locked', False):
-                btn.setToolTip("Context locked due to Knowledge Base modification. Please clear chat.")
-            btn.sig_clicked.connect(self._trigger_follow_up)
-            btn.sig_right_clicked.connect(self._edit_follow_up)
-            layout.addWidget(btn)
-
-        self.chat_layout.addWidget(container)
+        # 将其作为对话流的一个整体插入
+        self.chat_layout.addWidget(self.follow_up_group)
 
         if not getattr(self, '_is_editing', False):
-            from PySide6.QtCore import QTimer
             QTimer.singleShot(50, self.scroll_to_bottom)
-            self.scroll_to_bottom()
 
-    def _trigger_follow_up(self, text):
-        if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: The current library has been modified. Please clear chat.", "warning")
-            return
-        self.process_send(text)
-
-    def _edit_follow_up(self, text):
-        if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
-            return
-        self.input_container.set_text(text)
-
-    def handle_edit_resend(self, index, new_text):
-        if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
-            old_msg = self.history[index]
-            for i in range(self.chat_layout.count()):
-                item = self.chat_layout.itemAt(i)
-                if item and item.widget() and hasattr(item.widget(), 'index'):
-                    if item.widget().index == index:
-                        item.widget().set_content(
-                            self._format_response(old_msg.get('display_text', old_msg['content']), index))
-            return
-
-        last_user_idx = -1
-        for i in range(len(self.history) - 1, -1, -1):
-            if self.history[i]['role'] == 'user':
-                last_user_idx = i
-                break
-
-        if index != last_user_idx:
-            ToastManager().show("You can only edit your most recent message.", "warning")
-            return
-
-        old_msg = self.history[index]
-        old_context_html = old_msg.get('context_html')
-        old_chunks = old_msg.get('external_chunks', [])
-
-        self.history = self.history[:index]
-
-        v_bar = self.scroll_area.verticalScrollBar()
-        current_scroll = v_bar.value()
-        self._is_editing = True
-
-        self.clear_layout(self.chat_layout)
-        temp_history = list(self.history)
-        self.history = []
-
-        for msg in temp_history:
-            display_text = msg.get('display_text', msg['content'])
-            ctx_html = msg.get('context_html')
-            self.add_bubble(display_text, is_user=(msg['role'] == 'user'), context_html=ctx_html)
-            self.history.append(msg)
-
-        kb_data = self.combo_kb.currentData()
-        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-
-        self.add_bubble(new_text, is_user=True, context_html=old_context_html)
-
-        QApplication.processEvents()
-        v_bar.setValue(current_scroll)
-        self._is_editing = False
-
-        llm_text = new_text
-        if old_chunks:
-            context_block = "\n".join(
-                [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in old_chunks]
-            )
-            llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{new_text}"
-        elif "Context Info:\n" in old_msg['content'] and "\n\nQuestion:\n" in old_msg['content']:
-            context_part = old_msg['content'].split("\n\nQuestion:\n")[0]
-            llm_text = f"{context_part}\n\nQuestion:\n{new_text}"
-
-        self.history.append({
-            "role": "user",
-            "content": llm_text,
-            "display_text": new_text,
-            "context_html": old_context_html,
-            "external_chunks": old_chunks
-        })
-
-        self.external_chunks = old_chunks
-        self.start_ai_response(kb_id)
+    def remove_old_follow_ups(self):
+        """清理历史中的追问组件，避免重复堆叠"""
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if item and isinstance(item.widget(), FollowUpGroupWidget):
+                item.widget().deleteLater()
 
     def clear_layout(self, layout):
         while layout.count() > 0:
@@ -1986,6 +1958,10 @@ class ChatTool(BaseTool):
                 if hasattr(widget, 'clean_up_images'):
                     widget.clean_up_images()
                 widget.deleteLater()
+            elif item.spacerItem():
+                pass
+
+
 
     def handle_link_click(self, url_str):
 
@@ -1998,7 +1974,6 @@ class ChatTool(BaseTool):
             code = getattr(self, 'mermaid_codes', {}).get(code_hash, "")
             if code:
                 # 延迟导入避免循环依赖
-                from src.ui.components.mermaid_viewer import MermaidViewer
                 if not hasattr(self, 'mermaid_viewer') or self.mermaid_viewer is None:
                     self.mermaid_viewer = MermaidViewer(None)
                 self.mermaid_viewer.load_diagram(code)

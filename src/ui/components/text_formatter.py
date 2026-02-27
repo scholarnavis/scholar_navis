@@ -73,9 +73,10 @@ class TextFormatter:
                 safe_content = re.sub(r'\*(.*?)\*', r'<i>\1</i>', safe_content)
 
                 suffix = "" if is_closed else f" <span style='color:{accent_color};'><i>...</i></span>"
-                final_html += (f"<div style='background:{bg_color}; border-left: 3px solid {accent_color}; padding: 8px 12px; "
-                               f"margin: 10px 0; border-radius: 4px; font-size: 13px; color: {text_muted};'>"
-                               f"{link}<br><br><div style='color:{text_muted};'>{safe_content}{suffix}</div></div>")
+                final_html += (
+                    f"<div style='background:{bg_color}; border-left: 3px solid {accent_color}; padding: 8px 12px; "
+                    f"margin: 10px 0; border-radius: 4px; font-size: 13px; color: {text_muted};'>"
+                    f"{link}<br><br><div style='color:{text_muted};'>{safe_content}{suffix}</div></div>")
 
         if main_text:
             main_text = re.sub(r'\[FINAL_ANSWER\]\s*', '', main_text, flags=re.IGNORECASE)
@@ -104,9 +105,14 @@ class TextFormatter:
 
     @staticmethod
     def clean_text_for_export(text, include_citations=True):
-        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[FINAL_ANSWER\]|\[FOLLOW_UPS\]", "", text)
+        final_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
+        if final_match:
+            text = text[final_match.end():]
+        else:
+            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'.*?', '', text, flags=re.DOTALL | re.IGNORECASE)
 
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[FOLLOW_UPS\]", "", text)
 
         if include_citations and "<b>📚 Cited Sources:</b>" in text:
             parts = text.split("<b>📚 Cited Sources:</b><br>")
