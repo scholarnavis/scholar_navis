@@ -943,14 +943,15 @@ class ChatTool(BaseTool):
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background-color: transparent;")
         self.chat_layout = QVBoxLayout(self.chat_container)
-        self.chat_layout.setSpacing(15)
-        self.chat_layout.setContentsMargins(10, 10, 10, 5)
-
-        # 【关键】强制靠顶，移除所有 Spacer
+        self.chat_layout.setSpacing(12)
+        self.chat_layout.setContentsMargins(10, 10, 10, 0)
         self.chat_layout.setAlignment(Qt.AlignTop)
+
 
         self.scroll_area.setWidget(self.chat_container)
         main_layout.addWidget(self.scroll_area, stretch=1)
+
+        main_layout.addSpacing(5)
 
         # --- 悬浮滚动到底部按钮 ---
         self.btn_scroll_bottom = QPushButton("", self.scroll_area)
@@ -1960,6 +1961,7 @@ class ChatTool(BaseTool):
                 widget.deleteLater()
             elif item.spacerItem():
                 pass
+
 
 
 
