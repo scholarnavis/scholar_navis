@@ -1686,15 +1686,18 @@ class SettingsTool(BaseTool):
 
         to_download = result_dict.get("to_download", [])
 
-        try:
-            from src.core.mcp_manager import MCPManager
-            mcp_mgr = MCPManager.get_instance()
-            mcp_mgr.bootstrap_servers()
+        def _bootstrap_mcp_async():
+            try:
+                from src.core.mcp_manager import MCPManager
+                mcp_mgr = MCPManager.get_instance()
+                mcp_mgr.bootstrap_servers()
 
-            if hasattr(self, '_refresh_mcp_status'):
-                self._refresh_mcp_status()
-        except Exception as e:
-            self.logger.error(f"MCP Update Failed: {e}")
+                if hasattr(self, '_refresh_mcp_status'):
+                    self._refresh_mcp_status()
+            except Exception as e:
+                self.logger.error(f"MCP Update Failed: {e}")
+
+        QTimer.singleShot(100, _bootstrap_mcp_async)
 
         if not to_download:
             from src.ui.components.dialog import StandardDialog

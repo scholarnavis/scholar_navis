@@ -4,7 +4,6 @@ import mimetypes
 from urllib.parse import quote
 from src.core.core_task import BackgroundTask
 
-
 class ProcessAttachmentTask(BackgroundTask):
     def _execute(self):
         paths = self.kwargs.get('paths', [])
@@ -17,7 +16,7 @@ class ProcessAttachmentTask(BackgroundTask):
             ext = path.lower()
 
             try:
-                # 1. 图片处理
+                # 1. Image processing
                 if ext.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
                     self.update_progress(int((i / total) * 100), f"Encoding image: {f_name}...")
                     with open(path, "rb") as image_file:
@@ -35,7 +34,7 @@ class ProcessAttachmentTask(BackgroundTask):
                     link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
                     html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>🖼️ {f_name}</a></div>"
 
-                # 2. PDF 处理
+                # 2. PDF processing
                 elif ext.endswith('.pdf'):
                     self.update_progress(int((i / total) * 100), f"Parsing PDF: {f_name}...")
                     import pymupdf4llm
@@ -50,7 +49,7 @@ class ProcessAttachmentTask(BackgroundTask):
                     link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
                     html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
 
-                # 3. 纯文本处理
+                # 3. Text processing
                 else:
                     self.update_progress(int((i / total) * 100), f"Reading file: {f_name}...")
                     with open(path, 'r', encoding='utf-8') as f:
@@ -66,9 +65,8 @@ class ProcessAttachmentTask(BackgroundTask):
                 self.send_log("ERROR", f"Failed to process {f_name}: {e}")
                 raise e
 
-        self.update_progress(100, "Processing complete.")
+        self.update_progress(100, "")
 
-        # 组装结果并通过队列安全返回给主线程
         return {
             "chunks": chunks,
             "html": html

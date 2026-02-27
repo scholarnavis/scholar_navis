@@ -1,6 +1,6 @@
 import locale
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
-                               QTextBrowser, QPushButton, QLabel, QApplication, QComboBox)
+                               QTextBrowser, QPushButton, QLabel, QApplication, QComboBox, QCheckBox)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QPropertyAnimation
 
 from src.core.config_manager import ConfigManager
@@ -131,6 +131,7 @@ class QuickTranslatorWindow(QWidget):
             GlobalSignals().llm_config_changed.connect(self.model_selector.load_llm_configs)
 
     def _setup_ui(self):
+
         self.main_frame = QWidget(self)
         self.main_frame.setStyleSheet(
             "QWidget { background-color: #252526; border: 1px solid #3e3e42; border-radius: 12px; }")
@@ -139,23 +140,28 @@ class QuickTranslatorWindow(QWidget):
         main_layout.addWidget(self.main_frame)
         frame_layout = QVBoxLayout(self.main_frame)
 
-        # --- 顶部拖拽条 ---
+        # --- Top Drag Bar ---
         top_bar = QHBoxLayout()
-        title = QLabel("✨ Scholar Translator")
+        title = QLabel("Scholar Translator")
         title.setStyleSheet("color: #05B8CC; font-weight: bold; border: none;")
 
-        # 📌 置顶切换按钮
-        self.btn_pin = QPushButton("📌")
+        self.btn_pin = QPushButton()
+        self.btn_pin.setIcon(ThemeManager().icon("keep", "accent"))
         self.btn_pin.setToolTip("Toggle Always on Top")
         self.btn_pin.setFixedSize(24, 24)
         self.btn_pin.setStyleSheet(
-            "QPushButton { background: transparent; color: #05B8CC; border: none; font-size: 14px; } QPushButton:hover { color: #fff; }")
+            "QPushButton { background: transparent; border: none; } "
+            "QPushButton:hover { background: rgba(255, 255, 255, 0.1); border-radius: 4px; }"
+        )
         self.btn_pin.clicked.connect(self._toggle_pin)
 
-        btn_close = QPushButton("✕")
+        btn_close = QPushButton()
+        btn_close.setIcon(ThemeManager().icon("close", "text_muted"))
         btn_close.setFixedSize(24, 24)
         btn_close.setStyleSheet(
-            "QPushButton { background: transparent; color: #888; border: none; font-weight: bold; } QPushButton:hover { color: #ff5555; }")
+            "QPushButton { background: transparent; border: none; } "
+            "QPushButton:hover { background: rgba(255, 85, 85, 0.2); border-radius: 4px; }"
+        )
         btn_close.clicked.connect(self.hide_with_fade)
 
         top_bar.addWidget(title)
@@ -166,10 +172,15 @@ class QuickTranslatorWindow(QWidget):
 
         # --- 模型选择与语言配置 ---
         cfg_bar = QHBoxLayout()
-        self.model_selector = ModelSelectorWidget(label_text="🌐 Translator:", config_key="trans_llm_id",
+        self.lbl_trans_icon = QLabel()
+        self.lbl_trans_icon.setStyleSheet("background: transparent; border: none;")
+        cfg_bar.addWidget(self.lbl_trans_icon)
+
+        self.model_selector = ModelSelectorWidget(label_text="Translator:", config_key="trans_llm_id",
                                                   model_key="trans_model_name")
         cfg_bar.addWidget(self.model_selector)
         cfg_bar.addSpacing(15)
+
 
         langs = ["Auto Detect", "English", "Chinese", "Japanese", "French", "German"]
         sys_lang = get_system_language()
@@ -210,8 +221,9 @@ class QuickTranslatorWindow(QWidget):
 
         ctrl_bar = QHBoxLayout()
         self.btn_trans = QPushButton("🚀 Translate / Polish")
-        self.btn_stop = QPushButton("⏹ Stop")  # NEW STOP BUTTON
+        self.btn_stop = QPushButton("⏹ Stop")
         self.btn_clear = QPushButton("🧹 Clear")
+        self.chk_markdown = QCheckBox("Markdown Render")
 
         self.btn_trans.setStyleSheet(
             "background-color: #007acc; color: white; border-radius: 6px; padding: 6px; font-weight: bold;")
@@ -228,35 +240,35 @@ class QuickTranslatorWindow(QWidget):
         ctrl_bar.addWidget(self.btn_stop)
         ctrl_bar.addWidget(self.btn_clear)
         frame_layout.addLayout(ctrl_bar)
+        ctrl_bar.addWidget(self.chk_markdown)
 
         self.output_box = QTextBrowser()
         self.output_box.setStyleSheet(
             "background-color: #1e1e1e; color: #fff; border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 14px;")
         frame_layout.addWidget(self.output_box)
 
+
     def _stop_translation(self):
         if self.worker_thread and self.worker_thread.isRunning():
             self.worker.cancel()
-            self.output_box.append("<br><span style='color:#e6a23c;'><b>[⏹ Stopped by User]</b></span>")
+            self.output_box.append("<br><span style='color:#e6a23c;'><b>[Stopped by User]</b></span>")
             self._on_translation_finished()
-
 
 
     def _toggle_pin(self):
         """切换置顶状态，并刷新 Window Flags 和图标"""
-        from PySide6.QtCore import Qt
         self.is_pinned = not self.is_pinned
         flags = self.windowFlags()
 
         if self.is_pinned:
             flags |= Qt.WindowStaysOnTopHint
-            self.btn_pin.setText("📌")
+            self.btn_pin.setIcon(ThemeManager().icon("keep_off", "accent"))
             self.btn_pin.setToolTip("Unpin Window")
             self.btn_pin.setStyleSheet(
                 "QPushButton { background: transparent; color: #05B8CC; border: none; font-size: 15px; } QPushButton:hover { color: #fff; }")
         else:
             flags &= ~Qt.WindowStaysOnTopHint
-            self.btn_pin.setText("📍")
+            self.btn_pin.setIcon(ThemeManager().icon("keep", "text_muted"))
             self.btn_pin.setToolTip("Pin to Top")
             self.btn_pin.setStyleSheet(
                 "QPushButton { background: transparent; color: #888; border: none; font-size: 15px; opacity: 0.6; } QPushButton:hover { color: #ccc; }")
@@ -310,13 +322,13 @@ class QuickTranslatorWindow(QWidget):
         if not text: return
 
         try:
-            if getattr(self, 'worker_thread', None) and self.worker_thread.isRunning():
-                if hasattr(self, 'worker') and self.worker:
-                    self.worker.cancel()
-                self.worker_thread.quit()
-                self.worker_thread.wait(500)
+            if getattr(self, 'worker_thread', None) is not None:
+                if self.worker_thread.isRunning():
+                    if hasattr(self, 'worker') and self.worker:
+                        self.worker.cancel()
+                    self.worker_thread.quit()
+                    self.worker_thread.wait(200)
         except RuntimeError:
-            # 捕获 C++ 对象已删除的错误，直接将其置空切断幽灵指针
             self.worker_thread = None
             self.worker = None
 
@@ -371,6 +383,9 @@ class QuickTranslatorWindow(QWidget):
         self.combo_src.setStyleSheet(combo_style)
         self.combo_tgt.setStyleSheet(combo_style)
 
+        if hasattr(self, 'lbl_trans_icon'):
+            self.lbl_trans_icon.setPixmap(tm.icon("language", "text_main").pixmap(16, 16))
+
         # Apply Icons and Semantic Colors to Translator Buttons
         self.btn_trans.setText(" Translate / Polish")
         self.btn_trans.setIcon(tm.icon("send", "bg_main"))
@@ -386,11 +401,17 @@ class QuickTranslatorWindow(QWidget):
 
     def _on_token(self, token):
         self.current_out_text += token
-
         clean_text = TextFormatter.hide_think_tags(self.current_out_text)
 
-        self.output_box.setHtml(clean_text.replace('\n', '<br>'))
+        if getattr(self, 'chk_markdown', None) and self.chk_markdown.isChecked():
+            import markdown
+            html = markdown.markdown(clean_text, extensions=['extra', 'nl2br'])
+            self.output_box.setHtml(html)
+        else:
+            self.output_box.setHtml(clean_text.replace('\n', '<br>'))
+
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
+
 
     def _on_error(self, msg):
         self.output_box.setHtml(f"<span style='color:#ff5555;'><b>Error:</b> {msg}</span>")

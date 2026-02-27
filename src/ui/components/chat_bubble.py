@@ -65,7 +65,7 @@ class ChatBubbleWidget(QWidget):
         self.spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self.content_container = QWidget()
-        self.content_container.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
+        self.content_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self.content_layout = QVBoxLayout(self.content_container)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
@@ -228,7 +228,7 @@ class ChatBubbleWidget(QWidget):
         super().resizeEvent(event)
         parent = self.parentWidget()
         if parent:
-            max_w = int(parent.width() * 0.66)
+            max_w = int(parent.width() * 0.80)
             self.lbl_text.setMaximumWidth(max_w)
             self.edit_input.setMaximumWidth(max_w)
 
@@ -456,6 +456,7 @@ class ChatBubbleWidget(QWidget):
     def copy_text(self):
         clipboard = QGuiApplication.clipboard()
         text_to_copy = self.original_text
+        text_to_copy = re.sub(r'<think>.*?</think>', '', text_to_copy, flags=re.DOTALL).strip()
 
         if not self.is_user and "<b>📚 Cited Sources:</b>" in text_to_copy:
             parts = text_to_copy.split("<b>📚 Cited Sources:</b><br>")

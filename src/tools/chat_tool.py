@@ -1,16 +1,16 @@
-import base64
+import csv
 import functools
 import gc
 import hashlib
 import json
 import logging
-import mimetypes
 import os
 import re
+import shutil
+import tempfile
 import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
-import fitz
 import pymupdf4llm
 import torch
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation
@@ -19,9 +19,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
                                QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
-                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect)
-from chromadb.utils import embedding_functions
-from huggingface_hub import snapshot_download
+                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication)
 from langdetect import detect
 
 from src.core.config_manager import ConfigManager
@@ -32,11 +30,9 @@ from src.core.kb_manager import KBManager
 from src.core.llm_impl import OpenAICompatibleLLM
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
-from src.core.network_worker import NetworkEmbeddingFunction, NetworkRerankerFunction
 from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
-from src.services.file_service import FileService
 from src.task.chat_tasks import ProcessAttachmentTask
 from src.task.kb_tasks import _worker_load_model
 from src.tools.base_tool import BaseTool
@@ -124,6 +120,7 @@ class ChatDropTargetWidget(QWidget):
             self.sig_files_dropped.emit(paths)
         event.acceptProposedAction()
 
+
 class AutoResizingTextEdit(QPlainTextEdit):
     sig_send = Signal()
 
@@ -138,15 +135,30 @@ class AutoResizingTextEdit(QPlainTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.textChanged.connect(self.adjust_height)
 
-
     def adjust_height(self):
+        fm = self.fontMetrics()
+        line_height = fm.lineSpacing()
+
         doc_height = int(self.document().size().height())
         margins = self.contentsMargins()
-        new_height = min(max(doc_height + margins.top() + margins.bottom() + 10, 40), self.max_height)
+        padding = 8
+
+        self.max_height = int((line_height * 5) + margins.top() + margins.bottom() + padding)
+
+        new_height = int(doc_height + margins.top() + margins.bottom() + padding)
+
+        if new_height <= 40:
+            new_height = 40
+        elif new_height > self.max_height:
+            new_height = self.max_height
+
         self.setFixedHeight(new_height)
-        # 达到最高时开启滚动条
-        self.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded if new_height >= self.max_height else Qt.ScrollBarAlwaysOff)
+
+        if new_height >= self.max_height:
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        else:
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return and not event.modifiers() & Qt.ShiftModifier:
@@ -204,16 +216,17 @@ class ChatInputContainer(QFrame):
         self.mcp_toolbar = QHBoxLayout()
         self.chk_mcp_enable = QCheckBox("Enable advanced search (MCP Tools - Requires model support)")
         self.chk_mcp_enable.setStyleSheet("color: #05B8CC; font-weight: bold;")
-        self.chk_mcp_enable.setChecked(False)
+        self.chk_mcp_enable.setChecked(True)
 
         self.btn_mcp_tags = QToolButton()
-        self.btn_mcp_tags = QPushButton("🏷️ Filter Tools: Loading...")
+        self.btn_mcp_tags = QPushButton("Filter Tools: Loading...")
+        self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
         self.btn_mcp_tags.setStyleSheet(
             "QPushButton { color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px; }"
             "QPushButton:hover { background: #333; }"
         )
-        self.btn_mcp_tags.setVisible(False)
+        self.btn_mcp_tags.setVisible(True)
 
         self.menu_mcp_tags = QMenu(self)
         self.menu_mcp_tags.setStyleSheet(
@@ -227,28 +240,16 @@ class ChatInputContainer(QFrame):
 
         # 创建一个菜单用于多选
         self.menu_mcp_tags = QMenu(self)
-        self.menu_mcp_tags.setStyleSheet("""
-                    QMenu { 
-                        background-color: #2b2b2b; 
-                        border: 1px solid #555; 
-                        border-radius: 6px; 
-                        padding: 4px; 
-                    }
-                    QMenu::item { 
-                        padding: 0px; 
-                        margin: 0px; 
-                    }
-                """)
         self.btn_mcp_tags.setMenu(self.menu_mcp_tags)
 
         # 存储复选框动作的字典
         self.tag_actions = {}
 
-        self.btn_mcp_guide = QPushButton("💡 Prompt guide")
+        self.btn_mcp_guide = QPushButton("Prompt guide")
         self.btn_mcp_guide.setCursor(Qt.PointingHandCursor)
         self.btn_mcp_guide.setStyleSheet(
             "color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px;")
-        self.btn_mcp_guide.setVisible(False)  # 默认隐藏，开启 MCP 后显示
+        self.btn_mcp_guide.setVisible(True)
 
         self.mcp_toolbar.addWidget(self.chk_mcp_enable)
         self.mcp_toolbar.addWidget(self.btn_mcp_tags)
@@ -257,28 +258,27 @@ class ChatInputContainer(QFrame):
         main_layout.insertLayout(1, self.mcp_toolbar)
 
         self.chk_mcp_enable.toggled.connect(self._on_mcp_enable_toggled)
-
+        self.menu_mcp_guide = QMenu(self)
         # 设置菜单
-        guide_menu = QMenu(self)
-        guide_menu.setStyleSheet(
-            "QMenu { background-color: #2b2b2b; color: #ddd; border: 1px solid #555; } QMenu::item:selected { background-color: #05B8CC; color: white; }")
-
         prompts = [
-            "🔍 Search for the latest high-impact literature and abstracts in a specific research field",
-            "📄 Extract detailed metadata (authors, journal, publication year) for this exact article title",
-            "📥 Find Open Access (OA) free download links or PDFs for specific papers or DOIs",
-            "🧬 Query the expression and functional summary of a specific gene or protein in a target organism",
-            "📊 Find public omics datasets (GEO/SRA) related to specific experimental treatments or phenotypes",
-            "🌐 Explain a complex biological mechanism and draw a Mermaid relationship map"
+            "Search for the latest literature and abstracts regarding a specific research topic or gene.",
+            "Find the exact metadata and full-text Open Access PDF link for this article title or DOI.",
+            "Trace the citation graph (references and citations) to find related high-impact papers for this DOI.",
+            "Query the functional summary, length, and taxonomic info of a specific gene or protein.",
+            "Find 3D protein structures and experimental resolution details in the RCSB PDB.",
+            "Search for public omics datasets (GEO/SRA) related to specific experimental treatments or phenotypes.",
+            "Fetch the exact sequence in FASTA format for a given nucleotide or protein accession.",
+            "Retrieve plant-specific genomic data, orthologs, or gene families from Phytozome.",
+            "Get the exact scientific name, TaxID, and evolutionary lineage for a specific organism.",
+            "Explain a complex biological mechanism and draw a Mermaid relationship map."
         ]
 
         for p in prompts:
             action = QAction(p, self)
-            action.triggered.connect(lambda checked, text=p: self.set_text(text.split("：")[0] if "：" in text else text))
-            guide_menu.addAction(action)
+            action.triggered.connect(lambda checked, text=p: self.set_text(text))
+            self.menu_mcp_guide.addAction(action)
 
-        self.btn_mcp_guide.setMenu(guide_menu)
-
+        self.btn_mcp_guide.setMenu(self.menu_mcp_guide)
 
         self.bottom_bar = QHBoxLayout()
         self.bottom_bar.setContentsMargins(0, 0, 0, 0)
@@ -288,17 +288,17 @@ class ChatInputContainer(QFrame):
             QPushButton:hover { background-color: #333333; border: 1px solid #555555; color: #ffffff;}
             QPushButton:pressed { background-color: #222222; }
         """
-        self.btn_export = QPushButton("📤 Export")
+        self.btn_export = QPushButton("Export")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.setStyleSheet(tool_btn_style)
         self.btn_export.clicked.connect(self.sig_export_clicked.emit)
 
-        self.btn_clear = QPushButton("🧹 Clear")
+        self.btn_clear = QPushButton("Clear")
         self.btn_clear.setCursor(Qt.PointingHandCursor)
         self.btn_clear.setStyleSheet(tool_btn_style)
         self.btn_clear.clicked.connect(self.sig_clear_clicked.emit)
 
-        self.btn_attach = QPushButton("📎 Attach")
+        self.btn_attach = QPushButton("Attach")
         self.btn_attach.setCursor(Qt.PointingHandCursor)
         self.btn_attach.setStyleSheet(tool_btn_style)
         self.btn_attach.clicked.connect(self.sig_attach_clicked.emit)
@@ -319,7 +319,6 @@ class ChatInputContainer(QFrame):
             QPushButton:hover { background-color: #0062a3; }
         """)
         self.bottom_bar.addWidget(self.btn_send)
-
 
         self.btn_stop = QPushButton("⏹ Stop")
         self.btn_stop.setCursor(Qt.PointingHandCursor)
@@ -363,11 +362,10 @@ class ChatInputContainer(QFrame):
         self.setStyleSheet(
             f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
 
-        # 修复浅色模式下输入框文本看不清的问题
         self.text_edit.setStyleSheet(f"""
-            QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; }}
-            QScrollBar:vertical {{ background: {tm.color('bg_main')}; width: 6px; }}
-        """)
+                    QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; }}
+                    QScrollBar:vertical {{ background: {tm.color('bg_main')}; width: 6px; }}
+                """)
 
         tool_btn_style = f"""
              QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: 'Segoe UI'; font-size: 13px; text-align: left; }}
@@ -386,11 +384,38 @@ class ChatInputContainer(QFrame):
         self.btn_attach.setIcon(tm.icon("link", "text_muted"))
         self.btn_attach.setStyleSheet(tool_btn_style)
 
-        self.menu_mcp_tags.setStyleSheet(f"""
-            QMenu {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
-            QMenu::item {{ padding: 0px; margin: 0px; color: {tm.color('text_main')}; }}
-        """)
-
+        menu_style = f"""
+                    QMenu {{ 
+                        background-color: {tm.color('bg_card')}; 
+                        border: 1px solid {tm.color('border')}; 
+                        border-radius: 6px; 
+                        padding: 4px; 
+                    }}
+                    QMenu::item {{ 
+                        padding: 6px 12px; 
+                        margin: 2px 0px; 
+                        color: {tm.color('text_main')}; 
+                        border-radius: 4px;
+                    }}
+                    QMenu::item:selected {{ 
+                        background-color: {tm.color('accent')}; 
+                        color: #ffffff; /* 确保悬浮选中时是亮眼的纯白，不再是乌黑 */
+                    }}
+                    QMenu QCheckBox {{
+                        color: {tm.color('text_main')};
+                        background-color: transparent;
+                        padding: 6px 12px;
+                        font-size: 13px;
+                        border-radius: 4px;
+                    }}
+                    QMenu QCheckBox:hover {{
+                        background-color: {tm.color('accent')};
+                        color: #ffffff;
+                    }}
+                """
+        self.menu_mcp_tags.setStyleSheet(menu_style)
+        if hasattr(self, 'menu_mcp_guide'):
+            self.menu_mcp_guide.setStyleSheet(menu_style)
 
     def _on_mcp_status_changed(self):
         if self.chk_mcp_enable.isChecked():
@@ -436,25 +461,11 @@ class ChatInputContainer(QFrame):
                 self.menu_mcp_tags.addAction(dummy)
                 return
 
-            from PySide6.QtWidgets import QCheckBox, QWidgetAction
+            tm = ThemeManager()
             for tag in available_tags:
                 chk = QCheckBox(f"  {tag}")
 
-                # 干净透明的 UI，配合你的 rss_tool 风格
-                chk.setStyleSheet("""
-                                    QCheckBox { 
-                                        color: #ddd; 
-                                        padding: 8px 16px; 
-                                        margin: 0px;
-                                        background: transparent; 
-                                        font-size: 13px; 
-                                        border-radius: 4px; 
-                                    }
-                                    QCheckBox:hover { background: #37373d; }
-                                """)
-
                 chk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
                 chk.setChecked(tag not in deselected_tags)
                 chk.setCursor(Qt.PointingHandCursor)
                 chk.toggled.connect(lambda checked, t=tag: self._on_tag_toggled(t, checked))
@@ -475,12 +486,11 @@ class ChatInputContainer(QFrame):
         selected = self.get_selected_tags()
         total = len(self.tag_actions)
         if total == 0:
-            self.btn_mcp_tags.setText("🏷️ Filter Tools: None")
+            self.btn_mcp_tags.setText("Filter Tools: None")
         elif len(selected) == total:
-            self.btn_mcp_tags.setText("🏷️ Filter Tools: All")
+            self.btn_mcp_tags.setText("Filter Tools: All")
         else:
-            self.btn_mcp_tags.setText(f"🏷️ Filter Tools: {len(selected)} selected")
-
+            self.btn_mcp_tags.setText(f"Filter Tools: {len(selected)} selected")
 
     def get_selected_tags(self) -> list:
         try:
@@ -489,7 +499,6 @@ class ChatInputContainer(QFrame):
             return [t for t in available if t not in deselected]
         except:
             return []
-
 
     def _emit_send(self):
         text = self.text_edit.toPlainText().strip()
@@ -523,6 +532,7 @@ class ChatInputContainer(QFrame):
         """隐藏输入框上方的附件预览条"""
         self.context_banner.setVisible(False)
         self.lbl_context_info.setText("📎 Context Attached")
+
 
 class ChatWorker(QObject):
     sig_token = Signal(str)
@@ -586,7 +596,6 @@ class ChatWorker(QObject):
                     return
 
             self.sig_token.emit("[CLEAR_SEARCH]")
-
 
             # Phase 2 & 3: Vector Retrieval & Reranking (Only if KB is selected)
             if self.kb_id and self.kb_id != "none":
@@ -722,7 +731,7 @@ class ChatWorker(QObject):
                 "### REASONING PROTOCOL (CRITICAL):\n"
                 "If you utilize an internal thinking process, you MUST strictly encapsulate ALL reasoning inside <think> and </think> tags.\n"
                 "Immediately after closing the </think> tag, you MUST output the exact string [FINAL_ANSWER] before starting your actual response.\n\n"
-                
+
                 "### RESPONSE GUIDELINES:\n"
                 "1. GROUNDING: If data comes from Context, append citations (e.g., [1], [2]).\n\n"
 
@@ -915,7 +924,6 @@ class ChatTool(BaseTool):
         row1_layout.addWidget(self.trans_selector)
         row1_layout.addStretch()
 
-
         # 第二行：知识库选择
         row2_layout = QHBoxLayout()
         lbl_kb = QLabel(" Knowledge Base:")
@@ -929,7 +937,6 @@ class ChatTool(BaseTool):
         top_bar.addLayout(row2_layout)
         layout.addLayout(top_bar)
 
-
         # 加载本地配置文件并填充两个下拉框
         self.load_llm_configs()
 
@@ -937,15 +944,15 @@ class ChatTool(BaseTool):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("""
-            QScrollArea { border: none; background-color: transparent; }
-            QScrollBar:vertical { background: #2d2d30; width: 8px; }
-            QScrollBar::handle:vertical { background: #555; border-radius: 4px; }
-        """)
+                    QScrollArea { border: none; background-color: transparent; }
+                """)
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background-color: transparent;")
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setSpacing(15)
-        self.chat_layout.addStretch()
+        self.chat_layout.setSpacing(15)
+        self.chat_layout.setAlignment(Qt.AlignTop)
+        self.chat_layout.setContentsMargins(10, 10, 10, 30)
         self.scroll_area.setWidget(self.chat_container)
         layout.addWidget(self.scroll_area, stretch=1)
 
@@ -984,7 +991,6 @@ class ChatTool(BaseTool):
         # 监听滚动条数值变化
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._check_scroll_position)
 
-
         # --- 输入区 ---
         self.input_container = ChatInputContainer()
         self.input_container.sig_send_clicked.connect(self.process_send)
@@ -1018,7 +1024,6 @@ class ChatTool(BaseTool):
         self.input_container.btn_attach.setEnabled(False)
         self.input_container.btn_send.setEnabled(False)
         self.input_container.show_context_preview("⏳ Loading files into memory...")
-
 
         if hasattr(self, 'attach_task_mgr'):
             self.attach_task_mgr.cancel_task()
@@ -1072,7 +1077,6 @@ class ChatTool(BaseTool):
         else:
             self.input_container.hide_context_preview()
 
-
     def _on_attachment_finished(self, chunks, html):
         self.input_container.btn_attach.setEnabled(True)
         self.input_container.btn_send.setEnabled(True)
@@ -1090,7 +1094,6 @@ class ChatTool(BaseTool):
             ToastManager().show(f"Attached {len(names)} file(s).", "success")
         else:
             self.input_container.hide_context_preview()
-
 
     def export_chat_history(self):
         if not self.history:
@@ -1121,7 +1124,6 @@ class ChatTool(BaseTool):
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(txt)
             elif path.endswith(".csv"):
-                import csv
                 with open(path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow(["Role", "Content"])
@@ -1150,9 +1152,7 @@ class ChatTool(BaseTool):
         ToastManager().show("Chat history has been cleared.", "success")
         self.logger.info("Chat history cleared by user.")
 
-
     def scroll_to_user_message(self, bubble_widget):
-        from PySide6.QtWidgets import QApplication
         QApplication.processEvents()
 
         target_y = max(0, bubble_widget.y() - 10)
@@ -1269,22 +1269,23 @@ class ChatTool(BaseTool):
             self.external_chunks = last_user_msg.get('external_chunks', [])
             self.process_send(last_user_msg.get('display_text', last_user_msg['content']), is_retry=True)
 
-
     def add_bubble(self, text, is_user, context_html=None):
-        if self.chat_layout.count() > 0:
-            item = self.chat_layout.itemAt(self.chat_layout.count() - 1)
-            if item.spacerItem(): self.chat_layout.removeItem(item)
+
+        if self.chat_layout.count() > 1:
+            item = self.chat_layout.itemAt(self.chat_layout.count() - 2)
+            if item and item.spacerItem():
+                self.chat_layout.removeItem(item)
+
         if is_user:
-            for i in range(self.chat_layout.count()):
+            for i in range(self.chat_layout.count() - 1):
                 item = self.chat_layout.itemAt(i)
                 if item and item.widget():
                     w = item.widget()
-                    if isinstance(w, ChatBubbleWidget) and w.is_user: w.disable_edit()
+                    if isinstance(w, ChatBubbleWidget) and w.is_user:
+                        w.disable_edit()
 
         index = len(self.history)
-
         bubble = ChatBubbleWidget(text, is_user, index, context_html=context_html)
-
         bubble.index = index
 
         if is_user:
@@ -1292,11 +1293,9 @@ class ChatTool(BaseTool):
             bubble.sig_link_clicked.connect(self.handle_link_click)
         else:
             bubble.sig_retry_clicked.connect(lambda idx: self.trigger_retry())
-
             bubble.lbl_text.linkActivated.connect(self.handle_link_click)
 
-        self.chat_layout.addWidget(bubble)
-        self.chat_layout.addStretch()
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
 
         if is_user:
             QTimer.singleShot(50, lambda: self.scroll_to_user_message(bubble))
@@ -1305,10 +1304,6 @@ class ChatTool(BaseTool):
             self.scroll_to_bottom()
 
         return bubble
-
-
-
-
 
     def scroll_to_bottom(self):
         sb = self.scroll_area.verticalScrollBar()
@@ -1321,7 +1316,6 @@ class ChatTool(BaseTool):
         use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container,
                                                                                    'chk_mcp_enable') else False
         selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
-
 
         if trans_config:
             trans_config = trans_config.copy()
@@ -1376,32 +1370,29 @@ class ChatTool(BaseTool):
 
     def cancel_generation(self):
         """Handle the stop button click to abort AI generation."""
-        # 1. 调用 worker 层面的取消逻辑（中断 LLM 请求）
         if hasattr(self, 'worker') and self.worker:
             self.worker.cancel()
 
-        # 2. 停止 UI 加载状态
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
 
-        # 3. 在对话气泡中追加中止提示
         self.current_ai_text += "\n\n<div style='color:#ff9800; font-weight:bold;'>[⏹️ Generation Cancelled by User]</div>"
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)
             self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
 
-        # 4. 恢复底部输入框的按钮状态
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
         self.input_container.btn_retry.setVisible(True)
 
-        # 5. 强制退出后台线程
-        if getattr(self, 'worker_thread', None) is not None and self.worker_thread.isRunning():
-            self.worker_thread.quit()
+        try:
+            if getattr(self, 'worker_thread', None) is not None and self.worker_thread.isRunning():
+                self.worker_thread.quit()
+        except RuntimeError:
+            pass
 
         self.logger.info("AI generation cancelled by user.")
         self.scroll_to_bottom()
-
 
     def _show_slow_connection_warning(self):
         if self.current_ai_bubble and getattr(self, '_is_waiting_llm', False):
@@ -1440,13 +1431,8 @@ class ChatTool(BaseTool):
 
         self.handle_external_send(context_text, prompt_text)
 
-
     def handle_external_send(self, context_text, prompt_text=""):
-        import tempfile
-        import os
-        from urllib.parse import quote
 
-        # 1. 将纯文本伪装成本地物理文件，供 TextViewer 读取
         temp_dir = tempfile.gettempdir()
         temp_path = os.path.join(temp_dir, "scholar_navis_external_context.txt")
         try:
@@ -1455,7 +1441,6 @@ class ChatTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to write temp external context: {e}")
 
-        # 2. 兼容投递给大模型的 Chunks
         self.external_chunks = [{
             "path": temp_path,
             "name": "External Context.txt",
@@ -1463,7 +1448,6 @@ class ChatTool(BaseTool):
             "content": context_text
         }]
 
-        # 3. 生成带 <a> 标签的可点击 URI 链接
         safe_path = quote(temp_path)
         safe_name = quote("External Context.txt")
         link = f"cite://view?path={safe_path}&page=1&name={safe_name}"
@@ -1476,7 +1460,6 @@ class ChatTool(BaseTool):
             if not self.input_container.chk_mcp_enable.isChecked():
                 self.input_container.chk_mcp_enable.setChecked(True)
 
-        # 4. 界面焦点跳转与预览 UI 逻辑
         p = self.widget
         while p:
             if hasattr(p, 'setCurrentWidget'):
@@ -1522,8 +1505,6 @@ class ChatTool(BaseTool):
         self.external_chunks = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()
-
-
 
     def attach_from_kb(self):
         kb_data = self.combo_kb.currentData()
@@ -1600,8 +1581,6 @@ class ChatTool(BaseTool):
                                 })
 
                     names.append(f_name)
-                    # 构造气泡上方的可点击链接
-                    from urllib.parse import quote
                     link = f"cite://view?path={quote(f_path)}&page=1&name={quote(f_name)}"
                     self.external_context_html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
                 except Exception as e:
@@ -1610,7 +1589,6 @@ class ChatTool(BaseTool):
             if names:
                 self.input_container.show_context_preview(", ".join(names))
                 ToastManager().show(f"Attached {len(names)} document(s).", "success")
-
 
     def update_ai_bubble(self, token):
         """Updates the AI chat bubble with streaming tokens and handles status clearing."""
@@ -1622,8 +1600,6 @@ class ChatTool(BaseTool):
 
         # 1. Handle clearing of status prompts via Regex
         if token == "[CLEAR_SEARCH]":
-            import re
-            # Removes any italicized status messages and trailing newlines to prevent Markdown block errors
             self.current_ai_text = re.sub(r'<i>.*?</i>(?:\n\n)?', '', self.current_ai_text, flags=re.DOTALL)
             self.current_ai_text = self.current_ai_text.lstrip()
             self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
@@ -1639,7 +1615,6 @@ class ChatTool(BaseTool):
                 base_html +
                 "<br><div style='color:#05B8CC;'><i>Connecting to LLM provider, please wait...</i></div>"
             )
-            from PySide6.QtCore import QTimer
             self.slow_conn_timer = QTimer(self)
             self.slow_conn_timer.setSingleShot(True)
             self.slow_conn_timer.timeout.connect(self._show_slow_connection_warning)
@@ -1717,6 +1692,7 @@ class ChatTool(BaseTool):
         self.scroll_to_bottom()
 
     def on_chat_finished(self):
+
         if not self.current_ai_bubble:
             return
 
@@ -1724,13 +1700,21 @@ class ChatTool(BaseTool):
         self.input_container.btn_send.setVisible(True)
         try:
             self.input_container.btn_stop.clicked.disconnect()
-        except:
+        except Exception:
             pass
 
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
 
         full_text = self.current_ai_text
+        cites_html = ""
+
+        cite_match = re.search(
+            r'<br><hr style=\'border:0; height:1px; background:#444; margin:15px 0;\'><b>.*?Cited Sources:</b><br>',
+            full_text)
+        if cite_match:
+            cites_html = full_text[cite_match.start():]
+            full_text = full_text[:cite_match.start()]
 
         match = re.search(r'\[FOLLOW_UPS\]\s*(.*)', full_text, flags=re.IGNORECASE | re.DOTALL)
         questions = []
@@ -1738,15 +1722,13 @@ class ChatTool(BaseTool):
         if match:
             follow_up_block = match.group(1)
             clean_text = full_text[:match.start()].strip()
-            self.current_ai_text = clean_text
+            self.current_ai_text = clean_text + cites_html
 
             for line in follow_up_block.split('\n'):
                 line = line.strip()
-                # 兼容模型偶尔输出的 💡 前缀或星号
-                if line.startswith('-') or line.startswith('*') or line.startswith('💡'):
-                    q = line.lstrip('-*💡 ').strip()
+                if line.startswith('-') or line.startswith('*'):
+                    q = line.lstrip('-* ').strip()
                     if q and q.startswith('['):
-                        # 匹配 [Tag] 内容
                         tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
                         if tag_match:
                             tag, text = tag_match.groups()
@@ -1758,16 +1740,15 @@ class ChatTool(BaseTool):
             final_html = self._format_response(self.current_ai_text, idx)
             self.current_ai_bubble.set_content(final_html)
 
-            # 渲染胶囊按钮
             if questions:
                 self.render_follow_up_buttons(questions)
         else:
+            self.current_ai_text = full_text + cites_html
             idx = getattr(self.current_ai_bubble, 'index', -1)
             final_html = self._format_response(self.current_ai_text, idx) if self.current_ai_text else "No response."
             self.current_ai_bubble.set_content(final_html)
 
         self.history.append({"role": "assistant", "content": self.current_ai_text})
-
         self.current_ai_bubble = None
         self.logger.info("AI response generation finished and UI updated.")
 
@@ -1784,39 +1765,53 @@ class ChatTool(BaseTool):
             self.is_locked = True
             if hasattr(self, 'input_container'):
                 self.input_container.lock_input()
-            from src.ui.components.toast import ToastManager
             ToastManager().show("The knowledge base was modified. Chat is currently locked.", "warning")
 
-
     def render_follow_up_buttons(self, questions):
-        if self.chat_layout.count() > 0:
-            item = self.chat_layout.itemAt(self.chat_layout.count() - 1)
-            if item.spacerItem(): self.chat_layout.removeItem(item)
+
+        if self.chat_layout.count() > 1:
+            item = self.chat_layout.itemAt(self.chat_layout.count() - 2)
+            if item and item.spacerItem():
+                self.chat_layout.removeItem(item)
+
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(60, 10, 60, 20)
         layout.setSpacing(8)
-        lbl = QLabel("💡 <b>Explore deeper (Left-click to send, Right-click to edit):</b>")
+
+        lbl = QLabel("<b>Explore deeper (Left-click to send, Right-click to edit):</b>")
         lbl.setStyleSheet("color: #888888; font-size: 12px; border: none;")
         layout.addWidget(lbl)
-        color_map = {"Deep Dive": ("#ffb86c", "🔍"), "Critical": ("#ff5555", "⚠️"), "Broader": ("#50fa7b", "🌐"),
-                     "Brainstorm": ("#bd93f9", "⚡"), "Similar": ("#8be9fd", "🔗"), "Application": ("#f1fa8c", "🚀"),
-                     "General": ("#05B8CC", "💡")}
+
+        color_map = {
+            "Deep Dive": ("warning", "search"),
+            "Critical": ("danger", "warning"),
+            "Broader": ("success", "explore"),
+            "Brainstorm": ("accent", "lightbulb"),
+            "Similar": ("accent_hover", "link"),
+            "Application": ("title_blue", "rocket"),
+            "General": ("text_muted", "help")
+        }
+
         for q_obj in questions:
             tag = q_obj.get("tag", "General") if isinstance(q_obj, dict) else "General"
             raw_text = q_obj.get("text", q_obj) if isinstance(q_obj, dict) else q_obj
             clean_text = re.sub(r'\[\s*\d+\s*(?:,\s*\d+\s*)*\]', '', raw_text)
             clean_text = clean_text.replace('**', '').strip()
-            color, icon = color_map.get(tag, ("#05B8CC", "💡"))
-            btn = FollowUpPillButton(tag, clean_text, color, icon)
+
+            color_key, icon_name = color_map.get(tag, ("text_muted", "help"))
+
+            btn = FollowUpPillButton(tag, clean_text, color_key, icon_name)
+
             if getattr(self, 'is_locked', False):
-                btn.setToolTip("知识库已变更，无法追问，请清空历史记录。")
+                btn.setToolTip("Context locked due to Knowledge Base modification. Please clear chat.")
             btn.sig_clicked.connect(self._trigger_follow_up)
             btn.sig_right_clicked.connect(self._edit_follow_up)
             layout.addWidget(btn)
-        self.chat_layout.addWidget(container)
-        self.chat_layout.addStretch()
+
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
+
         QTimer.singleShot(50, self.scroll_to_bottom)
         self.scroll_to_bottom()
 
@@ -1897,17 +1892,14 @@ class ChatTool(BaseTool):
         self.external_chunks = old_chunks
         self.start_ai_response(kb_id)
 
-
     def clear_layout(self, layout):
-        while layout.count():
+        while layout.count() > 0:
             item = layout.takeAt(0)
             widget = item.widget()
             if widget:
                 if hasattr(widget, 'clean_up_images'):
                     widget.clean_up_images()
                 widget.deleteLater()
-        layout.addStretch()
-
 
     def handle_link_click(self, url_str):
 
@@ -1995,8 +1987,6 @@ class ChatTool(BaseTool):
                     ToastManager().show(f"已打开文档片段", "success")
                 else:
                     # 对于图片或我们无法渲染的格式，降级交给操作系统处理
-                    import tempfile
-                    import shutil
                     temp_dir = tempfile.gettempdir()
                     safe_name = source_name if source_name else "document.bin"
                     temp_file_path = os.path.join(temp_dir, f"scholar_navis_view_{safe_name}")
