@@ -8,6 +8,7 @@ from datetime import datetime
 import urllib.parse
 
 from src.core.core_task import BackgroundTask
+from src.core.oa import OAFetcher
 
 
 def _setup_worker_env():
@@ -174,12 +175,11 @@ class FetchRSSTask(BackgroundTask):
             self.send_log("WARNING", f"XML 解析异常: {str(e)}")
             return []
 
-        # --- 第二阶段：内层多线程并发探测 OA 全文状态 ---
+        # 内层多线程并发探测 OA 全文状态
         def _detect_oa_for_article(article):
             if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
                 return article
 
-            # 每个线程独立开启 Session 保证网络并发安全
             session = requests.Session()
             if os.environ.get("NO_PROXY") == "*":
                 session.trust_env = False
@@ -189,72 +189,26 @@ class FetchRSSTask(BackgroundTask):
             landing_url = article.get("link", "")
 
             if doi:
-                clean_doi = urllib.parse.quote(
-                    doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip())
-                if not landing_url: landing_url = f"https://doi.org/{clean_doi}"
+                def request_adapter(url, headers=None, timeout=4.0):
+                    return session.get(url, headers=headers, timeout=timeout)
 
                 s2_key = os.environ.get("S2_API_KEY", "").strip()
+                fetcher = OAFetcher()
 
-                # 1. 尝试 S2 (如果有 Key)
-                if s2_key and not pdf_url:
-                    try:
-                        s2_url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}?fields=isOpenAccess,openAccessPdf"
-                        res = session.get(s2_url, headers={"x-api-key": s2_key}, timeout=4.0)
-                        if res.status_code == 200:
-                            data = res.json()
-                            if data.get("isOpenAccess") and data.get("openAccessPdf"):
-                                pdf_url = data["openAccessPdf"].get("url", "")
-                    except:
-                        pass
+                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, s2_key, request_adapter)
 
-                # 2. 尝试 Unpaywall
-                if not pdf_url:
-                    try:
-                        req_url = f"https://api.unpaywall.org/v2/{clean_doi}?email={user_email}"
-                        res = session.get(req_url, timeout=4.0)
-                        if res.status_code == 200:
-                            data = res.json()
-                            if data.get("is_oa"):
-                                best = data.get("best_oa_location", {})
-                                if best and best.get("url_for_pdf"):
-                                    pdf_url = best.get("url_for_pdf")
-                                else:
-                                    # 如果最佳节点没有 PDF 直链，则遍历所有备用节点寻找
-                                    for loc in data.get("oa_locations", []):
-                                        if loc and loc.get("url_for_pdf"):
-                                            pdf_url = loc.get("url_for_pdf")
-                                            break
-                    except:
-                        pass
-
-                # 3. PMC API 终极保底
-                if not pdf_url:
-                    try:
-                        pmc_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={clean_doi}&format=json&email={user_email}"
-                        pmc_res = session.get(pmc_url, timeout=4.0)
-                        if pmc_res.status_code == 200:
-                            pmc_data = pmc_res.json()
-                            records = pmc_data.get("records", [])
-                            if records and "pmcid" in records[0]:
-                                pmcid = records[0]["pmcid"]
-
-                                oa_api_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}"
-                                oa_res = session.get(oa_api_url, timeout=4.0)
-                                if oa_res.status_code == 200 and "<OA>" in oa_res.text:
-                                    match = re.search(r'<link[^>]+format="pdf"[^>]+href="([^"]+)"', oa_res.text)
-                                    if match:
-                                        pdf_url = match.group(1).replace("ftp://", "https://")
-                                    else:
-                                        pdf_url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
-                    except:
-                        pass
+                if oa_result.get("is_oa"):
+                    pdf_url = oa_result["pdf_url"]
+                    if not landing_url:
+                        landing_url = oa_result["landing_page_url"]
+                elif not landing_url and "landing_page_url" in oa_result:
+                    landing_url = oa_result["landing_page_url"]
 
             article["pdf_url"] = pdf_url
             article["link"] = landing_url
             session.close()
             return article
 
-        # 内层开 8 个线程并发处理这篇文章的 OA 嗅探， executor.map 能够保持列表的原始排序（出版日期排序）
         final_articles = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             final_articles = list(executor.map(_detect_oa_for_article, raw_articles))

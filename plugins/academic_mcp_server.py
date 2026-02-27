@@ -1,4 +1,3 @@
-# plugins/academic_mcp_server.py
 import json
 import logging
 import os
@@ -11,16 +10,13 @@ import requests
 from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
 
-# 复用主程序的全局配置与网络核心（完美同步主 UI 的 Proxy 设置）
 from src.core.config_manager import ConfigManager
 from src.core.network_worker import setup_global_network_env, _get_explicit_proxy_kwargs
+from src.core.oa import OAFetcher
 
 logger = logging.getLogger("Academic.Server")
 
-# ==========================================
-# 0. 基础配置与本地工作区初始化
-# ==========================================
-# 确保配置文件被加载并同步代理环境变量
+
 ConfigManager()
 setup_global_network_env()
 
@@ -28,7 +24,7 @@ ncbi_email = os.environ.get("NCBI_API_EMAIL", "scholar.navis.admin@example.com")
 ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
 s2_api_key = os.environ.get("S2_API_KEY", "").strip()
 
-# 初始化本地文件落盘工作区 (与 Nuitka 环境根目录对齐)
+
 WORKSPACE_DIR = os.path.abspath(os.path.join(os.getcwd(), "mcp_workspace", "downloads"))
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 logger.info(f"Local Workspace initialized at: {WORKSPACE_DIR}")
@@ -69,11 +65,8 @@ if log_port_str.isdigit():
     logger.info(f"Connected to Main UI Log System via UDP port {log_port_str}.")
 
 
-# ==========================================
-# 核心网络封装与重试装饰器
-# ==========================================
+
 def mcp_request(method: str, url: str, **kwargs):
-    """包装 requests 库，强制注入 src.core.network_worker 提供的精准代理配置。"""
     proxy_cfg = _get_explicit_proxy_kwargs()
     if "trust_env" in proxy_cfg:
         kwargs.setdefault("trust_env", False)
@@ -83,7 +76,6 @@ def mcp_request(method: str, url: str, **kwargs):
 
 
 def simple_retry(max_attempts=3, delay=2):
-    """防抖装饰器：遇到网络波动自动重试，提升查询鲁棒性"""
 
     def decorator(func):
         @wraps(func)
@@ -100,9 +92,8 @@ def simple_retry(max_attempts=3, delay=2):
     return decorator
 
 
-# ==========================================
-# 1. 统一文献检索工具 (跨平台级联搜索 + 分页)
-# ==========================================
+
+# 1. 统一文献检索工具
 @mcp.tool(
     name="search_academic_literature",
     description=(
@@ -204,9 +195,7 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 2. 引文追踪引擎 (Citation Graph)
-# ==========================================
 @mcp.tool(
     name="traverse_citation_graph",
     description=(
@@ -264,9 +253,7 @@ def traverse_citation_graph(doi: str, direction: str = "references", max_results
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 3. 开放获取链接提取
-# ==========================================
 @mcp.tool(
     name="fetch_open_access_pdf",
     description=(
@@ -278,66 +265,34 @@ def traverse_citation_graph(doi: str, direction: str = "references", max_results
 @simple_retry()
 def fetch_open_access_pdf(doi: str) -> str:
     logger.info(f"Task: Fetch OA PDF | DOI: '{doi}'")
-    clean_doi = doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip()
-    encoded = urllib.parse.quote(clean_doi)
-    landing_url = f"https://doi.org/{clean_doi}"
 
-    if s2_api_key:
-        try:
-            res = mcp_request("GET",
-                              f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}?fields=isOpenAccess,openAccessPdf",
-                              headers={"x-api-key": s2_api_key}, timeout=5).json()
-            if res.get("isOpenAccess") and res.get("openAccessPdf"):
-                return json.dumps({"status": "success", "is_oa": True, "pdf_url": res["openAccessPdf"].get("url", ""),
-                                   "landing_page_url": landing_url, "source": "Semantic Scholar"})
-        except:
-            pass
+    def request_adapter(url, headers=None, timeout=5):
+        return mcp_request("GET", url, headers=headers, timeout=timeout)
 
-    try:
-        res = mcp_request("GET", f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={ncbi_email}",
-                          timeout=5).json()
-        if res.get("open_access", {}).get("is_oa") and res.get("open_access", {}).get("oa_url"):
-            return json.dumps({"status": "success", "is_oa": True, "pdf_url": res["open_access"]["oa_url"],
-                               "landing_page_url": landing_url, "source": "OpenAlex"})
-    except:
-        pass
+    fetcher = OAFetcher()
 
-    try:
-        res = mcp_request("GET", f"https://api.unpaywall.org/v2/{encoded}?email={ncbi_email}", timeout=5).json()
-        if res.get("is_oa") and res.get("best_oa_location", {}).get("url_for_pdf"):
-            return json.dumps({"status": "success", "is_oa": True, "pdf_url": res["best_oa_location"]["url_for_pdf"],
-                               "landing_page_url": res["best_oa_location"].get("url_for_landing_page", landing_url),
-                               "source": "Unpaywall"})
-    except:
-        pass
+    result = fetcher.fetch_best_oa_pdf(doi, ncbi_email, s2_api_key, request_adapter)
 
-    try:
-        conv_res = mcp_request("GET",
-                               f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={encoded}&format=json&email={ncbi_email}",
-                               timeout=5)
-        if conv_res.status_code == 200:
-            records = conv_res.json().get("records", [])
-            if records and "pmcid" in records[0]:
-                pmcid = records[0]["pmcid"]
-                oa_res = mcp_request("GET", f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}", timeout=5)
-                if oa_res.status_code == 200 and "<OA>" in oa_res.text:
-                    import re
-                    match = re.search(r'<link[^>]+format="pdf"[^>]+href="([^"]+)"', oa_res.text)
-                    pdf_url = match.group(1).replace("ftp://",
-                                                     "https://") if match else f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
-                    return json.dumps({"status": "success", "is_oa": True, "pdf_url": pdf_url,
-                                       "landing_page_url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/",
-                                       "source": "PubMed_OA"})
-    except:
-        pass
-
-    return json.dumps({"status": "success", "is_oa": False, "landing_page_url": landing_url,
-                       "message": "Paywalled. No OA PDF found."})
+    if result.get("is_oa"):
+        return json.dumps({
+            "status": "success",
+            "is_oa": True,
+            "pdf_url": result["pdf_url"],
+            "landing_page_url": result["landing_page_url"],
+            "source": result["source"]
+        })
+    else:
+        clean_doi = doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip()
+        landing_url = result.get("landing_page_url", f"https://doi.org/{clean_doi}")
+        return json.dumps({
+            "status": "success",
+            "is_oa": False,
+            "landing_page_url": landing_url,
+            "message": "Paywalled. No OA PDF found."
+        })
 
 
-# ==========================================
 # 4. 全文自动阅读器 (PDF 下载 + 解析 + 长文本本地工作区托管)
-# ==========================================
 @mcp.tool(
     name="read_paper_fulltext",
     description=(
@@ -389,9 +344,7 @@ def read_paper_fulltext(pdf_url: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 5. 生物大分子检索 (NCBI + UniProt 整合)
-# ==========================================
 @mcp.tool(
     name="search_biological_entity",
     description=(
@@ -444,9 +397,7 @@ def search_biological_entity(query: str, entity_type: str = "gene", organism: st
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 6. 植物组学引擎 (JGI Phytozome/PhytoMine)
-# ==========================================
 @mcp.tool(
     name="search_phytozome_phytomine",
     description=(
@@ -473,9 +424,7 @@ def search_phytozome_phytomine(query: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 7. 组学数据集联搜 (SRA + GEO)
-# ==========================================
 @mcp.tool(
     name="search_omics_datasets",
     description=(
@@ -525,9 +474,7 @@ def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 8. 蛋白质结构检索 (RCSB PDB)
-# ==========================================
 @mcp.tool(
     name="search_protein_structure",
     description=(
@@ -564,9 +511,7 @@ def search_protein_structure(query: str, max_results: int = 3) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 9. FASTA 序列下载 (大文件落盘保护)
-# ==========================================
 @mcp.tool(
     name="fetch_sequence_fasta",
     description=(
@@ -603,9 +548,7 @@ def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 10. NCBI 分类学信息
-# ==========================================
 @mcp.tool(
     name="fetch_taxonomy_info",
     description=(
@@ -636,9 +579,7 @@ def fetch_taxonomy_info(organism_name: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 11. PubMed 摘要提取
-# ==========================================
 @mcp.tool(
     name="fetch_pubmed_abstract",
     description=(
@@ -658,9 +599,7 @@ def fetch_pubmed_abstract(pmid: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ==========================================
 # 12. NCBI 全局兜底
-# ==========================================
 @mcp.tool(
     name="universal_ncbi_summary",
     description=(
