@@ -752,9 +752,15 @@ class SettingsTool(BaseTool):
         layout.setLabelAlignment(Qt.AlignRight)
 
         self.combo_embed = BaseComboBox()
-        self.lbl_embed_status = QLabel("Checking...")
-        self.lbl_embed_status.setTextFormat(Qt.RichText)
-        self.lbl_embed_status.setWordWrap(True)
+        self.lbl_embed_icon = QLabel()
+        self.lbl_embed_text = QLabel("Checking...")
+        self.lbl_embed_text.setWordWrap(True)
+
+        embed_layout = QHBoxLayout()
+        embed_layout.setContentsMargins(0, 0, 0, 0)
+        embed_layout.addWidget(self.lbl_embed_icon)
+        embed_layout.addWidget(self.lbl_embed_text)
+        embed_layout.addStretch()
 
         for m in EMBEDDING_MODELS:
             self.combo_embed.addItem(m['ui_name'], m['id'])
@@ -765,9 +771,15 @@ class SettingsTool(BaseTool):
         self.combo_embed.currentIndexChanged.connect(self.check_models_status)
 
         self.combo_rerank = BaseComboBox()
-        self.lbl_rerank_status = QLabel("Checking...")
-        self.lbl_rerank_status.setTextFormat(Qt.RichText)
-        self.lbl_rerank_status.setWordWrap(True)
+        self.lbl_rerank_icon = QLabel()
+        self.lbl_rerank_text = QLabel("Checking...")
+        self.lbl_rerank_text.setWordWrap(True)
+
+        rerank_layout = QHBoxLayout()
+        rerank_layout.setContentsMargins(0, 0, 0, 0)
+        rerank_layout.addWidget(self.lbl_rerank_icon)
+        rerank_layout.addWidget(self.lbl_rerank_text)
+        rerank_layout.addStretch()
 
         for m in RERANKER_MODELS:
             self.combo_rerank.addItem(m['ui_name'], m['id'])
@@ -778,9 +790,9 @@ class SettingsTool(BaseTool):
         self.combo_rerank.currentIndexChanged.connect(self.check_models_status)
 
         layout.addRow("Embedding:", self.combo_embed)
-        layout.addRow("", self.lbl_embed_status)
+        layout.addRow("", embed_layout)
         layout.addRow("Reranker:", self.combo_rerank)
-        layout.addRow("", self.lbl_rerank_status)
+        layout.addRow("", rerank_layout)
 
         self.btn_open_cache = QPushButton(" Open Model Storage Directory")
         ThemeManager().apply_class(self.btn_open_cache, "link-btn")
@@ -1318,6 +1330,16 @@ class SettingsTool(BaseTool):
         default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
         self.btn_del_llm.setEnabled(conf.get("id") not in default_ids)
 
+        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen", "moonshot", "minimax"]
+        is_native = conf.get("id") in hide_url_providers
+
+        form_layout = self.input_llm_url.parentWidget().layout()
+        if form_layout:
+            label = form_layout.labelForField(self.input_llm_url)
+            if label:
+                label.setVisible(not is_native)
+        self.input_llm_url.setVisible(not is_native)
+
         self._refresh_model_combo(conf)
 
     def _sync_llm_data(self):
@@ -1489,7 +1511,6 @@ class SettingsTool(BaseTool):
         self.combo_theme = BaseComboBox()
         self.combo_theme.addItems(["Dark", "Light", "Auto"])
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
-        self.combo_theme.currentTextChanged.connect(self._on_theme_ui_changed)
 
         self.combo_log = BaseComboBox()
         self.combo_log.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -1504,10 +1525,6 @@ class SettingsTool(BaseTool):
         layout.addRow("External Python Path:", self.input_ext_python)
         self.layout.addWidget(group)
 
-    def _on_theme_ui_changed(self, theme_text):
-        theme_name = "dark" if theme_text.lower() == "auto" else theme_text.lower()
-        qdarktheme.setup_theme(theme_name)
-        ThemeManager().set_theme(theme_name)
 
 
     def _get_req_html(self, conf):
@@ -1533,6 +1550,7 @@ class SettingsTool(BaseTool):
         embed_id = self.combo_embed.currentData()
         real_embed = embed_id
         is_auto = (embed_id == "embed_auto")
+        tm = ThemeManager()
 
         if is_auto:
             real_embed = resolve_auto_model("embedding", self.dev_mgr.get_optimal_device())
@@ -1544,9 +1562,11 @@ class SettingsTool(BaseTool):
         exists = check_model_exists(repo_id)
         msg = f"Target: {real_embed}" if is_auto else f"Repo: {repo_id}"
         if exists:
-            self.lbl_embed_status.setText(f"✅ Ready | {msg}{req_html}")
+            self.lbl_embed_icon.setPixmap(tm.icon("check-circle", "success").pixmap(16, 16))
+            self.lbl_embed_text.setText(f"Ready | {msg}{req_html}")
         else:
-            self.lbl_embed_status.setText(f"❌ Not Found | {msg} (Will Download){req_html}")
+            self.lbl_embed_icon.setPixmap(tm.icon("cancel", "danger").pixmap(16, 16))
+            self.lbl_embed_text.setText(f"Not Found | {msg} (Will Download){req_html}")
 
         rerank_id = self.combo_rerank.currentData()
         real_rerank = rerank_id
@@ -1562,9 +1582,11 @@ class SettingsTool(BaseTool):
         exists_r = check_model_exists(repo_id_r)
         msg_r = f"Target: {real_rerank}" if is_auto_r else f"Repo: {repo_id_r}"
         if exists_r:
-            self.lbl_rerank_status.setText(f"✅ Ready | {msg_r}{req_html_r}")
+            self.lbl_rerank_icon.setPixmap(tm.icon("check-circle", "success").pixmap(16, 16))
+            self.lbl_rerank_text.setText(f"Ready | {msg_r}{req_html_r}")
         else:
-            self.lbl_rerank_status.setText(f"❌ Not Found | {msg_r} (Will Download){req_html_r}")
+            self.lbl_rerank_icon.setPixmap(tm.icon("cancel", "danger").pixmap(16, 16))
+            self.lbl_rerank_text.setText(f"Not Found | {msg_r} (Will Download){req_html_r}")
 
     def on_save_clicked(self):
         self.widget.setFocus()
@@ -1602,6 +1624,13 @@ class SettingsTool(BaseTool):
         new_proxy_mode = ["system", "off", "custom"][mode_idx]
         new_proxy_url = self.input_proxy.text().strip()
 
+        new_theme = self.combo_theme.currentText().lower()
+        if new_theme == "auto": new_theme = "dark"
+
+        ThemeManager().set_theme(new_theme)
+        qdarktheme.setup_theme(new_theme)
+        # ==========================================
+
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
@@ -1633,17 +1662,15 @@ class SettingsTool(BaseTool):
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.emit()
 
-        qdarktheme.setup_theme(self.combo_theme.currentText().lower())
-        import logging
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
-        from src.ui.components.dialog import ProgressDialog
         self.save_pd = ProgressDialog(
             self.widget, "Applying Settings",
             "Initializing background tasks...",
             telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
         )
         self.save_pd.show()
+
         QApplication.processEvents()
 
         if hasattr(self, 'save_task_mgr') and self.save_task_mgr:
@@ -1654,9 +1681,6 @@ class SettingsTool(BaseTool):
         self.save_task_mgr.sig_state_changed.connect(self._on_save_task_state_changed)
         self.save_task_mgr.sig_result.connect(self._on_save_task_result)
         self.save_pd.sig_canceled.connect(self.save_task_mgr.cancel_task)
-
-        if hasattr(GlobalSignals(), 'theme_changed'):
-            GlobalSignals().theme_changed.emit()
 
         embed_id = self.combo_embed.currentData()
         rerank_id = self.combo_rerank.currentData()

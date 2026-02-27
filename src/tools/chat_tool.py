@@ -84,7 +84,7 @@ class ChatDropTargetWidget(QWidget):
         self.setAcceptDrops(True)
 
         # 拖拽时的叠加提示层
-        self.overlay = QLabel("📥 Drop files here to attach", self)
+        self.overlay = QLabel("Drop files here to attach", self)
         self.overlay.setAlignment(Qt.AlignCenter)
         self.overlay.setStyleSheet("""
             background-color: rgba(5, 184, 204, 0.85); 
@@ -200,14 +200,16 @@ class ChatInputContainer(QFrame):
         banner_layout = QHBoxLayout(self.context_banner)
         banner_layout.setContentsMargins(8, 4, 8, 4)
 
-        self.lbl_context_info = QLabel("📎 Context Attached")
+        self.lbl_context_icon = QLabel()
+        self.lbl_context_info = QLabel("Context Attached")
+
         self.lbl_context_info.setStyleSheet("color: #05B8CC; font-size: 12px; border: none;")
-        self.btn_clear_context = QPushButton("✖")
+
+        self.btn_clear_context = QPushButton("")
         self.btn_clear_context.setCursor(Qt.PointingHandCursor)
-        self.btn_clear_context.setStyleSheet(
-            "QPushButton { color: #ff6b6b; border: none; font-weight: bold; background: transparent; } QPushButton:hover { color: #ff4c4c; }")
         self.btn_clear_context.clicked.connect(self.sig_clear_context_clicked.emit)
 
+        banner_layout.addWidget(self.lbl_context_icon)
         banner_layout.addWidget(self.lbl_context_info)
         banner_layout.addStretch()
         banner_layout.addWidget(self.btn_clear_context)
@@ -320,30 +322,15 @@ class ChatInputContainer(QFrame):
         """)
         self.bottom_bar.addWidget(self.btn_send)
 
-        self.btn_stop = QPushButton("⏹ Stop")
+        self.btn_stop = QPushButton("Stop")
         self.btn_stop.setCursor(Qt.PointingHandCursor)
         self.btn_stop.setFixedSize(70, 32)
-        self.btn_stop.setStyleSheet("""
-            QPushButton { 
-                background-color: #c42b1c; color: white; border-radius: 6px; 
-                font-weight: bold; font-family: 'Microsoft YaHei';
-            }
-            QPushButton:hover { background-color: #d13438; }
-        """)
         self.btn_stop.setVisible(False)
         self.bottom_bar.addWidget(self.btn_stop)
 
-        # 重试按钮
-        self.btn_retry = QPushButton("🔄 重试")
+        self.btn_retry = QPushButton("Retry")
         self.btn_retry.setCursor(Qt.PointingHandCursor)
         self.btn_retry.setFixedSize(70, 32)
-        self.btn_retry.setStyleSheet("""
-                    QPushButton { 
-                        background-color: #ff9800; color: white; border-radius: 6px; 
-                        font-weight: bold; font-family: 'Microsoft YaHei';
-                    }
-                    QPushButton:hover { background-color: #f57c00; }
-                """)
         self.btn_retry.setVisible(False)
         self.bottom_bar.addWidget(self.btn_retry)
 
@@ -362,10 +349,13 @@ class ChatInputContainer(QFrame):
         self.setStyleSheet(
             f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
 
+        # 🌟 完美解决输入框滚动条乌黑问题，采用半透明 RGBA 悬浮设计
         self.text_edit.setStyleSheet(f"""
-                    QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; }}
-                    QScrollBar:vertical {{ background: {tm.color('bg_main')}; width: 6px; }}
-                """)
+            QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; }}
+            QScrollBar:vertical {{ background: transparent; width: 6px; }}
+            QScrollBar::handle:vertical {{ background: rgba(150, 150, 150, 0.35); border-radius: 3px; }}
+            QScrollBar::handle:vertical:hover {{ background: rgba(150, 150, 150, 0.65); }}
+        """)
 
         tool_btn_style = f"""
              QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: 'Segoe UI'; font-size: 13px; text-align: left; }}
@@ -384,38 +374,54 @@ class ChatInputContainer(QFrame):
         self.btn_attach.setIcon(tm.icon("link", "text_muted"))
         self.btn_attach.setStyleSheet(tool_btn_style)
 
+        if hasattr(self, 'lbl_context_icon'):
+            self.lbl_context_icon.setPixmap(tm.icon("link", "accent").pixmap(14, 14))
+            self.lbl_context_info.setStyleSheet(f"color: {tm.color('accent')}; font-size: 12px; border: none;")
+
+        self.btn_clear_context.setIcon(tm.icon("close", "danger"))
+        self.btn_clear_context.setStyleSheet(
+            "QPushButton { border: none; background: transparent; padding: 2px; } QPushButton:hover { background: rgba(255, 107, 107, 0.2); border-radius: 4px; }")
+
+        btn_mcp_style = f"""
+            QPushButton {{ color: {tm.color('text_muted')}; background: transparent; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
+            QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('text_main')}; }}
+        """
+        self.btn_mcp_tags.setIcon(tm.icon("filter", "text_muted"))
+        self.btn_mcp_tags.setStyleSheet(btn_mcp_style)
+        self.btn_mcp_guide.setIcon(tm.icon("help", "text_muted"))
+        self.btn_mcp_guide.setStyleSheet(btn_mcp_style)
+
+
+        self.btn_send.setIcon(tm.icon("send", "bg_main"))
+        self.btn_send.setStyleSheet(f"""
+            QPushButton {{ background-color: {tm.color('check-circle')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: 'Microsoft YaHei'; }}
+            QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
+        """)
+
+        self.btn_stop.setIcon(tm.icon("close", "bg_main"))
+        self.btn_stop.setStyleSheet(f"""
+            QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: 'Microsoft YaHei'; }}
+            QPushButton:hover {{ background-color: rgba(255, 107, 107, 0.8); }}
+        """)
+
+        self.btn_retry.setIcon(tm.icon("refresh", "bg_main"))
+        self.btn_retry.setStyleSheet(f"""
+            QPushButton {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: 'Microsoft YaHei'; }}
+            QPushButton:hover {{ background-color: rgba(255, 184, 108, 0.8); }}
+        """)
+
+
         menu_style = f"""
-                    QMenu {{ 
-                        background-color: {tm.color('bg_card')}; 
-                        border: 1px solid {tm.color('border')}; 
-                        border-radius: 6px; 
-                        padding: 4px; 
-                    }}
-                    QMenu::item {{ 
-                        padding: 6px 12px; 
-                        margin: 2px 0px; 
-                        color: {tm.color('text_main')}; 
-                        border-radius: 4px;
-                    }}
-                    QMenu::item:selected {{ 
-                        background-color: {tm.color('accent')}; 
-                        color: #ffffff; /* 确保悬浮选中时是亮眼的纯白，不再是乌黑 */
-                    }}
-                    QMenu QCheckBox {{
-                        color: {tm.color('text_main')};
-                        background-color: transparent;
-                        padding: 6px 12px;
-                        font-size: 13px;
-                        border-radius: 4px;
-                    }}
-                    QMenu QCheckBox:hover {{
-                        background-color: {tm.color('accent')};
-                        color: #ffffff;
-                    }}
-                """
+            QMenu {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
+            QMenu::item {{ padding: 6px 12px; margin: 2px 0px; color: {tm.color('text_main')}; border-radius: 4px; }}
+            QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #ffffff; }}
+            QMenu QCheckBox {{ color: {tm.color('text_main')}; background-color: transparent; padding: 6px 12px; font-size: 13px; border-radius: 4px; }}
+            QMenu QCheckBox:hover {{ background-color: {tm.color('accent')}; color: #ffffff; }}
+        """
         self.menu_mcp_tags.setStyleSheet(menu_style)
         if hasattr(self, 'menu_mcp_guide'):
             self.menu_mcp_guide.setStyleSheet(menu_style)
+
 
     def _on_mcp_status_changed(self):
         if self.chk_mcp_enable.isChecked():
@@ -1053,7 +1059,6 @@ class ChatTool(BaseTool):
             ToastManager().show(f"Attachment failed: {msg}", "error")
 
     def _on_attachment_result(self, result):
-        # 接收并应用后台处理结果
         self.input_container.btn_attach.setEnabled(True)
         self.input_container.btn_send.setEnabled(True)
 
@@ -1072,7 +1077,10 @@ class ChatTool(BaseTool):
                     names.append(c['name'])
 
             display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(names)
-            self.input_container.show_context_preview(display_text)
+
+
+            QTimer.singleShot(100, lambda: self.input_container.show_context_preview(display_text))
+
             ToastManager().show(f"Attached {len(names)} file(s).", "success")
         else:
             self.input_container.hide_context_preview()
@@ -1269,19 +1277,14 @@ class ChatTool(BaseTool):
             self.external_chunks = last_user_msg.get('external_chunks', [])
             self.process_send(last_user_msg.get('display_text', last_user_msg['content']), is_retry=True)
 
+
     def add_bubble(self, text, is_user, context_html=None):
-
-        if self.chat_layout.count() > 1:
-            item = self.chat_layout.itemAt(self.chat_layout.count() - 2)
-            if item and item.spacerItem():
-                self.chat_layout.removeItem(item)
-
         if is_user:
-            for i in range(self.chat_layout.count() - 1):
+            for i in range(self.chat_layout.count()):
                 item = self.chat_layout.itemAt(i)
                 if item and item.widget():
                     w = item.widget()
-                    if isinstance(w, ChatBubbleWidget) and w.is_user:
+                    if hasattr(w, 'is_user') and w.is_user:
                         w.disable_edit()
 
         index = len(self.history)
@@ -1295,13 +1298,14 @@ class ChatTool(BaseTool):
             bubble.sig_retry_clicked.connect(lambda idx: self.trigger_retry())
             bubble.lbl_text.linkActivated.connect(self.handle_link_click)
 
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+        self.chat_layout.addWidget(bubble)
 
-        if is_user:
-            QTimer.singleShot(50, lambda: self.scroll_to_user_message(bubble))
-        else:
-            QTimer.singleShot(50, self.scroll_to_bottom)
-            self.scroll_to_bottom()
+        if not getattr(self, '_is_editing', False):
+            if is_user:
+                QTimer.singleShot(50, lambda: self.scroll_to_user_message(bubble))
+            else:
+                QTimer.singleShot(50, self.scroll_to_bottom)
+                self.scroll_to_bottom()
 
         return bubble
 
@@ -1369,7 +1373,6 @@ class ChatTool(BaseTool):
         self.worker_thread.start()
 
     def cancel_generation(self):
-        """Handle the stop button click to abort AI generation."""
         if hasattr(self, 'worker') and self.worker:
             self.worker.cancel()
 
@@ -1486,15 +1489,16 @@ class ChatTool(BaseTool):
             self.input_container.show_context_preview("External Information (RSS/Web)")
 
     def show_attachment_menu(self):
+        tm = ThemeManager()
         menu = QMenu(self.widget)
-        menu.setStyleSheet("""
-            QMenu { background-color: #2d2d30; color: white; border: 1px solid #444; } 
-            QMenu::item { padding: 6px 20px; }
-            QMenu::item:selected { background-color: #007acc; }
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; }} 
+            QMenu::item {{ padding: 6px 20px; }}
+            QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
         """)
 
-        act_kb = menu.addAction("🗂️ Select from Knowledge Base")
-        act_local = menu.addAction("💻 Upload Local File")
+        act_kb = menu.addAction(tm.icon("folder", "text_main"), "Select from Knowledge Base")
+        act_local = menu.addAction(tm.icon("upload", "text_main"), "Upload Local File")
 
         act_kb.triggered.connect(self.attach_from_kb)
         act_local.triggered.connect(self.attach_from_local)
@@ -1635,28 +1639,44 @@ class ChatTool(BaseTool):
         if is_at_bottom: self.scroll_to_bottom()
 
     def _format_response(self, text, index):
+        # 1. 处理 Mermaid 图表
         pattern = r'```mermaid\s*\n(.*?)\n```'
 
         def repl_mermaid(match):
             code = match.group(1).strip()
-            # 使用 MD5 哈希作为字典的 Key
             code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()
 
             if not hasattr(self, 'mermaid_codes'):
                 self.mermaid_codes = {}
             self.mermaid_codes[code_hash] = code
 
-            # 生成一个清爽的 UI 卡片替代长串代码
             return (
                 f"<br><div style='padding:12px; margin: 8px 0; border:1px solid #05B8CC; border-radius:6px; background-color: rgba(5, 184, 204, 0.08);'>"
                 f"<div style='margin-bottom: 5px;'>📊 <b>Mermaid Diagram Generated</b></div>"
                 f"<a href='mermaid://view?hash={code_hash}' style='color:#05B8CC; text-decoration:none; font-weight:bold;'>"
-                f"👉 Click here to view / edit interactive diagram</a></div><br>")
+                f"Click here to view / edit interactive diagram</a></div><br>")
 
-        # 执行替换
         processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
 
-        # 交给原本的格式化器处理其他 Markdown 元素
+        # 2. 增加：为 <think> 标签添加区分底纹
+        think_pattern = r'<think>(.*?)</think>'
+
+        def repl_think(match):
+            think_content = match.group(1).strip()
+            # 根据当前主题提取颜色
+            tm = ThemeManager()
+            bg_color = tm.color('bg_input')
+            border_color = tm.color('border')
+            text_color = tm.color('text_muted')
+
+            return (
+                f"<div style='background-color: {bg_color}; border-left: 4px solid {border_color}; "
+                f"padding: 10px; margin: 10px 0; border-radius: 4px; color: {text_color}; font-size: 13px;'>"
+                f"💡 <b>Thinking Process:</b><br>{think_content}</div>"
+            )
+
+        processed_text = re.sub(think_pattern, repl_think, processed_text, flags=re.DOTALL | re.IGNORECASE)
+
         return TextFormatter.format_chat_text(
             processed_text, index, getattr(self, 'expanded_thinks', set()), getattr(self, 'user_toggled_thinks', set())
         )
@@ -1768,12 +1788,6 @@ class ChatTool(BaseTool):
             ToastManager().show("The knowledge base was modified. Chat is currently locked.", "warning")
 
     def render_follow_up_buttons(self, questions):
-
-        if self.chat_layout.count() > 1:
-            item = self.chat_layout.itemAt(self.chat_layout.count() - 2)
-            if item and item.spacerItem():
-                self.chat_layout.removeItem(item)
-
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(container)
@@ -1801,7 +1815,6 @@ class ChatTool(BaseTool):
             clean_text = clean_text.replace('**', '').strip()
 
             color_key, icon_name = color_map.get(tag, ("text_muted", "help"))
-
             btn = FollowUpPillButton(tag, clean_text, color_key, icon_name)
 
             if getattr(self, 'is_locked', False):
@@ -1810,10 +1823,12 @@ class ChatTool(BaseTool):
             btn.sig_right_clicked.connect(self._edit_follow_up)
             layout.addWidget(btn)
 
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
+        self.chat_layout.addWidget(container)
 
-        QTimer.singleShot(50, self.scroll_to_bottom)
-        self.scroll_to_bottom()
+        if not getattr(self, '_is_editing', False):
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(50, self.scroll_to_bottom)
+            self.scroll_to_bottom()
 
     def _trigger_follow_up(self, text):
         if getattr(self, 'is_locked', False):
@@ -1833,7 +1848,7 @@ class ChatTool(BaseTool):
             old_msg = self.history[index]
             for i in range(self.chat_layout.count()):
                 item = self.chat_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), ChatBubbleWidget):
+                if item and item.widget() and hasattr(item.widget(), 'index'):
                     if item.widget().index == index:
                         item.widget().set_content(
                             self._format_response(old_msg.get('display_text', old_msg['content']), index))
@@ -1844,6 +1859,7 @@ class ChatTool(BaseTool):
             if self.history[i]['role'] == 'user':
                 last_user_idx = i
                 break
+
         if index != last_user_idx:
             ToastManager().show("You can only edit your most recent message.", "warning")
             return
@@ -1853,11 +1869,15 @@ class ChatTool(BaseTool):
         old_chunks = old_msg.get('external_chunks', [])
 
         self.history = self.history[:index]
+
+        v_bar = self.scroll_area.verticalScrollBar()
+        current_scroll = v_bar.value()
+        self._is_editing = True
+
         self.clear_layout(self.chat_layout)
         temp_history = list(self.history)
         self.history = []
 
-        # 重新绘制历史气泡时，带上附加 UI 元素并避免渲染整段大长串 Prompt
         for msg in temp_history:
             display_text = msg.get('display_text', msg['content'])
             ctx_html = msg.get('context_html')
@@ -1867,10 +1887,12 @@ class ChatTool(BaseTool):
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
 
-        # 重新绘制被编辑的新气泡，并带上附件
         self.add_bubble(new_text, is_user=True, context_html=old_context_html)
 
-        # 重新拼接供底层喂给大模型的完整 Prompt
+        QApplication.processEvents()
+        v_bar.setValue(current_scroll)
+        self._is_editing = False
+
         llm_text = new_text
         if old_chunks:
             context_block = "\n".join(

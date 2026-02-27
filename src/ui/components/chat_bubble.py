@@ -57,6 +57,8 @@ class ChatBubbleWidget(QWidget):
         self._apply_theme()
 
     def init_ui(self):
+        tm = ThemeManager()
+
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(10, 5, 10, 15)
         self.main_layout.setSpacing(10)
@@ -171,25 +173,28 @@ class ChatBubbleWidget(QWidget):
             QPushButton:hover { color: #ccc; background-color: #444; }
         """
 
-        self.btn_copy = QPushButton("📄 Copy")
+        self.btn_copy = QPushButton(" Copy")
+        self.btn_copy.setIcon(tm.icon("copy", "text_muted"))
         self.btn_copy.setCursor(Qt.PointingHandCursor)
         self.btn_copy.setStyleSheet(btn_style)
         self.btn_copy.clicked.connect(self.copy_text)
         self.btn_layout.addWidget(self.btn_copy)
 
         if not self.is_user:
-            self.btn_bubble_retry = QPushButton("🔄 Retry")
+            self.btn_bubble_retry = QPushButton(" Retry")
+            self.btn_bubble_retry.setIcon(tm.icon("refresh", "warning"))
             self.btn_bubble_retry.setCursor(Qt.PointingHandCursor)
             self.btn_bubble_retry.setStyleSheet("""
-                        QPushButton { background-color: transparent; border: none; color: #ff9800; font-size: 12px; padding: 2px 4px; border-radius: 4px; font-weight: bold;} 
-                        QPushButton:hover { color: #fff; background-color: #f57c00; }
-                    """)
+                                QPushButton { background-color: transparent; border: none; color: #ff9800; font-size: 12px; padding: 2px 4px; border-radius: 4px; font-weight: bold;} 
+                                QPushButton:hover { color: #fff; background-color: #f57c00; }
+                            """)
             self.btn_bubble_retry.clicked.connect(lambda: self.sig_retry_clicked.emit(self.index))
             self.btn_bubble_retry.setVisible(False)
             self.btn_layout.addWidget(self.btn_bubble_retry)
 
         if self.is_user:
-            self.btn_edit = QPushButton("✎ Edit")
+            self.btn_edit = QPushButton("Edit")
+            self.btn_edit.setIcon(tm.icon("edit", "text_muted"))
             self.btn_edit.setCursor(Qt.PointingHandCursor)
             self.btn_edit.setStyleSheet(btn_style)
             self.btn_edit.clicked.connect(self.toggle_edit)
@@ -204,13 +209,11 @@ class ChatBubbleWidget(QWidget):
             self.edit_btn_layout.setSpacing(10)
             self.edit_btn_layout.setAlignment(btn_alignment)
 
-            self.btn_cancel = QPushButton("❌ Cancel")
-            self.btn_cancel.setCursor(Qt.PointingHandCursor)
-            self.btn_cancel.setStyleSheet(btn_style)
-            self.btn_cancel.clicked.connect(self.cancel_edit)
+            self.btn_cancel = QPushButton(" Cancel")
+            self.btn_cancel.setIcon(tm.icon("close", "text_muted"))
 
-            self.btn_confirm = QPushButton("✅ Confirm (Enter)")
-            self.btn_confirm.setCursor(Qt.PointingHandCursor)
+            self.btn_confirm = QPushButton(" Confirm)")
+            self.btn_confirm.setIcon(tm.icon("check-circle", "bg_main"))
             confirm_style = """
                 QPushButton { background-color: #007acc; border: none; color: white; font-size: 12px; padding: 5px 12px; border-radius: 4px; font-weight: bold;} 
                 QPushButton:hover { background-color: #005a9e; }
@@ -461,7 +464,7 @@ class ChatBubbleWidget(QWidget):
         if not self.is_user and "<b>📚 Cited Sources:</b>" in text_to_copy:
             parts = text_to_copy.split("<b>📚 Cited Sources:</b><br>")
             main_text = re.sub(r"<[^>]+>", "", parts[0].replace("<br>", "\n")).strip()
-            citations_text = "\n\n📚 参考文献:\n"
+            citations_text = "\n\n📚 Reference:\n"
             if len(parts) > 1:
                 raw_cites = parts[1]
                 matches = re.findall(r"<b>\[(\d+)\]</b>\s*(.*?)\s*\(Page (\d+)\)", raw_cites)
@@ -474,7 +477,7 @@ class ChatBubbleWidget(QWidget):
                 text_to_copy = re.sub(r"<[^>]+>", "", text_to_copy.replace("<br>", "\n")).strip()
 
         clipboard.setText(text_to_copy)
-        ToastManager().show("✅ 已复制到剪贴板", "success")
+        ToastManager().show("Copied to clipboard.", "success")
 
     def toggle_edit(self):
         if not self.is_editing:

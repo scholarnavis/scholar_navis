@@ -220,10 +220,12 @@ class QuickTranslatorWindow(QWidget):
         frame_layout.addWidget(self.input_box)
 
         ctrl_bar = QHBoxLayout()
-        self.btn_trans = QPushButton("🚀 Translate / Polish")
-        self.btn_stop = QPushButton("⏹ Stop")
-        self.btn_clear = QPushButton("🧹 Clear")
+        self.btn_trans = QPushButton("Translate / Polish")
+        self.btn_stop = QPushButton("Stop")
+        self.btn_clear = QPushButton("Clear")
         self.chk_markdown = QCheckBox("Markdown Render")
+        self.chk_markdown.setChecked(True)
+        self.chk_markdown.toggled.connect(self._re_render_output)
 
         self.btn_trans.setStyleSheet(
             "background-color: #007acc; color: white; border-radius: 6px; padding: 6px; font-weight: bold;")
@@ -247,6 +249,7 @@ class QuickTranslatorWindow(QWidget):
             "background-color: #1e1e1e; color: #fff; border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 14px;")
         frame_layout.addWidget(self.output_box)
 
+        self.current_out_text = ""
 
     def _stop_translation(self):
         if self.worker_thread and self.worker_thread.isRunning():
@@ -254,6 +257,19 @@ class QuickTranslatorWindow(QWidget):
             self.output_box.append("<br><span style='color:#e6a23c;'><b>[Stopped by User]</b></span>")
             self._on_translation_finished()
 
+    def _re_render_output(self, checked):
+        """开关 Markdown 渲染时，实时重绘画布内容"""
+        if not hasattr(self, 'current_out_text') or not self.current_out_text:
+            return
+
+        clean_text = TextFormatter.hide_think_tags(self.current_out_text)
+        if checked:
+            import markdown
+            html_str = markdown.markdown(clean_text, extensions=['extra', 'nl2br'])
+            self.output_box.setHtml(html_str)
+        else:
+            self.output_box.setHtml(clean_text.replace('\n', '<br>'))
+        self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
 
     def _toggle_pin(self):
         """切换置顶状态，并刷新 Window Flags 和图标"""
@@ -321,14 +337,16 @@ class QuickTranslatorWindow(QWidget):
         text = self.input_box.toPlainText().strip()
         if not text: return
 
-        try:
-            if getattr(self, 'worker_thread', None) is not None:
-                if self.worker_thread.isRunning():
-                    if hasattr(self, 'worker') and self.worker:
-                        self.worker.cancel()
-                    self.worker_thread.quit()
-                    self.worker_thread.wait(200)
-        except RuntimeError:
+        if getattr(self, 'worker_thread', None) is not None:
+            if hasattr(self, 'worker') and self.worker:
+                self.worker.cancel()
+                try:
+                    self.worker.sig_token.disconnect()
+                    self.worker.sig_finished.disconnect()
+                except Exception:
+                    pass
+
+            self.worker_thread.quit()
             self.worker_thread = None
             self.worker = None
 
@@ -352,13 +370,11 @@ class QuickTranslatorWindow(QWidget):
 
         self.worker.sig_token.connect(self._on_token)
         self.worker.sig_error.connect(self._on_error)
-
         self.worker.sig_finished.connect(self._on_translation_finished)
 
         self.worker.sig_finished.connect(self.worker_thread.quit)
         self.worker.sig_finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
-        self.worker_thread.finished.connect(lambda: setattr(self, 'worker_thread', None))
 
         self.current_out_text = ""
         self.worker_thread.start()
