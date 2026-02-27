@@ -38,6 +38,8 @@ class ThemeManager(QObject):
                 "text_muted": "#888888",
                 "accent": "#58a6ff",
                 "accent_hover": "#79b8ff",
+                "academic_blue": "#007acc",
+                "academic_blue_hover": "#005a9e" ,
                 "title_blue": "#6BA4E7",
                 "border": "#444444",
                 "danger": "#ff6b6b",
@@ -54,6 +56,8 @@ class ThemeManager(QObject):
                 "text_muted": "#666666",
                 "accent": "#005a9e",
                 "accent_hover": "#004578",
+                "academic_blue": "#007acc",
+                "academic_blue_hover": "#005a9e",
                 "title_blue": "#1A365D",
                 "border": "#cccccc",
                 "danger": "#d32f2f",
@@ -72,6 +76,8 @@ class ThemeManager(QObject):
         except Exception:
             pass
 
+    def font_family(self) -> str:
+        return "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', Roboto, sans-serif"
 
     @staticmethod
     def get_resource_path(*paths):

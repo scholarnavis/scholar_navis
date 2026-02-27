@@ -1,4 +1,7 @@
 import re
+
+import markdown
+
 from src.core.theme_manager import ThemeManager
 
 class TextFormatter:
@@ -80,6 +83,47 @@ class TextFormatter:
             final_html += f"\n\n{main_text}"
 
         return final_html
+
+    @staticmethod
+    def markdown_to_html(text):
+        tm = ThemeManager()
+        processed_text = text
+
+        processed_text = re.sub(r'(?<![="\'/])\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b',
+                                r'<a href="https://doi.org/\1">\1</a>', processed_text)
+        processed_text = re.sub(r'(?<![="\'/\[\(])\b(https?://[^\s<>\)\]]+)\b', r'<a href="\1">\1</a>',
+                                processed_text)
+
+        html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
+
+        html = html.replace("<a href=", "<a style='color: #4daafc; text-decoration: none; font-weight: bold;' href=")
+
+        final_html = f"<div style='font-family: {tm.font_family()}; line-height: 1.5;'>{html}</div>"
+
+        return final_html
+
+    @staticmethod
+    def clean_text_for_export(text, include_citations=True):
+        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[FINAL_ANSWER\]|\[FOLLOW_UPS\]", "", text)
+
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+
+        if include_citations and "<b>📚 Cited Sources:</b>" in text:
+            parts = text.split("<b>📚 Cited Sources:</b><br>")
+            main_text = re.sub(r"<[^>]+>", "", parts[0].replace("<br>", "\n")).strip()
+            citations_text = "\n\n📚 Reference:\n"
+            if len(parts) > 1:
+                raw_cites = parts[1]
+                matches = re.findall(r"<b>\[(\d+)\]</b>\s*(.*?)\s*\(Page (\d+)\)", raw_cites)
+                for m in matches:
+                    idx, name, page = m
+                    citations_text += f"[{idx}] {name.strip()} (第 {page} 页)\n"
+            text = main_text + citations_text
+        else:
+            text = re.sub(r"<[^>]+>", "", text.replace("<br>", "\n")).strip()
+
+        return text.strip()
+
 
     @staticmethod
     def hide_think_tags(text):

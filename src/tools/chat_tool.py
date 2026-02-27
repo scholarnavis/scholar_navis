@@ -1,4 +1,5 @@
 import csv
+import datetime
 import functools
 import gc
 import hashlib
@@ -11,15 +12,17 @@ import tempfile
 import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
+import markdown
 import pymupdf4llm
 import torch
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation
-from PySide6.QtGui import QDesktopServices, QCursor, QAction
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation, QMarginsF
+from PySide6.QtGui import QDesktopServices, QCursor, QAction, QPdfWriter, QTextDocument, QPageSize
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
                                QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
-                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication)
+                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication,
+                               QSpacerItem)
 from langdetect import detect
 
 from src.core.config_manager import ConfigManager
@@ -130,35 +133,16 @@ class AutoResizingTextEdit(QPlainTextEdit):
         self.setStyleSheet("""
             QPlainTextEdit { background-color: transparent; border: none; font-size: 14px; }
         """)
-        self.setFixedHeight(40)
-        self.max_height = 200
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.textChanged.connect(self.adjust_height)
 
-    def adjust_height(self):
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
         fm = self.fontMetrics()
-        line_height = fm.lineSpacing()
+        line_h = fm.lineSpacing()
+        doc_margins = self.document().documentMargin()
+        base_padding = self.contentsMargins().top() + self.contentsMargins().bottom() + int(doc_margins * 2)
 
-        doc_height = int(self.document().size().height())
-        margins = self.contentsMargins()
-        padding = 8
-
-        self.max_height = int((line_height * 5) + margins.top() + margins.bottom() + padding)
-
-        new_height = int(doc_height + margins.top() + margins.bottom() + padding)
-
-        if new_height <= 40:
-            new_height = 40
-        elif new_height > self.max_height:
-            new_height = self.max_height
-
-        self.setFixedHeight(new_height)
-
-        if new_height >= self.max_height:
-            self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        else:
-            self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
+        fixed_height = int((line_h * 5) + base_padding + 2)
+        self.setFixedHeight(fixed_height)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return and not event.modifiers() & Qt.ShiftModifier:
@@ -285,11 +269,12 @@ class ChatInputContainer(QFrame):
         self.bottom_bar = QHBoxLayout()
         self.bottom_bar.setContentsMargins(0, 0, 0, 0)
 
-        tool_btn_style = """
-            QPushButton { background-color: transparent; color: #888888; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: 'Segoe UI'; font-size: 13px;}
-            QPushButton:hover { background-color: #333333; border: 1px solid #555555; color: #ffffff;}
-            QPushButton:pressed { background-color: #222222; }
-        """
+        tool_btn_style = f"""
+                    QPushButton {{ background-color: transparent; color: #888888; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: {ThemeManager().font_family()}; font-size: 13px;}}
+                    QPushButton:hover {{ background-color: #333333; border: 1px solid #555555; color: #ffffff;}}
+                    QPushButton:pressed {{ background-color: #222222; }}
+                """
+
         self.btn_export = QPushButton("Export")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.setStyleSheet(tool_btn_style)
@@ -313,13 +298,13 @@ class ChatInputContainer(QFrame):
         self.btn_send = QPushButton("Send")
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.setFixedSize(70, 32)
-        self.btn_send.setStyleSheet("""
-            QPushButton { 
-                background-color: #007acc; color: white; border-radius: 6px; 
-                font-weight: bold; font-family: 'Microsoft YaHei';
-            }
-            QPushButton:hover { background-color: #0062a3; }
-        """)
+        self.btn_send.setStyleSheet(f"""
+                    QPushButton {{ 
+                        background-color: #007acc; color: white; border-radius: 6px; 
+                        font-weight: bold; font-family: {ThemeManager().font_family()};
+                    }}
+                    QPushButton:hover {{ background-color: #0062a3; }}
+                """)
         self.bottom_bar.addWidget(self.btn_send)
 
         self.btn_stop = QPushButton("Stop")
@@ -358,9 +343,9 @@ class ChatInputContainer(QFrame):
         """)
 
         tool_btn_style = f"""
-             QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: 'Segoe UI'; font-size: 13px; text-align: left; }}
-             QPushButton:hover {{ background-color: {tm.color('btn_hover')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')};}}
-         """
+                     QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: {tm.font_family()}; font-size: 13px; text-align: left; }}
+                     QPushButton:hover {{ background-color: {tm.color('btn_hover')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')};}}
+                 """
 
         self.btn_export.setText("Export")
         self.btn_export.setIcon(tm.icon("download", "text_muted"))
@@ -391,24 +376,24 @@ class ChatInputContainer(QFrame):
         self.btn_mcp_guide.setIcon(tm.icon("help", "text_muted"))
         self.btn_mcp_guide.setStyleSheet(btn_mcp_style)
 
-
         self.btn_send.setIcon(tm.icon("send", "bg_main"))
         self.btn_send.setStyleSheet(f"""
-            QPushButton {{ background-color: {tm.color('check-circle')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: 'Microsoft YaHei'; }}
-            QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
-        """)
+                    QPushButton {{ background-color: {tm.color('academic_blue')}; color: #ffffff; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
+                    QPushButton:hover {{ background-color: {tm.color('academic_blue_hover')}; }}
+                """)
 
         self.btn_stop.setIcon(tm.icon("close", "bg_main"))
         self.btn_stop.setStyleSheet(f"""
-            QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: 'Microsoft YaHei'; }}
-            QPushButton:hover {{ background-color: rgba(255, 107, 107, 0.8); }}
-        """)
+                    QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
+                    QPushButton:hover {{ background-color: rgba(255, 107, 107, 0.8); }}
+                """)
 
         self.btn_retry.setIcon(tm.icon("refresh", "bg_main"))
         self.btn_retry.setStyleSheet(f"""
-            QPushButton {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: 'Microsoft YaHei'; }}
-            QPushButton:hover {{ background-color: rgba(255, 184, 108, 0.8); }}
-        """)
+                    QPushButton {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
+                    QPushButton:hover {{ background-color: rgba(255, 184, 108, 0.8); }}
+                """)
+
 
 
         menu_style = f"""
@@ -956,9 +941,8 @@ class ChatTool(BaseTool):
         self.chat_container.setStyleSheet("background-color: transparent;")
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setSpacing(15)
-        self.chat_layout.setSpacing(15)
         self.chat_layout.setAlignment(Qt.AlignTop)
-        self.chat_layout.setContentsMargins(10, 10, 10, 30)
+        self.chat_layout.setContentsMargins(10, 10, 10, 10)
         self.scroll_area.setWidget(self.chat_container)
         layout.addWidget(self.scroll_area, stretch=1)
 
@@ -1104,45 +1088,126 @@ class ChatTool(BaseTool):
             self.input_container.hide_context_preview()
 
     def export_chat_history(self):
+        from src.ui.components.text_formatter import TextFormatter
+        from src.core.theme_manager import ThemeManager
+        from src.ui.components.toast import ToastManager
+
         if not self.history:
             ToastManager().show("There are currently no chat records to export.", "warning")
             self.logger.warning("Attempted to export empty chat history.")
             return
+
         path, ext = QFileDialog.getSaveFileName(
-            self.widget, "导出聊天记录 (Export Chat)", "chat_history",
-            "HTML File (*.html);;Text File (*.txt);;CSV/Excel (*.csv)"
+            self.widget, "导出学术记录 (Export Academic Log)", "Scholar_Navis_Log",
+            "PDF Document (*.pdf);;Text File (*.txt);;CSV Data (*.csv)"
         )
         if not path: return
+
         try:
-            if path.endswith(".html"):
-                html = "<html><head><meta charset='utf-8'><style>body{font-family:sans-serif; background:#f4f4f4; padding:20px;}.msg{background:#fff; padding:15px; margin-bottom:10px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);}.role{font-weight:bold; color:#007acc; margin-bottom:5px;}</style></head><body>"
+            tm = ThemeManager()
+            font_family = tm.font_family()
+
+            if path.endswith(".pdf"):
+                doc = QTextDocument()
+
+                # 当前日期，用于生成报告的 Header
+                date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # 🌟 高级学术/代码排版 CSS
+                doc.setDefaultStyleSheet(f"""
+                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
+                    h1, h2, h3 {{ color: #1A365D; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
+                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
+                    .header-user {{ color: #007acc; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .header-ai {{ color: #2e7d32; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .content {{ margin-top: 5px; }}
+
+                    /* 代码块与行内代码样式 */
+                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
+                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
+                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
+
+                    /* 引用与表格样式 */
+                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
+                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
+                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }}
+                    th {{ background-color: #f6f8fa; font-weight: bold; }}
+
+                    /* 报告页眉样式 */
+                    .doc-header {{ text-align: center; border-bottom: 2px solid #1A365D; padding-bottom: 15px; margin-bottom: 30px; }}
+                    .doc-title {{ font-size: 22pt; font-weight: bold; color: #1A365D; font-family: 'Segoe UI', sans-serif; }}
+                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
+                """)
+
+                # 尝试获取 SVG 图标 (如果没有这些文件，可以忽略或使用你已有的 SVG 文件名)
+                user_icon = tm.get_resource_path("assets", "icons", "user.svg").replace('\\', '/')
+                ai_icon = tm.get_resource_path("assets", "icons", "ai_model.svg").replace('\\', '/')
+
+                # 构建 HTML 骨架
+                html = f"""
+                <html><body>
+                <div class='doc-header'>
+                    <div class='doc-title'>Scholar Navis - Analysis Report</div>
+                    <div class='doc-meta'>Generated on: {date_str} | Document Type: Academic Chat Log</div>
+                </div>
+                """
+
                 for msg in self.history:
-                    role = "🧑 User" if msg['role'] == "user" else "🤖 AI Assistant"
-                    content = re.sub(r"\[CLEAR_SEARCH\]", "", msg['content'])
-                    html += f"<div class='msg'><div class='role'>{role}</div><div>{content.replace(chr(10), '<br>')}</div></div>"
+                    is_user = (msg['role'] == "user")
+
+                    # 1. 深度清洗：移除 Think、系统标签等
+                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
+
+                    # 2. Markdown 转换：激活表格、代码块、列表的 HTML 渲染
+                    rendered_html = markdown.markdown(
+                        clean_content,
+                        extensions=['extra', 'nl2br', 'tables', 'fenced_code']
+                    )
+
+                    # 3. 组装对话头
+                    if is_user:
+                        header = f"<div class='header-user'><img src='file:///{user_icon}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
+                    else:
+                        header = f"<div class='header-ai'><img src='file:///{ai_icon}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
+
+                    html += f"<div class='msg-box'>{header}<div class='content'>{rendered_html}</div></div>"
+
                 html += "</body></html>"
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(html)
+                doc.setHtml(html)
+
+                # 配置 PDF 引擎
+                writer = QPdfWriter(path)
+
+                writer.setPageSize(QPageSize(QPageSize.A4))
+
+                writer.setPageMargins(QMarginsF(15, 20, 15, 20))
+                writer.setResolution(300)
+                doc.print_(writer)
+
             elif path.endswith(".txt"):
-                txt = "================ CHAT HISTORY ================\n\n"
+                txt = f"================ SCHOLAR NAVIS REPORT ================\nGenerated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 for msg in self.history:
-                    role = "User" if msg['role'] == "user" else "AI"
-                    content = re.sub(r"<[^>]+>", "", msg['content'])
-                    txt += f"[{role}]:\n{content}\n\n{'-' * 40}\n\n"
+                    role = "User Inquiry" if msg['role'] == "user" else "AI Analysis"
+                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                    txt += f"[{role}]:\n{clean_content}\n\n{'-' * 60}\n\n"
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(txt)
+
             elif path.endswith(".csv"):
                 with open(path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow(["Role", "Content"])
                     for msg in self.history:
-                        content = re.sub(r"<[^>]+>", "", msg['content'])
-                        writer.writerow(["User" if msg['role'] == 'user' else "AI", content])
-            ToastManager().show(f"Chat history successfully exported to: {os.path.basename(path)}", "success")
+                        clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                        writer.writerow(["User" if msg['role'] == 'user' else "AI", clean_content])
+
+            ToastManager().show(f"Document successfully exported to: {os.path.basename(path)}", "success")
             self.logger.info(f"Chat history successfully exported to: {path}")
+
         except Exception as e:
-            ToastManager().show(f"Failed to export chat history: {str(e)}", "error")
-            self.logger.error(f"Failed to export chat history: {str(e)}")
+            ToastManager().show(f"Failed to export document: {str(e)}", "error")
+            self.logger.error(f"Failed to export document: {str(e)}")
+
 
     def clear_chat_history(self):
         self.cancel_generation()
@@ -1663,16 +1728,15 @@ class ChatTool(BaseTool):
 
         def repl_think(match):
             think_content = match.group(1).strip()
-            # 根据当前主题提取颜色
             tm = ThemeManager()
             bg_color = tm.color('bg_input')
-            border_color = tm.color('border')
-            text_color = tm.color('text_muted')
+            border_color = tm.color('accent')
+            text_color = tm.color('text_main')
 
             return (
                 f"<div style='background-color: {bg_color}; border-left: 4px solid {border_color}; "
-                f"padding: 10px; margin: 10px 0; border-radius: 4px; color: {text_color}; font-size: 13px;'>"
-                f"💡 <b>Thinking Process:</b><br>{think_content}</div>"
+                f"padding: 12px; margin: 10px 0; border-radius: 4px; color: {text_color}; font-size: 14.5px;'>"
+                f"<span style='font-size: 16px;'>💡</span> <b>Thinking Process:</b><br>{think_content}</div>"
             )
 
         processed_text = re.sub(think_pattern, repl_think, processed_text, flags=re.DOTALL | re.IGNORECASE)

@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer, QThread, QUrl
 from PySide6.QtGui import QClipboard, QGuiApplication, QCursor
 
 from src.core.theme_manager import ThemeManager
+from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 from src.core.network_worker import LightNetworkWorker
 
@@ -74,10 +75,7 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.setSpacing(6)
         self.content_layout.setAlignment(Qt.AlignTop)
 
-        font_family = (
-            "'Microsoft YaHei', 'PingFang SC', 'Segoe UI', "
-            "'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif"
-        )
+        font_family = tm.font_family()
 
         if self.is_user and self.context_html:
             self.ctx_frame = QFrame()
@@ -231,9 +229,12 @@ class ChatBubbleWidget(QWidget):
         super().resizeEvent(event)
         parent = self.parentWidget()
         if parent:
+            self.lbl_text.setMinimumHeight(0)
+
             max_w = int(parent.width() * 0.80)
             self.lbl_text.setMaximumWidth(max_w)
-            self.edit_input.setMaximumWidth(max_w)
+            if hasattr(self, 'edit_input'):
+                self.edit_input.setMaximumWidth(max_w)
 
     def adjust_edit_height(self):
         doc_h = int(self.edit_input.document().size().height())
@@ -295,7 +296,7 @@ class ChatBubbleWidget(QWidget):
 
     def _apply_theme(self):
         tm = ThemeManager()
-        font_family = "'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif"
+        font_family = tm.font_family()
 
         # User vs AI Bubble Colors
         if self.is_user:
@@ -349,16 +350,7 @@ class ChatBubbleWidget(QWidget):
         if self.is_loading: return
 
         try:
-            processed_text = text
-
-            processed_text = re.sub(r'(?<![="\'/])\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b',
-                                    r'<a href="https://doi.org/\1">\1</a>', processed_text)
-            processed_text = re.sub(r'(?<![="\'/\[\(])\b(https?://[^\s<>\)\]]+)\b', r'<a href="\1">\1</a>',
-                                    processed_text)
-
-            html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
-            html = html.replace("<a href=",
-                                "<a style='color: #4daafc; text-decoration: none; font-weight: bold;' href=")
+            html = TextFormatter.markdown_to_html(text)
 
             def repl_img(match):
                 raw_src_url = match.group(1)
@@ -458,24 +450,7 @@ class ChatBubbleWidget(QWidget):
 
     def copy_text(self):
         clipboard = QGuiApplication.clipboard()
-        text_to_copy = self.original_text
-        text_to_copy = re.sub(r'<think>.*?</think>', '', text_to_copy, flags=re.DOTALL).strip()
-
-        if not self.is_user and "<b>📚 Cited Sources:</b>" in text_to_copy:
-            parts = text_to_copy.split("<b>📚 Cited Sources:</b><br>")
-            main_text = re.sub(r"<[^>]+>", "", parts[0].replace("<br>", "\n")).strip()
-            citations_text = "\n\n📚 Reference:\n"
-            if len(parts) > 1:
-                raw_cites = parts[1]
-                matches = re.findall(r"<b>\[(\d+)\]</b>\s*(.*?)\s*\(Page (\d+)\)", raw_cites)
-                for m in matches:
-                    idx, name, page = m
-                    citations_text += f"[{idx}] {name.strip()} (第 {page} 页)\n"
-            text_to_copy = main_text + citations_text
-        else:
-            if not self.is_user:
-                text_to_copy = re.sub(r"<[^>]+>", "", text_to_copy.replace("<br>", "\n")).strip()
-
+        text_to_copy = TextFormatter.clean_text_for_export(self.original_text, include_citations=not self.is_user)
         clipboard.setText(text_to_copy)
         ToastManager().show("Copied to clipboard.", "success")
 
