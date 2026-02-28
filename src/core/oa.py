@@ -27,7 +27,7 @@ class OAFetcher:
         return True
 
 
-    def fetch_best_oa_pdf(self, doi: str, user_email: str, s2_api_key: str, request_func) -> dict:
+    def fetch_best_oa_pdf(self, doi: str, user_email: str, s2_api_key: str, request_func = None) -> dict:
         """
         Unified OA PDF sniffing engine.
         :param request_func: A callable for making network requests, expecting (url, headers=None, timeout=5)

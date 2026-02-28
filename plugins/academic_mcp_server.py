@@ -11,7 +11,7 @@ from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
 
 from src.core.config_manager import ConfigManager
-from src.core.network_worker import setup_global_network_env, _get_explicit_proxy_kwargs
+from src.core.network_worker import setup_global_network_env, _get_explicit_proxy_kwargs, create_robust_session
 from src.core.oa import OAFetcher
 
 logger = logging.getLogger("Academic.Server")
@@ -65,14 +65,20 @@ if log_port_str.isdigit():
     logger.info(f"Connected to Main UI Log System via UDP port {log_port_str}.")
 
 
-
 def mcp_request(method: str, url: str, **kwargs):
-    proxy_cfg = _get_explicit_proxy_kwargs()
-    if "trust_env" in proxy_cfg:
-        kwargs.setdefault("trust_env", False)
-    elif "proxy" in proxy_cfg:
-        kwargs.setdefault("proxies", {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]})
-    return requests.request(method, url, **kwargs)
+    session = create_robust_session()
+
+    custom_headers = kwargs.pop("headers", {})
+
+    if "User-Agent" in custom_headers and custom_headers["User-Agent"] == "Mozilla/5.0":
+        custom_headers.pop("User-Agent")
+
+    session.headers.update(custom_headers)
+
+    try:
+        return session.request(method, url, **kwargs)
+    finally:
+        session.close()
 
 
 def simple_retry(max_attempts=3, delay=2):
@@ -258,8 +264,7 @@ def traverse_citation_graph(doi: str, direction: str = "references", max_results
     name="fetch_open_access_pdf",
     description=(
             "[Tags: Literature] "
-            "[Always Enabled] Find a direct Open Access PDF download link for a given DOI. "
-            "If you want to read the full text, pass this URL to 'read_paper_fulltext'."
+            "[Always Enabled] Check if a given DOI has an Open Access PDF and return its direct download link."
     )
 )
 @simple_retry()
@@ -292,56 +297,6 @@ def fetch_open_access_pdf(doi: str) -> str:
         })
 
 
-# 4. 全文自动阅读器 (PDF 下载 + 解析 + 长文本本地工作区托管)
-@mcp.tool(
-    name="read_paper_fulltext",
-    description=(
-            "[Tags: Literature] "
-            "Download and read the full text of an Open Access PDF. "
-            "Pass the direct PDF URL (obtained from fetch_open_access_pdf). "
-            "Returns the Markdown text of the paper. If the paper is very long, it will automatically save it locally and return a context link."
-    )
-)
-def read_paper_fulltext(pdf_url: str) -> str:
-    logger.info(f"Task: PDF Auto-Read | URL: {pdf_url}")
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = mcp_request("GET", pdf_url, headers=headers, stream=True, timeout=20)
-        res.raise_for_status()
-
-        safe_name = f"paper_{int(time.time())}.pdf"
-        pdf_path = os.path.join(WORKSPACE_DIR, safe_name)
-
-        with open(pdf_path, 'wb') as f:
-            for chunk in res.iter_content(chunk_size=8192): f.write(chunk)
-
-        try:
-            import pymupdf4llm
-            md_text = pymupdf4llm.to_markdown(pdf_path)
-
-            # 长文本保护：超过 15000 字符强制落盘，不撑爆 LLM 窗口
-            if len(md_text) > 15000:
-                md_path = pdf_path.replace(".pdf", ".md")
-                with open(md_path, 'w', encoding='utf-8') as f: f.write(md_text)
-                cite_link = f"cite://view?path={urllib.parse.quote(md_path)}&page=1&name={urllib.parse.quote('Full Text (Markdown)')}"
-                return json.dumps({
-                    "status": "success",
-                    "message": "Paper downloaded and parsed successfully. Content is too long for direct display. Instruct the user to click the link below to view it or use it as context.",
-                    "local_path": md_path,
-                    "cite_link": cite_link,
-                    "preview": md_text[:2000] + "\n...[TRUNCATED]"
-                })
-
-            return json.dumps({"status": "success", "content": md_text})
-        except ImportError:
-            # 环境中没有 pymupdf4llm 时，只存盘返回系统调用链接
-            cite_link = f"cite://view?path={urllib.parse.quote(pdf_path)}&page=1&name={urllib.parse.quote('Downloaded PDF')}"
-            return json.dumps(
-                {"status": "success", "message": "PDF downloaded to local workspace. Markdown parsing unavailable.",
-                 "cite_link": cite_link})
-
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
 
 
 # 5. 生物大分子检索 (NCBI + UniProt 整合)

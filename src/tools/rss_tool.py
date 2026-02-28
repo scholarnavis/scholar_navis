@@ -1,29 +1,26 @@
 import html
-import os
 import json
+import os
 import re
-
-import requests
+import time
 from datetime import datetime
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                               QLabel, QListWidget, QSplitter, QComboBox,
-                               QTextBrowser, QListWidgetItem, QDialog, QLineEdit, QFormLayout,
-                               QCheckBox, QScrollArea, QFileDialog, QTableWidget, QHeaderView,
-                               QTableWidgetItem, QFrame, QAbstractItemView, QMessageBox, QMenu, QSizePolicy)
-from PySide6.QtCore import Qt, QUrl, QEvent, QThread, Signal, QMarginsF, QTimer, QRectF
+from PySide6.QtCore import Qt, QUrl, QEvent, QMarginsF, QTimer, QRectF, QByteArray, QBuffer, QIODevice
 from PySide6.QtGui import QDesktopServices, QTextDocument, QPageLayout, QAbstractTextDocumentLayout, QPainter, QFont, \
     QColor
 from PySide6.QtPrintSupport import QPrinter
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                               QLabel, QListWidget, QSplitter, QListWidgetItem, QLineEdit, QCheckBox, QScrollArea,
+                               QFileDialog, QFrame, QAbstractItemView, QMenu, QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.theme_manager import ThemeManager
-from src.tools.base_tool import BaseTool
 from src.core.core_task import TaskManager, TaskState
-from src.task.rss_tasks import FetchRSSTask, DownloadOATask
-from src.ui.components.toast import ToastManager
-from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog, StandardDialog
 from src.core.signals import GlobalSignals
+from src.core.theme_manager import ThemeManager
+from src.task.rss_tasks import FetchRSSTask
+from src.tools.base_tool import BaseTool
+from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog, StandardDialog
+from src.ui.components.toast import ToastManager
 
 DEFAULT_FEEDS_DICT = {
     "Nature (Main Subjects)": [
@@ -194,6 +191,11 @@ class ArticleWidget(QFrame):
         header_layout.addWidget(self.checkbox)
         header_layout.addSpacing(5)
 
+        if article_data.get('pdf_url'):
+            self.icon_oa = QLabel()
+            self.icon_oa.setToolTip("Open Access (OA)")
+            header_layout.addWidget(self.icon_oa)
+
         title_link = f"<a href='{article_data['link']}' style='color:#05B8CC; text-decoration:none; font-size: 16px; font-weight:bold;'>{article_data['title']}</a>"
         self.lbl_title = QLabel(title_link)
         self.lbl_title.setOpenExternalLinks(True)
@@ -202,13 +204,39 @@ class ArticleWidget(QFrame):
         header_layout.addWidget(self.lbl_title, stretch=1)
         layout.addLayout(header_layout)
 
-        meta_text = f"🕒 {article_data.get('pub_date', 'Unknown Date')}"
-        if article_data.get('doi'): meta_text += f" | 🔗 DOI: {article_data['doi']}"
-        if article_data.get('tags'): meta_text += f" | 🏷️ {', '.join(article_data['tags'])}"
+        self.meta_container = QWidget()
+        self.meta_layout = QHBoxLayout(self.meta_container)
+        self.meta_layout.setContentsMargins(0, 0, 0, 0)
+        self.meta_layout.setSpacing(5)
 
-        self.lbl_meta = QLabel(meta_text)
-        layout.addWidget(self.lbl_meta)
+        # 发布日期
+        self.lbl_date_icon = QLabel()
+        self.lbl_date_text = QLabel(article_data.get('pub_date', 'Unknown Date'))
+        self.meta_layout.addWidget(self.lbl_date_icon)
+        self.meta_layout.addWidget(self.lbl_date_text)
 
+        # DOI
+        if article_data.get('doi'):
+            self.lbl_sep1 = QLabel(" | ")
+            self.lbl_doi_icon = QLabel()
+            self.lbl_doi_text = QLabel(f"DOI: {article_data['doi']}")
+            self.meta_layout.addWidget(self.lbl_sep1)
+            self.meta_layout.addWidget(self.lbl_doi_icon)
+            self.meta_layout.addWidget(self.lbl_doi_text)
+
+        # 标签
+        if article_data.get('tags'):
+            self.lbl_sep2 = QLabel(" | ")
+            self.lbl_tag_icon = QLabel()
+            self.lbl_tag_text = QLabel(", ".join(article_data['tags']))
+            self.meta_layout.addWidget(self.lbl_sep2)
+            self.meta_layout.addWidget(self.lbl_tag_icon)
+            self.meta_layout.addWidget(self.lbl_tag_text)
+
+        self.meta_layout.addStretch()
+        layout.addWidget(self.meta_container)
+
+        # 摘要区域
         self.text_browser = QLabel()
         self.text_browser.setOpenExternalLinks(True)
         self.text_browser.setTextFormat(Qt.RichText)
@@ -231,21 +259,14 @@ class ArticleWidget(QFrame):
         self.btn_chat.clicked.connect(self._send_to_chat)
         btn_layout.insertWidget(1, self.btn_chat)
 
-        if article_data.get('pdf_url'):
-            self.btn_dl = QPushButton(" Download OA PDF")
-            self.btn_dl.setCursor(Qt.PointingHandCursor)
-            self.btn_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['pdf_url'])))
-            btn_layout.addWidget(self.btn_dl)
-        else:
-            self.btn_link = QPushButton(" Publisher Link (Non-OA)")
-            self.btn_link.setCursor(Qt.PointingHandCursor)
-            self.btn_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['link'])))
-            btn_layout.addWidget(self.btn_link)
+        self.btn_link = QPushButton(" Publisher Link")
+        self.btn_link.setCursor(Qt.PointingHandCursor)
+        self.btn_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['link'])))
+        btn_layout.addWidget(self.btn_link)
 
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
-        # Connect to theme manager and initialize colors/icons
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
@@ -254,14 +275,13 @@ class ArticleWidget(QFrame):
         bg_card = tm.color('bg_card')
         border = tm.color('border')
         text_main = tm.color('text_main')
+        text_muted = tm.color('text_muted')
         btn_bg = tm.color('btn_bg')
         btn_hover = tm.color('btn_hover')
 
-        # 设置卡片本身的样式
         self.setStyleSheet(
             f"QFrame#ArticleFrame {{ background-color: {bg_card}; border: 1px solid {border}; border-radius: 6px; }}")
 
-        # 按钮通用样式
         btn_style = f"QPushButton {{ background-color: {btn_bg}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 4px 10px; }} QPushButton:hover {{ background-color: {btn_hover}; }}"
 
         if hasattr(self, 'btn_trans'):
@@ -272,20 +292,27 @@ class ArticleWidget(QFrame):
             self.btn_chat.setIcon(tm.icon("send", "text_main"))
             self.btn_chat.setStyleSheet(btn_style)
 
-        if hasattr(self, 'btn_dl'):
-            self.btn_dl.setIcon(tm.icon("download", "success"))
-            self.btn_dl.setStyleSheet(btn_style)
-
         if hasattr(self, 'btn_link'):
             self.btn_link.setIcon(tm.icon("link", "text_main"))
             self.btn_link.setStyleSheet(btn_style)
 
-            if hasattr(self, 'lbl_date_icon'):
-                self.lbl_date_icon.setPixmap(tm.icon("time", "text_muted").pixmap(14, 14))
-            if hasattr(self, 'lbl_doi_icon'):
-                self.lbl_doi_icon.setPixmap(tm.icon("link", "text_muted").pixmap(14, 14))
-            if hasattr(self, 'lbl_tag_icon'):
-                self.lbl_tag_icon.setPixmap(tm.icon("tag", "text_muted").pixmap(14, 14))
+        for lbl in [self.lbl_date_text, getattr(self, 'lbl_doi_text', None),
+                    getattr(self, 'lbl_tag_text', None), getattr(self, 'lbl_sep1', None),
+                    getattr(self, 'lbl_sep2', None)]:
+            if lbl: lbl.setStyleSheet(f"color: {text_muted}; font-size: 12px;")
+
+        if hasattr(self, 'icon_oa'):
+            self.icon_oa.setPixmap(tm.icon("unlock", "success").pixmap(16, 16))
+
+        if hasattr(self, 'lbl_date_icon'):
+            self.lbl_date_icon.setPixmap(tm.icon("time", "text_muted").pixmap(14, 14))
+
+        if hasattr(self, 'lbl_doi_icon'):
+            self.lbl_doi_icon.setPixmap(tm.icon("link", "text_muted").pixmap(14, 14))
+
+        if hasattr(self, 'lbl_tag_icon'):
+            self.lbl_tag_icon.setPixmap(tm.icon("tag", "accent").pixmap(14, 14))
+
 
     def _send_to_chat(self):
         if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
@@ -422,9 +449,6 @@ class RSSTool(BaseTool):
             self.btn_export_pdf.setIcon(tm.icon("file-text", "warning"))
             self.btn_export_pdf.setStyleSheet(f"QPushButton {{ color: {tm.color('warning')}; background-color: transparent; border: 1px solid {tm.color('warning')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; }}")
 
-        if hasattr(self, 'btn_batch_dl'):
-            self.btn_batch_dl.setIcon(tm.icon("download", "success"))
-            self.btn_batch_dl.setStyleSheet(f"QPushButton {{ color: {tm.color('success')}; background-color: transparent; border: 1px solid {tm.color('success')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('success')}; color: {tm.color('bg_main')}; }}")
 
 
 
@@ -533,16 +557,12 @@ class RSSTool(BaseTool):
         self.btn_export_pdf.setStyleSheet("color: #ffb86c;")
         self.btn_export_pdf.clicked.connect(self.export_to_pdf)
 
-        self.btn_batch_dl = QPushButton("⬇Download Selected OA")
-        self.btn_batch_dl.setStyleSheet("color: #50fa7b;")
-        self.btn_batch_dl.clicked.connect(self.batch_download_pdfs)
 
         action_bar.addWidget(self.btn_sel_all)
         action_bar.addWidget(self.btn_sel_inv)
         action_bar.addStretch()
         action_bar.addWidget(self.btn_batch_chat)
         action_bar.addWidget(self.btn_export_pdf)
-        action_bar.addWidget(self.btn_batch_dl)
         right_layout.addLayout(action_bar)
 
         self.scroll_area = QScrollArea()
@@ -834,7 +854,6 @@ class RSSTool(BaseTool):
         self.feed_list.blockSignals(False)
 
     def export_to_pdf(self):
-
         selected = [w.article_data for w in self.current_article_widgets if w.is_checked()]
         if not selected:
             ToastManager().show("Please select at least one article to export.", "warning")
@@ -844,10 +863,39 @@ class RSSTool(BaseTool):
         feed_name = self.feeds[row]['name'] if 0 <= row < len(self.feeds) else "Literature_Report"
         safe_filename = re.sub(r'[\\/*?:"<>|]', "_", feed_name)
 
+
         path, _ = QFileDialog.getSaveFileName(self.widget, "Export to PDF", f"{safe_filename}.pdf",
                                               "PDF Files (*.pdf)")
         if not path: return
 
+        # 1. 启动进度对话框
+        telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
+        pd = ProgressDialog(self.widget, "Exporting to PDF", "Preparing document layout...",
+                            telemetry_config=telemetry_off)
+        pd.show()
+
+        self._cancel_export = False
+
+        def on_cancel():
+            self._cancel_export = True
+
+        pd.sig_canceled.connect(on_cancel)
+        QApplication.instance().processEvents()
+
+        # 2. 将 ThemeManager 图标转为 Base64 字符串供 HTML 内联
+        def get_b64_icon(icon_name, color_key):
+            pixmap = ThemeManager().icon(icon_name, color_key).pixmap(16, 16)
+            byte_array = QByteArray()
+            buffer = QBuffer(byte_array)
+            buffer.open(QIODevice.WriteOnly)
+            pixmap.save(buffer, "PNG")
+            return f"data:image/png;base64,{bytes(byte_array.toBase64()).decode('utf-8')}"
+
+        icon_time_b64 = get_b64_icon("time", "text_muted")
+        icon_link_b64 = get_b64_icon("link", "text_muted")
+        icon_oa_b64 = get_b64_icon("unlock", "success")
+
+        # 3. 拼接带有内嵌图片的 HTML 内容
         html = f"""
         <h1 style='color: #333;'>{feed_name}</h1>
         <p style='color: #666;'>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
@@ -857,19 +905,30 @@ class RSSTool(BaseTool):
         for art in selected:
             landing_url = art.get('link', '#')
             html += f"<h3><a href='{landing_url}' style='color:#05B8CC; text-decoration:none;'>{art['title']}</a></h3>"
+
+            # 使用内嵌的 base64 图像替代原本的 Emoji
+            date_str = art.get('pub_date', 'Unknown Date')
+            date_html = f"<img src='{icon_time_b64}' width='12' height='12' style='vertical-align: middle;'> {date_str}"
+
             doi_val = art.get('doi', '')
-            doi_html = f"<a href='https://doi.org/{doi_val}' style='color:#05B8CC; text-decoration:none;'>{doi_val}</a>" if doi_val else "N/A"
+            doi_html = f" | <img src='{icon_link_b64}' width='12' height='12' style='vertical-align: middle;'> DOI: <a href='https://doi.org/{doi_val}' style='color:#05B8CC; text-decoration:none;'>{doi_val}</a>" if doi_val else ""
+
             oa_url = art.get('pdf_url', '')
-            oa_html = f" | <b>OA PDF:</b> <a href='{oa_url}' style='color:#28a745; text-decoration:none;'>⬇️ Click to Download</a>" if oa_url else ""
-            html += f"<p style='color:gray; font-size: 10pt;'><b>Date:</b> {art.get('pub_date', '')} | <b>DOI:</b> {doi_html}{oa_html}</p>"
+            oa_html = f" | <img src='{icon_oa_b64}' width='12' height='12' style='vertical-align: middle;'> <b style='color:#28a745;'>Open Access</b>" if oa_url else ""
+
+            html += f"<p style='color:gray; font-size: 10pt;'>{date_html}{doi_html}{oa_html}</p>"
             html += f"<div style='font-size: 11pt; line-height: 1.4;'>{art.get('summary', '')}</div><hr>"
+
+        # 4. 配置打印机与文档
+        pd.update_progress(0, "Calculating pages...")
+        QApplication.instance().processEvents()
+
 
         doc = QTextDocument()
         doc.setHtml(html)
 
         printer = QPrinter(QPrinter.ScreenResolution)
         printer.setOutputFormat(QPrinter.PdfFormat)
-
         margin = QMarginsF(15, 15, 15, 22)
         printer.setPageMargins(margin, QPageLayout.Millimeter)
         printer.setOutputFileName(path)
@@ -880,7 +939,30 @@ class RSSTool(BaseTool):
         painter = QPainter(printer)
         page_count = doc.pageCount()
 
+        # 5. 核心渲染循环：按页绘制并更新进度
         for page_idx in range(page_count):
+            if self._cancel_export:
+                painter.end()
+                printer.setOutputFileName("")
+                pd.close_safe()
+
+                cleaned = False
+                for _ in range(3):
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                        cleaned = True
+                        break
+                    except PermissionError:
+                        time.sleep(0.1)
+
+                if cleaned or not os.path.exists(path):
+                    ToastManager().show("PDF export cancelled. Temporary file cleaned.", "warning")
+                else:
+                    ToastManager().show("Export cancelled, but partial file is locked by system.", "warning")
+
+                return
+
             if page_idx > 0:
                 printer.newPage()
 
@@ -900,55 +982,16 @@ class RSSTool(BaseTool):
 
             fm = painter.fontMetrics()
             text_height = fm.height()
-
             text_rect = QRectF(0, page_rect.height() - text_height * 1.5, page_rect.width(), text_height)
             painter.drawText(text_rect, Qt.AlignCenter | Qt.AlignBottom, f"- {page_idx + 1} -")
             painter.restore()
 
+            percent = int(((page_idx + 1) / page_count) * 100)
+            pd.update_progress(percent, f"Rendering page {page_idx + 1} of {page_count}...")
+            QApplication.instance().processEvents()
+
         painter.end()
-
-        ToastManager().show(f"PDF exported successfully ({page_count} pages).", "success")
-
-    def batch_download_pdfs(self):
-        selected = [w.article_data for w in self.current_article_widgets if
-                    w.is_checked() and w.article_data.get('pdf_url')]
-        if not selected:
-            ToastManager().show("None of the selected articles have OA PDF links available.", "warning")
-            return
-
-        save_dir = QFileDialog.getExistingDirectory(self.widget, "Select Folder to Save PDFs")
-        if not save_dir: return
-
-        urls_info = [{"url": art['pdf_url'], "filename": art['title']} for art in selected]
-
-        telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
-        self.dl_pd = ProgressDialog(self.widget, "Downloading PDFs", f"Starting download of {len(urls_info)} files...",
-                                    telemetry_config=telemetry_off)
-        self.dl_pd.show()
-
-        self.task_mgr.sig_progress.connect(self.dl_pd.update_progress)
-        self.task_mgr.sig_state_changed.connect(self._on_download_done)
-        self.dl_pd.sig_canceled.connect(self.task_mgr.cancel_task)
-
-        # 启动基于 core_task 的下载任务
-        self.task_mgr.start_task(DownloadOATask, "dl_oa_pdfs", urls_info=urls_info, save_dir=save_dir)
-
-
-    def _on_download_done(self, state, msg):
-        try:
-            self.task_mgr.sig_state_changed.disconnect(self._on_download_done)
-        except:
-            pass
-        try:
-            self.task_mgr.sig_progress.disconnect(self.dl_pd.update_progress)
-        except:
-            pass
-
-        if state == TaskState.SUCCESS.value:
-            self.dl_pd.show_success_state("Complete", "Download task finished.")
-        else:
-            self.dl_pd.close_safe()
-            ToastManager().show(f"Download aborted or failed: {msg}", "error")
+        pd.show_success_state("Complete", f"Successfully exported {page_count} pages to PDF.")
 
 
     def _load_config(self):
