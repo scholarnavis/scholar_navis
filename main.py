@@ -1,3 +1,11 @@
+
+import ctypes
+from src.version import __version__
+def fix_taskbar_icon():
+    if sys.platform == "win32":
+        myappid = f"scholarnavis.studio.navis.{__version__}"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
 import os
 import sys
 import time
@@ -196,11 +204,23 @@ class AppController(QObject):
 
 
 if __name__ == "__main__":
+    import ctypes
+    import sys
+    from src.version import __version__
+
+    if sys.platform == "win32":
+        myappid = f"scholarnavis.studio.navigator.{__version__}"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
     app = QApplication(sys.argv)
+
+    from src.core.theme_manager import ThemeManager
+    from PySide6.QtGui import QIcon
+
+    app.setWindowIcon(QIcon(ThemeManager.get_resource_path("Assets", "ico.svg")))
 
     saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
     qdarktheme.setup_theme(saved_theme)
 
     controller = AppController()
-
     sys.exit(app.exec())

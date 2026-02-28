@@ -1,5 +1,7 @@
 import os
 import logging
+import random
+
 import requests
 import httpx
 from PySide6.QtCore import QObject, Signal
@@ -8,6 +10,83 @@ from chromadb import EmbeddingFunction, Documents, Embeddings
 from src.core.config_manager import ConfigManager
 
 logger = logging.getLogger("NetworkWorker")
+
+def get_random_browser_headers():
+    chrome_v = random.randint(120, 124)
+    ff_v = random.randint(120, 125)
+    mac_minor = random.randint(14, 15)
+    mac_patch = random.randint(1, 7)
+
+    templates = [
+        # Windows Chrome
+        {
+            "ua": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_v}.0.0.0 Safari/537.36",
+            "browser": "chrome",
+            "os": "Windows"
+        },
+        # Mac Chrome
+        {
+            "ua": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{mac_minor}_{mac_patch}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_v}.0.0.0 Safari/537.36",
+            "browser": "chrome",
+            "os": "macOS"
+        },
+        # Windows Edge
+        {
+            "ua": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_v}.0.0.0 Safari/537.36 Edg/{chrome_v}.0.0.0",
+            "browser": "edge",
+            "os": "Windows"
+        },
+        # Windows Firefox
+        {
+            "ua": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{ff_v}.0) Gecko/20100101 Firefox/{ff_v}.0",
+            "browser": "firefox",
+            "os": "Windows"
+        },
+        # Mac Firefox
+        {
+            "ua": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{mac_minor}_{mac_patch}; rv:{ff_v}.0) Gecko/20100101 Firefox/{ff_v}.0",
+            "browser": "firefox",
+            "os": "macOS"
+        }
+    ]
+
+    choice = random.choice(templates)
+
+    headers = {
+        'User-Agent': choice["ua"],
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0'
+    }
+
+    # 如果是 Chromium 内核 (Chrome/Edge)，动态注入对应的 Sec-Ch-Ua 指纹
+    if choice["browser"] in ["chrome", "edge"]:
+        brand = "Microsoft Edge" if choice["browser"] == "edge" else "Google Chrome"
+        headers['Sec-Ch-Ua'] = f'"Chromium";v="{chrome_v}", "Not(A:Brand";v="24", "{brand}";v="{chrome_v}"'
+        headers['Sec-Ch-Ua-Mobile'] = '?0'
+        headers['Sec-Ch-Ua-Platform'] = f'"{choice["os"]}"'
+
+    return headers
+
+
+def create_robust_session():
+    session = requests.Session()
+
+    proxy_cfg = _get_explicit_proxy_kwargs()
+    if "trust_env" in proxy_cfg:
+        session.trust_env = False
+    elif "proxy" in proxy_cfg:
+        session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
+
+    session.headers.update(get_random_browser_headers())
+    return session
 
 
 def setup_global_network_env():

@@ -271,7 +271,7 @@ def fetch_open_access_pdf(doi: str) -> str:
 
     fetcher = OAFetcher()
 
-    result = fetcher.fetch_best_oa_pdf(doi, ncbi_email, s2_api_key, request_adapter)
+    result = fetcher.fetch_best_oa_pdf(doi, ncbi_email, s2_api_key)
 
     if result.get("is_oa"):
         return json.dumps({

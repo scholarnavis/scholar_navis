@@ -4,227 +4,271 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Scholar Navis | AI-Driven Academic Navigation</title>
-    <meta name="description" content="An advanced, cross-platform scholarly navigation and literature management tool driven by dynamic AI models.">
-    
+    <meta name="description" content="A high-performance PySide6 desktop application for academic research, featuring Local RAG, Academic MCP, and RSS integration.">
+
     <script src="https://cdn.tailwindcss.com"></script>
-    
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <script>
         tailwind.config = {
+            darkMode: 'class',
             theme: {
                 extend: {
-                    // 使用各系统默认的高质量 UI 字体
-                    fontFamily: { 
-                        sans: ['system-ui', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', '"Helvetica Neue"', 'Arial', '"Noto Sans"', 'sans-serif', '"Apple Color Emoji"', '"Segoe UI Emoji"', '"Segoe UI Symbol"', '"Noto Color Emoji"'] 
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif']
                     },
                     colors: {
-                        primary: '#0f172a', 
-                        secondary: '#3b82f6',
-                        accent: '#10b981', 
-                        surface: '#f8fafc',
+                        primary: '#3b82f6',
+                        darkBg: '#0f172a',
+                        darkSurface: '#1e293b',
                     }
                 }
             }
         }
-    </script>
-</head>
-<body class="font-sans text-gray-800 bg-surface antialiased flex flex-col min-h-screen">
 
-    <header class="bg-white border-b border-gray-200 pt-24 pb-20 text-center px-4 sm:px-6 lg:px-8 shadow-sm">
-        <div class="max-w-4xl mx-auto mt-4">
-            <div class="inline-flex items-center justify-center p-4 bg-slate-100 rounded-2xl mb-6 shadow-inner">
-                <i class="fa-solid fa-microscope text-primary text-3xl"></i>
+        function setTheme(theme) {
+            if (theme === 'dark' || (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+            localStorage.setItem('theme', theme);
+        }
+
+        const savedTheme = localStorage.getItem('theme') || 'auto';
+        setTheme(savedTheme);
+    </script>
+    <style>
+        .logo-container { filter: drop-shadow(0 0 20px rgba(59, 130, 246, 0.3)); }
+        .feature-card { transition: all 0.3s ease; }
+        .feature-card:hover { transform: translateY(-5px); }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 dark:bg-darkBg dark:text-slate-100 transition-colors duration-300 min-h-screen flex flex-col">
+
+    <!-- Navigation -->
+    <nav class="fixed w-full z-50 bg-white/80 dark:bg-darkBg/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8">
+                    <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <linearGradient id="navGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#38BDF8" /><stop offset="100%" stop-color="#2563EB" /></linearGradient>
+                        </defs>
+                        <rect x="32" y="32" width="960" height="960" rx="224" fill="#0F172A" />
+                        <path d="M 512 710 Q 366 770 220 660 L 220 400 Q 366 510 512 450 Z" fill="url(#navGrad)" />
+                        <path d="M 512 710 Q 658 770 804 660 L 804 400 Q 658 510 512 450 Z" fill="#60A5FA" />
+                    </svg>
+                </div>
+                <span class="font-bold text-xl tracking-tight hidden sm:block">Scholar Navis</span>
             </div>
-            <h1 class="text-4xl md:text-6xl font-extrabold tracking-tight text-gray-900 mb-6">
+
+            <div class="flex items-center gap-6">
+                <a href="https://github.com/scholarnavis/scholar_navis/" target="_blank" class="text-slate-600 dark:text-slate-400 hover:text-primary transition-colors flex items-center gap-2">
+                    <i class="fa-brands fa-github text-xl"></i>
+                    <span class="text-sm font-medium">GitHub</span>
+                </a>
+                <div class="flex bg-slate-200 dark:bg-slate-800 p-1 rounded-lg">
+                    <button onclick="setTheme('light')" class="p-1.5 rounded-md hover:bg-white dark:hover:bg-slate-700 transition-all"><i class="fa-solid fa-sun text-xs"></i></button>
+                    <button onclick="setTheme('auto')" class="p-1.5 rounded-md hover:bg-white dark:hover:bg-slate-700 transition-all"><i class="fa-solid fa-circle-half-stroke text-xs"></i></button>
+                    <button onclick="setTheme('dark')" class="p-1.5 rounded-md hover:bg-white dark:hover:bg-slate-700 transition-all"><i class="fa-solid fa-moon text-xs"></i></button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <header class="pt-32 pb-16 px-4 text-center">
+        <div class="max-w-4xl mx-auto">
+            <div class="w-40 h-40 mx-auto mb-8 logo-container">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="100%" height="100%">
+                    <defs>
+                        <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#0F172A" /><stop offset="100%" stop-color="#1E1B4B" /></linearGradient>
+                        <linearGradient id="bookLeft" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#38BDF8" /><stop offset="100%" stop-color="#2563EB" /></linearGradient>
+                        <linearGradient id="bookRight" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#60A5FA" /><stop offset="100%" stop-color="#4F46E5" /></linearGradient>
+                        <linearGradient id="aiSparkle" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#C084FC" /><stop offset="100%" stop-color="#F472B6" /></linearGradient>
+                        <filter id="glow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="16" result="blur" /><feComposite in="SourceGraphic" in2="blur" operator="over" /></filter>
+                        <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="16" stdDeviation="16" flood-color="#000000" flood-opacity="0.4" /></filter>
+                    </defs>
+                    <rect x="32" y="32" width="960" height="960" rx="224" ry="224" fill="url(#bgGrad)" />
+                    <g filter="url(#shadow)">
+                        <path d="M 512 740 Q 366 800 220 690 L 220 660 Q 366 770 512 710 Z" fill="#1E3A8A" />
+                        <path d="M 512 740 Q 658 800 804 690 L 804 660 Q 658 770 512 710 Z" fill="#312E81" />
+                        <path d="M 512 710 Q 366 770 220 660 L 220 400 Q 366 510 512 450 Z" fill="url(#bookLeft)" />
+                        <path d="M 512 710 Q 658 770 804 660 L 804 400 Q 658 510 512 450 Z" fill="url(#bookRight)" />
+                        <line x1="512" y1="450" x2="512" y2="710" stroke="#BFDBFE" stroke-width="4" opacity="0.6" stroke-linecap="round"/>
+                    </g>
+                    <g filter="url(#glow)">
+                        <path d="M 512 80 C 512 180 410 260 310 260 C 410 260 512 340 512 440 C 512 340 614 260 714 260 C 614 260 512 180 512 80 Z" fill="url(#aiSparkle)" />
+                    </g>
+                </svg>
+            </div>
+            <h1 class="text-4xl md:text-6xl font-black mb-6 tracking-tight">
                 Scholar Navis
             </h1>
-            <p class="text-lg md:text-xl text-gray-600 mb-8 max-w-2xl mx-auto leading-relaxed">
-                Empowering the next generation of scientific discovery. A high-performance, AI-integrated literature management platform compiled natively for your operating system.
+            <p class="text-lg md:text-xl text-slate-600 dark:text-slate-400 mb-10 max-w-2xl mx-auto leading-relaxed">
+                A high-performance academic workstation powered by PySide6. Local RAG, Academic MCP, and deep AI integration for the modern researcher.
             </p>
-            
-            <div class="flex justify-center items-center gap-6 mb-10 text-gray-400">
-                <div class="flex items-center gap-2"><i class="fa-brands fa-windows text-xl"></i><span class="text-sm font-medium">Windows</span></div>
-                <div class="flex items-center gap-2"><i class="fa-brands fa-apple text-xl"></i><span class="text-sm font-medium">macOS</span></div>
-                <div class="flex items-center gap-2"><i class="fa-brands fa-linux text-xl"></i><span class="text-sm font-medium">Linux</span></div>
-            </div>
-            
+
             <div class="flex flex-col sm:flex-row justify-center gap-4">
-                <a href="#download" class="inline-flex items-center justify-center px-8 py-3.5 border border-transparent text-base font-semibold rounded-lg text-white bg-primary hover:bg-slate-800 transition-colors duration-200 shadow-lg hover:shadow-xl">
-                    <i class="fa-solid fa-download mr-2"></i> Download Natively
+                <a href="http://scholarnavis.com/dl" class="inline-flex items-center justify-center px-8 py-4 bg-primary text-white font-bold rounded-xl hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
+                    <i class="fa-solid fa-download mr-2"></i> Download Latest Version
                 </a>
-                <a href="https://github.com/yourusername/scholar-navis/releases" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center px-8 py-3.5 border border-gray-300 text-base font-medium rounded-lg text-gray-700 bg-white hover:bg-gray-50 transition-colors duration-200 shadow-sm">
-                    <i class="fa-brands fa-github mr-2"></i> View Release Notes
+                <a href="#features" class="inline-flex items-center justify-center px-8 py-4 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 transition-all">
+                    Learn More
                 </a>
             </div>
         </div>
     </header>
 
-    <section id="features" class="py-24 bg-surface px-4 sm:px-6 lg:px-8">
+    <!-- Main Features -->
+    <section id="features" class="py-20 px-4">
         <div class="max-w-7xl mx-auto">
-            <div class="text-center mb-16">
-                <h2 class="text-3xl font-bold text-gray-900 tracking-tight">Engineered for Research Excellence</h2>
-                <p class="mt-4 text-gray-600 max-w-2xl mx-auto">Seamlessly bridging the gap between scientific literature, omics data, and AI-driven analysis.</p>
-            </div>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                
-                <div class="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 hover:shadow-lg transition-all duration-300">
-                    <div class="w-12 h-12 inline-flex items-center justify-center rounded-xl bg-blue-50 text-secondary mb-6">
-                        <i class="fa-solid fa-microchip text-xl"></i>
-                    </div>
-                    <h3 class="text-lg font-bold text-gray-900 mb-3">Hardware-Aware RAG</h3>
-                    <p class="text-gray-600 text-sm leading-relaxed">
-                        Features a dynamic allocation algorithm that intelligently scales embedding (e.g., BGE-M3) and reranker parameters based on your available system RAM and GPU VRAM.
-                    </p>
-                </div>
-
-                <div class="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 hover:shadow-lg transition-all duration-300">
-                    <div class="w-12 h-12 inline-flex items-center justify-center rounded-xl bg-purple-50 text-purple-600 mb-6">
-                        <i class="fa-solid fa-file-pdf text-xl"></i>
-                    </div>
-                    <h3 class="text-lg font-bold text-gray-900 mb-3">OA PDF Retrieval Cascade</h3>
-                    <p class="text-gray-600 text-sm leading-relaxed">
-                        Built-in MCP server executes a robust fallback strategy (Semantic Scholar → Unpaywall → PubMed OA) to securely fetch full-text Open Access PDFs globally.
-                    </p>
-                </div>
-
-                <div class="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 hover:shadow-lg transition-all duration-300">
-                    <div class="w-12 h-12 inline-flex items-center justify-center rounded-xl bg-emerald-50 text-accent mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- RAG -->
+                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
+                    <div class="w-12 h-12 bg-blue-100 dark:bg-blue-900/30 rounded-lg flex items-center justify-center mb-6 text-blue-600 dark:text-blue-400">
                         <i class="fa-solid fa-database text-xl"></i>
                     </div>
-                    <h3 class="text-lg font-bold text-gray-900 mb-3">Multi-Omics Data Mining</h3>
-                    <p class="text-gray-600 text-sm leading-relaxed">
-                        Directly interfaces with NCBI tools to query SRA datasets, GEO expression studies, and retrieve raw FASTA sequences for rapid biological validation.
+                    <h3 class="text-xl font-bold mb-3">Local Research Memory</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Build your private knowledge base with local vector embeddings. RAG ensures all AI answers are grounded in your specific literature, minimizing hallucinations.
                     </p>
                 </div>
 
-                <div class="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 hover:shadow-lg transition-all duration-300">
-                    <div class="w-12 h-12 inline-flex items-center justify-center rounded-xl bg-orange-50 text-orange-500 mb-6">
-                        <i class="fa-solid fa-cubes text-xl"></i>
+                <!-- MCP -->
+                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
+                    <div class="w-12 h-12 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center mb-6 text-purple-600 dark:text-purple-400">
+                        <i class="fa-solid fa-microscope text-xl"></i>
                     </div>
-                    <h3 class="text-lg font-bold text-gray-900 mb-3">Modular Architecture</h3>
-                    <p class="text-gray-600 text-sm leading-relaxed">
-                        Highly extensible foundation utilizing BaseTool classes. Researchers can rapidly develop and integrate custom analysis scripts as independent plugins.
+                    <h3 class="text-xl font-bold mb-3">Academic MCP Servers</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Direct integration with NCBI, UniProt, Semantic Scholar, and Unpaywall. The AI can fetch full-text PDFs and biological sequences autonomously.
                     </p>
                 </div>
 
+                <!-- RSS -->
+                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
+                    <div class="w-12 h-12 bg-orange-100 dark:bg-orange-900/30 rounded-lg flex items-center justify-center mb-6 text-orange-600 dark:text-orange-400">
+                        <i class="fa-solid fa-rss text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-bold mb-3">Journal Feed Tracking</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Stay updated with real-time RSS subscriptions from top journals. Save lists and initiate AI discussions on the latest papers immediately.
+                    </p>
+                </div>
+
+                <!-- Chat -->
+                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
+                    <div class="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg flex items-center justify-center mb-6 text-emerald-600 dark:text-emerald-400">
+                        <i class="fa-solid fa-message text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-bold mb-3">Guided AI Interaction</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Advanced chat interface with auto-follow-up question suggestions. Custom API parameters allow you to fine-tune the AI's scientific reasoning.
+                    </p>
+                </div>
+
+                <!-- Translator -->
+                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
+                    <div class="w-12 h-12 bg-cyan-100 dark:bg-cyan-900/30 rounded-lg flex items-center justify-center mb-6 text-cyan-600 dark:text-cyan-400">
+                        <i class="fa-solid fa-language text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-bold mb-3">Global Overlay Translator</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        A floating window accessible from any application. Perform multi-language translation and AI polishing on any text you highlight.
+                    </p>
+                </div>
+
+                <!-- Programmable MCP -->
+                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
+                    <div class="w-12 h-12 bg-rose-100 dark:bg-rose-900/30 rounded-lg flex items-center justify-center mb-6 text-rose-600 dark:text-rose-400">
+                        <i class="fa-solid fa-code text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-bold mb-3">Programmable Extensions</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Write your own local MCP plugins as simple <code>.py</code> files. Build custom lab automation and analysis tools that the AI can use directly.
+                    </p>
+                </div>
             </div>
         </div>
     </section>
 
-    <section id="requirements" class="py-24 bg-white border-t border-gray-100 px-4 sm:px-6 lg:px-8">
-        <div class="max-w-7xl mx-auto">
+    <!-- System Requirements (RAG Focused) -->
+    <section class="py-24 bg-slate-100 dark:bg-slate-900/50">
+        <div class="max-w-5xl mx-auto px-4">
             <div class="text-center mb-16">
-                <h2 class="text-3xl font-bold text-gray-900 tracking-tight">System Requirements</h2>
-                <p class="mt-4 text-gray-600 max-w-2xl mx-auto">Scholar Navis automatically scales its AI models to match your hardware. Choose the tier that best describes your workstation.</p>
+                <h2 class="text-3xl font-bold mb-4">System Requirements</h2>
+                <p class="text-slate-500">Scholar Navis utilizes local Embedding and Reranker models for maximum privacy and precision.</p>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-                
-                <div class="rounded-2xl border border-gray-200 bg-white overflow-hidden shadow-sm hover:shadow-md transition-shadow">
-                    <div class="p-6 border-b border-gray-100 bg-gray-50">
-                        <h3 class="text-xl font-bold text-gray-900">Portable / Minimal</h3>
-                        <p class="text-sm text-gray-500 mt-1">CPU-Only execution (Nano & Lite Models)</p>
-                    </div>
-                    <div class="p-6">
-                        <ul class="space-y-4 text-sm text-gray-600">
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-memory text-gray-400 mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">RAM:</strong> 2 GB Minimum</div>
-                            </li>
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-microchip text-gray-400 mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">GPU:</strong> Not Required</div>
-                            </li>
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-hard-drive text-gray-400 mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">Disk Space:</strong> ~2 GB</div>
-                            </li>
-                        </ul>
-                        <div class="mt-6 pt-6 border-t border-gray-100">
-                            <p class="text-xs text-gray-500 italic">Utilizes ultra-fast parameters suitable for pure CPU environments and 2-in-1 portable devices.</p>
-                        </div>
-                    </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <!-- Minimum -->
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border border-slate-200 dark:border-slate-800">
+                    <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-yellow-500"></span> Minimum Configuration
+                    </h4>
+                    <ul class="space-y-4">
+                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                            <span class="text-slate-500">Memory (RAM)</span>
+                            <span class="font-semibold">8 GB</span>
+                        </li>
+                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                            <span class="text-slate-500">Graphics (GPU)</span>
+                            <span class="font-semibold text-right text-sm">Not Required<br>(CPU-only Inference)</span>
+                        </li>
+                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                            <span class="text-slate-500">Disk Space</span>
+                            <span class="font-semibold">~2 GB (Lite Models)</span>
+                        </li>
+                        <li class="flex justify-between">
+                            <span class="text-slate-500">Models</span>
+                            <span class="font-medium text-blue-500 text-sm">Arctic-XS / BGE-Base</span>
+                        </li>
+                    </ul>
                 </div>
 
-                <div class="rounded-2xl border-2 border-secondary bg-white overflow-hidden shadow-lg relative transform md:-translate-y-4">
-                    <div class="absolute top-0 right-0 bg-secondary text-white text-xs font-bold px-4 py-1.5 rounded-bl-xl">
-                        Recommended
-                    </div>
-                    <div class="p-6 border-b border-blue-50 bg-blue-50/30">
-                        <h3 class="text-xl font-bold text-secondary">Scientific Standard</h3>
-                        <p class="text-sm text-gray-500 mt-1">GPU Recommended (M3 Series Models)</p>
-                    </div>
-                    <div class="p-6">
-                        <ul class="space-y-4 text-sm text-gray-600">
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-memory text-secondary mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">RAM:</strong> 8 GB Minimum</div>
-                            </li>
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-vr-cardboard text-secondary mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">VRAM:</strong> 6 GB (e.g., RTX 3060/4060)</div>
-                            </li>
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-hard-drive text-secondary mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">Disk Space:</strong> 5 GB for Models</div>
-                            </li>
-                        </ul>
-                        <div class="mt-6 pt-6 border-t border-gray-100">
-                            <p class="text-xs text-gray-500 italic">Flagship scientific models. Excellent understanding of academic terminology with multi-language and long text support.</p>
-                        </div>
-                    </div>
+                <!-- Recommended -->
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border-2 border-primary shadow-xl scale-105">
+                    <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500"></span> Recommended (Pro)
+                    </h4>
+                    <ul class="space-y-4">
+                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                            <span class="text-slate-500">Memory (RAM)</span>
+                            <span class="font-semibold">16 GB - 32 GB</span>
+                        </li>
+                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                            <span class="text-slate-500">Graphics (VRAM)</span>
+                            <span class="font-semibold text-right">NVIDIA 6GB+<br><span class="text-xs font-normal text-slate-400">(RTX 3060/4060+)</span></span>
+                        </li>
+                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                            <span class="text-slate-500">Disk Space</span>
+                            <span class="font-semibold">~10 GB (High Precision)</span>
+                        </li>
+                        <li class="flex justify-between">
+                            <span class="text-slate-500">Models</span>
+                            <span class="font-medium text-blue-500 text-sm">BGE-M3 / Qwen2-7B-Embed</span>
+                        </li>
+                    </ul>
                 </div>
-
-                <div class="rounded-2xl border border-gray-200 bg-white overflow-hidden shadow-sm hover:shadow-md transition-shadow">
-                    <div class="p-6 border-b border-gray-100 bg-gray-900">
-                        <h3 class="text-xl font-bold text-white">Extreme Workstation</h3>
-                        <p class="text-sm text-gray-400 mt-1">High-End GPU Only (Gemma 9B / NV-Embed)</p>
-                    </div>
-                    <div class="p-6">
-                        <ul class="space-y-4 text-sm text-gray-600">
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-memory text-gray-700 mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">RAM:</strong> 32 GB - 64 GB</div>
-                            </li>
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-vr-cardboard text-gray-700 mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">VRAM:</strong> 20 GB - 24 GB+</div>
-                            </li>
-                            <li class="flex items-start">
-                                <i class="fa-solid fa-hard-drive text-gray-700 mt-1 mr-3 w-4 text-center"></i>
-                                <div><strong class="text-gray-900">Disk Space:</strong> 20 GB - 35 GB</div>
-                            </li>
-                        </ul>
-                        <div class="mt-6 pt-6 border-t border-gray-100">
-                            <p class="text-xs text-gray-500 italic">Unlocks state-of-the-art semantic understanding and massive parameter precision for local NLP tasks.</p>
-                        </div>
-                    </div>
-                </div>
-
             </div>
+            <p class="mt-12 text-center text-xs text-slate-400 italic">Note: High-performance Reranker models (like Gemma-9B) may require 20GB+ VRAM for optimal speed.</p>
         </div>
     </section>
 
-    <footer class="bg-gray-900 mt-auto py-12 px-4 sm:px-6 lg:px-8 border-t border-gray-800">
-        <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center">
-            <div class="mb-6 md:mb-0 text-center md:text-left">
-                <span class="text-2xl font-bold text-white tracking-tight flex items-center justify-center md:justify-start gap-2">
-                    <i class="fa-solid fa-microscope text-secondary"></i> Scholar Navis
-                </span>
-                <p class="text-gray-400 text-sm mt-2">© 2026. Advancing Research Infrastructure.</p>
+    <!-- Footer -->
+    <footer class="mt-auto py-12 border-t border-slate-200 dark:border-slate-800">
+        <div class="max-w-7xl mx-auto px-4 flex flex-col md:flex-row justify-between items-center gap-6">
+            <div class="flex items-center gap-2">
+                <div class="w-6 h-6">
+                    <svg viewBox="0 0 1024 1024"><rect x="32" y="32" width="960" height="960" rx="224" fill="#0F172A" /><path d="M 512 710 Q 366 770 220 660 L 220 400 Q 366 510 512 450 Z" fill="#38BDF8" /><path d="M 512 710 Q 658 770 804 660 L 804 400 Q 658 510 512 450 Z" fill="#60A5FA" /></svg>
+                </div>
+                <span class="font-bold">Scholar Navis</span>
             </div>
-            
-            <div class="flex space-x-6">
-                <a href="#" class="text-gray-400 hover:text-white transition-colors">
-                    <span class="sr-only">GitHub</span>
-                    <i class="fa-brands fa-github text-2xl"></i>
-                </a>
-                <a href="#" class="text-gray-400 hover:text-white transition-colors">
-                    <span class="sr-only">Documentation</span>
-                    <i class="fa-solid fa-book text-2xl"></i>
-                </a>
+            <p class="text-slate-500 text-sm">© 2026 Scholar Navis Studio</p>
+            <div class="flex gap-4">
+                <a href="https://github.com/scholarnavis/scholar_navis/" class="text-slate-400 hover:text-primary transition-colors"><i class="fa-brands fa-github text-xl"></i></a>
             </div>
         </div>
     </footer>

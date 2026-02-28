@@ -8,6 +8,7 @@ from datetime import datetime
 import urllib.parse
 
 from src.core.core_task import BackgroundTask
+from src.core.network_worker import create_robust_session
 from src.core.oa import OAFetcher
 
 
@@ -55,21 +56,17 @@ class FetchRSSTask(BackgroundTask):
 
         self.send_log("INFO", f"📡 开始多线程并发同步 {total} 个订阅源，并自动嗅探 OA 全文...")
 
-        # 定义单源抓取内部函数（利用独立 Session 保证线程安全）
         def process_single_feed(feed):
             if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
-                return None  # 提早退出
+                return None
 
-            session = requests.Session()
-            if os.environ.get("NO_PROXY") == "*":
-                session.trust_env = False
+            session = create_robust_session()
 
             url = feed.get('url')
             name = feed.get('name', 'Unknown')
 
             try:
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                resp = session.get(url, headers=headers, timeout=15)
+                resp = session.get(url, timeout=15)
                 resp.raise_for_status()
 
                 articles = self._parse_feed(resp.text, session)
@@ -77,6 +74,8 @@ class FetchRSSTask(BackgroundTask):
                 return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count}
             except Exception as e:
                 return {"success": False, "url": url, "name": name, "error": str(e)}
+            finally:
+                session.close()
 
         # 使用最大 8 线程并发请求
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -96,9 +95,9 @@ class FetchRSSTask(BackgroundTask):
                         results[res["url"]] = res["articles"]
                         success_count += 1
                         self.send_log("INFO",
-                                      f"✅ {res['name']}: 获取 {len(res['articles'])} 篇 (发现 {res['oa_count']} 篇 OA)")
+                                      f"{res['name']}: 获取 {len(res['articles'])} 篇 (发现 {res['oa_count']} 篇 OA)")
                     else:
-                        self.send_log("ERROR", f"❌ 获取 {res['name']} 失败: {res['error']}")
+                        self.send_log("ERROR", f"获取 {res['name']} 失败: {res['error']}")
 
                 # 更新进度条
                 self.update_progress(int((completed_count / total) * 100), f"Syncing... {completed_count}/{total}")
@@ -180,22 +179,17 @@ class FetchRSSTask(BackgroundTask):
             if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
                 return article
 
-            session = requests.Session()
-            if os.environ.get("NO_PROXY") == "*":
-                session.trust_env = False
-
             doi = article.get("doi")
             pdf_url = ""
             landing_url = article.get("link", "")
+            user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
 
             if doi:
-                def request_adapter(url, headers=None, timeout=4.0):
-                    return session.get(url, headers=headers, timeout=timeout)
-
                 s2_key = os.environ.get("S2_API_KEY", "").strip()
                 fetcher = OAFetcher()
 
-                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, s2_key, request_adapter)
+                # === 优化点：直接调用，让 OA 引擎自己处理网络和防屏蔽 ===
+                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, s2_key)
 
                 if oa_result.get("is_oa"):
                     pdf_url = oa_result["pdf_url"]
@@ -206,7 +200,6 @@ class FetchRSSTask(BackgroundTask):
 
             article["pdf_url"] = pdf_url
             article["link"] = landing_url
-            session.close()
             return article
 
         final_articles = []
@@ -229,6 +222,7 @@ class DownloadOATask(BackgroundTask):
         total = len(urls_info)
         success_count = 0
         skip_count = 0
+        session = create_robust_session()
 
         import requests
         session = requests.Session()
@@ -262,7 +256,7 @@ class DownloadOATask(BackgroundTask):
             self.update_progress(int((i / total) * 100), f"[{i + 1}/{total}] 正在下载: {safe_name[:20]}...")
 
             try:
-                res = session.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+                res = session.get(url, timeout=30)
                 res.raise_for_status()
                 with open(filepath, 'wb') as f:
                     f.write(res.content)

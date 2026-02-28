@@ -3,6 +3,8 @@ import re
 import logging
 import requests
 
+from src.core.network_worker import create_robust_session
+
 
 class OAFetcher:
     def __init__(self):
@@ -39,6 +41,18 @@ class OAFetcher:
         landing_url = f"https://doi.org/{clean_doi}"
 
         self.logger.info(f"Starting OA search for DOI: {clean_doi}")
+
+        session = None
+        if request_func is None:
+            session = create_robust_session()
+
+            def default_request(url, headers=None, timeout=5):
+                req_headers = session.headers.copy()
+                if headers:
+                    req_headers.update(headers)
+                return session.get(url, headers=req_headers, timeout=timeout)
+
+            request_func = default_request
 
         # 1. Semantic Scholar (S2)
         if s2_api_key:
@@ -140,8 +154,10 @@ class OAFetcher:
         return {"is_oa": False, "landing_page_url": landing_url}
 
 
-
 if __name__ == "__main__":
+    from src.core.network_worker import setup_global_network_env
+    setup_global_network_env()
+
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
     print("\n=== OA PDF Sniffer Testing Tool ===")
@@ -150,16 +166,11 @@ if __name__ == "__main__":
         "Enter your NCBI/Unpaywall Email (or leave blank for test@example.com): ").strip() or "test@example.com"
     test_s2_key = input("Enter Semantic Scholar API Key (or leave blank to skip S2): ").strip()
 
-
-    def simple_request_adapter(url, headers=None, timeout=5):
-        return requests.get(url, headers=headers, timeout=timeout)
-
-
     fetcher = OAFetcher()
     print("\n[Executing Searches...]")
-    result = fetcher.fetch_best_oa_pdf(test_doi, test_email, test_s2_key, simple_request_adapter)
+
+    result = fetcher.fetch_best_oa_pdf(test_doi, test_email, test_s2_key)
 
     print("\n=== Final Result ===")
     import json
-
     print(json.dumps(result, indent=2))

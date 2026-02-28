@@ -16,6 +16,7 @@ from PySide6.QtGui import QDesktopServices, QTextDocument, QPageLayout, QAbstrac
     QColor
 from PySide6.QtPrintSupport import QPrinter
 
+from src.core.config_manager import ConfigManager
 from src.core.theme_manager import ThemeManager
 from src.tools.base_tool import BaseTool
 from src.core.core_task import TaskManager, TaskState
@@ -279,6 +280,12 @@ class ArticleWidget(QFrame):
             self.btn_link.setIcon(tm.icon("link", "text_main"))
             self.btn_link.setStyleSheet(btn_style)
 
+            if hasattr(self, 'lbl_date_icon'):
+                self.lbl_date_icon.setPixmap(tm.icon("time", "text_muted").pixmap(14, 14))
+            if hasattr(self, 'lbl_doi_icon'):
+                self.lbl_doi_icon.setPixmap(tm.icon("link", "text_muted").pixmap(14, 14))
+            if hasattr(self, 'lbl_tag_icon'):
+                self.lbl_tag_icon.setPixmap(tm.icon("tag", "text_muted").pixmap(14, 14))
 
     def _send_to_chat(self):
         if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
@@ -322,8 +329,16 @@ class ArticleWidget(QFrame):
 class RSSTool(BaseTool):
     def __init__(self):
         super().__init__("Literature Tracker")
-        self.workspace_dir = os.path.join(os.getcwd(), "scholar_workspace")
-        self.feeds_file = os.path.join(self.workspace_dir, "rss_subscriptions.json")
+
+        base_dir = ConfigManager().BASE_DIR
+
+        self.workspace_dir = os.path.join(base_dir, "scholar_workspace")
+        os.makedirs(self.workspace_dir, exist_ok=True)
+
+        config_dir = os.path.join(base_dir, "config")
+        os.makedirs(config_dir, exist_ok=True)
+
+        self.feeds_file = os.path.join(config_dir, "rss_feed.json")
         self.cache_file = os.path.join(self.workspace_dir, "rss_cache.json")
 
         self.feeds = []
@@ -333,7 +348,7 @@ class RSSTool(BaseTool):
         self.dl_thread = None
 
         self.task_mgr = TaskManager()
-        os.makedirs(self.workspace_dir, exist_ok=True)
+
         self._load_config()
 
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -480,6 +495,8 @@ class RSSTool(BaseTool):
         left_action_bar.addWidget(self.btn_feed_sel_inv)
         left_action_bar.addStretch()
         left_layout.addLayout(left_action_bar)
+        self.btn_feed_sel_all.clicked.connect(lambda: self._batch_select_feeds(True))
+        self.btn_feed_sel_inv.clicked.connect(lambda: self._batch_select_feeds("invert"))
 
         self.feed_list = QListWidget()
         self.feed_list.itemDoubleClicked.connect(lambda item: self.edit_feed())

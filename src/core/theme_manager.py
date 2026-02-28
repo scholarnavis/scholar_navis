@@ -120,6 +120,11 @@ class ThemeManager(QObject):
 
     def get_custom_qss(self):
         return f"""
+        
+        QWidget {{
+            font-family: {self.font_family()};
+        }}
+        
         QGroupBox {{ margin-top: 15px; }}
         QGroupBox::title {{
             color: {self.color('title_blue')} !important;

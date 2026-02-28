@@ -1,26 +1,26 @@
 import os
 import sys
+import shutil
 import subprocess
+from datetime import datetime
 from src.version import __version__, __app_name__, __description__, __company__
 
 
-def build(target_os):
-    current_os = sys.platform
-
-    # Nuitka 跨平台编译拦截与警告
-    if target_os == "windows" and current_os != "win32":
-        print("⚠️ 警告: Nuitka 无法在非 Windows 系统上直接编译 Windows 版本。跳过该任务。")
-        return
-    if target_os == "mac" and current_os != "darwin":
-        print("⚠️ 警告: Nuitka 无法在非 macOS 系统上直接编译 Mac 版本。跳过该任务。")
-        return
-    if target_os == "linux" and not current_os.startswith("linux"):
-        print("⚠️ 警告: Nuitka 无法在非 Linux 系统上直接编译 Linux 版本。跳过该任务。")
+def build_windows():
+    if sys.platform != "win32":
+        print("❌ Error: This script must be run on Windows.")
         return
 
     win_version = f"{__version__}.0" if len(__version__.split('.')) == 3 else __version__
+    dist_dir = "dist"
+    build_name = __app_name__.replace(" ", "_").lower()
+    output_zip = f"{build_name}_ver.{__version__}.zip"
 
-    # 基础通用参数
+    # 1. 清理旧构建
+    if os.path.exists(dist_dir):
+        shutil.rmtree(dist_dir)
+
+    # 2. Nuitka 指令
     cmd = [
         "python", "-m", "nuitka", "--standalone",
         "--show-progress", "--show-memory",
@@ -30,68 +30,46 @@ def build(target_os):
         "--include-package=posthog",
         "--include-package=onnxruntime",
         "--include-package=tokenizers",
-        "--include-module=src.plugins.bio_ncbi_server",
-        "--nofollow-import-to=plugins_ext",
         "--output-dir=dist",
-        "--noinclude-pytest-mode=nofollow",
-        "--noinclude-setuptools-mode=nofollow",
         "--include-data-dir=Assets=Assets",
         "--include-data-dir=assets=assets",
+        "--windows-icon-from-ico=resources/icon.ico",
+        "--windows-console-mode=disable",
+        f"--company-name={__company__}",
+        f"--product-name={__app_name__}",
+        f"--file-description={__description__}",
+        f"--file-version={win_version}",
+        f"--product-version={win_version}",
         f"--output-filename={__app_name__}",
+        "main.py"
     ]
 
-    # 平台专属参数
-    if target_os == "windows":
-        cmd.extend([
-            "--mingw64",
-            "--windows-icon-from-ico=resources/icon.ico",
-            "--windows-console-mode=disable",
-            f"--company-name={__company__}",
-            f"--product-name={__app_name__}",
-            f"--file-description={__description__}",
-            f"--file-version={win_version}",
-        ])
-    elif target_os == "mac":
-        cmd.extend([
-            "--macos-create-app-bundle",
-            "--macos-app-icon=resources/icon.icns",  # Mac 需要 icns 格式图标
-            f"--macos-app-name={__app_name__}",
-            f"--macos-app-version={__version__}",
-        ])
-    elif target_os == "linux":
-        cmd.extend([
-            "--linux-icon=resources/icon.png",  # Linux 一般使用 png
-        ])
+    print(f"\n🚀 [1/2] Starting Nuitka Build for {__app_name__} v{__version__}...")
+    result = subprocess.run(cmd)
 
-    cmd.append("main.py")
+    if result.returncode == 0:
+        print(f"\n✅ [2/2] Build successful. Creating archive: {output_zip}...")
 
-    print(f"\n🚀 开始构建 {__app_name__} for {target_os.upper()} (v{win_version})...")
-    subprocess.run(cmd)
+        # 找到生成的可执行目录 (Nuitka 通常会生成 main.dist)
+        target_folder = os.path.join(dist_dir, "main.dist")
+
+        # 压缩 target_folder 到 output_zip
+        # 使用 shutil.make_archive，它会自动处理
+        shutil.make_archive(
+            base_name=output_zip.replace(".zip", ""),
+            format='zip',
+            root_dir=target_folder
+        )
+
+        # 移动 zip 到 dist 根目录方便上传
+        final_zip_path = os.path.join(dist_dir, output_zip)
+        if os.path.exists(output_zip):
+            shutil.move(output_zip, final_zip_path)
+
+        print(f"\n🎉 Done! Package ready at: {final_zip_path}")
+    else:
+        print("\n❌ Build failed.")
 
 
 if __name__ == "__main__":
-    print("=" * 40)
-    print(" Scholar Navis 自动化打包工具")
-    print("=" * 40)
-    print("请选择要打包的平台 (可多选，用逗号分隔，例如 1,3):")
-    print("  1. Windows")
-    print("  2. macOS")
-    print("  3. Linux")
-    print("  4. 全部 (All)")
-
-    choice = input("\n请输入选项: ").strip()
-
-    targets = []
-    if "4" in choice or "all" in choice.lower():
-        targets = ["windows", "mac", "linux"]
-    else:
-        if "1" in choice: targets.append("windows")
-        if "2" in choice: targets.append("mac")
-        if "3" in choice: targets.append("linux")
-
-    if not targets:
-        print("未选择任何平台，退出打包。")
-        sys.exit(0)
-
-    for t in targets:
-        build(t)
+    build_windows()
