@@ -979,6 +979,11 @@ class ChatTool(BaseTool):
 
         main_layout.addWidget(self.input_container)
 
+        self._render_timer = QTimer(self.widget)
+        self._render_timer.setInterval(60)
+        self._render_timer.timeout.connect(self._throttled_render)
+        self._is_rendering_dirty = False
+
         return self.widget
 
     def attach_from_local(self):
@@ -1022,6 +1027,37 @@ class ChatTool(BaseTool):
             mode=TaskMode.THREAD,
             paths=paths
         )
+
+    def set_controls_enabled(self, enabled: bool):
+        """锁定或解锁对话控制区的关键配置"""
+        if hasattr(self, 'model_selector'):
+            self.model_selector.setEnabled(enabled)
+        if hasattr(self, 'trans_selector'):
+            self.trans_selector.setEnabled(enabled)
+        if hasattr(self, 'combo_kb'):
+            self.combo_kb.setEnabled(enabled)
+
+        if hasattr(self, 'input_container'):
+            if hasattr(self.input_container, 'chk_mcp_enable'):
+                self.input_container.chk_mcp_enable.setEnabled(enabled)
+            if hasattr(self.input_container, 'btn_mcp_tags'):
+                self.input_container.btn_mcp_tags.setEnabled(enabled)
+
+            if hasattr(self.input_container, 'btn_clear'):
+                self.input_container.btn_clear.setEnabled(enabled)
+            if hasattr(self.input_container, 'btn_attach'):
+                self.input_container.btn_attach.setEnabled(enabled)
+
+    def _throttled_render(self):
+        if getattr(self, '_is_rendering_dirty', False) and self.current_ai_bubble:
+            self._is_rendering_dirty = False
+            idx = getattr(self.current_ai_bubble, 'index', -1)
+            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text.lstrip(), idx))
+
+            sb = self.scroll_area.verticalScrollBar()
+            if (sb.maximum() - sb.value()) <= 50:
+                self.scroll_to_bottom()
+
 
     def _on_attachment_state_changed(self, state, msg):
         if state == TaskState.FAILED.value:
@@ -1415,6 +1451,10 @@ class ChatTool(BaseTool):
         self.current_ai_bubble.set_loading(True)
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
+        self.set_controls_enabled(False)
+
+        self._is_rendering_dirty = False
+        self._render_timer.start()
 
         # 实例化后台 Worker
         self.worker_thread = QThread()
@@ -1546,6 +1586,9 @@ class ChatTool(BaseTool):
 
         self.worker_thread = None
         self.worker = None
+
+        if hasattr(self, '_render_timer'): self._render_timer.stop()
+        self.set_controls_enabled(True)
 
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
@@ -1776,25 +1819,21 @@ class ChatTool(BaseTool):
                 ToastManager().show(f"Attached {len(names)} document(s).", "success")
 
     def update_ai_bubble(self, token):
-        """Updates the AI chat bubble with streaming tokens and handles status clearing."""
         if not self.current_ai_bubble: return
         sb = self.scroll_area.verticalScrollBar()
         is_at_bottom = (sb.maximum() - sb.value()) <= 15
-
         idx = getattr(self.current_ai_bubble, 'index', -1)
 
         # 1. Handle clearing of status prompts via Regex
         if token == "[CLEAR_SEARCH]":
             self.current_ai_text = re.sub(r'<i>.*?</i>(?:\n\n)?', '', self.current_ai_text, flags=re.DOTALL)
             self.current_ai_text = self.current_ai_text.lstrip()
-            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
-            if is_at_bottom: self.scroll_to_bottom()
+            self._is_rendering_dirty = True
             return
 
         # 2. Handle LLM connection start
         if token == "[START_LLM_NETWORK]":
             self._is_waiting_llm = True
-            # Ensure text is stripped to prevent <div> from being treated as a code block
             base_html = self._format_response(self.current_ai_text.lstrip(), idx)
             self.current_ai_bubble.set_content(
                 base_html +
@@ -1816,8 +1855,7 @@ class ChatTool(BaseTool):
                 self.current_ai_bubble.set_loading(False)
 
         self.current_ai_text += token
-        self.current_ai_bubble.set_content(self._format_response(self.current_ai_text.lstrip(), idx))
-        if is_at_bottom: self.scroll_to_bottom()
+        self._is_rendering_dirty = True
 
     def _format_response(self, text, index):
         # 1. 处理 Mermaid 图表
@@ -1848,6 +1886,9 @@ class ChatTool(BaseTool):
         if hasattr(self, 'slow_conn_timer'): self.slow_conn_timer.stop()
         self._is_waiting_llm = False
 
+        if hasattr(self, '_render_timer'): self._render_timer.stop()
+        self.set_controls_enabled(True)
+
         # --- 翻译或生成失败处理 ---
         # 显示重试按钮
         self.input_container.btn_stop.setVisible(False)
@@ -1874,6 +1915,14 @@ class ChatTool(BaseTool):
         self.scroll_to_bottom()
 
     def on_chat_finished(self):
+
+        if hasattr(self, '_render_timer'): self._render_timer.stop()
+        self.set_controls_enabled(True)
+
+        # 强制进行最后一次全量渲染，确保不丢掉最后的 token
+        if getattr(self, '_is_rendering_dirty', False):
+            self._throttled_render()
+
 
         if not self.current_ai_bubble:
             return
