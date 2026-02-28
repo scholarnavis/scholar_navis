@@ -84,6 +84,10 @@ class BaseDialog(QDialog):
 
     def _apply_theme(self):
         tm = self.tm
+
+        self.main_frame.style().unpolish(self.main_frame)
+        self.title_bar.style().unpolish(self.title_bar)
+
         self.main_frame.setStyleSheet(f"""
             QFrame#MainFrame {{
                 background-color: {tm.color('bg_main')};
