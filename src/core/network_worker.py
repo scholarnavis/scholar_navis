@@ -76,8 +76,27 @@ def get_random_browser_headers():
     return headers
 
 
+# 引入支持 TLS 指纹伪装的库
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CFFI = True
+except ImportError:
+    import requests as cffi_requests
+    HAS_CFFI = False
+    logger.warning("curl_cffi is not installed. Falling back to standard requests. Strict WAFs may block access.")
+
 def create_robust_session():
-    session = requests.Session()
+    """
+    创建一个真正强壮的 Session，
+    自动挂载全局代理配置，并使用底层 TLS 指纹伪装真实浏览器。
+    """
+    if HAS_CFFI:
+        # impersonate 参数会自动配置匹配该版本浏览器的 TLS 指纹、HTTP/2 特征和基础 Headers
+        # 我们随机挑选一个现代浏览器目标来模仿
+        targets = ["chrome120", "chrome124", "edge122", "safari17_0"]
+        session = cffi_requests.Session(impersonate=random.choice(targets))
+    else:
+        session = cffi_requests.Session()
 
     proxy_cfg = _get_explicit_proxy_kwargs()
     if "trust_env" in proxy_cfg:
@@ -85,9 +104,15 @@ def create_robust_session():
     elif "proxy" in proxy_cfg:
         session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
 
-    session.headers.update(get_random_browser_headers())
-    return session
+    if not HAS_CFFI:
+        session.headers.update(get_random_browser_headers())
+    else:
+        session.headers.update({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        })
 
+    return session
 
 def setup_global_network_env():
     cfg = ConfigManager().user_settings

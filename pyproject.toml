@@ -36,6 +36,7 @@ dependencies = [
     "dashscope>=1.25.12",
     "google-genai>=1.64.0",
     "optimum[onnxruntime]>=2.1.0",
+    "curl-cffi>=0.14.0",
 ]
 
 [[tool.uv.index]]
