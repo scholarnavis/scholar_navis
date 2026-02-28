@@ -13,7 +13,7 @@ class ProcessAttachmentTask(BackgroundTask):
         total = len(paths)
 
         for i, path in enumerate(paths):
-            if getattr(self, '_is_cancelled', False):
+            if self._is_cancelled:
                 self.send_log("INFO", "Attachment processing cancelled by user.")
                 break
 

@@ -32,6 +32,10 @@ class BackgroundTask:
         self._is_cancelled = False
 
     def run(self):
+        # 局部导入！
+        from config_manager import ConfigManager
+        self.config = ConfigManager()
+
         self.logger.debug(f"Start. PID: {os.getpid()} | Task: {self.task_id}")
         self.queue.put({"state": TaskState.PROCESSING.value, "progress": -1, "msg": "Initializing..."})
         try:

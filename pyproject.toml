@@ -29,6 +29,8 @@ dependencies = [
     "torch>=2.10.0",
     "onnxruntime-gpu>=1.24.2",
     "onnxruntime-directml>=1.24.2 ; sys_platform == 'win32'",
+    "cryptography>=46.0.5",
+    "keyring>=25.7.0",
 ]
 
 

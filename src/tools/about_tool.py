@@ -1,29 +1,13 @@
-import os
-import logging
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
 from PySide6.QtCore import Qt, QUrl, QSize
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtSvgWidgets import QSvgWidget
 
+from src.task.common_task import VersionCheckTask
 from src.tools.base_tool import BaseTool
 from src.core.theme_manager import ThemeManager
-from src.core.core_task import TaskManager, BackgroundTask, TaskMode
-from src.core.network_worker import create_robust_session
+from src.core.core_task import TaskManager, TaskMode
 from src.version import __version__, __app_name__, __description__
-
-
-# --- 后台版本检测任务 ---
-class VersionCheckTask(BackgroundTask):
-    def _execute(self):
-        try:
-            session = create_robust_session()
-            response = session.get("https://scholarnavis.com/latest", timeout=5)
-            if response.status_code == 200:
-                latest_version = response.text.strip()
-                return {"latest_version": latest_version}
-        except Exception as e:
-            self.logger.error(f"Failed to check for updates: {e}")
-        return {"latest_version": None}
 
 
 class AboutTool(BaseTool):

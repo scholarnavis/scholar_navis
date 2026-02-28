@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from chromadb import Documents, Embeddings, EmbeddingFunction
 from optimum.onnxruntime import ORTModelForFeatureExtraction
 from transformers import AutoTokenizer
-
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
@@ -41,13 +40,11 @@ def _setup_worker_env():
     return base_dir
 
 
-def _worker_load_model(kb_id):
+def _worker_load_model(kb_id, config):
     logger = logging.getLogger("Worker.ModelLoader")
 
     kb_mgr = KBManager()
     dev_mgr = DeviceManager()
-
-    config = ConfigManager()
 
     kb_data = kb_mgr.get_kb_by_id(kb_id)
     if not kb_data:
@@ -163,7 +160,7 @@ class ImportFilesTask(BackgroundTask):
         self.send_log("INFO", "Loading AI Model...")
         self.send_log("INFO", f"Task kwargs: files_count={len(files)}, is_rebuild={is_rebuild}")
 
-        embed_fn = _worker_load_model(kb_id)
+        embed_fn = _worker_load_model(kb_id, self.config)
 
         # 连接数据库
         if not db_mgr.switch_kb(kb_id, embedding_function=embed_fn):
@@ -196,7 +193,7 @@ class ImportFilesTask(BackgroundTask):
         # 3. 动态获取最优切分参数（木桶原理）
         kb_info = kb_mgr.get_kb_by_id(kb_id)
         current_embed_id = kb_info.get('model_id', 'embed_auto') if kb_info else 'embed_auto'
-        current_rerank_id = ConfigManager().user_settings.get("rerank_model_id", "rerank_auto")
+        current_rerank_id = self.config.user_settings.get("rerank_model_id", "rerank_auto")
 
         opt_chunk, opt_overlap, opt_batch = get_optimal_chunk_settings(current_embed_id, current_rerank_id)
         self.send_log("INFO", f"Chunk settings applied: Chunk={opt_chunk}, Overlap={opt_overlap}, Batch={opt_batch}")
@@ -337,7 +334,7 @@ class DeleteFilesTask(BackgroundTask):
         kb_mgr._update_meta_field(kb_id, "file_map", file_map)
 
         # 3. 清理向量库中的数据
-        embed_fn = _worker_load_model(kb_id)
+        embed_fn = _worker_load_model(kb_id, self.config)
         if db_mgr.switch_kb(kb_id, embedding_function=embed_fn):
             total = len(file_names)
             for i, fname in enumerate(file_names):
@@ -374,7 +371,7 @@ class RenameFilesTask(BackgroundTask):
         kb_mgr._update_meta_field(kb_id, "file_map", file_map)
 
         # 2. 更新向量库中的 metadata
-        embed_fn = _worker_load_model(kb_id)
+        embed_fn = _worker_load_model(kb_id, self.config)
         if db_mgr.switch_kb(kb_id, embedding_function=embed_fn) and db_mgr.collection:
             total = len(renames)
             for i, (old_name, new_name) in enumerate(renames.items()):

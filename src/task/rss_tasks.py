@@ -59,7 +59,7 @@ class FetchRSSTask(BackgroundTask):
         self.send_log("INFO", f"📡 开始多线程并发同步 {total} 个订阅源，并自动嗅探 OA 全文...")
 
         def process_single_feed(feed):
-            if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
+            if self._is_cancelled:
                 return None
 
             session = create_robust_session()
@@ -118,7 +118,7 @@ class FetchRSSTask(BackgroundTask):
             future_to_feed = [executor.submit(process_single_feed, f) for f in feeds]
 
             for future in concurrent.futures.as_completed(future_to_feed):
-                if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
+                if self._is_cancelled:
                     self.send_log("WARNING", "⚠️ Task cancelled by user. Terminating fetch pool.")
                     break
 
@@ -141,11 +141,11 @@ class FetchRSSTask(BackgroundTask):
         with open(save_path, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
-        if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
-            self.send_log("INFO", "🛑 同步被用户主动中断，已保存部分数据。")
+        if self._is_cancelled:
+            self.send_log("INFO", "同步被用户主动中断，已保存部分数据。")
         else:
             self.update_progress(100, f"同步完成。成功: {success_count}/{total}")
-            self.send_log("INFO", f"🎉 RSS 并发抓取任务完成，数据已落盘")
+            self.send_log("INFO", f"RSS 并发抓取任务完成，数据已落盘")
 
     def _parse_feed(self, xml_string, base_session):
         user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
@@ -210,7 +210,7 @@ class FetchRSSTask(BackgroundTask):
 
         # 内层多线程并发探测 OA 全文状态
         def _detect_oa_for_article(article):
-            if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
+            if self._is_cancelled:
                 return article
 
 
@@ -275,7 +275,7 @@ class FetchRSSTask(BackgroundTask):
             return []
 
         def _detect_oa_for_article(article):
-            if getattr(self, 'is_cancelled', False) or getattr(self, '_is_cancelled', False):
+            if self._is_cancelled:
                 return article
 
             time.sleep(random.uniform(0.2, 0.8))

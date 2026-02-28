@@ -7,7 +7,6 @@ import torch
 import tqdm
 from huggingface_hub import snapshot_download, constants
 from src.core.core_task import BackgroundTask, TaskState
-from src.core.config_manager import ConfigManager
 from src.core.network_worker import setup_global_network_env
 
 _global_callback = None

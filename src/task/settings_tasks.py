@@ -49,13 +49,13 @@ class FetchModelsTask(BackgroundTask):
         self.update_progress(20, "Connecting to API endpoint...")
 
         url = f"{base_url.rstrip('/')}/models"
-        proxy_cfg = _get_explicit_proxy_kwargs()
+        proxy_url = self.config.user_settings.get("proxy_url", "").strip()
 
         session = requests.Session()
-        if "trust_env" in proxy_cfg:
+        if proxy_url:
+            session.proxies = {"http": proxy_url, "https": proxy_url}
+        else:
             session.trust_env = False
-        elif "proxy" in proxy_cfg:
-            session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
 
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
@@ -88,12 +88,12 @@ class TestApiTask(BackgroundTask):
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         httpx_kwargs = {"timeout": 15.0}
-        proxy_cfg = _get_explicit_proxy_kwargs()
+        proxy_url = self.config.user_settings.get("proxy_url", "").strip()
 
-        if "proxy" in proxy_cfg:
-            httpx_kwargs["proxy"] = proxy_cfg["proxy"]
-        elif "trust_env" in proxy_cfg:
-            httpx_kwargs["trust_env"] = proxy_cfg["trust_env"]
+        if proxy_url:
+            httpx_kwargs["proxy"] = proxy_url
+        else:
+            httpx_kwargs["trust_env"] = False
 
         headers = {
             "Authorization": f"Bearer {api_key or 'sk-test'}",
