@@ -88,6 +88,10 @@ class OpenAICompatibleLLM:
 
         self.logger.info(f"Initialized LLM Config: [{self.model_name}] SDK: {self.sdk_type.upper()} @ {self.base_url}")
 
+        applied_params = self._get_payload_kwargs()
+        if applied_params:
+            self.logger.info(f"Applied Custom Parameters: {applied_params}")
+
     def cancel(self):
         self._is_cancelled = True
         try:

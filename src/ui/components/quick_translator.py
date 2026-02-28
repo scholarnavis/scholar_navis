@@ -176,8 +176,8 @@ class QuickTranslatorWindow(QWidget):
         self.lbl_trans_icon.setStyleSheet("background: transparent; border: none;")
         cfg_bar.addWidget(self.lbl_trans_icon)
 
-        self.model_selector = ModelSelectorWidget(label_text="Translator:", config_key="trans_llm_id",
-                                                  model_key="trans_model_name")
+        self.model_selector = ModelSelectorWidget(label_text="Translator:", config_key="quick_trans_llm_id",
+                                                  model_key="quick_trans_model_name")
         cfg_bar.addWidget(self.model_selector)
         cfg_bar.addSpacing(15)
 
@@ -223,6 +223,7 @@ class QuickTranslatorWindow(QWidget):
         self.btn_trans = QPushButton("Translate / Polish")
         self.btn_stop = QPushButton("Stop")
         self.btn_clear = QPushButton("Clear")
+        self.btn_copy = QPushButton("Copy")
         self.chk_markdown = QCheckBox("Markdown Render")
         self.chk_markdown.setChecked(True)
         self.chk_markdown.toggled.connect(self._re_render_output)
@@ -237,9 +238,11 @@ class QuickTranslatorWindow(QWidget):
         self.btn_trans.clicked.connect(self._start_translation)
         self.btn_stop.clicked.connect(self._stop_translation)
         self.btn_clear.clicked.connect(self._clear_all)
+        self.btn_copy.clicked.connect(self._copy_result)
 
         ctrl_bar.addWidget(self.btn_trans)
         ctrl_bar.addWidget(self.btn_stop)
+        ctrl_bar.addWidget(self.btn_copy)
         ctrl_bar.addWidget(self.btn_clear)
         frame_layout.addLayout(ctrl_bar)
         ctrl_bar.addWidget(self.chk_markdown)
@@ -252,17 +255,39 @@ class QuickTranslatorWindow(QWidget):
         self.current_out_text = ""
 
     def _stop_translation(self):
-        if self.worker_thread and self.worker_thread.isRunning():
-            self.worker.cancel()
+        if getattr(self, 'worker_thread', None):
+            try:
+                if self.worker_thread.isRunning():
+                    if getattr(self, 'worker', None):
+                        self.worker.cancel()
+                        try:
+                            self.worker.sig_token.disconnect()
+                        except Exception:
+                            pass
+
+                    if not hasattr(self, '_orphaned_threads'): self._orphaned_threads = []
+                    old_t, old_w = self.worker_thread, self.worker
+                    old_t.quit()
+                    self._orphaned_threads.append((old_t, old_w))
+                    old_t.finished.connect(
+                        lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self,
+                                                                                                            '_orphaned_threads',
+                                                                                                            []) else None)
+            except RuntimeError:
+                pass
+
+            self.worker_thread = None
+            self.worker = None
+
             self.output_box.append("<br><span style='color:#e6a23c;'><b>[Stopped by User]</b></span>")
             self._on_translation_finished()
 
+
     def _re_render_output(self, checked):
-        """开关 Markdown 渲染时，实时重绘画布内容"""
         if not hasattr(self, 'current_out_text') or not self.current_out_text:
             return
 
-        clean_text = TextFormatter.hide_think_tags(self.current_out_text)
+        clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
         if checked:
             import markdown
             html_str = markdown.markdown(clean_text, extensions=['extra', 'nl2br'])
@@ -270,6 +295,8 @@ class QuickTranslatorWindow(QWidget):
         else:
             self.output_box.setHtml(clean_text.replace('\n', '<br>'))
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
+
+
 
     def _toggle_pin(self):
         """切换置顶状态，并刷新 Window Flags 和图标"""
@@ -338,20 +365,33 @@ class QuickTranslatorWindow(QWidget):
         if not text: return
 
         if getattr(self, 'worker_thread', None) is not None:
-            if hasattr(self, 'worker') and self.worker:
-                self.worker.cancel()
-                try:
-                    self.worker.sig_token.disconnect()
-                    self.worker.sig_finished.disconnect()
-                except Exception:
-                    pass
+            try:
+                if getattr(self, 'worker', None):
+                    self.worker.cancel()
+                    try:
+                        self.worker.sig_token.disconnect()
+                        self.worker.sig_finished.disconnect()
+                    except Exception:
+                        pass
 
-            self.worker_thread.quit()
+                if self.worker_thread.isRunning():
+                    if not hasattr(self, '_orphaned_threads'): self._orphaned_threads = []
+                    old_t, old_w = self.worker_thread, self.worker
+                    old_t.quit()
+                    self._orphaned_threads.append((old_t, old_w))
+                    old_t.finished.connect(
+                        lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self,
+                                                                                                            '_orphaned_threads',
+                                                                                                            []) else None)
+            except RuntimeError:
+                pass
+
             self.worker_thread = None
             self.worker = None
 
         self.output_box.clear()
         self.output_box.setHtml("<span style='color:#05B8CC;'><i>AI is preparing...</i></span>")
+
         self.btn_trans.setVisible(False)
         self.btn_stop.setVisible(True)
 
@@ -413,11 +453,29 @@ class QuickTranslatorWindow(QWidget):
 
         self.btn_clear.setText(" Clear")
         self.btn_clear.setIcon(tm.icon("clear", "text_main"))
-        self.btn_clear.setStyleSheet(f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px;")
+        self.btn_clear.setStyleSheet(
+            f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px;")
+
+        self.btn_copy.setText(" Copy")
+        self.btn_copy.setIcon(tm.icon("copy", "text_main"))
+        self.btn_copy.setStyleSheet(
+            f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px;")
+
+
+    def _copy_result(self):
+        if not self.current_out_text: return
+        clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=False)
+        import re
+        clean_text = re.sub(r"<[^>]+>", "", clean_text).strip()
+        QApplication.clipboard().setText(clean_text)
+        from src.ui.components.toast import ToastManager
+        ToastManager().show("Translated text copied to clipboard.", "success")
+
+
 
     def _on_token(self, token):
         self.current_out_text += token
-        clean_text = TextFormatter.hide_think_tags(self.current_out_text)
+        clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
 
         if getattr(self, 'chk_markdown', None) and self.chk_markdown.isChecked():
             import markdown
@@ -425,8 +483,9 @@ class QuickTranslatorWindow(QWidget):
             self.output_box.setHtml(html)
         else:
             self.output_box.setHtml(clean_text.replace('\n', '<br>'))
-
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
+
+
 
 
     def _on_error(self, msg):

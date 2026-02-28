@@ -4,14 +4,19 @@ import mimetypes
 from urllib.parse import quote
 from src.core.core_task import BackgroundTask
 
+
 class ProcessAttachmentTask(BackgroundTask):
     def _execute(self):
         paths = self.kwargs.get('paths', [])
         chunks = []
         html = ""
-
         total = len(paths)
+
         for i, path in enumerate(paths):
+            if getattr(self, '_is_cancelled', False):
+                self.send_log("INFO", "Attachment processing cancelled by user.")
+                break
+
             f_name = os.path.basename(path)
             ext = path.lower()
 
@@ -66,8 +71,4 @@ class ProcessAttachmentTask(BackgroundTask):
                 raise e
 
         self.update_progress(100, "")
-
-        return {
-            "chunks": chunks,
-            "html": html
-        }
+        return {"chunks": chunks, "html": html}

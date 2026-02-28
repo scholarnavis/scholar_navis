@@ -29,6 +29,7 @@ class BackgroundTask:
         self.queue = queue
         self.kwargs = kwargs or {}
         self.logger = logging.getLogger("BackgroundTask")
+        self._is_cancelled = False
 
     def run(self):
         self.logger.debug(f"Start. PID: {os.getpid()} | Task: {self.task_id}")
@@ -55,6 +56,8 @@ class BackgroundTask:
     def _execute(self):
         raise NotImplementedError()
 
+    def cancel(self):
+        self._is_cancelled = True
 
 # --- 物理包装器 ---
 class RunnerProcess(mp.Process):
@@ -145,19 +148,28 @@ class TaskManager(QObject):
 
     def cancel_task(self):
         if self.worker:
+            if hasattr(self.worker, 'task'):
+                self.worker.task.cancel()
+
             if self.current_mode == TaskMode.PROCESS and self.worker.is_alive():
                 self.kill_process_tree(self.worker.pid)
             elif self.current_mode == TaskMode.THREAD and self.worker.isRunning():
-                self.worker.terminate()  # 硬杀线程
-                self.worker.wait()  # 等待线程彻底死亡
+                if not hasattr(self, '_orphaned_threads'):
+                    self._orphaned_threads = []
+
+                old_worker = self.worker
+                old_worker.quit()
+                self._orphaned_threads.append(old_worker)
+
+                old_worker.finished.connect(
+                    lambda w=old_worker: self._orphaned_threads.remove(w) if w in getattr(self, '_orphaned_threads',
+                                                                                          []) else None
+                )
 
             self.sig_state_changed.emit(TaskState.TERMINATED.value, "Manually halted.")
             self.stop_listener()
             if self.terminate_hook: self.terminate_hook()
 
-            # 补充清理
-            if self.current_mode == TaskMode.THREAD:
-                self.worker.deleteLater()
             self.worker = None
 
     def stop_listener(self):

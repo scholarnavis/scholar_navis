@@ -21,8 +21,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
                                QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
-                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication,
-                               QSpacerItem)
+                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication)
 from langdetect import detect
 
 from src.core.config_manager import ConfigManager
@@ -46,7 +45,7 @@ from src.ui.components.dialog import StandardDialog
 from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
-from src.ui.components.pill_button import FollowUpPillButton, FollowUpGroupWidget
+from src.ui.components.pill_button import FollowUpGroupWidget
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
@@ -314,12 +313,6 @@ class ChatInputContainer(QFrame):
         self.btn_stop.setVisible(False)
         self.bottom_bar.addWidget(self.btn_stop)
 
-        self.btn_retry = QPushButton("Retry")
-        self.btn_retry.setCursor(Qt.PointingHandCursor)
-        self.btn_retry.setFixedSize(70, 32)
-        self.btn_retry.setVisible(False)
-        self.bottom_bar.addWidget(self.btn_retry)
-
         main_layout.addLayout(self.bottom_bar)
 
         self.btn_send.clicked.connect(self._emit_send)
@@ -388,13 +381,6 @@ class ChatInputContainer(QFrame):
                     QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
                     QPushButton:hover {{ background-color: rgba(255, 107, 107, 0.8); }}
                 """)
-
-        self.btn_retry.setIcon(tm.icon("refresh", "bg_main"))
-        self.btn_retry.setStyleSheet(f"""
-                    QPushButton {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
-                    QPushButton:hover {{ background-color: rgba(255, 184, 108, 0.8); }}
-                """)
-
 
 
         menu_style = f"""
@@ -720,10 +706,6 @@ class ChatWorker(QObject):
                 "1. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
                 "2. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n\n"
 
-                "### REASONING PROTOCOL (CRITICAL):\n"
-                "If you utilize an internal thinking process, you MUST strictly encapsulate ALL reasoning inside <think> and </think> tags.\n"
-                "Immediately after closing the </think> tag, you MUST output the exact string [FINAL_ANSWER] before starting your actual response.\n\n"
-
                 "### RESPONSE GUIDELINES:\n"
                 "1. GROUNDING: If data comes from Context, append citations (e.g., [1], [2]).\n\n"
 
@@ -910,10 +892,10 @@ class ChatTool(BaseTool):
 
         # 第一行：模型与翻译器选择
         row1_layout = QHBoxLayout()
-        self.model_selector = ModelSelectorWidget(label_text=" Model:", config_key="active_llm_id",
-                                                  model_key="model_name")
-        self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="trans_llm_id",
-                                                  model_key="trans_model_name")
+        self.model_selector = ModelSelectorWidget(label_text=" Model:", config_key="chat_llm_id",
+                                                  model_key="chat_model_name")
+        self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
+                                                  model_key="chat_trans_model_name")
         row1_layout.addWidget(self.model_selector)
         row1_layout.addSpacing(15)
         row1_layout.addWidget(self.trans_selector)
@@ -992,7 +974,6 @@ class ChatTool(BaseTool):
         self.input_container.sig_send_clicked.connect(self.process_send)
         self.input_container.sig_export_clicked.connect(self.export_chat_history)
         self.input_container.sig_clear_clicked.connect(self.clear_chat_history)
-        self.input_container.btn_retry.clicked.connect(self.trigger_retry)
         self.input_container.sig_attach_clicked.connect(self.show_attachment_menu)
         self.input_container.sig_clear_context_clicked.connect(self.clear_attached_context)
 
@@ -1245,14 +1226,15 @@ class ChatTool(BaseTool):
         if hasattr(self, 'trans_selector'):
             self.trans_selector.load_llm_configs()
 
-    def process_send(self, text, is_retry=False):
+
+    def process_send(self, text):
         # 1. 获取并格式化 KB ID
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
         if not kb_id:
             kb_id = "none"
 
-        # 2. 模型拦截校验（仅在使用了本地知识库时触发）
+        # 2. 模型拦截校验
         if kb_id != "none":
             ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(kb_id)
             if not ready:
@@ -1283,7 +1265,7 @@ class ChatTool(BaseTool):
         if not is_english and trans_config is None:
             if not getattr(self.__class__, '_has_shown_lang_warning', False):
                 ToastManager().show(
-                    "检测到非英语输入，但翻译模型未启用。核心模型可能无法完美处理该语言，请注意结果准确性。",
+                    "Non-English input detected, but translation model is not enabled. \nThe core model may not perfectly handle this language; please verify the accuracy of the results.",
                     "warning"
                 )
                 self.__class__._has_shown_lang_warning = True
@@ -1295,42 +1277,35 @@ class ChatTool(BaseTool):
         self.external_chunks = []
 
         # 5. UI 切换与历史记录管理
-        self.input_container.btn_retry.setVisible(False)
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
 
-        if not is_retry:
-            self.logger.info(f"User asked: {text[:50]}... (KB: {kb_id})")
-            self.input_container.clear_text()
+        self.logger.info(f"User asked: {text[:50]}... (KB: {kb_id})")
+        self.input_container.clear_text()
 
-            # 将上下文的 HTML 链接渲染在气泡上方
-            self.add_bubble(text, is_user=True, context_html=current_html if current_html else None)
+        # 将上下文的 HTML 链接渲染在气泡上方
+        self.add_bubble(text, is_user=True, context_html=current_html if current_html else None)
 
-            llm_text = text
-            if current_chunks:
-                context_block = "\n".join(
-                    [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in current_chunks]
-                )
-                llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
+        llm_text = text
+        if current_chunks:
+            context_block = "\n".join(
+                [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in current_chunks]
+            )
+            llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
 
-            self.history.append({
-                "role": "user",
-                "content": llm_text,
-                "display_text": text,
-                "context_html": current_html if current_html else None,
-                "external_chunks": current_chunks
-            })
+        self.history.append({
+            "role": "user",
+            "content": llm_text,
+            "display_text": text,
+            "context_html": current_html if current_html else None,
+            "external_chunks": current_chunks
+        })
 
         self.input_container.hide_context_preview()
-
         self.external_chunks = current_chunks
         self.start_ai_response(kb_id, requires_translation)
 
-    def trigger_retry(self):
-        """用户点击重试按钮触发"""
-        if not self.history: return
-
-        # 寻找最后一次 user 的提问
+    def _restore_last_input(self):
         last_user_msg = None
         for i in range(len(self.history) - 1, -1, -1):
             if self.history[i]['role'] == 'user':
@@ -1338,18 +1313,24 @@ class ChatTool(BaseTool):
                 break
 
         if last_user_msg:
-            # 清理历史记录中失败的 Assistant 回复及其气泡，避免大模型读取到报错信息
-            if self.history[-1]['role'] == 'assistant':
-                self.history.pop()
-                if self.chat_layout.count() > 1:
-                    item = self.chat_layout.itemAt(self.chat_layout.count() - 2)
-                    if item.widget():
-                        item.widget().deleteLater()
+            self.input_container.set_text(last_user_msg.get('display_text', ''))
 
-            # 恢复外部附件切片
-            self.external_chunks = last_user_msg.get('external_chunks', [])
-            self.process_send(last_user_msg.get('display_text', last_user_msg['content']), is_retry=True)
+            chunks = last_user_msg.get('external_chunks', [])
+            html = last_user_msg.get('context_html', '')
 
+            self.external_chunks = list(chunks) if chunks else []
+            self.external_context_html = html if html else ""
+
+            if self.external_chunks:
+                names = []
+                for c in self.external_chunks:
+                    if c['name'] not in names:
+                        names.append(c['name'])
+                display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(
+                    names)
+                self.input_container.show_context_preview(display_text)
+            else:
+                self.input_container.hide_context_preview()
 
 
     def add_bubble(self, text, is_user, context_html=None):
@@ -1370,7 +1351,6 @@ class ChatTool(BaseTool):
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
             bubble.sig_link_clicked.connect(self.handle_link_click)
         else:
-            bubble.sig_retry_clicked.connect(lambda idx: self.trigger_retry())
             bubble.lbl_text.linkActivated.connect(self.handle_link_click)
 
         self.chat_layout.addWidget(bubble)
@@ -1388,17 +1368,41 @@ class ChatTool(BaseTool):
         sb = self.scroll_area.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+
     def start_ai_response(self, kb_id, requires_translation=False):
+        if getattr(self, 'worker_thread', None) is not None:
+            try:
+                if getattr(self, 'worker', None):
+                    self.worker.cancel()
+                    try:
+                        self.worker.sig_token.disconnect()
+                    except Exception:
+                        pass
+                if self.worker_thread.isRunning():
+                    if not hasattr(self, '_orphaned_threads'): self._orphaned_threads = []
+                    old_t, old_w = self.worker_thread, self.worker
+                    old_t.quit()
+                    self._orphaned_threads.append((old_t, old_w))
+                    old_t.finished.connect(lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self, '_orphaned_threads', []) else None)
+            except RuntimeError:
+                pass
+
+            self.worker_thread = None
+            self.worker = None
+
         # 获取最新的主模型配置与翻译配置
         main_config = self.model_selector.get_current_config()
         trans_config = self.trans_selector.get_current_config()
-        use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container,
-                                                                                   'chk_mcp_enable') else False
+        use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container, 'chk_mcp_enable') else False
         selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
+
+        if main_config:
+            main_config = main_config.copy()
+            main_config["model_name"] = main_config.get("chat_model_name", main_config.get("model_name"))
 
         if trans_config:
             trans_config = trans_config.copy()
-            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
+            trans_config["model_name"] = trans_config.get("chat_trans_model_name", trans_config.get("model_name"))
 
         if main_config:
             actual_model = main_config.get("model_name", "").strip()
@@ -1522,6 +1526,26 @@ class ChatTool(BaseTool):
     def cancel_generation(self):
         if hasattr(self, 'worker') and self.worker:
             self.worker.cancel()
+            try:
+                self.worker.sig_token.disconnect()
+            except Exception:
+                pass
+
+        try:
+            if getattr(self, 'worker_thread', None) is not None and self.worker_thread.isRunning():
+                if not hasattr(self, '_orphaned_threads'): self._orphaned_threads = []
+                old_t, old_w = self.worker_thread, self.worker
+                old_t.quit()
+                self._orphaned_threads.append((old_t, old_w))
+                old_t.finished.connect(
+                    lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self,
+                                                                                                        '_orphaned_threads',
+                                                                                                        []) else None)
+        except RuntimeError:
+            pass
+
+        self.worker_thread = None
+        self.worker = None
 
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
@@ -1533,13 +1557,10 @@ class ChatTool(BaseTool):
 
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
-        self.input_container.btn_retry.setVisible(True)
 
-        try:
-            if getattr(self, 'worker_thread', None) is not None and self.worker_thread.isRunning():
-                self.worker_thread.quit()
-        except RuntimeError:
-            pass
+        if hasattr(self, '_restore_last_input'):
+            self._restore_last_input()
+
 
         self.logger.info("AI generation cancelled by user.")
         self.scroll_to_bottom()
@@ -1830,8 +1851,8 @@ class ChatTool(BaseTool):
         # --- 翻译或生成失败处理 ---
         # 显示重试按钮
         self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_retry.setVisible(True)
         self.input_container.btn_send.setVisible(True)
+        self._restore_last_input()
 
         display_error = msg
         if "translation" in msg.lower() or "translator" in msg.lower():

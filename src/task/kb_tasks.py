@@ -1,20 +1,16 @@
+import json
 import logging
 import os
-import sys
 import shutil
-import time
-import zipfile
-import json
 import uuid
+import zipfile
 
+import torch.nn.functional as F
 from chromadb import Documents, Embeddings, EmbeddingFunction
-from chromadb.utils import embedding_functions
-from huggingface_hub import snapshot_download
 from optimum.onnxruntime import ORTModelForFeatureExtraction
 from transformers import AutoTokenizer
-import torch.nn.functional as F
-from src.core.config_manager import ConfigManager
-from src.core.core_task import BackgroundTask, TaskState
+
+from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
 from src.core.models_registry import get_model_conf, ensure_onnx_model

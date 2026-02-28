@@ -109,10 +109,10 @@ class TextFormatter:
         if final_match:
             text = text[final_match.end():]
         else:
-            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
-            text = re.sub(r'.*?', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<think>.*?(?:</think>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
 
         text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[FOLLOW_UPS\]", "", text)
+        text = re.sub(r"\[AI is reasoning in the background\.\.\.\]", "", text, flags=re.IGNORECASE)
 
         if include_citations and "<b>📚 Cited Sources:</b>" in text:
             parts = text.split("<b>📚 Cited Sources:</b><br>")
@@ -130,16 +130,25 @@ class TextFormatter:
 
         return text.strip()
 
-
     @staticmethod
-    def hide_think_tags(text):
+    def hide_think_tags(text, for_display=False):
         final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
         if final_answer_match:
             cleaned = text[final_answer_match.end():]
             return re.sub(r'</?think\s*>', '', cleaned, flags=re.IGNORECASE).strip()
 
-        cleaned = re.sub(r'<think>.*?(</think>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r'<think>.*?(?:</think>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
         if '<think>' in text and not cleaned.strip():
-            tm = ThemeManager()
-            return f"<span style='color:{tm.color('text_muted')}; font-style:italic;'>[AI is reasoning in the background...]</span>"
+            if for_display:
+                from src.core.theme_manager import ThemeManager
+                tm = ThemeManager()
+                return f"<span style='color:{tm.color('text_muted')}; font-style:italic;'>[AI is reasoning in the background...]</span>"
+            return ""
         return cleaned.lstrip()
+
+
+    @staticmethod
+    def clean_text_for_copy(text):
+        """专门提供给聊天气泡的复制操作使用，去掉所有 HTML、引用列表、AI 思考过程及占位符"""
+        return TextFormatter.clean_text_for_export(text, include_citations=False)
+
