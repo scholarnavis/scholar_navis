@@ -641,10 +641,11 @@ class SettingsTool(BaseTool):
         layout.setLabelAlignment(Qt.AlignRight)
 
         self.combo_proxy_mode = BaseComboBox()
-        self.combo_proxy_mode.addItems(["System Proxy (Default)", "No Proxy (Direct)", "Custom Proxy"])
 
-        current_mode = self.config.user_settings.get("proxy_mode", "system")
-        mode_map = {"system": 0, "off": 1, "custom": 2}
+        self.combo_proxy_mode.addItems(["Disable Proxy (Direct)", "Enable Proxy (Custom)"])
+
+        current_mode = self.config.user_settings.get("proxy_mode", "off")
+        mode_map = {"off": 0, "custom": 1}
         self.combo_proxy_mode.setCurrentIndex(mode_map.get(current_mode, 0))
 
         self.input_proxy = QLineEdit()
@@ -664,7 +665,7 @@ class SettingsTool(BaseTool):
         self.layout.addWidget(group)
 
     def _on_proxy_mode_changed(self, index):
-        is_custom = (index == 2)
+        is_custom = (index == 1)
         self.input_proxy.setEnabled(is_custom)
 
     def init_model_section(self):
@@ -793,8 +794,8 @@ class SettingsTool(BaseTool):
              "model_name": "meta/llama-3.1-70b-instruct", "api_key": ""},
             {"id": "moonshot", "name": "Moonshot (Kimi)", "base_url": "https://api.moonshot.cn/v1",
              "model_name": "moonshot-v1-auto", "api_key": ""},
-            {"id": "minimax", "name": "MiniMax", "base_url": "https://api.minimax.chat/v1",
-             "model_name": "abab6.5s-chat", "api_key": ""},
+            {"id": "minimax", "name": "MiniMax", "base_url": "https://api.minimaxi.com/anthropic",
+             "model_name": "MiniMax-M2.5", "api_key": ""},
             {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
              "model_name": "qwen-plus", "api_key": ""},
             {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -1560,7 +1561,7 @@ class SettingsTool(BaseTool):
         new_s2_key = self.input_s2_api_key.text().strip()
 
         mode_idx = self.combo_proxy_mode.currentIndex()
-        new_proxy_mode = ["system", "off", "custom"][mode_idx]
+        new_proxy_mode = ["off", "custom"][mode_idx]
         new_proxy_url = self.input_proxy.text().strip()
 
         new_theme = self.combo_theme.currentText().lower()

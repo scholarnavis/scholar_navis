@@ -133,7 +133,7 @@ def create_robust_session():
 
 def setup_global_network_env():
     cfg = ConfigManager().user_settings
-    proxy_mode = cfg.get("proxy_mode", "system")
+    proxy_mode = cfg.get("proxy_mode", "off")
     proxy_url = cfg.get("proxy_url", "").strip()
     hf_mirror = cfg.get("hf_mirror", "").strip()
 
@@ -143,13 +143,13 @@ def setup_global_network_env():
     else:
         os.environ.pop("HF_ENDPOINT", None)
 
-    if proxy_mode == "off":
-        os.environ.pop("HTTP_PROXY", None)
-        os.environ.pop("HTTPS_PROXY", None)
-        os.environ.pop("ALL_PROXY", None)
-        os.environ["NO_PROXY"] = "*"
-        logger.debug("Global proxy disabled (NO_PROXY=*).")
-    elif proxy_mode == "custom" and proxy_url:
+    if hf_mirror:
+        os.environ["HF_ENDPOINT"] = hf_mirror
+        logger.debug(f"HF_ENDPOINT set to: {hf_mirror}")
+    else:
+        os.environ.pop("HF_ENDPOINT", None)
+
+    if proxy_mode == "custom" and proxy_url:
         os.environ["HTTP_PROXY"] = proxy_url
         os.environ["HTTPS_PROXY"] = proxy_url
         os.environ["ALL_PROXY"] = proxy_url
@@ -159,21 +159,19 @@ def setup_global_network_env():
         os.environ.pop("HTTP_PROXY", None)
         os.environ.pop("HTTPS_PROXY", None)
         os.environ.pop("ALL_PROXY", None)
-        os.environ.pop("NO_PROXY", None)
-        logger.debug("Using system default proxy settings.")
+        os.environ["NO_PROXY"] = "*"
+        logger.debug("Global proxy disabled.")
 
 
 def _get_explicit_proxy_kwargs():
     """Reads configuration to generate explicit proxy arguments for request libraries."""
     cfg = ConfigManager().user_settings
-    proxy_mode = cfg.get("proxy_mode", "system")
+    proxy_mode = cfg.get("proxy_mode", "off")
     proxy_url = cfg.get("proxy_url", "").strip()
 
     if proxy_mode == "custom" and proxy_url:
         return {"proxy": proxy_url}
-    elif proxy_mode == "off":
-        return {"trust_env": False}
-    return {}
+    return {"trust_env": False}
 
 
 class LightNetworkWorker(QObject):

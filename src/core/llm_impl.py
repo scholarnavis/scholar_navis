@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from typing import Generator, List, Dict, Optional
@@ -25,9 +26,6 @@ class OpenAICompatibleLLM:
         proxy_cfg = _get_explicit_proxy_kwargs()
         httpx_kwargs.update(proxy_cfg)
 
-        if "proxy" in httpx_kwargs:
-            httpx_kwargs["proxies"] = httpx_kwargs.pop("proxy")
-
         self.http_client = httpx.Client(**httpx_kwargs)
 
         if not config:
@@ -47,8 +45,7 @@ class OpenAICompatibleLLM:
         self.client = None
         self.sdk_type = "openai"
 
-        # 🚀 SDK Routing
-        if self.provider_id == "anthropic" or "anthropic.com" in self.base_url.lower():
+        if self.provider_id == "anthropic" or "minimax" in self.base_url.lower():
             self.sdk_type = "anthropic"
             self.client = Anthropic(api_key=self.api_key, base_url=self.base_url, http_client=self.http_client)
 
@@ -114,7 +111,7 @@ class OpenAICompatibleLLM:
                 elif ptype == "float":
                     res[name] = float(val_str)
                 elif ptype == "bool":
-                    res[name] = val_str.lower() in ['true', '1', 'yes', 'on']
+                    res[name] = val_str.lower() in['true', '1', 'yes', 'on']
                 elif ptype == "json":
                     res[name] = json.loads(val_str)
                 else:
@@ -129,12 +126,12 @@ class OpenAICompatibleLLM:
 
         if current_model_conf:
             param_mode = current_model_conf.get("mode", "inherit")
-            model_params = current_model_conf.get("params", [])
+            model_params = current_model_conf.get("params",[])
         else:
             param_mode = self.config_data.get("model_params_mode", "inherit")
-            model_params = self.config_data.get("model_params", [])
+            model_params = self.config_data.get("model_params",[])
 
-        provider_params = self.config_data.get("provider_params", [])
+        provider_params = self.config_data.get("provider_params",[])
         custom_params = {}
 
         if param_mode == "inherit":
@@ -142,7 +139,7 @@ class OpenAICompatibleLLM:
         elif param_mode == "custom":
             custom_params = self._parse_custom_params(model_params)
 
-        return {k: v for k, v in custom_params.items() if k not in ["messages", "model", "stream", "tools"]}
+        return {k: v for k, v in custom_params.items() if k not in["messages", "model", "stream", "tools"]}
 
     def _split_openai_payload(self, payload: Dict) -> Dict:
         standard_keys = {
@@ -193,7 +190,7 @@ class OpenAICompatibleLLM:
             return {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [{"id": t.id, "type": "function",
+                "tool_calls":[{"id": t.id, "type": "function",
                                 "function": {"name": t.function.name, "arguments": t.function.arguments}} for t in
                                choice.message.tool_calls]
             }
@@ -210,20 +207,17 @@ class OpenAICompatibleLLM:
             return {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [{"id": t.id, "type": "function",
+                "tool_calls":[{"id": t.id, "type": "function",
                                 "function": {"name": t.function.name, "arguments": t.function.arguments}} for t in
                                choice.message.tool_calls]
             }
         return choice.message.content or ""
 
     def _chat_qwen(self, messages: List[Dict], **payload):
-        # 1. 检查 Payload 是否包含多模态内容 (如图片)
         is_vl_payload = any(isinstance(m["content"], list) for m in messages)
-        # 2. 检查模型名称是否属于多模态模型阵营
-        vl_keywords = ['vl', 'image', 'audio', 'video', 'vision', 'qwen3.5-plus']
+        vl_keywords =['vl', 'image', 'audio', 'video', 'vision', 'qwen3.5-plus']
         is_vl_model = any(kw in self.model_name.lower() for kw in vl_keywords)
 
-        # 只要满足其一，就必须走多模态端点
         use_multimodal = is_vl_payload or is_vl_model
 
         qwen_msgs = self._convert_to_qwen_messages(messages)
@@ -248,8 +242,7 @@ class OpenAICompatibleLLM:
         if response.status_code == 200:
             return response.output.choices[0].message.content
         else:
-            raise Exception(f"Dashscope Error [{response.code}]: {response.message}")
-
+            raise Exception(f"Dashscope Error[{response.code}]: {response.message}")
 
     def _chat_gemini(self, messages: List[Dict], **payload):
         sys_prompt, gemini_msgs = self._convert_to_gemini_messages(messages)
@@ -257,40 +250,34 @@ class OpenAICompatibleLLM:
         tools = payload.pop("tools", None)
         if "tool_choice" in payload: payload.pop("tool_choice")
 
+        gemini_config = self._clean_gemini_payload(payload)
+        if sys_prompt:
+            gemini_config["system_instruction"] = sys_prompt
+        if tools:
+            gemini_config["tools"] = tools
+
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=gemini_msgs,
-            config={
-                "system_instruction": sys_prompt if sys_prompt else None,
-                "tools": tools,
-                **payload
-            }
+            config=gemini_config
         )
         return response.text
 
     def _chat_anthropic(self, messages: List[Dict], **payload):
         system_prompt, anthropic_msgs = self._convert_to_anthropic_messages(messages)
-        if "tools" in payload:
-            anthropic_tools = [
-                {
-                    "name": t["function"]["name"],
-                    "description": t["function"].get("description", ""),
-                    "input_schema": t["function"]["parameters"]
-                } for t in payload.pop("tools")
-            ]
-            payload["tools"] = anthropic_tools
-            if "tool_choice" in payload: payload.pop("tool_choice")
+        anthropic_payload = self._clean_anthropic_payload(payload)
+
+        if system_prompt:
+            anthropic_payload["system"] = system_prompt
 
         response = self.client.messages.create(
             model=self.model_name,
-            system=system_prompt,
             messages=anthropic_msgs,
-            max_tokens=payload.pop("max_tokens", 4096),
-            **payload
+            **anthropic_payload
         )
 
         text_content = ""
-        tool_calls = []
+        tool_calls =[]
         for block in response.content:
             if block.type == "text":
                 text_content += block.text
@@ -309,13 +296,11 @@ class OpenAICompatibleLLM:
         payload = self._get_payload_kwargs()
 
         # 1. 识别并拦截图像生成模型 (Text-to-Image)
-        gen_keywords = ['image', 'dall', 'mj', 'picture', 'cogview']
-        # 排除视觉理解模型 (它们支持流式多模态对话)
+        gen_keywords =['image', 'dall', 'mj', 'picture', 'cogview']
         is_vision_understanding = any(kw in self.model_name.lower() for kw in ['vl', 'vision'])
         is_image_gen = any(kw in self.model_name.lower() for kw in gen_keywords) and not is_vision_understanding
 
         if is_image_gen:
-            # 路由到专门的生图伪流式处理器
             yield from self._generate_image_pseudo_stream(messages, **payload)
             return
 
@@ -385,11 +370,9 @@ class OpenAICompatibleLLM:
         if is_thinking: yield "\n</think>\n"
 
     def _generate_image_pseudo_stream(self, messages: List[Dict], **payload) -> Generator[str, None, None]:
-        """为不支持流式的生图模型提供『伪流式』支持，直接返回 Markdown 图片"""
         self.logger.info(f"Routing to Image Generation endpoint for model: {self.model_name}")
         yield "🎨 *正在挥洒创意，绘制图像中，请稍候...*\n\n"
 
-        # 提取最后一条用户消息作为 Prompt
         last_msg = messages[-1]["content"]
         if isinstance(last_msg, list):
             prompt = " ".join([p.get("text", "") for p in last_msg if p.get("type") == "text"])
@@ -398,7 +381,6 @@ class OpenAICompatibleLLM:
 
         try:
             if self.sdk_type == "zhipu":
-                # 智谱官方生图接口
                 res = self.client.images.generations(
                     model=self.model_name,
                     prompt=prompt,
@@ -408,13 +390,12 @@ class OpenAICompatibleLLM:
                 yield f"![Generated Image]({img_url})"
 
             elif self.sdk_type == "qwen":
-                qwen_msgs = [
+                qwen_msgs =[
                     {
                         "role": "user",
                         "content": [{"text": prompt}]
                     }
                 ]
-
                 payload["stream"] = False
                 res = self.client.MultiModalConversation.call(
                     api_key=self.api_key,
@@ -438,7 +419,6 @@ class OpenAICompatibleLLM:
                     yield f"\n\n❌ 生图失败：[{res.code}] {res.message}"
 
             elif self.sdk_type == "openai" and "dall" in self.model_name.lower():
-                # OpenAI DALL-E 生图接口
                 res = self.client.images.generate(
                     model=self.model_name,
                     prompt=prompt,
@@ -447,6 +427,25 @@ class OpenAICompatibleLLM:
                 img_url = res.data[0].url
                 yield f"![Generated Image]({img_url})"
 
+            elif self.sdk_type == "gemini":
+                valid_keys =["number_of_images", "aspect_ratio", "output_mime_type", "person_generation",
+                              "safety_settings"]
+                gemini_config = {k: v for k, v in payload.items() if k in valid_keys}
+
+                res = self.client.models.generate_images(
+                    model=self.model_name,
+                    prompt=prompt,
+                    config=gemini_config if gemini_config else None
+                )
+
+                for generated_image in res.generated_images:
+                    img = generated_image.image
+                    if hasattr(img, "image_bytes") and img.image_bytes:
+                        b64_data = base64.b64encode(img.image_bytes).decode("utf-8")
+                        mime_type = payload.get("output_mime_type", "image/jpeg")
+                        yield f"![Generated Image](data:{mime_type};base64,{b64_data})\n\n"
+                    else:
+                        yield f"\n\n❌ Gemini 图像生成成功，但无法提取图像字节数据。"
             else:
                 yield "\n\n❌ 当前服务商暂不支持该图像生成模型的直接调用。"
 
@@ -497,7 +496,7 @@ class OpenAICompatibleLLM:
 
     def _stream_qwen(self, messages: List[Dict], **payload) -> Generator[str, None, None]:
         is_vl_payload = any(isinstance(m["content"], list) for m in messages)
-        vl_keywords = ['vl', 'image', 'audio', 'video', 'vision', 'qwen3.5-plus']
+        vl_keywords =['vl', 'image', 'audio', 'video', 'vision', 'qwen3.5-plus']
         is_vl_model = any(kw in self.model_name.lower() for kw in vl_keywords)
 
         use_multimodal = is_vl_payload or is_vl_model
@@ -558,13 +557,14 @@ class OpenAICompatibleLLM:
     def _stream_gemini(self, messages: List[Dict], **payload) -> Generator[str, None, None]:
         sys_prompt, gemini_msgs = self._convert_to_gemini_messages(messages)
 
+        gemini_config = self._clean_gemini_payload(payload)
+        if sys_prompt:
+            gemini_config["system_instruction"] = sys_prompt
+
         responses = self.client.models.generate_content_stream(
             model=self.model_name,
             contents=gemini_msgs,
-            config={
-                "system_instruction": sys_prompt if sys_prompt else None,
-                **payload
-            }
+            config=gemini_config
         )
 
         for chunk in responses:
@@ -576,14 +576,17 @@ class OpenAICompatibleLLM:
 
     def _stream_anthropic(self, messages: List[Dict], **payload) -> Generator[str, None, None]:
         system_prompt, anthropic_msgs = self._convert_to_anthropic_messages(messages)
+        anthropic_payload = self._clean_anthropic_payload(payload)
+
+        if system_prompt:
+            anthropic_payload["system"] = system_prompt
+
         is_thinking = False
 
         with self.client.messages.stream(
                 model=self.model_name,
-                system=system_prompt,
                 messages=anthropic_msgs,
-                max_tokens=payload.pop("max_tokens", 4096),
-                **payload
+                **anthropic_payload
         ) as stream:
             for event in stream:
                 if self._is_cancelled:
@@ -622,10 +625,40 @@ class OpenAICompatibleLLM:
                 qwen_msgs.append(m)
         return qwen_msgs
 
+    def _clean_gemini_payload(self, payload: Dict) -> Dict:
+        gemini_config = {}
+        if "max_tokens" in payload:
+            gemini_config["max_output_tokens"] = payload.pop("max_tokens")
+        if "temperature" in payload:
+            gemini_config["temperature"] = payload.pop("temperature")
+        if "top_p" in payload:
+            gemini_config["top_p"] = payload.pop("top_p")
+        if "top_k" in payload:
+            gemini_config["top_k"] = payload.pop("top_k")
+        if "stop" in payload:
+            gemini_config["stop_sequences"] = payload.pop("stop")
+        if "response_format" in payload:
+            fmt = payload.pop("response_format")
+            if isinstance(fmt, dict) and fmt.get("type") == "json_object":
+                gemini_config["response_mime_type"] = "application/json"
+
+        exclude_keys = {"stream", "model", "messages", "tools", "tool_choice", "parallel_tool_calls"}
+        for k, v in payload.items():
+            if k not in exclude_keys:
+                gemini_config[k] = v
+
+        return gemini_config
+
     def _convert_to_gemini_messages(self, messages: List[Dict]):
         sys_prompt = ""
-        gemini_msgs = []
+        gemini_msgs =[]
         import base64
+
+        try:
+            from google.genai import types
+            has_types = True
+        except ImportError:
+            has_types = False
 
         for m in messages:
             if m["role"] == "system":
@@ -636,54 +669,149 @@ class OpenAICompatibleLLM:
                 if isinstance(m["content"], list):
                     for part in m["content"]:
                         if part.get("type") == "text":
-                            parts.append(part["text"])
+                            if has_types:
+                                parts.append(types.Part.from_text(text=part["text"]))
+                            else:
+                                parts.append({"text": part["text"]})
                         elif part.get("type") == "image_url":
                             url = part["image_url"]["url"]
                             if url.startswith("data:"):
                                 mime = url.split(";")[0].split(":")[1]
-                                data = url.split(",")[1]
-                                parts.append({"mime_type": mime, "data": base64.b64decode(data)})
+                                b64_data = url.split(",")[1]
+                                decoded_data = base64.b64decode(b64_data)
+                                if has_types:
+                                    parts.append(types.Part.from_bytes(data=decoded_data, mime_type=mime))
+                                else:
+                                    parts.append({"inline_data": {"mime_type": mime, "data": decoded_data}})
                 else:
-                    parts.append(m["content"])
+                    if has_types:
+                        parts.append(types.Part.from_text(text=m["content"]))
+                    else:
+                        parts.append({"text": m["content"]})
 
-                # google-genai SDK takes dict format for parts
-                gemini_msgs.append({"role": role, "parts": parts})
+                if has_types:
+                    gemini_msgs.append(types.Content(role=role, parts=parts))
+                else:
+                    gemini_msgs.append({"role": role, "parts": parts})
+
         return sys_prompt.strip(), gemini_msgs
+
+    def _clean_anthropic_payload(self, payload: Dict) -> Dict:
+        anthropic_payload = {}
+
+        if "max_tokens" in payload:
+            anthropic_payload["max_tokens"] = payload.pop("max_tokens")
+        else:
+            anthropic_payload["max_tokens"] = 4096
+
+        if "tools" in payload:
+            anthropic_tools =[
+                {
+                    "name": t["function"]["name"],
+                    "description": t["function"].get("description", ""),
+                    "input_schema": t["function"]["parameters"]
+                } for t in payload.pop("tools")
+            ]
+            anthropic_payload["tools"] = anthropic_tools
+
+            if "tool_choice" in payload:
+                tc = payload.pop("tool_choice")
+                if tc == "auto" or tc == "required":
+                    anthropic_payload["tool_choice"] = {"type": "auto"} if tc == "auto" else {"type": "any"}
+                elif isinstance(tc, dict) and "function" in tc:
+                    anthropic_payload["tool_choice"] = {"type": "tool", "name": tc["function"]["name"]}
+
+        if "stop" in payload:
+            stop_val = payload.pop("stop")
+            if isinstance(stop_val, str):
+                anthropic_payload["stop_sequences"] = [stop_val]
+            elif isinstance(stop_val, list):
+                anthropic_payload["stop_sequences"] = stop_val
+
+        exclude_keys = {"presence_penalty", "frequency_penalty", "logit_bias", "user", "response_format", "seed",
+                        "parallel_tool_calls", "logprobs", "top_logprobs", "stream"}
+        for k, v in payload.items():
+            if k not in exclude_keys:
+                anthropic_payload[k] = v
+
+        return anthropic_payload
 
     def _convert_to_anthropic_messages(self, messages: List[Dict]):
         system_prompt = ""
-        anthropic_msgs = []
+        raw_msgs = []
 
         for msg in messages:
             if msg["role"] == "system":
                 system_prompt += msg["content"] + "\n"
             elif msg["role"] == "tool":
-                anthropic_msgs.append({
+                tool_content = str(msg.get("content", ""))
+                if not tool_content.strip():
+                    tool_content = "Executed successfully."
+                raw_msgs.append({
                     "role": "user",
-                    "content": [{
+                    "content":[{
                         "type": "tool_result",
                         "tool_use_id": msg.get("tool_call_id", ""),
-                        "content": msg["content"]
+                        "content": tool_content
                     }]
                 })
             else:
+                new_content = []
                 content = msg["content"]
+
                 if isinstance(content, list):
-                    new_content = []
                     for block in content:
                         if block.get("type") == "text":
                             new_content.append({"type": "text", "text": block["text"]})
                         elif block.get("type") == "image_url":
                             url = block["image_url"]["url"]
                             if url.startswith("data:"):
-                                mime = url.split(";")[0].split(":")[1]
-                                b64_data = url.split(",")[1]
-                                new_content.append({
-                                    "type": "image",
-                                    "source": {"type": "base64", "media_type": mime, "data": b64_data}
-                                })
-                    anthropic_msgs.append({"role": msg["role"], "content": new_content})
+                                try:
+                                    mime_data = url.split(";")[0]
+                                    mime = mime_data.split(":")[1] if ":" in mime_data else "image/jpeg"
+                                    b64_data = url.split(",")[1]
+                                    new_content.append({
+                                        "type": "image",
+                                        "source": {"type": "base64", "media_type": mime, "data": b64_data}
+                                    })
+                                except Exception as e:
+                                    new_content.append({"type": "text", "text": f"[Failed to process image: {e}]"})
+                            else:
+                                # 对于普通 URL, 如果未能转换为 base64, 则降级以文本呈现供模型自行抓取或阅读
+                                new_content.append({"type": "text", "text": f"[Image URL: {url}]"})
                 else:
-                    anthropic_msgs.append({"role": msg["role"], "content": content})
+                    if content:
+                        new_content.append({"type": "text", "text": str(content)})
 
-        return system_prompt.strip(), anthropic_msgs
+                # 提取模型侧调用的工具 (需回传给上下文保证连贯性)
+                if msg["role"] == "assistant" and msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        fn = tc.get("function", {})
+                        args = fn.get("arguments", "{}")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except:
+                                args = {}
+                        new_content.append({
+                            "type": "tool_use",
+                            "id": tc.get("id", ""),
+                            "name": fn.get("name", ""),
+                            "input": args
+                        })
+
+                if not new_content:
+                    new_content.append({"type": "text", "text": " "})
+
+                raw_msgs.append({"role": msg["role"], "content": new_content})
+
+        merged_msgs =[]
+        for rm in raw_msgs:
+            role = rm["role"]
+            content = rm["content"]
+            if merged_msgs and merged_msgs[-1]["role"] == role:
+                merged_msgs[-1]["content"].extend(content)
+            else:
+                merged_msgs.append({"role": role, "content": content})
+
+        return system_prompt.strip(), merged_msgs

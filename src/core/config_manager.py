@@ -156,6 +156,7 @@ class ConfigManager:
             "current_model_id": "embed_nano_fast",
             "rerank_model_id": "rerank_lite",
             "inference_device": "cpu",
+            "proxy_mode": "off",
             "proxy_url": "",
             "hf_mirror": "",
             "hf_token": "",
