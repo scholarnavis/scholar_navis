@@ -325,7 +325,13 @@ class ArticleWidget(QFrame):
                 "2. Evaluate its potential biological or clinical significance.\n"
                 "*(Note: Since this is only an abstract, you may trigger the NCBI/Semantic Scholar tools to retrieve more metadata or related literature if you need deeper context.)*"
             )
-            GlobalSignals().sig_send_to_chat.emit(context_text, prompt)
+
+            if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
+                # 携带 "Literature" 标签触发带有文献 MCP 权限的聊天
+                GlobalSignals().sig_route_to_chat_with_mcp.emit(context_text, prompt, "Literature")
+            elif hasattr(GlobalSignals(), 'sig_send_to_chat'):
+                # 降级模式，正常发送
+                GlobalSignals().sig_send_to_chat.emit(context_text, prompt)
 
         elif hasattr(GlobalSignals(), 'sig_send_to_chat'):
             pass
@@ -357,7 +363,7 @@ class RSSTool(BaseTool):
     def __init__(self):
         super().__init__("Literature Tracker")
 
-        base_dir = ConfigManager().BASE_DIR
+        base_dir = self.config.BASE_DIR
 
         self.workspace_dir = os.path.join(base_dir, "scholar_workspace")
         os.makedirs(self.workspace_dir, exist_ok=True)
@@ -995,13 +1001,7 @@ class RSSTool(BaseTool):
 
 
     def _load_config(self):
-        saved_feeds = []
-        if os.path.exists(self.feeds_file):
-            try:
-                with open(self.feeds_file, 'r', encoding='utf-8') as f:
-                    saved_feeds = json.load(f)
-            except:
-                pass
+        saved_feeds = self.config.load_json(self.feeds_file, encrypt=False) or []
 
         for feed in saved_feeds:
             if "category" not in feed:
@@ -1016,27 +1016,22 @@ class RSSTool(BaseTool):
                         break
                 feed["is_default"] = is_def
 
-        self.feeds = saved_feeds if saved_feeds else []
+        self.feeds = saved_feeds
+
 
     def _save_config(self):
-        try:
-            with open(self.feeds_file, 'w', encoding='utf-8') as f:
-                json.dump(self.feeds, f, indent=4)
-        except:
-            pass
+        self.config.save_json(self.feeds_file, self.feeds, encrypt=False)
+
 
     def _load_cache(self):
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    meta = data.pop("_meta", {})
-                    self.last_fetched_time = meta.get("last_fetched", "Unknown")
-                    self.article_cache = data
-                    if hasattr(self, 'lbl_time'):
-                        self.lbl_time.setText(f"Last Fetched: {self.last_fetched_time}")
-            except:
-                pass
+        data = self.config.load_json(self.cache_file, encrypt=False)
+        if data:
+            meta = data.pop("_meta", {})
+            self.last_fetched_time = meta.get("last_fetched", "Unknown")
+            self.article_cache = data
+            if hasattr(self, 'lbl_time'):
+                self.lbl_time.setText(f"Last Fetched: {self.last_fetched_time}")
+
 
     def _refresh_feed_ui(self):
         self.feed_list.blockSignals(True)

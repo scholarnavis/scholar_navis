@@ -46,7 +46,7 @@ class AboutTool(BaseTool):
         self.lbl_update.setAlignment(Qt.AlignCenter)
         self.lbl_update.setCursor(Qt.PointingHandCursor)
         self.lbl_update.hide()
-        self.lbl_update.mousePressEvent = lambda e: QDesktopServices.openUrl(QUrl("https://scholarnavis.com/dl"))
+        self.lbl_update.setOpenExternalLinks(True)
 
         layout.addWidget(self.lbl_title)
         layout.addWidget(self.lbl_desc)
@@ -79,16 +79,21 @@ class AboutTool(BaseTool):
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
-        self.task_manager.start_task(VersionCheckTask, "check_update", TaskMode.THREAD)
+        self.task_manager.start_task(VersionCheckTask, task_id="check_update", mode=TaskMode.THREAD)
 
         return self.widget
 
     def _on_version_checked(self, payload):
+        if not payload:
+            return
+
         latest_version = payload.get("latest_version")
         if latest_version and latest_version != "0.0.0" and latest_version != __version__:
-            self.lbl_update.setText(f"New version v{latest_version} available! Click to download.")
+            self.lbl_update.setText(
+                f'<a href="https://scholarnavis.com/dl" style="color: inherit; text-decoration: none;">New version v{latest_version} available! Click to download.</a>')
             self.lbl_update.show()
             self._apply_theme()
+
 
     def _apply_theme(self):
         tm = ThemeManager()

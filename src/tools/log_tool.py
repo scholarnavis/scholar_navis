@@ -7,6 +7,7 @@ from src.core.theme_manager import ThemeManager
 
 
 class LogTool(BaseTool):
+    MAX_LOGS = 1000
     def __init__(self):
         super().__init__("System Logs")
         self.widget = None
@@ -18,6 +19,9 @@ class LogTool(BaseTool):
         for level, msg in handler.log_history:
             self._log_buffer.append((level, msg))
             self._all_logs.append((level, msg))
+
+        if len(self._all_logs) > self.MAX_LOGS:
+            self._all_logs = self._all_logs[-self.MAX_LOGS:]
 
         handler.new_log_signal.connect(self.append_log)
 
@@ -40,6 +44,7 @@ class LogTool(BaseTool):
 
         self.log_viewer = QPlainTextEdit()
         self.log_viewer.setReadOnly(True)
+        self.log_viewer.setMaximumBlockCount(self.MAX_LOGS)
         layout.addWidget(self.log_viewer)
 
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -108,5 +113,3 @@ class LogTool(BaseTool):
         if is_at_bottom:
             sb.setValue(sb.maximum())
 
-    def execute_task(self):
-        pass

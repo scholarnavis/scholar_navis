@@ -2,6 +2,7 @@ import logging
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QObject
 
+from src.core.config_manager import ConfigManager
 from src.ui.components.toast import ToastManager
 
 
@@ -17,6 +18,7 @@ class BaseTool(QObject):
         super().__init__()
         self.tool_name = tool_name
         self.logger = logging.getLogger(f"Tool.{tool_name}")
+        self.config = ConfigManager()
 
     def get_ui_widget(self) -> QWidget:
         """返回该工具的主界面 Widget"""

@@ -1,7 +1,6 @@
 import urllib.parse
 import re
 import logging
-import requests
 
 from src.core.network_worker import create_robust_session
 
@@ -30,7 +29,7 @@ class OAFetcher:
     def fetch_best_oa_pdf(self, doi: str, user_email: str, s2_api_key: str, request_func = None) -> dict:
         """
         Unified OA PDF sniffing engine.
-        :param request_func: A callable for making network requests, expecting (url, headers=None, timeout=5)
+        :param request_func: A callable for making network requests, expecting (url, headers=None, timeout=15)
         """
         if not doi:
             self.logger.warning("Empty DOI provided. Aborting fetch.")
@@ -46,7 +45,7 @@ class OAFetcher:
         if request_func is None:
             session = create_robust_session()
 
-            def default_request(url, headers=None, timeout=5):
+            def default_request(url, headers=None, timeout=15):
                 req_headers = session.headers.copy()
                 if headers:
                     req_headers.update(headers)
@@ -61,7 +60,7 @@ class OAFetcher:
                 res = request_func(
                     f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}?fields=isOpenAccess,openAccessPdf",
                     headers={"x-api-key": s2_api_key},
-                    timeout=5
+                    timeout=15
                 )
                 if res.status_code == 200:
                     data = res.json()
@@ -81,7 +80,7 @@ class OAFetcher:
         self.logger.debug("Querying OpenAlex...")
         try:
             res = request_func(f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={user_email}",
-                               timeout=5)
+                               timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("open_access", {}).get("is_oa") and data.get("open_access", {}).get("oa_url"):
@@ -97,7 +96,7 @@ class OAFetcher:
         # 3. Unpaywall
         self.logger.debug("Querying Unpaywall...")
         try:
-            res = request_func(f"https://api.unpaywall.org/v2/{encoded}?email={user_email}", timeout=5)
+            res = request_func(f"https://api.unpaywall.org/v2/{encoded}?email={user_email}", timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("is_oa"):
@@ -124,14 +123,14 @@ class OAFetcher:
         try:
             conv_res = request_func(
                 f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={encoded}&format=json&email={user_email}",
-                timeout=5
+                timeout=15
             )
             if conv_res.status_code == 200:
                 records = conv_res.json().get("records", [])
                 if records and "pmcid" in records[0]:
                     pmcid = records[0]["pmcid"]
                     oa_res = request_func(f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}",
-                                          timeout=5)
+                                          timeout=15)
                     if oa_res.status_code == 200 and "<OA>" in oa_res.text:
                         matches = re.findall(r'<link[^>]+format="pdf"[^>]+href="([^"]+)"', oa_res.text)
 

@@ -401,7 +401,7 @@ class ChatInputContainer(QFrame):
             self.refresh_mcp_tags()
 
     def _on_tag_toggled(self, tag, checked):
-        ConfigManager().toggle_mcp_tag(tag, checked)
+        self.config.toggle_mcp_tag(tag, checked)
         self._update_tag_button_text()
 
     def _on_mcp_enable_toggled(self, checked):
@@ -423,10 +423,9 @@ class ChatInputContainer(QFrame):
     def refresh_mcp_tags(self):
         try:
             mcp_mgr = MCPManager.get_instance()
-            config_mgr = ConfigManager()
 
             available_tags = mcp_mgr.get_available_tags()
-            deselected_tags = config_mgr.mcp_servers.get("deselected_mcp_tags", [])
+            deselected_tags = self.config.mcp_servers.get("deselected_mcp_tags", [])
 
             self.menu_mcp_tags.clear()
             self.tag_actions.clear()
@@ -474,7 +473,7 @@ class ChatInputContainer(QFrame):
     def get_selected_tags(self) -> list:
         try:
             available = MCPManager.get_instance().get_available_tags()
-            deselected = ConfigManager().mcp_servers.get("deselected_mcp_tags", [])
+            deselected = self.config.mcp_servers.get("deselected_mcp_tags", [])
             return [t for t in available if t not in deselected]
         except:
             return []
@@ -521,9 +520,7 @@ class ChatWorker(QObject):
     def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False, external_context=None,
                  use_mcp=False):
         super().__init__()
-
         self.logger = logging.getLogger("ChatWorker")
-
         self.main_config = main_config
         self.trans_config = trans_config
         self.messages = messages
@@ -555,6 +552,9 @@ class ChatWorker(QObject):
 
     def run(self):
         try:
+            from src.core.config_manager import ConfigManager
+            self.config = ConfigManager()
+
             self._init_llms()
             original_user_query = self.messages[-1]['content']
             search_query = original_user_query
@@ -584,7 +584,8 @@ class ChatWorker(QObject):
                 if kb_info:
                     domain = kb_info.get('domain', 'General Academic')
                     model_id = kb_info.get('model_id', 'embed_auto')
-                    user_pref = ConfigManager().user_settings.get("inference_device", "Auto")
+
+                    user_pref = self.config.user_settings.get("inference_device", "Auto")
                     target_device = DeviceManager().parse_device_string(user_pref)
 
                     conf = get_model_conf(model_id, "embedding")
@@ -595,7 +596,7 @@ class ChatWorker(QObject):
                     repo_id = conf.get('hf_repo_id')
 
                     try:
-                        embed_fn = _worker_load_model(self.kb_id)
+                        embed_fn = _worker_load_model(self.kb_id,self.config)
 
                         if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
                             self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
@@ -671,9 +672,9 @@ class ChatWorker(QObject):
                 context_str = "No local documents provided. Use tools to fetch real-time data if necessary."
 
             # Phase 3.9: Low VRAM 内存/显存释放
-            is_low_vram = ConfigManager().user_settings.get("low_vram_mode", False)
+            is_low_vram = self.config.user_settings.get("low_vram_mode", False)
             if is_low_vram:
-                self.sig_token.emit("<i>🧹 [Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
+                self.sig_token.emit("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
                 if hasattr(self, 'reranker') and getattr(self.reranker, 'model', None) is not None:
                     self.reranker.model = None
                 if hasattr(self, 'db') and self.db:
@@ -860,6 +861,7 @@ class ChatTool(BaseTool):
         self.user_toggled_thinks = set()
         self.external_context_buffer = ""
         self.external_context_html = ""
+
 
         GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
         GlobalSignals().kb_switched.connect(self.on_global_kb_switched)
@@ -1641,15 +1643,15 @@ class ChatTool(BaseTool):
         config_mgr = ConfigManager()
         available_tags = MCPManager.get_instance().get_available_tags()
 
-        deselected = set(config_mgr.mcp_servers.get("deselected_mcp_tags", []))
+        deselected = set(self.config.mcp_servers.get("deselected_mcp_tags", []))
         for tag in available_tags:
             if tag.lower() == target_tag.lower():
                 deselected.discard(tag)
             else:
                 deselected.add(tag)
 
-        config_mgr.mcp_servers["deselected_mcp_tags"] = list(deselected)
-        config_mgr.save_settings()
+        self.config.mcp_servers["deselected_mcp_tags"] = list(deselected)
+        self.config.save_mcp_servers()
 
         if hasattr(self, 'input_container') and hasattr(self.input_container, 'refresh_mcp_tags'):
             self.input_container.refresh_mcp_tags()

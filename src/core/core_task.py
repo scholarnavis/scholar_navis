@@ -33,7 +33,7 @@ class BackgroundTask:
 
     def run(self):
         # 局部导入！
-        from config_manager import ConfigManager
+        from src.core.config_manager import ConfigManager
         self.config = ConfigManager()
 
         self.logger.debug(f"Start. PID: {os.getpid()} | Task: {self.task_id}")

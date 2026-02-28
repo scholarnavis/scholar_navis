@@ -28,7 +28,6 @@ class ImportTool(BaseTool):
         self.widget = None
         self.kb_manager = KBManager()
         self.task_mgr = TaskManager()
-        self.logger = logging.getLogger("ImportTool")
         self.staged_add = []
         self.staged_del = []
         self.staged_rename = {}
@@ -878,13 +877,33 @@ class ImportTool(BaseTool):
             self.update_file_list()
             self.mark_dirty()
 
+
     def batch_delete(self, rows):
         for r in reversed(rows):
             name = self.file_table.item(r, 0).text()
-            if "Indexed" in self.file_table.item(r, 2).text():
-                self.staged_del.append(name)
+            status_item = self.file_table.item(r, 2)
+            status_text = status_item.text() if status_item else ""
+
+            if "Indexed" in status_text or "Renaming..." in status_text:
+                original_name = name
+                # 如果这个文件被重命名过，需要顺藤摸瓜找到它真正的原始名字
+                for k, v in self.staged_rename.items():
+                    if v == name:
+                        original_name = k
+                        break
+
+                self.staged_del.append(original_name)
+
+                if original_name in self.staged_rename:
+                    del self.staged_rename[original_name]
+
+            elif "Pending Save" in status_text:
+                self.staged_add = [f for f in self.staged_add if os.path.basename(f) != name]
+
             self.file_table.removeRow(r)
+
         self.mark_dirty()
+
 
     def on_kb_switched(self, index):
         if index < 0:
@@ -1002,16 +1021,32 @@ class ImportTool(BaseTool):
         except Exception: pass
         GlobalSignals().kb_list_changed.emit()
 
-
     def download_required_model(self):
         self.pd = ProgressDialog(
             self.widget, "Downloader", "Connecting...",
             telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": True}
         )
         self.pd.show()
+
         self.task_mgr.sig_progress.connect(self.pd.update_progress)
-        self.task_mgr.sig_state_changed.connect(lambda s, m: self.pd.accept() if s == TaskState.SUCCESS.value else None)
+
+        def on_download_state_changed(state, msg):
+            if state == TaskState.SUCCESS.value:
+                self.pd.show_success_state("Complete", "Model downloaded successfully.")
+                self.refresh_kb_list()  # 下载完刷新一下状态
+            elif state == TaskState.FAILED.value:
+                self.pd.close_safe()
+                StandardDialog(self.widget, "Download Failed", f"Network error: {msg}").exec()
+
+            try:
+                self.task_mgr.sig_state_changed.disconnect(on_download_state_changed)
+            except Exception:
+                pass
+
+        self.task_mgr.sig_state_changed.connect(on_download_state_changed)
+        self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
         self.task_mgr.start_task(SwitchKBTask, "dl", kb_id=self.current_kb_id)
+
 
     def _handle_open(self, rows):
         """修复混淆后的文件打开逻辑"""

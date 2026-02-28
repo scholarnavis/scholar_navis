@@ -34,92 +34,6 @@ from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDi
 from src.ui.components.toast import ToastManager
 
 
-class BatchDownloadWorker(QObject):
-    sig_progress = Signal(int, str)
-    sig_finished = Signal(bool, str)
-
-    def __init__(self, download_list):
-        super().__init__()
-        self.download_list = download_list
-        self.is_running = True
-        self._process = None
-        self.current_repo = None
-
-    def stop(self):
-        self.is_running = False
-        if self._process is not None:
-            try:
-                self._process.kill()
-            except Exception:
-                pass
-
-    def _nuke_cache(self, repo_id):
-        hf_home = constants.HF_HOME
-        folder_name = "models--" + repo_id.replace("/", "--")
-        target_dir = os.path.join(hf_home, "hub", folder_name)
-
-        if os.path.exists(target_dir):
-            try:
-                shutil.rmtree(target_dir)
-                print(f"Cache nuked: {target_dir}")
-            except Exception as e:
-                print(f"Failed to wipe cache: {e}")
-
-    def run(self):
-        try:
-            env = os.environ.copy()
-            env["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
-
-            total = len(self.download_list)
-            for i, repo_id in enumerate(self.download_list):
-                self.current_repo = repo_id
-                if not self.is_running:
-                    break
-
-                self.sig_progress.emit(0, f"Preparing ({i + 1}/{total}): {repo_id}")
-
-                cmd = [sys.executable, "-m", "huggingface_hub.commands.huggingface_cli", "download", repo_id]
-
-                kwargs = {}
-                if sys.platform == "win32":
-                    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-
-                self._process = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, encoding='utf-8', errors='replace',
-                    env=env, **kwargs
-                )
-
-                for line in self._process.stdout:
-                    if not self.is_running:
-                        break
-
-                    pct_match = re.search(r'(\d+)%', line)
-                    if pct_match:
-                        pct = int(pct_match.group(1))
-                        speed_str = ""
-                        speed_match = re.search(r'\[.*?,\s*([^\]]+)\]', line)
-                        if speed_match:
-                            speed_str = f" | {speed_match.group(1).strip()}"
-                        self.sig_progress.emit(pct, f"Downloading {repo_id} ({pct}%){speed_str}")
-
-                self._process.wait()
-
-                if not self.is_running:
-                    raise Exception("Task explicitly killed by user (SIGKILL).")
-                elif self._process.returncode != 0:
-                    raise Exception(f"Download failed with process code {self._process.returncode}.")
-
-            if self.is_running:
-                self.sig_progress.emit(100, "All downloads complete.")
-                self.sig_finished.emit(True, "Success")
-
-        except Exception as e:
-            if self.current_repo:
-                self._nuke_cache(self.current_repo)
-            reason = "Task aborted and residual cache wiped." if not self.is_running else str(e)
-            self.sig_finished.emit(False, reason)
-
 
 class FloatingOverlayFilter(QObject):
     def __init__(self, parent_widget, btn):
@@ -142,7 +56,6 @@ class SettingsTool(BaseTool):
         self.dev_mgr = DeviceManager()
         self.widget = None
         self.llm_configs = []
-        self.logger = logging.getLogger("SettingsTool")
         self._is_updating_model_ui = False
 
         GlobalSignals().request_model_download.connect(self.on_download_requested)
@@ -1435,14 +1348,14 @@ class SettingsTool(BaseTool):
         self.net_pd.close_safe()
         if result.get("success"):
             models = result["models"]
-            self.logger.info(f"🔄 Successfully fetched {len(models)} models from API.")
+            self.logger.info(f"Successfully fetched {len(models)} models from API.")
             idx = self.combo_llm_preset.currentIndex()
             if 0 <= idx < len(self.llm_configs):
                 self.llm_configs[idx]["fetched_models"] = models
                 self._refresh_model_combo(self.llm_configs[idx])
             StandardDialog(self.widget, "Success", result["msg"]).exec()
         else:
-            self.logger.warning(f"⚠️ Failed to fetch models: {result['msg']}")
+            self.logger.warning(f"⚠Failed to fetch models: {result['msg']}")
             ToastManager().show(f"Fetch Models Failed: {result['msg']}", "error")
 
     def _start_test_task(self):
@@ -1661,7 +1574,6 @@ class SettingsTool(BaseTool):
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
             "hf_mirror": self.input_mirror.text().strip(),
-            "download_speed_limit": self.combo_embed.currentText(),
             "inference_device": self.combo_device.currentData(),
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
@@ -1682,9 +1594,6 @@ class SettingsTool(BaseTool):
         self.config.save_settings()
 
         setup_global_network_env()
-        os.environ["NCBI_API_EMAIL"] = new_email
-        os.environ["NCBI_API_KEY"] = new_key
-        os.environ["S2_API_KEY"] = new_s2_key
 
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.emit()
