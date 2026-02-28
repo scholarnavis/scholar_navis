@@ -602,7 +602,7 @@ class McpConfigDialog(BaseDialog):
 
         self.content_layout.addWidget(self.form_widget)
 
-        self.btn_test = self.add_button("🧪 测试连接", self._on_test_clicked)
+        self.btn_test = self.add_button("测试连接", self._on_test_clicked)
         self.footer_layout.removeWidget(self.btn_test)
         self.footer_layout.insertWidget(0, self.btn_test)
 
@@ -681,6 +681,7 @@ class McpConfigDialog(BaseDialog):
             StandardDialog(self, "信息缺失", "请至少填入服务器标识与命令/URL。").exec()
             return
 
+        self.btn_test.setEnabled(False)
         self.pd = ProgressDialog(self, "测试连接", f"正在尝试连接至 [{name}]...\n请稍候...")
         self.pd.show()
 
@@ -706,11 +707,14 @@ class McpConfigDialog(BaseDialog):
         self.test_thread.start()
 
     def _on_test_finished(self, success, msg):
+
+        self.btn_test.setEnabled(True)
+
         self.pd.close_safe()
         if success:
-            StandardDialog(self, "连接成功", f"✅ {msg}").exec()
+            StandardDialog(self, "连接成功", f"{msg}").exec()
         else:
-            err_dialog = StandardDialog(self, "连接失败", f"❌ 无法连接到服务器：\n{msg}")
+            err_dialog = StandardDialog(self, "连接失败", f"无法连接到服务器：\n{msg}")
             err_dialog.setFixedWidth(500)
             err_dialog.exec()
 

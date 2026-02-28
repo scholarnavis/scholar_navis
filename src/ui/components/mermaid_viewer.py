@@ -146,6 +146,8 @@ class MermaidViewer(QMainWindow):
         self.source_editor.blockSignals(True)
         self.source_editor.setPlainText(self.mermaid_code)
 
+        self.source_editor.blockSignals(False)
+
     def _toggle_source(self):
         self.source_editor.setVisible(not self.source_editor.isVisible())
 

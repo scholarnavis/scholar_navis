@@ -56,7 +56,12 @@ class ConfigManager:
     def _init_encryption(self):
         """基于系统凭据管理器获取或生成唯一密钥"""
         try:
-            key = keyring.get_password(self.KEYRING_SERVICE, self.KEYRING_ACCOUNT)
+            key = None
+            try:
+                # 单独捕获 keyring 异常，防止环境不支持时直接崩溃
+                key = keyring.get_password(self.KEYRING_SERVICE, self.KEYRING_ACCOUNT)
+            except Exception as e:
+                self.logger.warning(f"Keyring unavailable or locked, triggering fallback: {e}")
 
             fallback_key_path = os.path.join(self.CONFIG_DIR, ".secret_fallback.key")
 
@@ -66,10 +71,8 @@ class ConfigManager:
                     with open(fallback_key_path, 'r', encoding='utf-8') as f:
                         key = f.read().strip()
                 else:
-                    # 如果都没有，生成一个全新的高强度安全密钥
                     key = Fernet.generate_key().decode('utf-8')
                     try:
-                        # 存入系统凭据管理器
                         keyring.set_password(self.KEYRING_SERVICE, self.KEYRING_ACCOUNT, key)
                         self.logger.info("New encryption key generated and stored in system keyring.")
                     except Exception as e:

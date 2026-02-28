@@ -48,9 +48,24 @@ class ToastManager:
     def _update_positions(self):
         if not self.parent_widget: return
 
-        parent_rect = self.parent_widget.rect()
+        try:
+            parent_rect = self.parent_widget.rect()
+        except RuntimeError:
+            self.active_toasts.clear()
+            self.parent_widget = None
+            return
+
         base_y = parent_rect.height() - 100
-        spacing = 15  # Toast 之间的上下间距
+        spacing = 15
+
+        valid_toasts = []
+        for toast in self.active_toasts:
+            try:
+                toast.width()  # 探针检测
+                valid_toasts.append(toast)
+            except RuntimeError:
+                pass
+        self.active_toasts = valid_toasts
 
         for toast in reversed(self.active_toasts):
             x = (parent_rect.width() - toast.width()) // 2

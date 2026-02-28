@@ -371,6 +371,7 @@ class ChatBubbleWidget(QWidget):
                         dots = "." * getattr(self, 'image_loading_dots', 0)
                         return f'<div style="color:#05B8CC; padding: 20px; border: 2px dashed #05B8CC; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">正在将图像下载到本地缓存，请稍候{dots}</span></div>'
 
+                return match.group(0)
             html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
 
             self.lbl_text.setText(html)
@@ -414,7 +415,7 @@ class ChatBubbleWidget(QWidget):
         worker.sig_image_downloaded.connect(thread.quit)
         worker.sig_image_downloaded.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-
+        thread.finished.connect(lambda t=thread: self.image_threads.remove(t) if t in self.image_threads else None)
         self.image_threads.append(thread)
         thread.start()
 

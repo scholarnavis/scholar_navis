@@ -85,7 +85,8 @@ class FollowUpPillButton(QFrame):
         self.lbl = QLabel(f"<b>{tag}</b> | {self.text_content}")
         self.lbl.setWordWrap(True)
         self.lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-
+        self.icon_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
         layout.addWidget(self.icon_lbl)
         layout.addWidget(self.lbl)
 

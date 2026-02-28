@@ -93,13 +93,13 @@ class ParamEditorWidget(QWidget):
         self.table.setCellWidget(row, 3, btn_del)
 
     def _remove_row(self, button):
-        index = self.table.indexAt(button.pos())
-        if index.isValid():
-            self.table.removeRow(index.row())
-            self.sig_data_changed.emit()
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, 3) == button:
+                self.table.removeRow(row)
+                self.sig_data_changed.emit()
+                break
 
     def extract_data(self):
-        """Returns a list of dictionaries containing valid parameters."""
         self.table.viewport().clearFocus()
         self.table.setCurrentItem(None)
 

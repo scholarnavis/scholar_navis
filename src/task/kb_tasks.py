@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from chromadb import Documents, Embeddings, EmbeddingFunction
 from optimum.onnxruntime import ORTModelForFeatureExtraction
 from transformers import AutoTokenizer
-from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager

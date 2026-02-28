@@ -1,6 +1,6 @@
 import html
 
-import fitz  # PyMuPDF
+import fitz
 import os
 import shutil
 import re
@@ -459,13 +459,6 @@ class InternalTextViewer(QMainWindow):
         tb2.addWidget(hint)
 
 
-    def prev_page(self):
-        if self.doc and self.current_page > 0:
-            self.goto_page(self.current_page - 1)
-
-    def next_page(self):
-        if self.doc and self.current_page < len(self.doc) - 1:
-            self.goto_page(self.current_page + 1)
 
     # --- 呼出全局翻译 ---
     def _invoke_translator(self, text):

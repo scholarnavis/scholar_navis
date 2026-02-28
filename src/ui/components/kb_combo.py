@@ -10,10 +10,12 @@ from src.ui.components.combo import BaseComboBox
 class KBDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         if not index.isValid(): return
-
+        painter.save()
         data = index.data(Qt.UserRole)
-        if not data:
+
+        if not data or not isinstance(data, dict):
             super().paint(painter, option, index)
+            painter.restore()
             return
 
         name = data.get('name', 'Untitled')

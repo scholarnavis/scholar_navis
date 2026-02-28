@@ -14,7 +14,7 @@ class ModelSelectorWidget(QWidget):
         super().__init__(parent)
         self.config_key = config_key
         self.model_key = model_key
-
+        self.config_manager = ConfigManager()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel(label_text))
@@ -33,14 +33,15 @@ class ModelSelectorWidget(QWidget):
         self.load_llm_configs()
 
     def load_llm_configs(self):
-        path = os.path.join(os.getcwd(), "config", "llm_config.json")
+        path = os.path.join(self.config_manager.CONFIG_DIR, "llm_config.json")
+
         self.combo_provider.blockSignals(True)
         self.combo_provider.clear()
 
         if self.config_key == "trans_llm_id":
-            self.combo_provider.addItem("❌ None (Disable)", None)
+            self.combo_provider.addItem("None (Disable)", None)
 
-        active_id = ConfigManager().user_settings.get(self.config_key, "openai")
+        active_id = self.config_manager.user_settings.get(self.config_key, "openai")
         target_idx = 0
 
         if os.path.exists(path):
@@ -51,8 +52,8 @@ class ModelSelectorWidget(QWidget):
                         self.combo_provider.addItem(cfg.get('name', 'Unknown'), cfg)
                         if cfg.get("id") == active_id:
                             target_idx = self.combo_provider.count() - 1
-            except Exception:
-                pass
+            except Exception as e:
+                self.config_manager.logger.error(f"Failed to load llm_config.json: {e}")
 
         if self.combo_provider.count() > 0:
             self.combo_provider.setCurrentIndex(target_idx)
@@ -92,7 +93,7 @@ class ModelSelectorWidget(QWidget):
         if cfg and model_name:
             # Update the JSON locally
             cfg[self.model_key] = model_name
-            path = os.path.join(os.getcwd(), "config", "llm_config.json")
+            path = os.path.join(self.config_manager.CONFIG_DIR, "llm_config.json")
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     file_configs = json.load(f)

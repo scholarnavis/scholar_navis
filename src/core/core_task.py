@@ -108,7 +108,7 @@ class TaskManager(QObject):
     def start_task(self, task_class, task_id, mode: TaskMode = TaskMode.PROCESS, **kwargs):
         self.logger.info(f"Launching {task_class.__name__} in {mode.value} mode")
         self.cancel_task()  # 清理旧任务
-
+        self.task_queue = mp.Queue()
         self.current_mode = mode
         if self.pre_task_hook: self.pre_task_hook()
 
@@ -162,9 +162,8 @@ class TaskManager(QObject):
                     self._orphaned_threads = []
 
                 old_worker = self.worker
-                old_worker.quit()
                 self._orphaned_threads.append(old_worker)
-
+                # 只要确保你的后台任务 _execute 内部有在循环检查 self._is_cancelled 就能取消
                 old_worker.finished.connect(
                     lambda w=old_worker: self._orphaned_threads.remove(w) if w in getattr(self, '_orphaned_threads',
                                                                                           []) else None

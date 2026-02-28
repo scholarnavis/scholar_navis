@@ -262,6 +262,8 @@ class QuickTranslatorWindow(QWidget):
                         self.worker.cancel()
                         try:
                             self.worker.sig_token.disconnect()
+                            self.worker.sig_finished.disconnect()
+                            self.worker.sig_error.disconnect()
                         except Exception:
                             pass
 
@@ -352,10 +354,8 @@ class QuickTranslatorWindow(QWidget):
         self.move((screen.width() - self.width()) // 2, int((screen.height() - self.height()) // 2))
 
     def _clear_all(self):
-        if self.worker_thread and self.worker_thread.isRunning():
-            self.worker.cancel()
-            self.worker_thread.quit()
-            self.worker_thread.wait()
+        if getattr(self, 'worker_thread', None) and self.worker_thread.isRunning():
+            self._stop_translation()
 
         self.input_box.clear()
         self.output_box.clear()
@@ -371,6 +371,7 @@ class QuickTranslatorWindow(QWidget):
                     try:
                         self.worker.sig_token.disconnect()
                         self.worker.sig_finished.disconnect()
+                        self.worker.sig_error.disconnect()
                     except Exception:
                         pass
 
