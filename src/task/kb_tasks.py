@@ -4,12 +4,13 @@ import os
 import shutil
 import uuid
 import zipfile
-
+import onnxruntime as ort
 import torch.nn.functional as F
 from chromadb import Documents, Embeddings, EmbeddingFunction
 from optimum.onnxruntime import ORTModelForFeatureExtraction
 from transformers import AutoTokenizer
 
+from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
@@ -45,6 +46,9 @@ def _worker_load_model(kb_id):
 
     kb_mgr = KBManager()
     dev_mgr = DeviceManager()
+
+    config = ConfigManager()
+
     kb_data = kb_mgr.get_kb_by_id(kb_id)
     if not kb_data:
         raise RuntimeError(f"未找到 KB ID: {kb_id} 的元数据")
@@ -52,15 +56,19 @@ def _worker_load_model(kb_id):
     model_id = kb_data.get('model_id', 'embed_auto')
     conf = get_model_conf(model_id, "embedding")
 
-    device_info = dev_mgr.get_optimal_device()
-    device = device_info.get('type', 'cpu') if isinstance(device_info, dict) else str(device_info)
+    user_device = config.user_settings.get("inference_device", "auto")
+    device_str = dev_mgr.parse_device_string(user_device)
+
+    logger.info(f"[DEBUG] User selected inference_device: {user_device}")
+    logger.info(f"[DEBUG] Parsed device string for ONNX: {device_str}")
+
     repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
 
     try:
         onnx_dir = ensure_onnx_model(repo_id, "embedding")
         logger.info(f"Loading cached ONNX model from: {onnx_dir}")
 
-        embed_fn = ONNXEmbeddingFunction(onnx_dir, device=device)
+        embed_fn = ONNXEmbeddingFunction(onnx_dir, device=device_str)
         return embed_fn
 
     except Exception as e:
@@ -71,12 +79,50 @@ def _worker_load_model(kb_id):
 
 class ONNXEmbeddingFunction(EmbeddingFunction):
     def __init__(self, onnx_cache_dir, device="cpu"):
+        logger = logging.getLogger("Worker.ONNXProvider")
+
         self.tokenizer = AutoTokenizer.from_pretrained(onnx_cache_dir)
-        provider = "CUDAExecutionProvider" if "cuda" in str(device) else "CPUExecutionProvider"
+        available_providers = ort.get_available_providers()
+
+        provider = "CPUExecutionProvider"
+        provider_options = None
+        device_str = str(device).lower()
+
+        logger.info(f"[DEBUG] ONNX Init Requested Device: {device_str}")
+        logger.info(f"[DEBUG] Available ONNX Providers in Env: {available_providers}")
+
+        if device_str.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
+            provider = "CUDAExecutionProvider"
+            if ":" in device_str:
+                provider_options = [{'device_id': int(device_str.split(":")[1])}]
+
+        elif device_str.startswith("dml") and "DmlExecutionProvider" in available_providers:
+            provider = "DmlExecutionProvider"
+            if ":" in device_str:
+                provider_options = [{'device_id': int(device_str.split(":")[1])}]
+
+        elif device_str.startswith("coreml") and "CoreMLExecutionProvider" in available_providers:
+            provider = "CoreMLExecutionProvider"
+
+        elif device_str == "auto":
+            if "CUDAExecutionProvider" in available_providers:
+                provider = "CUDAExecutionProvider"
+            elif "DmlExecutionProvider" in available_providers:
+                provider = "DmlExecutionProvider"
+            elif "CoreMLExecutionProvider" in available_providers:
+                provider = "CoreMLExecutionProvider"
+
+        logger.info(f"[DEBUG] Final Selected ONNX Provider: {provider}")
+        logger.info(f"[DEBUG] Provider Options: {provider_options}")
+
+        kwargs = {"provider": provider}
+        if provider_options:
+            kwargs["provider_options"] = provider_options
+
         self.model = ORTModelForFeatureExtraction.from_pretrained(
             onnx_cache_dir,
             export=False,
-            provider=provider
+            **kwargs
         )
 
     def __call__(self, input: Documents) -> Embeddings:
@@ -97,6 +143,7 @@ class ImportFilesTask(BackgroundTask):
         import uuid
         import shutil
         import tempfile
+        import traceback
         from src.core.kb_manager import KBManager
         from src.core.database import DatabaseManager
         from src.services.file_service import FileService
@@ -113,7 +160,9 @@ class ImportFilesTask(BackgroundTask):
         kb_mgr = KBManager()
         db_mgr = DatabaseManager()
 
-        self.send_log("INFO", "🧠 Loading AI Model...")
+        self.send_log("INFO", "Loading AI Model...")
+        self.send_log("INFO", f"Task kwargs: files_count={len(files)}, is_rebuild={is_rebuild}")
+
         embed_fn = _worker_load_model(kb_id)
 
         # 连接数据库
@@ -124,7 +173,7 @@ class ImportFilesTask(BackgroundTask):
 
         # 2. 处理重建逻辑或增量导入逻辑
         if is_rebuild:
-            self.send_log("WARNING", "🧹 Rebuilding vector database...")
+            self.send_log("WARNING", "Rebuilding vector database...")
             try:
                 db_mgr.client.delete_collection("main_collection")
                 kb_info = kb_mgr.get_kb_by_id(kb_id)
@@ -150,9 +199,9 @@ class ImportFilesTask(BackgroundTask):
         current_rerank_id = ConfigManager().user_settings.get("rerank_model_id", "rerank_auto")
 
         opt_chunk, opt_overlap, opt_batch = get_optimal_chunk_settings(current_embed_id, current_rerank_id)
-        self.send_log("INFO", f"📐 动态切分策略应用: Chunk={opt_chunk}, Overlap={opt_overlap}, Batch={opt_batch}")
+        self.send_log("INFO", f"Chunk settings applied: Chunk={opt_chunk}, Overlap={opt_overlap}, Batch={opt_batch}")
 
-        # 🌟 4. 初始化基础文本切分器（应用动态参数）
+        # 4. 初始化基础文本切分器
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=opt_chunk,
             chunk_overlap=opt_overlap,
@@ -160,7 +209,7 @@ class ImportFilesTask(BackgroundTask):
             length_function=len
         )
 
-        # 初始化 PDF 引擎
+        # 初始化 PDF 引擎，扩大异常捕获范围，抛出底层信息
         pdf_engine = None
         try:
             from src.core.pdf_engine import PDFEngine
@@ -174,17 +223,19 @@ class ImportFilesTask(BackgroundTask):
 
                 def info(self, msg):
                     if "Vectorized" in msg or "Loaded" in msg:
-                        self.task_ref.send_log("INFO", f"📄 {msg}")
+                        self.task_ref.send_log("INFO", msg)
 
-                def warning(self, msg): self.task_ref.send_log("WARNING", f"{msg}")
+                def warning(self, msg): self.task_ref.send_log("WARNING", msg)
 
-                def error(self, msg): self.task_ref.send_log("ERROR", f"底层崩溃: {msg}")
+                def error(self, msg): self.task_ref.send_log("ERROR", f"PDFEngine Error: {msg}")
 
             pdf_engine.logger = LoggerHijacker(self)
-        except ImportError as e:
-            self.send_log("ERROR", f"PDFEngine 导入失败 (缺库?): {e}")
+        except Exception as e:
+            self.send_log("ERROR", f"PDFEngine import or initialization failed: {e}")
+            self.send_log("ERROR", f"Traceback:\n{traceback.format_exc()}")
 
         total = len(process_tasks)
+        self.send_log("INFO", f"Actual tasks to process: {total}")
         success_count = 0
         temp_dir = tempfile.gettempdir()
 
@@ -193,16 +244,17 @@ class ImportFilesTask(BackgroundTask):
             if not os.path.exists(read_path): continue
             pct = int((i / total) * 100)
             self.update_progress(pct, f"Indexing: {source_name}")
+            self.send_log("INFO", f"Processing item {i}: {source_name} at {read_path}")
 
             try:
-                #  PDF 智能分流
+                # PDF 智能分流
                 if source_name.lower().endswith('.pdf') and pdf_engine:
                     # 制造物理替身欺骗 LangChain
                     temp_pdf_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}_{source_name}")
                     shutil.copy2(read_path, temp_pdf_path)
 
                     try:
-                        #  动态参数注入 process_pdf
+                        # 动态参数注入 process_pdf
                         chunks_count = pdf_engine.process_pdf(
                             temp_pdf_path,
                             real_filename=source_name,
@@ -213,9 +265,9 @@ class ImportFilesTask(BackgroundTask):
                         if chunks_count > 0:
                             success_count += 1
                         else:
-                            self.send_log("WARNING", f"⚠️ {source_name} 提取了 0 个字符。")
+                            self.send_log("WARNING", f"{source_name} extracted 0 characters.")
                     finally:
-                        # 拔x无情：清理替身，不留垃圾
+                        # 清理替身
                         if os.path.exists(temp_pdf_path):
                             os.remove(temp_pdf_path)
 
@@ -240,6 +292,7 @@ class ImportFilesTask(BackgroundTask):
 
             except Exception as e:
                 self.send_log("ERROR", f"Failed to index {source_name}: {str(e)}")
+                self.send_log("ERROR", f"Task Inner Loop Error Traceback:\n{traceback.format_exc()}")
 
         # 6. 收尾工作：更新时间戳、强制 WAL 落盘
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))

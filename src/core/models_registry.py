@@ -1,10 +1,14 @@
+import gc
 import logging
 import os
 import shutil
 import sys
 import json
+import warnings
 
 from huggingface_hub import scan_cache_dir, snapshot_download, constants
+from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
+from transformers import AutoTokenizer
 
 from src.core.device_manager import DeviceManager
 
@@ -20,15 +24,6 @@ EXTERNAL_MODELS_FILE = os.path.join(CONFIG_DIR, "external_models.json")
 logger =logging.getLogger("ModelRegistry")
 
 EMBEDDING_MODELS = [
-    {
-        "id": "embed_auto",
-        "ui_name": "AUTO (System Recommended)",
-        "is_auto": True,
-        "description": "System will auto-select based on hardware.",
-        "chunk_size": 800,
-        "chunk_overlap": 150,
-        "batch_size": 16
-    },
     {
         "id": "embed_nano_fast",
         "ui_name": "⚡ Nano (Speed Priority) - Snowflake Arctic XS",
@@ -107,13 +102,6 @@ EMBEDDING_MODELS = [
 ]
 
 RERANKER_MODELS = [
-    {
-        "id": "rerank_auto",
-        "ui_name": "AUTO (Best Performance)",
-        "is_auto": True,
-        "description": "System will auto-select based on hardware.",
-        "max_chunk_size": 800
-    },
     {
         "id": "rerank_lite",
         "ui_name": "Lite - BGE-Reranker-Base",
@@ -232,16 +220,19 @@ def init_external_models_file():
                 json.dump(default_structure, f, indent=4)
         except: pass
 
+
 def check_model_exists(repo_id):
-    if not repo_id or repo_id == "Unknown": return False
-    if _official_check(repo_id): return True
-    if _manual_check(repo_id): return True
-    hf_home = _get_hf_home()
-    base_repo_path = os.path.join(hf_home, "hub", "models--" + repo_id.replace("/", "--"))
-    if os.path.exists(base_repo_path):
-        if _repair_model_links(repo_id):
-            if _official_check(repo_id) or _manual_check(repo_id): return True
+    if not repo_id:
+        return False
+    hf_home = constants.HF_HOME
+    onnx_dir = os.path.join(hf_home, "onnx_cache", repo_id.replace("/", "--"))
+
+    if os.path.exists(onnx_dir):
+        for root, dirs, files in os.walk(onnx_dir):
+            if any(f.endswith('.onnx') for f in files):
+                return True
     return False
+
 
 def load_external_models():
     init_external_models_file()
@@ -357,65 +348,70 @@ def get_model_type_by_repo(repo_id):
     return "embedding"
 
 
-def ensure_onnx_model(repo_id, model_type=None):
-    """确保模型已被转换为 ONNX，自动识别官方 ONNX 并屏蔽底层追踪警告"""
-    logger = logging.getLogger("ModelRegistry.ONNX")
-    if not model_type:
-        model_type = get_model_type_by_repo(repo_id)
+def ensure_onnx_model(repo_id, model_type="embedding"):
+    hf_home = constants.HF_HOME
+    onnx_dir = os.path.join(hf_home, "onnx_cache", repo_id.replace("/", "--"))
 
-    onnx_dir = get_onnx_cache_dir(repo_id)
-
-    # 1. 检查我们的私有缓存是否已经转换过
-    if os.path.exists(onnx_dir) and any(f.endswith('.onnx') for f in os.listdir(onnx_dir)):
-        return onnx_dir
-
-    logger.info(f"Preparing ONNX format for {repo_id} ({model_type}). This may take a moment...")
-
-    try:
-        # 获取 Hugging Face 的原始缓存路径
-        model_path = snapshot_download(repo_id=repo_id, local_files_only=True)
-
-        source_has_onnx = False
-        for root, dirs, files in os.walk(model_path):
+    if os.path.exists(onnx_dir):
+        for root, dirs, files in os.walk(onnx_dir):
             if any(f.endswith('.onnx') for f in files):
-                source_has_onnx = True
-                break
+                return onnx_dir
 
-        should_export = not source_has_onnx
+    logger.info(f"ONNX models not found for {repo_id}. Starting PyTorch to ONNX conversion trace...")
 
-        if source_has_onnx:
-            logger.info("Detected official ONNX files in repository. Skipping forced re-export.")
+    model_path = snapshot_download(repo_id=repo_id)
+
+    source_has_onnx = False
+    for root, dirs, files in os.walk(model_path):
+        if any(f.endswith('.onnx') for f in files):
+            source_has_onnx = True
+            break
+
+    should_export = not source_has_onnx
+
+    if source_has_onnx:
+        logger.info("Detected official ONNX files in repository. Skipping forced re-export.")
+    else:
+        logger.info("No official ONNX files found. Starting PyTorch to ONNX conversion trace...")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+
+        if model_type == "embedding":
+            model = ORTModelForFeatureExtraction.from_pretrained(
+                model_path,
+                export=should_export,
+                provider="CPUExecutionProvider"
+            )
         else:
-            logger.info("No official ONNX files found. Starting PyTorch to ONNX conversion trace...")
+            model = ORTModelForSequenceClassification.from_pretrained(
+                model_path,
+                export=should_export,
+                provider="CPUExecutionProvider"
+            )
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+    os.makedirs(onnx_dir, exist_ok=True)
+    model.save_pretrained(onnx_dir)
+    tokenizer.save_pretrained(onnx_dir)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+    logger.info(f"ONNX processing successful and saved to: {onnx_dir}")
 
-            if model_type == "embedding":
-                model = ORTModelForFeatureExtraction.from_pretrained(
-                    model_path,
-                    export=should_export,
-                    provider="CPUExecutionProvider"
-                )
-            else:
-                model = ORTModelForSequenceClassification.from_pretrained(
-                    model_path,
-                    export=should_export,
-                    provider="CPUExecutionProvider"
-                )
+    del model
+    del tokenizer
+    gc.collect()
 
-        os.makedirs(onnx_dir, exist_ok=True)
-        model.save_pretrained(onnx_dir)
-        tokenizer.save_pretrained(onnx_dir)
+    folder_name = "models--" + repo_id.replace("/", "--")
+    hf_model_dir = os.path.join(hf_home, "hub", folder_name)
+    if os.path.exists(hf_model_dir):
+        try:
+            shutil.rmtree(hf_model_dir)
+            logger.info(f"🧹 Cleaned up original PyTorch cache to save disk space: {hf_model_dir}")
+        except Exception as e:
+            logger.warning(f"Could not delete original cache: {e}")
 
-        logger.info(f"ONNX processing successful and saved to: {onnx_dir}")
-        return onnx_dir
-
-    except Exception as e:
-        logger.error(f"ONNX conversion failed for {repo_id}: {e}")
-        raise e
+    return onnx_dir
 
 
 

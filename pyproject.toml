@@ -1,6 +1,6 @@
 [project]
 name = "scholar-navis"
-version = "0.1.0"
+version = "2.0.0"
 description = "Scholar Navis Knowledge Base"
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
@@ -20,9 +20,6 @@ dependencies = [
     "pyside6>=6.10.2",
     "scikit-learn>=1.8.0",
     "sentence-transformers>=5.2.2",
-    "torch",
-    "torchvision",
-    "torchaudio",
     "psutil>=7.2.2",
     "hf-xet>=1.2.0",
     "nvidia-ml-py>=13.590.48",
@@ -37,14 +34,9 @@ dependencies = [
     "google-genai>=1.64.0",
     "optimum[onnxruntime]>=2.1.0",
     "curl-cffi>=0.14.0",
+    "torch>=2.10.0",
+    "onnxruntime-gpu>=1.24.2",
+    "onnxruntime-directml>=1.24.2 ; sys_platform == 'win32'",
 ]
 
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
 
-[tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }

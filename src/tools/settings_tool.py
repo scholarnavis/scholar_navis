@@ -448,6 +448,7 @@ class SettingsTool(BaseTool):
         layout = QVBoxLayout(self.group_hw)
         self.lbl_hw_info = QLabel()
         self.lbl_hw_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_hw_info.setTextFormat(Qt.RichText)
         layout.addWidget(self.lbl_hw_info)
         self.layout.addWidget(self.group_hw)
         self._update_hardware_html()
@@ -486,26 +487,34 @@ class SettingsTool(BaseTool):
             QPushButton:hover {{ background-color: {hover}; }}
         """
 
-
     def _update_hardware_html(self):
         if not hasattr(self, 'lbl_hw_info'): return
+
         tm = ThemeManager()
         info = self.dev_mgr.get_sys_info()
-        gpu_str = "<br>".join([f"&nbsp;&nbsp;• {g}" for g in info['gpus']])
 
-        status_color = tm.color("success") if info['cuda_support'] else tm.color("warning")
-        cuda_status = "Available" if info['cuda_support'] else "Not Available"
-        ver_info = f"Toolkit: {info['torch_cuda_ver']} | Driver: {info['gpu_driver_ver']}" if info[
-            'cuda_support'] else "N/A"
+        gpu_info_list = info.get('gpu_info', self.dev_mgr.get_gpu_info())
+
+        gpu_str = "<br>".join([
+            f"&nbsp;&nbsp;• {g['name']} <span style='color:{tm.color('accent')};'>[{g['vram']}]</span>"
+            for g in gpu_info_list
+        ])
+
+        has_accel = any(p in info.get('ort_providers', []) for p in
+                        ["CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider"])
+        status_color = tm.color("success") if has_accel else tm.color("warning")
+        accel_status = "Hardware Accelerated" if has_accel else "CPU Fallback"
+
+        clean_providers = [p.replace("ExecutionProvider", "") for p in info.get('ort_providers', [])]
 
         html = f"""
-        <div style='font-family: Consolas, monospace; font-size: 13px; color: {tm.color("text_main")}; line-height: 1.6;'>
-            <b>OS:</b> {info['os']}<br>
-            <b>Python:</b> {info['python_ver']}<br>
-            <b>CPU:</b> {info['cpu']} ({info['cpu_cores']})<br>
-            <b>RAM:</b> {info['ram_available']} / {info['ram_total']}<br>
-            <b>GPU:</b><br>{gpu_str}<br>
-            <b>CUDA:</b> <span style='color:{status_color}'>{cuda_status}</span> ({ver_info})
+        <div style='font-family: Consolas, "Courier New", monospace; font-size: 13px; color: {tm.color("text_main")}; line-height: 1.6;'>
+            <b>OS:</b> {info.get('os', 'Unknown')}<br>
+            <b>CPU:</b> {info.get('cpu', 'Unknown')} ({info.get('cpu_cores', 'Unknown')})<br>
+            <b>RAM:</b> {info.get('ram_available', 'Unknown')} / {info.get('ram_total', 'Unknown')}<br>
+            <b>GPU(s):</b><br>{gpu_str}<br>
+            <b>ONNX Engine:</b> v{info.get('ort_version', 'N/A')} <span style='color:{status_color}'>[{accel_status}]</span><br>
+            <b>Providers:</b> {", ".join(clean_providers)}
         </div>
         """
         self.lbl_hw_info.setText(html)
@@ -751,10 +760,12 @@ class SettingsTool(BaseTool):
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
+        # --- 1. Embedding 模型选择 ---
         self.combo_embed = BaseComboBox()
         self.lbl_embed_icon = QLabel()
         self.lbl_embed_text = QLabel("Checking...")
         self.lbl_embed_text.setWordWrap(True)
+        self.lbl_embed_text.setTextFormat(Qt.RichText)
 
         embed_layout = QHBoxLayout()
         embed_layout.setContentsMargins(0, 0, 0, 0)
@@ -770,10 +781,12 @@ class SettingsTool(BaseTool):
         self.combo_embed.setCurrentIndex(max(0, idx))
         self.combo_embed.currentIndexChanged.connect(self.check_models_status)
 
+        # --- 2. Reranker 模型选择 ---
         self.combo_rerank = BaseComboBox()
         self.lbl_rerank_icon = QLabel()
         self.lbl_rerank_text = QLabel("Checking...")
         self.lbl_rerank_text.setWordWrap(True)
+        self.lbl_rerank_text.setTextFormat(Qt.RichText)
 
         rerank_layout = QHBoxLayout()
         rerank_layout.setContentsMargins(0, 0, 0, 0)
@@ -794,6 +807,19 @@ class SettingsTool(BaseTool):
         layout.addRow("Reranker:", self.combo_rerank)
         layout.addRow("", rerank_layout)
 
+        # --- 3. 硬件加速设备选择 (新增) ---
+        self.combo_device = BaseComboBox()
+        dev_mgr = DeviceManager()
+        for dev in dev_mgr.get_available_devices():
+            self.combo_device.addItem(dev["name"], dev["id"])
+
+        curr_device = self.config.user_settings.get("inference_device", "auto")
+        idx_dev = self.combo_device.findData(curr_device)
+        self.combo_device.setCurrentIndex(max(0, idx_dev))
+
+        layout.addRow("Compute Device:", self.combo_device)
+
+        # --- 4. 其他模型设置 ---
         self.btn_open_cache = QPushButton(" Open Model Storage Directory")
         ThemeManager().apply_class(self.btn_open_cache, "link-btn")
         self.btn_open_cache.setCursor(Qt.PointingHandCursor)
@@ -1636,6 +1662,7 @@ class SettingsTool(BaseTool):
             "proxy_url": new_proxy_url,
             "hf_mirror": self.input_mirror.text().strip(),
             "download_speed_limit": self.combo_embed.currentText(),
+            "inference_device": self.combo_device.currentData(),
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),

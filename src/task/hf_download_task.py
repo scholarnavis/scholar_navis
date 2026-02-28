@@ -1,6 +1,9 @@
+import multiprocessing
 import os
 import time
 
+import psutil
+import torch
 import tqdm
 from huggingface_hub import snapshot_download, constants
 from src.core.core_task import BackgroundTask, TaskState
@@ -64,9 +67,7 @@ class DownloadCapture:
 class RealTimeHFDownloadTask(BackgroundTask):
     def _execute(self):
         setup_global_network_env()
-
         repo_id = self.kwargs.get("repo_id")
-
 
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
@@ -89,12 +90,30 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 )
             self.send_log("INFO", f"Download Finished: {repo_id}. Starting ONNX Conversion...")
 
-            # 自动启动 ONNX 永久转换，并在 Dialog 提示
             self.queue.put({
                 "state": TaskState.PROCESSING.value,
                 "progress": 99,
                 "msg": f"[{repo_id}] Converting to ONNX format (First time only)..."
             })
+
+            try:
+                # 获取真实物理核心数，避免超线程导致上下文切换开销
+                physical_cores = psutil.cpu_count(logical=False) or multiprocessing.cpu_count() - 1
+
+                # 强行拉满底层并行计算库的线程数
+                os.environ["OMP_NUM_THREADS"] = str(physical_cores)
+                os.environ["MKL_NUM_THREADS"] = str(physical_cores)
+                os.environ["OPENBLAS_NUM_THREADS"] = str(physical_cores)
+
+                # 强行拉满 PyTorch 推理和内部图优化线程数
+                torch.set_num_threads(physical_cores)
+                torch.set_num_interop_threads(physical_cores)
+
+                self.send_log("INFO",
+                              f"CPU Engine Optimizer: Using {physical_cores} physical cores for maximum conversion speed.")
+            except Exception as e:
+                self.send_log("WARNING", f"Could not optimize CPU threads: {e}")
+
             from src.core.models_registry import ensure_onnx_model
             ensure_onnx_model(repo_id)
 

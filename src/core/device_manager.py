@@ -1,10 +1,8 @@
-import torch
 import platform
+import subprocess
 import logging
 import psutil
 import sys
-import subprocess
-import shutil
 
 
 class DeviceManager:
@@ -20,137 +18,177 @@ class DeviceManager:
                 cls._initialized = True
         return cls._instance
 
-    def _get_gpu_driver_version(self):
-        """尝试通过 nvidia-smi 获取显卡驱动版本"""
-        if not torch.cuda.is_available():
-            return "N/A"
-
-        # 尝试查找 nvidia-smi
-        smi_path = shutil.which("nvidia-smi")
-        if not smi_path:
-            return "Unknown (nvidia-smi not found)"
-
+    def get_gpu_info(self):
+        gpus = []
+        system = platform.system()
         try:
-            # nvidia-smi --query-gpu=driver_version --format=csv,noheader
-            output = subprocess.check_output(
-                [smi_path, "--query-gpu=driver_version", "--format=csv,noheader"],
-                encoding="utf-8"
-            )
-            return output.strip().split('\n')[0]
+            if system == "Windows":
+                cmd = ["powershell", "-NoProfile", "-Command",
+                       "Get-CimInstance -ClassName Win32_VideoController | Select-Object Name, AdapterRAM | ConvertTo-Json"]
+                output = subprocess.check_output(cmd, text=True, creationflags=subprocess.CREATE_NO_WINDOW).strip()
+                if output:
+                    import json
+                    data = json.loads(output)
+                    if isinstance(data, dict): data = [data]
+                    for item in data:
+                        name = item.get("Name", "Unknown GPU")
+                        ram_bytes = item.get("AdapterRAM", 0)
+
+                        if ram_bytes:
+                            if ram_bytes in [4294967296, 4293918720]:
+                                vram_gb = "≥ 4.0 GB"
+                            else:
+                                vram_gb = f"{ram_bytes / (1024 ** 3):.1f} GB"
+                        else:
+                            vram_gb = "Shared / Unknown"
+                        gpus.append({"name": name, "vram": vram_gb})
+
+                try:
+                    smi_out = subprocess.check_output(
+                        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                        text=True, creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                    nvidia_vrams = {}
+                    for line in smi_out.strip().split('\n'):
+                        parts = line.split(',')
+                        if len(parts) == 2:
+                            n_name = parts[0].strip()
+                            n_mib = float(parts[1].replace("MiB", "").strip())
+                            nvidia_vrams[n_name] = f"{n_mib / 1024:.1f} GB"
+
+                    # 将真实 VRAM 覆盖回去
+                    for gpu in gpus:
+                        for nv_name, real_vram in nvidia_vrams.items():
+                            if nv_name.lower() in gpu["name"].lower() or gpu["name"].lower() in nv_name.lower():
+                                gpu["vram"] = real_vram
+                except Exception:
+                    pass
+
+            elif system == "Darwin":
+                output = subprocess.check_output(["system_profiler", "SPDisplaysDataType"], text=True)
+                for line in output.split('\n'):
+                    if "Chipset Model:" in line:
+                        gpus.append({"name": line.split(":")[1].strip(), "vram": "Unified Memory"})
+
+            elif system == "Linux":
+                try:
+                    smi_out = subprocess.check_output(
+                        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"], text=True)
+                    for line in smi_out.strip().split('\n'):
+                        parts = line.split(',')
+                        if len(parts) == 2:
+                            mb_val = float(parts[1].replace("MiB", "").strip())
+                            gpus.append({"name": parts[0].strip(), "vram": f"{mb_val / 1024:.1f} GB"})
+                except:
+                    output = subprocess.check_output(["lspci"], text=True)
+                    names = [line.split(': ')[1].strip() for line in output.split('\n') if
+                             "VGA" in line or "3D" in line]
+                    for name in names: gpus.append({"name": name, "vram": "Unknown VRAM"})
         except Exception as e:
-            return f"Unknown (Error: {str(e)})"
+            self.logger.warning(f"Failed to fetch GPU info: {e}")
+
+        unique_gpus = []
+        seen = set()
+        for g in gpus:
+            if g['name'] not in seen:
+                seen.add(g['name'])
+                unique_gpus.append(g)
+
+        return unique_gpus if unique_gpus else [{"name": "Unknown GPU", "vram": "N/A"}]
+
+
+    def get_onnx_providers(self):
+        try:
+            import onnxruntime as ort
+            return ort.get_available_providers()
+        except ImportError:
+            return ["CPUExecutionProvider"]
+
+    def get_available_devices(self):
+        providers = self.get_onnx_providers()
+
+        gpu_info_list = self.get_gpu_info()
+
+        devices = [
+            {"id": "cpu", "name": "CPU (Universal Fallback - Slow but Safe)"}
+        ]
+
+        has_cuda = "CUDAExecutionProvider" in providers
+        has_dml = "DmlExecutionProvider" in providers
+        has_coreml = "CoreMLExecutionProvider" in providers
+
+        if has_coreml:
+            devices.append({"id": "coreml", "name": "Apple Silicon (CoreML)"})
+
+        # Windows / Linux 智能分配
+        for i, gpu_dict in enumerate(gpu_info_list):
+            gpu_name = gpu_dict.get("name", "Unknown GPU")
+            gpu_lower = gpu_name.lower()
+
+            # 如果是 Nvidia 显卡，优先挂载 CUDA
+            if "nvidia" in gpu_lower:
+                if has_cuda:
+                    devices.append({"id": f"cuda:{i}", "name": f"{gpu_name} (CUDA)"})
+                elif has_dml:
+                    devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML)"})
+            # 如果是 AMD 或 Intel 核显
+            else:
+                if has_dml:
+                    devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML)"})
+                else:
+                    devices.append({"id": "cpu", "name": f"{gpu_name} (Needs 'onnxruntime-directml')"})
+
+        return devices
 
     def get_sys_info(self):
-        """获取详尽的系统硬件信息"""
         info = {}
-
-
         info['os'] = platform.platform()
         info['python_ver'] = sys.version.split()[0]
-
-
         info['cpu'] = platform.processor() or platform.machine()
-        info['cpu_cores'] = f"{psutil.cpu_count(logical=False)}C / {psutil.cpu_count(logical=True)}T"
+
+        try:
+            info['cpu_cores'] = f"{psutil.cpu_count(logical=False)}C / {psutil.cpu_count(logical=True)}T"
+        except:
+            info['cpu_cores'] = "Unknown Cores"
 
         try:
             mem = psutil.virtual_memory()
             info['ram_total'] = f"{mem.total / (1024 ** 3):.1f} GB"
             info['ram_available'] = f"{mem.available / (1024 ** 3):.1f} GB"
-            info['ram_percent'] = f"{mem.percent}%"
         except:
             info['ram_total'] = "Unknown"
             info['ram_available'] = "Unknown"
-            info['ram_percent'] = "Unknown"
 
-        info['cuda_support'] = torch.cuda.is_available()
-        info['torch_cuda_ver'] = torch.version.cuda if info['cuda_support'] else "N/A"
-        info['gpu_driver_ver'] = self._get_gpu_driver_version()
+        gpu_info_list = self.get_gpu_info()
 
-        gpu_details = []
-        if info['cuda_support']:
-            try:
-                cnt = torch.cuda.device_count()
-                for i in range(cnt):
-                    name = torch.cuda.get_device_name(i)
-                    props = torch.cuda.get_device_properties(i)
-                    vram_total = f"{props.total_memory / (1024 ** 3):.1f} GB"
-                    # 计算能力
-                    cap = f"{props.major}.{props.minor}"
-                    gpu_details.append(f"[{i}] {name} (VRAM: {vram_total}, Compute: {cap})")
-            except Exception as e:
-                gpu_details.append(f"Error reading GPU: {e}")
-        elif torch.backends.mps.is_available():
-            gpu_details.append("Apple Silicon GPU (Shared Memory via Metal)")
-            info['os'] += " (MacOS Metal Enabled)"
-        else:
-            gpu_details.append("None (CPU Only)")
+        info['gpu_info'] = gpu_info_list
 
-        info['gpus'] = gpu_details
+        info['gpus'] = [g['name'] for g in gpu_info_list]
+
+        info['ort_providers'] = self.get_onnx_providers()
+
+        try:
+            import onnxruntime as ort
+            info['ort_version'] = ort.__version__
+        except:
+            info['ort_version'] = "N/A"
+
         return info
 
     def get_optimal_device(self):
-        """自动选择最佳设备"""
-        if torch.cuda.is_available():
-            return "cuda"
-        elif torch.backends.mps.is_available():
-            return "mps"
-        else:
-            return "cpu"
+        providers = self.get_onnx_providers()
+        if "CUDAExecutionProvider" in providers: return "cuda:0"
+        if "DmlExecutionProvider" in providers: return "dml:0"
+        if "CoreMLExecutionProvider" in providers: return "coreml"
+        return "cpu"
 
     def parse_device_string(self, setting_str):
-        if not setting_str or setting_str == "Auto":
+        if not setting_str or setting_str.lower() == "auto":
             return self.get_optimal_device()
         return setting_str
 
     def log_system_report(self):
-        """向日志系统输出一份完整的硬件自检报告"""
         info = self.get_sys_info()
-
-        log_lines = []
-        log_lines.append("=" * 40)
-        log_lines.append("🖥️  SYSTEM HARDWARE & ENVIRONMENT REPORT")
-        log_lines.append("=" * 40)
-        log_lines.append(f"OS             : {info['os']}")
-        log_lines.append(f"Python         : {info['python_ver']}")
-        log_lines.append(f"CPU            : {info['cpu']} ({info['cpu_cores']})")
-        log_lines.append(f"RAM            : {info['ram_available']} Available / {info['ram_total']} Total")
-        log_lines.append("-" * 40)
-
-        if info['cuda_support']:
-            log_lines.append(f"GPU Support    : ✅ CUDA Available")
-            log_lines.append(f"CUDA Version   : {info['torch_cuda_ver']} (PyTorch Built-in)")
-            log_lines.append(f"Driver Version : {info['gpu_driver_ver']}")
-            for gpu in info['gpus']:
-                log_lines.append(f"Device         : {gpu}")
-        elif torch.backends.mps.is_available():
-            log_lines.append(f"GPU Support    : ✅ Apple MPS (Metal Performance Shaders)")
-            log_lines.append(f"Device         : {info['gpus'][0]}")
-        else:
-            log_lines.append(f"GPU Support    : ❌ CPU Only")
-
-        log_lines.append("=" * 40)
-
-        for line in log_lines:
-            self.logger.info(line)
-
-    def check_hardware_requirements(self, recommended_config):
-        """检查硬件是否满足要求"""
-        warnings = []
-        passed = True
-
-        current_dev = self.get_optimal_device()
-        priority = recommended_config.get("device_priority", "CPU")
-        sys_info = self.get_sys_info()
-
-        # 1. 检查 GPU 需求
-        if "GPU Required" in priority:
-            if current_dev == "cpu":
-                passed = False
-                warnings.append("This model requires a dedicated graphics card (GPU), but currently only CPU is detected.")
-
-        # 2. 检查 VRAM
-        req_vram_str = recommended_config.get("min_vram", "")
-        if req_vram_str and not sys_info['cuda_support']:
-            warnings.append(f"This model recommends VRAM: {req_vram_str} (No CUDA support currently).")
-
-        return passed, warnings
+        self.logger.info(f"System: {info['os']} | Python: {info['python_ver']}")
+        self.logger.info(f"GPUs: {', '.join(info['gpus'])}")
+        self.logger.info(f"ONNX Providers: {', '.join(info['ort_providers'])}")

@@ -1,3 +1,4 @@
+import base64
 import csv
 import datetime
 import functools
@@ -1112,9 +1113,6 @@ class ChatTool(BaseTool):
             self.input_container.hide_context_preview()
 
     def export_chat_history(self):
-        from src.ui.components.text_formatter import TextFormatter
-        from src.core.theme_manager import ThemeManager
-        from src.ui.components.toast import ToastManager
 
         if not self.history:
             ToastManager().show("There are currently no chat records to export.", "warning")
@@ -1133,41 +1131,43 @@ class ChatTool(BaseTool):
 
             if path.endswith(".pdf"):
                 doc = QTextDocument()
-
-                # 当前日期，用于生成报告的 Header
                 date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                # 🌟 高级学术/代码排版 CSS
                 doc.setDefaultStyleSheet(f"""
                     body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
-                    h1, h2, h3 {{ color: #1A365D; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
+                    h1, h2, h3 {{ color: {tm.color('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
                     .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
-                    .header-user {{ color: #007acc; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                    .header-ai {{ color: #2e7d32; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .header-user {{ color: {tm.color('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .header-ai {{ color: {tm.color('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
                     .content {{ margin-top: 5px; }}
-
-                    /* 代码块与行内代码样式 */
                     pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
                     code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
                     pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
-
-                    /* 引用与表格样式 */
                     blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
                     table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
                     th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }}
                     th {{ background-color: #f6f8fa; font-weight: bold; }}
-
-                    /* 报告页眉样式 */
-                    .doc-header {{ text-align: center; border-bottom: 2px solid #1A365D; padding-bottom: 15px; margin-bottom: 30px; }}
-                    .doc-title {{ font-size: 22pt; font-weight: bold; color: #1A365D; font-family: 'Segoe UI', sans-serif; }}
+                    .doc-header {{ text-align: center; border-bottom: 2px solid {tm.color('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
+                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {tm.color('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
                     .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
                 """)
 
-                # 尝试获取 SVG 图标 (如果没有这些文件，可以忽略或使用你已有的 SVG 文件名)
-                user_icon = tm.get_resource_path("assets", "icons", "user.svg").replace('\\', '/')
-                ai_icon = tm.get_resource_path("assets", "icons", "ai_model.svg").replace('\\', '/')
 
-                # 构建 HTML 骨架
+                def _get_colored_svg_base64(icon_name, color_hex):
+                    svg_path = tm.get_resource_path("assets", "icons", f"{icon_name}.svg")
+                    try:
+                        with open(svg_path, "r", encoding="utf-8") as f:
+                            svg_content = f.read()
+                        if "<svg" in svg_content:
+                            svg_content = re.sub(r'<svg', f'<svg fill="{color_hex}"', svg_content, count=1)
+                        encoded = base64.b64encode(svg_content.encode('utf-8')).decode('utf-8')
+                        return f"data:image/svg+xml;base64,{encoded}"
+                    except Exception:
+                        return ""
+
+                user_icon_b64 = _get_colored_svg_base64("user", tm.color('academic_blue'))
+                ai_icon_b64 = _get_colored_svg_base64("ai_model", tm.color('success'))
+
                 html = f"""
                 <html><body>
                 <div class='doc-header'>
@@ -1178,32 +1178,24 @@ class ChatTool(BaseTool):
 
                 for msg in self.history:
                     is_user = (msg['role'] == "user")
-
-                    # 1. 深度清洗：移除 Think、系统标签等
                     clean_content = TextFormatter.clean_text_for_export(msg['content'])
-
-                    # 2. Markdown 转换：激活表格、代码块、列表的 HTML 渲染
                     rendered_html = markdown.markdown(
                         clean_content,
                         extensions=['extra', 'nl2br', 'tables', 'fenced_code']
                     )
 
-                    # 3. 组装对话头
                     if is_user:
-                        header = f"<div class='header-user'><img src='file:///{user_icon}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
+                        header = f"<div class='header-user'><img src='{user_icon_b64}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
                     else:
-                        header = f"<div class='header-ai'><img src='file:///{ai_icon}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
+                        header = f"<div class='header-ai'><img src='{ai_icon_b64}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
 
                     html += f"<div class='msg-box'>{header}<div class='content'>{rendered_html}</div></div>"
 
                 html += "</body></html>"
                 doc.setHtml(html)
 
-                # 配置 PDF 引擎
                 writer = QPdfWriter(path)
-
                 writer.setPageSize(QPageSize(QPageSize.A4))
-
                 writer.setPageMargins(QMarginsF(15, 20, 15, 20))
                 writer.setResolution(300)
                 doc.print_(writer)
@@ -1232,6 +1224,7 @@ class ChatTool(BaseTool):
             ToastManager().show(f"Failed to export document: {str(e)}", "error")
             self.logger.error(f"Failed to export document: {str(e)}")
 
+
     def clear_follow_up_shelf(self):
         while self.follow_up_shelf_layout.count() > 0:
             item = self.follow_up_shelf_layout.takeAt(0)
@@ -1240,7 +1233,7 @@ class ChatTool(BaseTool):
         self.follow_up_shelf.setVisible(False)
 
     def clear_chat_history(self):
-        self.cancel_generation()
+        self.cancel_generation()  # 这里会触发文本还原
         self.current_ai_bubble = None
         self.history.clear()
         self.clear_layout(self.chat_layout)
@@ -1248,7 +1241,12 @@ class ChatTool(BaseTool):
         self.clear_follow_up_shelf()
 
         self.input_container.unlock_input()
+
+        self.input_container.clear_text()
+        self.clear_attached_context()
+
         ToastManager().show("Chat history cleared.", "success")
+
 
     def scroll_to_user_message(self, bubble_widget):
         QApplication.processEvents()

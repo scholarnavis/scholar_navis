@@ -289,9 +289,8 @@ class ImportTool(BaseTool):
                 self._handle_open([row])
 
     def _adjust_table_height(self):
-        """动态计算表格高度：按内容自适应，拒绝被全局布局无脑拉伸"""
         rows = self.file_table.rowCount()
-        base_height = 150  # 即使空列表也保持一致的基础高度 (防止 UI 塌陷)
+        base_height = 150
 
         if rows == 0:
             self.file_table.setFixedHeight(base_height)
@@ -301,7 +300,6 @@ class ImportTool(BaseTool):
         if header_h == 0: header_h = 30
         row_h = self.file_table.verticalHeader().defaultSectionSize()
 
-        # 计算完美贴合所需的高度
         total_h = header_h + (row_h * rows) + 5
 
         final_height = max(base_height, min(total_h, 450))
@@ -313,13 +311,20 @@ class ImportTool(BaseTool):
         self.combo_kb.setPlaceholderText("Select a library...")
 
         kbs = self.kb_manager.get_all_kbs()
-        from src.core.models_registry import get_model_conf
+        from src.core.models_registry import get_model_conf, check_model_exists
         target_idx = -1
         tm = ThemeManager()
 
         for i, kb in enumerate(kbs):
             m = get_model_conf(kb.get('model_id'), "embedding")
-            m_ui = m['ui_name'] if m else kb.get('model_id', '?')
+
+            if m:
+                is_downloaded = check_model_exists(m.get('hf_repo_id'))
+                status_marker = "" if is_downloaded else " (Not Downloaded)"
+                m_ui = f"{m['ui_name']}{status_marker}"
+            else:
+                m_ui = f"{kb.get('model_id', '?')} (Unknown/External)"
+
             status = kb.get('status', 'ready')
 
             icon = QIcon()
@@ -422,7 +427,6 @@ class ImportTool(BaseTool):
             import traceback
             self.logger.error(f"GUI Error in update_file_list: {e}\n{traceback.format_exc()}")
 
-
     def _update_details_html(self):
         try:
             data = self.combo_kb.currentData()
@@ -433,7 +437,13 @@ class ImportTool(BaseTool):
                 display_data.update(self.staged_meta)
 
             m_conf = get_model_conf(display_data.get('model_id'), "embedding")
-            m_ui = m_conf['ui_name'] if m_conf else display_data.get('model_id', 'Unknown')
+
+            if m_conf:
+                is_downloaded = check_model_exists(m_conf.get('hf_repo_id'))
+                dl_tag = "" if is_downloaded else " <span style='color:#ffb86c; font-weight:bold;'>(Not Downloaded)</span>"
+                m_ui = f"{m_conf['ui_name']}{dl_tag}"
+            else:
+                m_ui = f"{display_data.get('model_id', 'Unknown')} <span style='color:#ff6b6b; font-weight:bold;'>(Unknown/External)</span>"
 
             status = display_data.get('status', 'ready')
             status_color = "#ff6b6b" if status == "corrupted" else ("#f1c40f" if status == "building" else "#05B8CC")
@@ -488,9 +498,7 @@ class ImportTool(BaseTool):
         # 获取当前显示的名称（可能是已经暂存过一次的名字）
         old_display_name = self.file_table.item(row, 0).text()
 
-        # 找到该行对应的原始物理文件名（用于在 staged_rename 中做 Key）
-        # 如果是第一次改名，Key 就是 old_display_name
-        # 如果已经改过一次了，我们需要找到最初的那个 Key
+
         original_name = None
         for k, v in self.staged_rename.items():
             if v == old_display_name:

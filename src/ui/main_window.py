@@ -19,7 +19,7 @@ from src.tools.import_tool import ImportTool
 from src.tools.log_tool import LogTool
 from src.tools.rss_tool import RSSTool
 from src.tools.settings_tool import SettingsTool
-from src.ui.components.dialog import StandardDialog
+from src.ui.components.dialog import StandardDialog, BaseDialog
 from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
 
@@ -377,8 +377,9 @@ class MainWindow(QMainWindow):
                 f"The system cannot verify the following models:<br>{names}<br><br>"
                 f"Please go to <b>Global Settings</b> to verify the path or download them."
             )
-            # 只有在确实找不到的时候才弹窗，且不乱动文件
-            StandardDialog(self, "System Check", msg).exec()
+            dlg = StandardDialog(self, "System Check", msg)
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+            dlg.exec()
             self._jump_to_settings()
 
     def _jump_to_settings(self):
@@ -388,17 +389,44 @@ class MainWindow(QMainWindow):
     def check_first_run(self):
         cfg = ConfigManager()
         if cfg.user_settings.get("is_first_run", True):
-            welcome_msg = (
-                "Welcome to Scholar Navis!\n\n"
-                "Please go to the 'Global Settings' tab to configure your AI models."
+
+            dlg = BaseDialog(self, "Welcome to Scholar Navis", width=550)
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+            layout = QVBoxLayout(dlg.main_frame)
+
+            lbl_desc = QLabel(
+                "<b>First Time Setup</b><br><br>"
+                "Before we begin, please select your computation device and core models based on your hardware capabilities."
             )
-            StandardDialog(self, "Welcome", welcome_msg).exec()
-            self.switch_tool(6)
-            self.sidebar.setCurrentRow(6)
-            cfg.user_settings['is_first_run'] = False
-            cfg.save_settings()
-            return True
-        return False
+            lbl_desc.setWordWrap(True)
+            layout.addWidget(lbl_desc)
 
+            # 1. Device
+            combo_dev = QComboBox()
+            from src.core.device_manager import DeviceManager
+            for dev in DeviceManager().get_available_devices():
+                combo_dev.addItem(dev["name"], dev["id"])
+            layout.addWidget(QLabel("<b>Compute Engine:</b> (Select DirectML/CUDA if you have a GPU)"))
+            layout.addWidget(combo_dev)
 
-print()
+            # 2. Embed
+            combo_embed = QComboBox()
+            from src.core.models_registry import EMBEDDING_MODELS
+            for m in EMBEDDING_MODELS:
+                combo_embed.addItem(m['ui_name'], m['id'])
+            layout.addWidget(QLabel("<br><b>Text Embedding Model:</b>"))
+            layout.addWidget(combo_embed)
+
+            btn_save = QPushButton("Save & Download Models")
+            btn_save.clicked.connect(dlg.accept)
+            layout.addWidget(btn_save)
+
+            if dlg.exec():
+                cfg.user_settings.update({
+                    "is_first_run": False,
+                    "inference_device": combo_dev.currentData(),
+                    "current_model_id": combo_embed.currentData()
+                })
+                cfg.save_settings()
+                self._jump_to_settings()
+
