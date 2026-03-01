@@ -570,8 +570,7 @@ class ChatWorker(QObject):
                 try:
                     trans_kwargs = {
                         "is_translation": True,
-                        "thinking_enabled": getattr(self, 'thinking_enabled', False),
-                        "thinking_effort": getattr(self, 'thinking_effort', "low")
+                        "thinking_enabled": False,
                     }
                     search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm, **trans_kwargs)
                 except Exception as e:
@@ -712,6 +711,7 @@ class ChatWorker(QObject):
                 "### TOOL USE PROTOCOL (STRICT):\n"
                 "1. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
                 "2. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n\n"
+                "3. If graphics need to be created, use mermaid uniformly.\n\n"
 
                 "### RESPONSE GUIDELINES:\n"
                 "1. GROUNDING: If data comes from Context, append citations (e.g., [1], [2]).\n\n"
@@ -840,10 +840,7 @@ class ChatWorker(QObject):
                 rag_messages.append({"role": "system", "content": silence_prompt})
 
             # --- LLM Output Streaming ---
-            kwargs = {
-                "thinking_enabled": getattr(self, 'thinking_enabled', False),
-                "thinking_effort": getattr(self, 'thinking_effort', "medium")
-            }
+            kwargs = {}
             for token in self.main_llm.stream_chat(rag_messages, **kwargs):
                 self.full_response_cache += token
                 self.sig_token.emit(token)
@@ -924,19 +921,9 @@ class ChatTool(BaseTool):
         self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
                                                   model_key="chat_model_name")
 
-        self.chk_think = QCheckBox("Reasoning")
-        self.chk_think.setChecked(self.config.user_settings.get("chat_thinking_enabled", False))
-        self.combo_think_effort = BaseComboBox()
-        self.combo_think_effort.addItems(["low", "medium", "high"])
-        self.combo_think_effort.setCurrentText(self.config.user_settings.get("chat_thinking_effort", "medium"))
-
-        self.chk_think.toggled.connect(lambda v: self._save_setting("chat_thinking_enabled", v))
-        self.combo_think_effort.currentTextChanged.connect(lambda v: self._save_setting("chat_thinking_effort", v))
 
         row1_layout.addWidget(self.model_selector)
         row1_layout.addSpacing(15)
-        row1_layout.addWidget(self.chk_think)
-        row1_layout.addWidget(self.combo_think_effort)
         row1_layout.addStretch()
 
         #  第二行：翻译模型与知识库
@@ -1527,8 +1514,6 @@ class ChatTool(BaseTool):
 
         # 实例化后台 Worker
         self.worker_thread = QThread()
-        thinking_enabled = self.chk_think.isChecked() if hasattr(self, 'chk_think') else False
-        thinking_effort = self.combo_think_effort.currentText() if hasattr(self, 'combo_think_effort') else "medium"
 
         self.worker = ChatWorker(
             main_config=main_config,
@@ -1539,8 +1524,7 @@ class ChatTool(BaseTool):
             external_context=getattr(self, 'external_chunks', []),
             use_mcp=use_mcp_tools
         )
-        self.worker.thinking_enabled = thinking_enabled
-        self.worker.thinking_effort = thinking_effort
+
         self.worker.selected_mcp_tags = selected_mcp_tags
         self.external_chunks = []
         self.external_context_html = ""

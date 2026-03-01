@@ -781,25 +781,25 @@ class SettingsTool(BaseTool):
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
         default_config = [
-            {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "gpt-4o",
+            {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "",
              "api_key": ""},
             {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
-             "model_name": "deepseek-chat", "api_key": ""},
+             "model_name": "", "api_key": ""},
             {"id": "gemini", "name": "Google Gemini",
-             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "gemini-3-pro",
+             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "",
              "api_key": ""},
             {"id": "anthropic", "name": "Anthropic", "base_url": "https://api.anthropic.com/v1",
-             "model_name": "claude-3-5-sonnet-latest", "api_key": ""},
+             "model_name": "", "api_key": ""},
             {"id": "nvidia", "name": "Nvidia Build", "base_url": "https://integrate.api.nvidia.com/v1",
-             "model_name": "meta/llama-3.1-70b-instruct", "api_key": ""},
+             "model_name": "", "api_key": ""},
             {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-             "model_name": "qwen-plus", "api_key": ""},
+             "model_name": "", "api_key": ""},
             {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
-             "model_name": "glm-4-plus", "api_key": ""},
+             "model_name": "", "api_key": ""},
             {"id": "siliconflow", "name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1",
-             "model_name": "deepseek-ai/DeepSeek-V3", "api_key": ""},
+             "model_name": "", "api_key": ""},
             {"id": "custom", "name": "Local Custom (Ollama)", "base_url": "http://localhost:11434/v1",
-             "model_name": "llama3", "api_key": "ollama"}
+             "model_name": "", "api_key": "ollama"}
         ]
 
         loaded_configs = []

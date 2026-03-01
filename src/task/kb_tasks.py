@@ -55,8 +55,8 @@ def _worker_load_model(kb_id, config):
     user_device = config.user_settings.get("inference_device", "auto")
     device_str = dev_mgr.parse_device_string(user_device)
 
-    logger.info(f"[DEBUG] User selected inference_device: {user_device}")
-    logger.info(f"[DEBUG] Parsed device string for ONNX: {device_str}")
+    logger.info(f"User selected inference_device: {user_device}")
+    logger.info(f"Parsed device string for ONNX: {device_str}")
 
     repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -84,8 +84,8 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
         provider_options = None
         device_str = str(device).lower()
 
-        logger.info(f"[DEBUG] ONNX Init Requested Device: {device_str}")
-        logger.info(f"[DEBUG] Available ONNX Providers in Env: {available_providers}")
+        logger.info(f"ONNX Init Requested Device: {device_str}")
+        logger.info(f"Available ONNX Providers in Env: {available_providers}")
 
         if device_str.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
             provider = "CUDAExecutionProvider"
@@ -108,8 +108,8 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
             elif "CoreMLExecutionProvider" in available_providers:
                 provider = "CoreMLExecutionProvider"
 
-        logger.info(f"[DEBUG] Final Selected ONNX Provider: {provider}")
-        logger.info(f"[DEBUG] Provider Options: {provider_options}")
+        logger.info(f"Final Selected ONNX Provider: {provider}")
+        logger.info(f"Provider Options: {provider_options}")
 
         kwargs = {"provider": provider}
         if provider_options:

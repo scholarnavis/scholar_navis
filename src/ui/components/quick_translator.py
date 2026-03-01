@@ -92,8 +92,6 @@ class TranslatorWorker(QObject):
 
             kwargs = {
                 "is_translation": True,
-                "thinking_enabled": getattr(self, 'thinking_enabled', False),
-                "thinking_effort": getattr(self, 'thinking_effort', "low")
             }
             for token in self.llm.stream_chat(messages, **kwargs):
                 if self._is_cancelled: break
@@ -185,18 +183,8 @@ class QuickTranslatorWindow(QWidget):
                                                   model_key="quick_trans_model_name")
         cfg_bar.addWidget(self.model_selector)
 
-        self.chk_think = QCheckBox("Reasoning")
-        self.chk_think.setChecked(self.cfg_mgr.user_settings.get("qt_think_enabled", False))
-        self.combo_think_effort = QComboBox()
-        self.combo_think_effort.addItems(["low", "medium", "high"])
-        self.combo_think_effort.setCurrentText(self.cfg_mgr.user_settings.get("qt_think_effort", "medium"))
-
-        self.chk_think.toggled.connect(lambda v: self._save_lang("qt_think_enabled", v))
-        self.combo_think_effort.currentTextChanged.connect(lambda v: self._save_lang("qt_think_effort", v))
 
         cfg_bar.addSpacing(10)
-        cfg_bar.addWidget(self.chk_think)
-        cfg_bar.addWidget(self.combo_think_effort)
         cfg_bar.addSpacing(15)
 
 
@@ -442,8 +430,7 @@ class QuickTranslatorWindow(QWidget):
             text, self.combo_src.currentText(), self.combo_tgt.currentText(),
             trans_config
         )
-        self.worker.thinking_enabled = self.chk_think.isChecked()
-        self.worker.thinking_effort = self.combo_think_effort.currentText()
+
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
 
