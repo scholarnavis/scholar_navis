@@ -32,6 +32,7 @@ class MCPManager:
     def __init__(self):
         self.sessions: Dict[str, ClientSession] = {}
         self.tool_map: Dict[str, str] = {}
+        self.tool_schemas: Dict[str, dict] = {}
         self.server_status: Dict[str, str] = {}
         self.server_tasks: Dict[str, object] = {}
         self.server_stops: Dict[str, asyncio.Event] = {}
@@ -132,6 +133,16 @@ class MCPManager:
                 tools_response = await session.list_tools()
                 for tool in tools_response.tools:
                     self.tool_map[tool.name] = server_name
+                    # 🚀 Added: Cache the schema in memory instantly
+                    self.tool_schemas[tool.name] = {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.inputSchema,
+                            "server": server_name
+                        }
+                    }
 
                 logger.info(f"[{server_name}] Connected. Loaded {len(tools_response.tools)} tools.")
                 GlobalSignals().mcp_status_changed.emit()
@@ -145,6 +156,7 @@ class MCPManager:
             tools_to_remove = [k for k, v in self.tool_map.items() if v == server_name]
             for tool in tools_to_remove:
                 del self.tool_map[tool]
+                self.tool_schemas.pop(tool, None)
 
             GlobalSignals().mcp_status_changed.emit()
 
@@ -265,24 +277,7 @@ class MCPManager:
         return self.server_status.get(server_name, "disconnected")
 
     def get_all_tools_schema(self) -> list:
-        all_tools = []
-        for server_name, session in self.sessions.items():
-            try:
-                future = asyncio.run_coroutine_threadsafe(session.list_tools(), self._loop)
-                tools = future.result()
-                for tool in tools.tools:
-                    all_tools.append({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.inputSchema,
-                            "server": server_name
-                        }
-                    })
-            except Exception as e:
-                logger.error(f"Failed to get tools from {server_name}: {e}")
-        return all_tools
+        return list(self.tool_schemas.values())
 
     def disconnect_server(self, server_name: str):
         if server_name in self.server_stops:
@@ -300,6 +295,7 @@ class MCPManager:
         tools_to_remove = [k for k, v in self.tool_map.items() if v == server_name]
         for tool in tools_to_remove:
             del self.tool_map[tool]
+            self.tool_schemas.pop(tool, None)
 
         self.server_status[server_name] = "disconnected"
         logger.info(f"[{server_name}] Disconnected and tools unmapped.")

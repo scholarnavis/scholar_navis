@@ -5,10 +5,10 @@ from typing import Generator, List, Dict, Optional
 
 import dashscope
 import httpx
+from google import genai
 from openai import OpenAI, APIStatusError
 from anthropic import Anthropic, APIStatusError as AnthropicAPIError
 from zai import ZhipuAiClient
-
 from src.core.config_manager import ConfigManager
 from src.core.network_worker import _get_explicit_proxy_kwargs
 
@@ -45,7 +45,7 @@ class OpenAICompatibleLLM:
         self.client = None
         self.sdk_type = "openai"
 
-        if self.provider_id == "anthropic" or "minimax" in self.base_url.lower():
+        if self.provider_id == "anthropic":
             self.sdk_type = "anthropic"
             self.client = Anthropic(api_key=self.api_key, base_url=self.base_url, http_client=self.http_client)
 
@@ -72,7 +72,6 @@ class OpenAICompatibleLLM:
         elif self.provider_id == "gemini":
             self.sdk_type = "gemini"
             try:
-                from google import genai
                 self.client = genai.Client(api_key=self.api_key)
             except ImportError:
                 self.logger.warning("google-genai SDK missing. Falling back to OpenAI compatible mode.")
@@ -88,6 +87,16 @@ class OpenAICompatibleLLM:
         applied_params = self._get_payload_kwargs()
         if applied_params:
             self.logger.info(f"Applied Custom Parameters: {applied_params}")
+
+
+    def _log_params(self, payload: Dict):
+        safe_payload = {}
+        for k, v in payload.items():
+            if k in ['api_key', 'messages', 'contents', 'input', 'image_url', 'image_base64', 'inline_data']:
+                safe_payload[k] = "<Omitted for Log>"
+            else:
+                safe_payload[k] = v
+        self.logger.info(f"[{self.model_name}] Request Parameters: {safe_payload}")
 
     def cancel(self):
         self._is_cancelled = True
@@ -111,7 +120,7 @@ class OpenAICompatibleLLM:
                 elif ptype == "float":
                     res[name] = float(val_str)
                 elif ptype == "bool":
-                    res[name] = val_str.lower() in['true', '1', 'yes', 'on']
+                    res[name] = val_str.lower() in ['true', '1', 'yes', 'on']
                 elif ptype == "json":
                     res[name] = json.loads(val_str)
                 else:
@@ -126,12 +135,12 @@ class OpenAICompatibleLLM:
 
         if current_model_conf:
             param_mode = current_model_conf.get("mode", "inherit")
-            model_params = current_model_conf.get("params",[])
+            model_params = current_model_conf.get("params", [])
         else:
             param_mode = self.config_data.get("model_params_mode", "inherit")
-            model_params = self.config_data.get("model_params",[])
+            model_params = self.config_data.get("model_params", [])
 
-        provider_params = self.config_data.get("provider_params",[])
+        provider_params = self.config_data.get("provider_params", [])
         custom_params = {}
 
         if param_mode == "inherit":
@@ -139,7 +148,7 @@ class OpenAICompatibleLLM:
         elif param_mode == "custom":
             custom_params = self._parse_custom_params(model_params)
 
-        return {k: v for k, v in custom_params.items() if k not in["messages", "model", "stream", "tools"]}
+        return {k: v for k, v in custom_params.items() if k not in ["messages", "model", "stream", "tools"]}
 
     def _split_openai_payload(self, payload: Dict) -> Dict:
         standard_keys = {
@@ -162,20 +171,58 @@ class OpenAICompatibleLLM:
 
         return standard_payload
 
-    def chat(self, messages: List[Dict], **kwargs):
+    def chat(self, messages: List[Dict], is_translation=False, **kwargs):
         payload = self._get_payload_kwargs()
         payload.update(kwargs)
 
+        if is_translation:
+            for k in ['tools', 'tool_choice', 'response_format', 'image_generation']:
+                payload.pop(k, None)
+
+            clean_msgs = []
+            for m in messages:
+                if isinstance(m["content"], list):
+                    text_only = " ".join([p["text"] for p in m["content"] if p.get("type") == "text"])
+                    clean_msgs.append({"role": m["role"], "content": text_only})
+                else:
+                    clean_msgs.append(m)
+            messages = clean_msgs
+
+        thinking_enabled = payload.pop("thinking_enabled", False)
+        thinking_effort = payload.pop("thinking_effort", "medium")
+
+
         if self.sdk_type == "anthropic":
+            if thinking_enabled:
+                payload["thinking"] = {"type": "adaptive"}
+                payload["output_config"] = {"effort": thinking_effort}
             return self._chat_anthropic(messages, **payload)
+
         elif self.sdk_type == "zhipu":
+            if thinking_enabled:
+                payload["thinking"] = {"type": "enabled"}
+            else:payload["thinking"] = {"type": "disabled"}
+            self._log_params(payload)
+
             return self._chat_zhipu(messages, **payload)
+
         elif self.sdk_type == "qwen":
+            payload["enable_thinking"] = thinking_enabled
             return self._chat_qwen(messages, **payload)
+
         elif self.sdk_type == "gemini":
+            if thinking_enabled:
+                try:
+                    payload["thinking_config"] = genai.types.ThinkingConfig(thinking_level=thinking_effort)
+                except ImportError:
+                    pass
             return self._chat_gemini(messages, **payload)
+
         else:
+            if thinking_enabled:
+                payload["reasoning"] = {"effort": thinking_effort}
             return self._chat_openai(messages, **payload)
+
 
     def _chat_openai(self, messages: List[Dict], **payload):
         safe_payload = self._split_openai_payload(payload)
@@ -190,7 +237,7 @@ class OpenAICompatibleLLM:
             return {
                 "role": "assistant",
                 "content": "",
-                "tool_calls":[{"id": t.id, "type": "function",
+                "tool_calls": [{"id": t.id, "type": "function",
                                 "function": {"name": t.function.name, "arguments": t.function.arguments}} for t in
                                choice.message.tool_calls]
             }
@@ -207,7 +254,7 @@ class OpenAICompatibleLLM:
             return {
                 "role": "assistant",
                 "content": "",
-                "tool_calls":[{"id": t.id, "type": "function",
+                "tool_calls": [{"id": t.id, "type": "function",
                                 "function": {"name": t.function.name, "arguments": t.function.arguments}} for t in
                                choice.message.tool_calls]
             }
@@ -215,7 +262,7 @@ class OpenAICompatibleLLM:
 
     def _chat_qwen(self, messages: List[Dict], **payload):
         is_vl_payload = any(isinstance(m["content"], list) for m in messages)
-        vl_keywords =['vl', 'image', 'audio', 'video', 'vision', 'qwen3.5-plus']
+        vl_keywords = ['vl', 'image', 'audio', 'video', 'vision', 'qwen3.5-plus']
         is_vl_model = any(kw in self.model_name.lower() for kw in vl_keywords)
 
         use_multimodal = is_vl_payload or is_vl_model
@@ -277,7 +324,7 @@ class OpenAICompatibleLLM:
         )
 
         text_content = ""
-        tool_calls =[]
+        tool_calls = []
         for block in response.content:
             if block.type == "text":
                 text_content += block.text
@@ -292,11 +339,27 @@ class OpenAICompatibleLLM:
             return {"role": "assistant", "content": text_content, "tool_calls": tool_calls}
         return text_content
 
-    def stream_chat(self, messages: List[Dict]) -> Generator[str, None, None]:
+    def stream_chat(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[str, None, None]:
         payload = self._get_payload_kwargs()
+        payload.update(kwargs)
+
+        # 翻译模式限制，去除多模态、工具调用等非必要参数，仅保留基础与用户自定义参数
+        if is_translation:
+            for k in ['tools', 'tool_choice', 'response_format', 'image_generation']:
+                payload.pop(k, None)
+            clean_msgs = []
+            for m in messages:
+                if isinstance(m["content"], list):
+                    text_only = " ".join([p["text"] for p in m["content"] if p.get("type") == "text"])
+                    clean_msgs.append({"role": m["role"], "content": text_only})
+                else:
+                    clean_msgs.append(m)
+            messages = clean_msgs
+
+        self._log_params(payload)
 
         # 1. 识别并拦截图像生成模型 (Text-to-Image)
-        gen_keywords =['image', 'dall', 'mj', 'picture', 'cogview']
+        gen_keywords = ['image', 'dall', 'mj', 'picture', 'cogview']
         is_vision_understanding = any(kw in self.model_name.lower() for kw in ['vl', 'vision'])
         is_image_gen = any(kw in self.model_name.lower() for kw in gen_keywords) and not is_vision_understanding
 
@@ -332,10 +395,18 @@ class OpenAICompatibleLLM:
     def _stream_openai(self, messages: List[Dict], **payload) -> Generator[str, None, None]:
         is_thinking = False
         stream = payload.pop("stream", True)
-        safe_payload = self._split_openai_payload(payload)
 
-        response = self.client.chat.completions.create(model=self.model_name, messages=messages, stream=stream,
-                                                       **safe_payload)
+        thinking_enabled = payload.pop("thinking_enabled", False)
+        thinking_effort = payload.pop("thinking_effort", "medium")
+        if thinking_enabled:
+            payload["reasoning"] = {"effort": thinking_effort}
+
+        safe_payload = self._split_openai_payload(payload)
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            stream=stream,
+             **safe_payload)
 
         if not stream:
             yield response.choices[0].message.content or ""
@@ -380,6 +451,33 @@ class OpenAICompatibleLLM:
             prompt = last_msg
 
         try:
+
+            if self.sdk_type == "minimax" in self.base_url:
+                url = "https://api.minimaxi.com/v1/image_generation"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                }
+
+                minimax_payload = {
+                    "model": self.model_name,
+                    "prompt": prompt,
+                    "response_format": "base64"
+                }
+
+                if "aspect_ratio" in payload:
+                    minimax_payload["aspect_ratio"] = payload["aspect_ratio"]
+
+                res = self.http_client.post(url, headers=headers, json=minimax_payload)
+
+                if res.status_code == 200:
+                    data = res.json()
+                    images = data.get("data", {}).get("image_base64", [])
+                    for b64_img in images:
+                        yield f"![Generated Image](data:image/jpeg;base64,{b64_img})\n\n"
+                else:
+                    yield f"\n\n生图失败：[{res.status_code}] {res.text}"
+
             if self.sdk_type == "zhipu":
                 res = self.client.images.generations(
                     model=self.model_name,
@@ -390,7 +488,7 @@ class OpenAICompatibleLLM:
                 yield f"![Generated Image]({img_url})"
 
             elif self.sdk_type == "qwen":
-                qwen_msgs =[
+                qwen_msgs = [
                     {
                         "role": "user",
                         "content": [{"text": prompt}]
@@ -428,7 +526,7 @@ class OpenAICompatibleLLM:
                 yield f"![Generated Image]({img_url})"
 
             elif self.sdk_type == "gemini":
-                valid_keys =["number_of_images", "aspect_ratio", "output_mime_type", "person_generation",
+                valid_keys = ["number_of_images", "aspect_ratio", "output_mime_type", "person_generation",
                               "safety_settings"]
                 gemini_config = {k: v for k, v in payload.items() if k in valid_keys}
 
@@ -459,8 +557,18 @@ class OpenAICompatibleLLM:
         is_thinking = False
         stream = payload.pop("stream", True)
 
-        response = self.client.chat.completions.create(model=self.model_name, messages=messages, stream=stream,
-                                                       **payload)
+        thinking_enabled = payload.pop("thinking_enabled", False)
+        payload.pop("thinking_effort", None)
+
+        if thinking_enabled:
+            payload["thinking"] = {"type": "enabled"}
+
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            stream=stream,
+            **payload
+        )
 
         if not stream:
             yield response.choices[0].message.content or ""
@@ -496,12 +604,18 @@ class OpenAICompatibleLLM:
 
     def _stream_qwen(self, messages: List[Dict], **payload) -> Generator[str, None, None]:
         is_vl_payload = any(isinstance(m["content"], list) for m in messages)
-        vl_keywords =['vl', 'image', 'audio', 'video', 'vision', 'qwen3.5-plus']
+        vl_keywords = ['vl', 'image', 'audio', 'video', 'vision', 'qwen3.5-plus']
         is_vl_model = any(kw in self.model_name.lower() for kw in vl_keywords)
 
         use_multimodal = is_vl_payload or is_vl_model
         qwen_msgs = self._convert_to_qwen_messages(messages)
         is_thinking = False
+
+        thinking_enabled = payload.pop("thinking_enabled", False)
+        payload.pop("thinking_effort", None)
+
+        if thinking_enabled:
+            payload["enable_thinking"] = True
 
         if use_multimodal:
             responses = self.client.MultiModalConversation.call(
@@ -557,15 +671,22 @@ class OpenAICompatibleLLM:
     def _stream_gemini(self, messages: List[Dict], **payload) -> Generator[str, None, None]:
         sys_prompt, gemini_msgs = self._convert_to_gemini_messages(messages)
 
+        thinking_enabled = payload.pop("thinking_enabled", False)
+        thinking_effort = payload.pop("thinking_effort", "low")
+
         gemini_config = self._clean_gemini_payload(payload)
         if sys_prompt:
             gemini_config["system_instruction"] = sys_prompt
 
-        responses = self.client.models.generate_content_stream(
-            model=self.model_name,
-            contents=gemini_msgs,
-            config=gemini_config
-        )
+        if thinking_enabled:
+            try:
+                from google.genai import types
+                gemini_config["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_effort)
+            except ImportError:
+                pass
+
+        responses = self.client.models.generate_content_stream(model=self.model_name, contents=gemini_msgs,
+                                                               config=gemini_config)
 
         for chunk in responses:
             if self._is_cancelled:
@@ -577,23 +698,19 @@ class OpenAICompatibleLLM:
     def _stream_anthropic(self, messages: List[Dict], **payload) -> Generator[str, None, None]:
         system_prompt, anthropic_msgs = self._convert_to_anthropic_messages(messages)
         anthropic_payload = self._clean_anthropic_payload(payload)
+        if system_prompt: anthropic_payload["system"] = system_prompt
 
-        if system_prompt:
-            anthropic_payload["system"] = system_prompt
+        # Claude 思考模式支持
+        thinking_enabled = anthropic_payload.pop("thinking_enabled", False)
+        thinking_effort = anthropic_payload.pop("thinking_effort", "medium")
+        if thinking_enabled:
+            anthropic_payload["thinking"] = {"type": "adaptive"}
+            anthropic_payload["output_config"] = {"effort": thinking_effort}
 
         is_thinking = False
-
-        with self.client.messages.stream(
-                model=self.model_name,
-                messages=anthropic_msgs,
-                **anthropic_payload
-        ) as stream:
+        with self.client.messages.stream(model=self.model_name, messages=anthropic_msgs, **anthropic_payload) as stream:
             for event in stream:
-                if self._is_cancelled:
-                    if is_thinking: yield "\n</think>\n"
-                    yield "\n\n[⛔ Generation halted by user.]"
-                    break
-
+                if self._is_cancelled: break
                 if event.type == "content_block_start" and event.content_block.type == "thinking":
                     if not is_thinking:
                         yield "<think>\n"
@@ -606,9 +723,7 @@ class OpenAICompatibleLLM:
                             yield "\n</think>\n"
                             is_thinking = False
                         yield event.delta.text
-
-            if is_thinking:
-                yield "\n</think>\n"
+            if is_thinking: yield "\n</think>\n"
 
     def _convert_to_qwen_messages(self, messages: List[Dict]) -> List[Dict]:
         qwen_msgs = []
@@ -651,7 +766,7 @@ class OpenAICompatibleLLM:
 
     def _convert_to_gemini_messages(self, messages: List[Dict]):
         sys_prompt = ""
-        gemini_msgs =[]
+        gemini_msgs = []
         import base64
 
         try:
@@ -705,7 +820,7 @@ class OpenAICompatibleLLM:
             anthropic_payload["max_tokens"] = 4096
 
         if "tools" in payload:
-            anthropic_tools =[
+            anthropic_tools = [
                 {
                     "name": t["function"]["name"],
                     "description": t["function"].get("description", ""),
@@ -749,7 +864,7 @@ class OpenAICompatibleLLM:
                     tool_content = "Executed successfully."
                 raw_msgs.append({
                     "role": "user",
-                    "content":[{
+                    "content": [{
                         "type": "tool_result",
                         "tool_use_id": msg.get("tool_call_id", ""),
                         "content": tool_content
@@ -805,7 +920,7 @@ class OpenAICompatibleLLM:
 
                 raw_msgs.append({"role": msg["role"], "content": new_content})
 
-        merged_msgs =[]
+        merged_msgs = []
         for rm in raw_msgs:
             role = rm["role"]
             content = rm["content"]

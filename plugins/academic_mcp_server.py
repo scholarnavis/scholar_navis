@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import socket
 import urllib.parse
 import time
@@ -586,6 +587,51 @@ def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> s
         return json.dumps({"status": "success", "database": database, "results": parsed_results})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
+    name="fetch_webpage_content",
+    description=(
+            "[Tags: Web] "
+            "Fetch and read the text content of a user-provided URL. "
+            "Automatically handles proxies, bypasses WAFs using robust browser headers (TLS fingerprinting), and enforces a timeout. "
+            "Trigger this ONLY when the user explicitly provides a URL in their prompt and asks to read, summarize, or extract information from it."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def fetch_webpage_content(url: str, timeout: int = 15) -> str:
+    logger.info(f"Task: Fetch Webpage | URL: '{url}' | Timeout: {timeout}s")
+    try:
+
+        res = mcp_request("GET", url, timeout=timeout)
+        res.raise_for_status()
+
+        html_content = res.text
+
+        # 简单清洗 HTML，去除 script 和 style 标签，提取纯文本，防止撑爆上下文
+        text_content = re.sub(r'<script.*?>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        text_content = re.sub(r'<style.*?>.*?</style>', '', text_content, flags=re.DOTALL | re.IGNORECASE)
+        text_content = re.sub(r'<[^>]+>', ' ', text_content)
+
+        text_content = re.sub(r'\s+', ' ', text_content).strip()
+
+        max_chars = 30000
+        if len(text_content) > max_chars:
+            text_content = text_content[:max_chars] + "\n...[Content truncated due to length limits]"
+
+        return json.dumps({
+            "status": "success",
+            "url": url,
+            "content": text_content
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Webpage fetch failed for {url}: {e}")
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to fetch URL. It might be unreachable, strictly protected by WAF, or timed out. Error: {str(e)}"
+        })
+
 
 
 if __name__ == "__main__":

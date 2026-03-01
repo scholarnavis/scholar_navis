@@ -90,7 +90,12 @@ class TranslatorWorker(QObject):
 
             messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": self.text}]
 
-            for token in self.llm.stream_chat(messages):
+            kwargs = {
+                "is_translation": True,
+                "thinking_enabled": getattr(self, 'thinking_enabled', False),
+                "thinking_effort": getattr(self, 'thinking_effort', "low")
+            }
+            for token in self.llm.stream_chat(messages, **kwargs):
                 if self._is_cancelled: break
                 self.sig_token.emit(token)
 
@@ -179,6 +184,19 @@ class QuickTranslatorWindow(QWidget):
         self.model_selector = ModelSelectorWidget(label_text="Translator:", config_key="quick_trans_llm_id",
                                                   model_key="quick_trans_model_name")
         cfg_bar.addWidget(self.model_selector)
+
+        self.chk_think = QCheckBox("Reasoning")
+        self.chk_think.setChecked(self.cfg_mgr.user_settings.get("qt_think_enabled", False))
+        self.combo_think_effort = QComboBox()
+        self.combo_think_effort.addItems(["low", "medium", "high"])
+        self.combo_think_effort.setCurrentText(self.cfg_mgr.user_settings.get("qt_think_effort", "medium"))
+
+        self.chk_think.toggled.connect(lambda v: self._save_lang("qt_think_enabled", v))
+        self.combo_think_effort.currentTextChanged.connect(lambda v: self._save_lang("qt_think_effort", v))
+
+        cfg_bar.addSpacing(10)
+        cfg_bar.addWidget(self.chk_think)
+        cfg_bar.addWidget(self.combo_think_effort)
         cfg_bar.addSpacing(15)
 
 
@@ -399,13 +417,33 @@ class QuickTranslatorWindow(QWidget):
         trans_config = self.model_selector.get_current_config()
         if trans_config:
             trans_config = trans_config.copy()
-            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
+
+            from PySide6.QtWidgets import QComboBox
+            combos = self.model_selector.findChildren(QComboBox)
+            if len(combos) >= 2:
+                raw_ui_trans = combos[1].currentText()
+            else:
+                raw_ui_trans = self.cfg_mgr.user_settings.get("quick_trans_model_name", "")
+
+            ui_selected_trans = raw_ui_trans
+
+            # 清理后缀，防止发给 API 导致 404
+            for suffix in [" (⚙️ Custom)", " (🚫 Closed)"]:
+                if ui_selected_trans.endswith(suffix):
+                    ui_selected_trans = ui_selected_trans[:-len(suffix)]
+
+            if ui_selected_trans:
+                trans_config["model_name"] = ui_selected_trans
+                self.cfg_mgr.user_settings["quick_trans_model_name"] = raw_ui_trans
+                self.cfg_mgr.save_settings()
 
         self.worker_thread = QThread()
         self.worker = TranslatorWorker(
             text, self.combo_src.currentText(), self.combo_tgt.currentText(),
             trans_config
         )
+        self.worker.thinking_enabled = self.chk_think.isChecked()
+        self.worker.thinking_effort = self.combo_think_effort.currentText()
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
 

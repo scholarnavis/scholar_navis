@@ -792,10 +792,6 @@ class SettingsTool(BaseTool):
              "model_name": "claude-3-5-sonnet-latest", "api_key": ""},
             {"id": "nvidia", "name": "Nvidia Build", "base_url": "https://integrate.api.nvidia.com/v1",
              "model_name": "meta/llama-3.1-70b-instruct", "api_key": ""},
-            {"id": "moonshot", "name": "Moonshot (Kimi)", "base_url": "https://api.moonshot.cn/v1",
-             "model_name": "moonshot-v1-auto", "api_key": ""},
-            {"id": "minimax", "name": "MiniMax", "base_url": "https://api.minimaxi.com/anthropic",
-             "model_name": "MiniMax-M2.5", "api_key": ""},
             {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
              "model_name": "qwen-plus", "api_key": ""},
             {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -883,6 +879,13 @@ class SettingsTool(BaseTool):
         header_layout.addWidget(self.btn_add_llm)
         header_layout.addWidget(self.btn_del_llm)
         header_layout.addWidget(self.btn_help_params)
+
+        #  服务商特性提示标签
+        self.lbl_provider_desc = QLabel("")
+        self.lbl_provider_desc.setStyleSheet("color: #05B8CC; font-size: 11px; font-style: italic;")
+        self.lbl_provider_desc.setWordWrap(True)
+        self.lbl_provider_desc.setVisible(False)
+        layout.addRow("", self.lbl_provider_desc)
 
         self.input_llm_name = QLineEdit()
         self.input_llm_url = QLineEdit()
@@ -1270,7 +1273,11 @@ class SettingsTool(BaseTool):
         default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
         self.btn_del_llm.setEnabled(conf.get("id") not in default_ids)
 
-        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen", "moonshot", "minimax"]
+        self.btn_fetch_models.setToolTip("")
+        self.btn_fetch_models.setText(" Fetch")
+
+
+        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen"]
         is_native = conf.get("id") in hide_url_providers
 
         form_layout = self.input_llm_url.parentWidget().layout()
@@ -1279,6 +1286,21 @@ class SettingsTool(BaseTool):
             if label:
                 label.setVisible(not is_native)
         self.input_llm_url.setVisible(not is_native)
+
+        provider_id = conf.get("id", "")
+        desc_text = ""
+        if provider_id == "qwen":
+            desc_text = "💡 Qwen: Contains Text, Multimodal (vl/qvq) for Image Gen, OCR (ocr), and Translation (mt)."
+        elif provider_id == "zhipu":
+            desc_text = "💡 GLM: Contains Text, Vision (V), OCR, and Image Generation (glm-image)."
+        elif provider_id == "gemini":
+            desc_text = "💡 Gemini: 'image' tagged models support Image Generation (Nano Banana series)."
+        elif provider_id == "deepseek":
+            desc_text = "💡 DeepSeek: Multimodal features are not natively supported by text/reasoner models."
+
+        if hasattr(self, 'lbl_provider_desc'):
+            self.lbl_provider_desc.setText(desc_text)
+            self.lbl_provider_desc.setVisible(bool(desc_text))
 
         self._refresh_model_combo(conf)
 
@@ -1327,6 +1349,7 @@ class SettingsTool(BaseTool):
 
         base_url = conf.get("base_url", "").strip()
         api_key = conf.get("api_key", "").strip()
+        provider_id = conf.get("id", "").strip()
 
         if not base_url:
             StandardDialog(self.widget, "Warning", "Please enter API Base URL first.").exec()
@@ -1342,7 +1365,7 @@ class SettingsTool(BaseTool):
 
         self.fetch_task_mgr.start_task(
             FetchModelsTask, task_id="fetch_models", mode=TaskMode.THREAD,
-            base_url=base_url, api_key=api_key
+            base_url=base_url, api_key=api_key, provider_id=provider_id
         )
 
     def _on_models_fetched(self, result):
@@ -1356,7 +1379,7 @@ class SettingsTool(BaseTool):
                 self._refresh_model_combo(self.llm_configs[idx])
             StandardDialog(self.widget, "Success", result["msg"]).exec()
         else:
-            self.logger.warning(f"⚠Failed to fetch models: {result['msg']}")
+            self.logger.warning(f"Failed to fetch models: {result['msg']}")
             ToastManager().show(f"Fetch Models Failed: {result['msg']}", "error")
 
     def _start_test_task(self):
@@ -1366,6 +1389,7 @@ class SettingsTool(BaseTool):
 
         base_url = conf.get("base_url", "").strip()
         api_key = conf.get("api_key", "").strip()
+        provider_id = conf.get("id", "")
         model_name = self._extract_real_model_name(self.combo_llm_model.currentText().strip())
 
         if not base_url or not model_name:
@@ -1402,7 +1426,8 @@ class SettingsTool(BaseTool):
 
         self.test_task_mgr.start_task(
             TestApiTask, task_id="test_api", mode=TaskMode.THREAD,
-            base_url=base_url, api_key=api_key, model_name=model_name, custom_params=parsed_params
+            base_url=base_url, api_key=api_key, model_name=model_name, custom_params=parsed_params,
+            provider_id=provider_id
         )
 
     def _on_test_finished(self, result):

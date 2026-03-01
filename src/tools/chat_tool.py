@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
                                QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
-                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication)
+                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication, QComboBox)
 from langdetect import detect
 
 from src.core.config_manager import ConfigManager
@@ -52,7 +52,7 @@ from src.ui.components.toast import ToastManager
 
 
 @functools.lru_cache(maxsize=128)
-def get_cached_translation(text, direction="to_en", llm_instance=None):
+def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs):
     if not llm_instance: return text
 
     if direction == "to_en":
@@ -76,7 +76,7 @@ def get_cached_translation(text, direction="to_en", llm_instance=None):
     return llm_instance.chat([
         {"role": "system", "content": prompt},
         {"role": "user", "content": text}
-    ]).strip()
+    ], **kwargs).strip()
 
 
 class ChatDropTargetWidget(QWidget):
@@ -225,9 +225,7 @@ class ChatInputContainer(QFrame):
         self.user_deselected_tags = set()
         self.known_tags = set()
 
-        # 创建一个菜单用于多选
-        self.menu_mcp_tags = QMenu(self)
-        self.btn_mcp_tags.setMenu(self.menu_mcp_tags)
+        self.btn_mcp_guide = QPushButton("Prompt guide")
 
         # 存储复选框动作的字典
         self.tag_actions = {}
@@ -414,10 +412,12 @@ class ChatInputContainer(QFrame):
 
     def _show_filter_menu(self):
         """完全接管菜单弹出逻辑：确保每次点击绝对会请求最新数据"""
+        self.btn_mcp_tags.setText("Filter Tools: Fetching...")
+        QApplication.processEvents()
+
         self.refresh_mcp_tags()
-        # 计算在按钮正下方弹出
         pos = self.btn_mcp_tags.mapToGlobal(self.btn_mcp_tags.rect().bottomLeft())
-        pos.setY(pos.y() + 2)  # 向下偏移 2px 更好看
+        pos.setY(pos.y() + 2)
         self.menu_mcp_tags.popup(pos)
 
     def refresh_mcp_tags(self):
@@ -566,9 +566,14 @@ class ChatWorker(QObject):
             # Phase 1: Query Extraction & Translation (Cache Accelerated)
             # ==========================================
             if self.requires_translation:
-                self.sig_token.emit("<i>🌐 Translating your query to academic English for precise retrieval...</i>\n\n")
+                self.sig_token.emit("<i>Translating your query to academic English for precise retrieval...</i>\n\n")
                 try:
-                    search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm)
+                    trans_kwargs = {
+                        "is_translation": True,
+                        "thinking_enabled": getattr(self, 'thinking_enabled', False),
+                        "thinking_effort": getattr(self, 'thinking_effort', "low")
+                    }
+                    search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm, **trans_kwargs)
                 except Exception as e:
                     self.sig_error.emit(
                         f"Translation model request failed. Please check your translation API configuration.\nDetails: {e}")
@@ -725,19 +730,37 @@ class ChatWorker(QObject):
                 f"### CONTEXT:\n{context_str}"
             )
             rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
-            images = [chunk for chunk in getattr(self, 'external_context', []) if chunk.get("type") == "image"]
+            # [重构] 剥离出图片和纯文档
+            external_chunks = getattr(self, 'external_context', [])
+            images = [c for c in external_chunks if c.get("type") == "image"]
+            docs = [c for c in external_chunks if c.get("type") != "image"]
 
-            if images:
-                vision_content = [{"type": "text", "text": search_query}]
-                for img in images:
-                    vision_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": img["base64_url"]}
-                    })
-                rag_messages.append({"role": "user", "content": vision_content})
-            else:
-                # 纯文本请求
-                rag_messages.append({"role": "user", "content": search_query})
+            # 构建当前轮次的用户输入 Content (支持多模态 List)
+            llm_content = []
+
+            # 1. 如果有文档/PDF，将其打包为 JSON 格式置于文字最前方
+            if docs:
+                files_dict = {}
+                for doc in docs:
+                    f_name = doc.get('name', 'Unknown_File')
+                    if f_name not in files_dict:
+                        files_dict[f_name] = ""
+                    files_dict[f_name] += f"\n[Page {doc.get('page', 1)}]\n{doc.get('content', '')}"
+
+                docs_json = json.dumps(files_dict, ensure_ascii=False)
+                llm_content.append({"type": "text", "text": f"Context Files (JSON Format):\n{docs_json}\n\n"})
+
+            # 2. 正常文字输入
+            llm_content.append({"type": "text", "text": f"User Input:\n{search_query}"})
+
+            # 3. 追加图片 (按用户提供的顺序)
+            for img in images:
+                llm_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": img["base64_url"]}
+                })
+
+            rag_messages.append({"role": "user", "content": llm_content})
 
             tool_executed = False
 
@@ -817,7 +840,11 @@ class ChatWorker(QObject):
                 rag_messages.append({"role": "system", "content": silence_prompt})
 
             # --- LLM Output Streaming ---
-            for token in self.main_llm.stream_chat(rag_messages):
+            kwargs = {
+                "thinking_enabled": getattr(self, 'thinking_enabled', False),
+                "thinking_effort": getattr(self, 'thinking_effort', "medium")
+            }
+            for token in self.main_llm.stream_chat(rag_messages, **kwargs):
                 self.full_response_cache += token
                 self.sig_token.emit(token)
 
@@ -883,32 +910,45 @@ class ChatTool(BaseTool):
         self.widget = ChatDropTargetWidget()
         self.widget.sig_files_dropped.connect(self.process_attached_files)
 
-        # 设置主布局间距为0，靠内部组件的 margins 控制，防止多重间距叠加
         main_layout = QVBoxLayout(self.widget)
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # 2. 顶部工具栏 (模型与知识库选择)
+        # 2. 顶部工具栏
         top_bar = QVBoxLayout()
         top_bar.setSpacing(8)
-        top_bar.setContentsMargins(0, 0, 0, 10)  # 底部留白
+        top_bar.setContentsMargins(0, 0, 0, 10)
 
-        # 第一行：模型与翻译器选择
+        #  第一行：主模型与思考配置
         row1_layout = QHBoxLayout()
-        self.model_selector = ModelSelectorWidget(label_text=" Model:", config_key="chat_llm_id",
+        self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
                                                   model_key="chat_model_name")
-        self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
-                                                  model_key="chat_trans_model_name")
+
+        self.chk_think = QCheckBox("Reasoning")
+        self.chk_think.setChecked(self.config.user_settings.get("chat_thinking_enabled", False))
+        self.combo_think_effort = BaseComboBox()
+        self.combo_think_effort.addItems(["low", "medium", "high"])
+        self.combo_think_effort.setCurrentText(self.config.user_settings.get("chat_thinking_effort", "medium"))
+
+        self.chk_think.toggled.connect(lambda v: self._save_setting("chat_thinking_enabled", v))
+        self.combo_think_effort.currentTextChanged.connect(lambda v: self._save_setting("chat_thinking_effort", v))
+
         row1_layout.addWidget(self.model_selector)
         row1_layout.addSpacing(15)
-        row1_layout.addWidget(self.trans_selector)
+        row1_layout.addWidget(self.chk_think)
+        row1_layout.addWidget(self.combo_think_effort)
         row1_layout.addStretch()
 
-        # 第二行：知识库选择
+        #  第二行：翻译模型与知识库
         row2_layout = QHBoxLayout()
+        self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
+                                                  model_key="chat_trans_model_name")
         lbl_kb = QLabel(" Knowledge Base:")
         self.combo_kb = BaseComboBox(min_width=250)
         self.refresh_kb_list()
+
+        row2_layout.addWidget(self.trans_selector)
+        row2_layout.addSpacing(15)
         row2_layout.addWidget(lbl_kb)
         row2_layout.addWidget(self.combo_kb)
         row2_layout.addStretch()
@@ -916,6 +956,7 @@ class ChatTool(BaseTool):
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
         main_layout.addLayout(top_bar)
+
 
         # 加载配置
         self.load_llm_configs()
@@ -1432,13 +1473,41 @@ class ChatTool(BaseTool):
         use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container, 'chk_mcp_enable') else False
         selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
 
+        def _clean_model_name(name):
+            if not name: return ""
+            for suffix in [" (⚙️ Custom)", " (🚫 Closed)"]:
+                if name.endswith(suffix): return name[:-len(suffix)]
+            return name
+
+
         if main_config:
             main_config = main_config.copy()
-            main_config["model_name"] = main_config.get("chat_model_name", main_config.get("model_name"))
+            combos_main = self.model_selector.findChildren(QComboBox)
+            if len(combos_main) >= 2:
+                raw_ui_model = combos_main[1].currentText()
+            else:
+                raw_ui_model = self.config.user_settings.get("chat_model_name", "")
+
+            ui_model = _clean_model_name(raw_ui_model)
+            if ui_model:
+                main_config["model_name"] = ui_model
+                self.config.user_settings["chat_model_name"] = raw_ui_model
+                self.config.save_settings()
 
         if trans_config:
             trans_config = trans_config.copy()
-            trans_config["model_name"] = trans_config.get("chat_trans_model_name", trans_config.get("model_name"))
+            combos_trans = self.trans_selector.findChildren(QComboBox)
+            if len(combos_trans) >= 2:
+                raw_ui_trans = combos_trans[1].currentText()
+            else:
+                raw_ui_trans = self.config.user_settings.get("chat_trans_model_name", "")
+
+            ui_trans = _clean_model_name(raw_ui_trans)
+            if ui_trans:
+                trans_config["model_name"] = ui_trans
+                self.config.user_settings["chat_trans_model_name"] = raw_ui_trans
+                self.config.save_settings()
+
 
         if main_config:
             actual_model = main_config.get("model_name", "").strip()
@@ -1458,6 +1527,9 @@ class ChatTool(BaseTool):
 
         # 实例化后台 Worker
         self.worker_thread = QThread()
+        thinking_enabled = self.chk_think.isChecked() if hasattr(self, 'chk_think') else False
+        thinking_effort = self.combo_think_effort.currentText() if hasattr(self, 'combo_think_effort') else "medium"
+
         self.worker = ChatWorker(
             main_config=main_config,
             trans_config=trans_config,
@@ -1467,6 +1539,8 @@ class ChatTool(BaseTool):
             external_context=getattr(self, 'external_chunks', []),
             use_mcp=use_mcp_tools
         )
+        self.worker.thinking_enabled = thinking_enabled
+        self.worker.thinking_effort = thinking_effort
         self.worker.selected_mcp_tags = selected_mcp_tags
         self.external_chunks = []
         self.external_context_html = ""
@@ -1857,29 +1931,38 @@ class ChatTool(BaseTool):
         self.current_ai_text += token
         self._is_rendering_dirty = True
 
+
     def _format_response(self, text, index):
-        # 1. 处理 Mermaid 图表
-        pattern = r'```mermaid\s*\n(.*?)\n```'
+        if not text:
+            return ""
 
-        def repl_mermaid(match):
-            code = match.group(1).strip()
-            code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()
+        try:
+            pattern = r'```mermaid\s*\n(.*?)\n```'
 
-            if not hasattr(self, 'mermaid_codes'):
-                self.mermaid_codes = {}
-            self.mermaid_codes[code_hash] = code
+            def repl_mermaid(match):
+                code = match.group(1).strip()
+                code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()
 
-            return (
-                f"<br><div style='padding:12px; margin: 8px 0; border:1px solid #05B8CC; border-radius:6px; background-color: rgba(5, 184, 204, 0.08);'>"
-                f"<div style='margin-bottom: 5px;'>📊 <b>Mermaid Diagram Generated</b></div>"
-                f"<a href='mermaid://view?hash={code_hash}' style='color:#05B8CC; text-decoration:none; font-weight:bold;'>"
-                f"Click here to view / edit interactive diagram</a></div><br>")
+                if not hasattr(self, 'mermaid_codes'):
+                    self.mermaid_codes = {}
+                self.mermaid_codes[code_hash] = code
 
-        processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
+                return (
+                    f"<br><div style='padding:12px; margin: 8px 0; border:1px solid #05B8CC; border-radius:6px; background-color: rgba(5, 184, 204, 0.08);'>"
+                    f"<div style='margin-bottom: 5px;'>📊 <b>Mermaid Diagram Generated</b></div>"
+                    f"<a href='mermaid://view?hash={code_hash}' style='color:#05B8CC; text-decoration:none; font-weight:bold;'>"
+                    f"Click here to view / edit interactive diagram</a></div><br>")
 
-        return TextFormatter.format_chat_text(
-            processed_text, index, getattr(self, 'expanded_thinks', set()), getattr(self, 'user_toggled_thinks', set())
-        )
+            processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
+
+            return TextFormatter.format_chat_text(
+                processed_text, index, getattr(self, 'expanded_thinks', set()),
+                getattr(self, 'user_toggled_thinks', set())
+            )
+        except Exception as e:
+            self.logger.error(f"Error formatting response: {e}")
+            return str(text).replace('\n', '<br>')
+
 
     def on_chat_error(self, msg):
         self.logger.error(f"Chat generation encountered an error: {msg}")
@@ -2206,6 +2289,10 @@ class ChatTool(BaseTool):
                 self.fade_anim.finished.connect(self.btn_scroll_bottom.hide)
 
                 self.fade_anim.start()
+
+    def _save_setting(self, key, value):
+        self.config.user_settings[key] = value
+        self.config.save_settings()
 
     def execute_task(self):
         pass

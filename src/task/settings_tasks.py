@@ -1,7 +1,10 @@
 import httpx
 import requests
+from anthropic import Anthropic
+
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
+from src.core.llm_impl import OpenAICompatibleLLM
 from src.core.models_registry import resolve_auto_model, get_model_conf, check_model_exists
 from src.core.network_worker import _get_explicit_proxy_kwargs
 
@@ -45,12 +48,27 @@ class FetchModelsTask(BackgroundTask):
     def _execute(self):
         base_url = self.kwargs.get("base_url", "")
         api_key = self.kwargs.get("api_key", "")
+        provider_id = self.kwargs.get("provider_id", "")
 
         self.update_progress(20, "Connecting to API endpoint...")
-
-        url = f"{base_url.rstrip('/')}/models"
         proxy_url = self.config.user_settings.get("proxy_url", "").strip()
 
+        if provider_id == "anthropic" or "api.anthropic.com" in base_url:
+            try:
+                import httpx as ax
+                client = Anthropic(
+                    api_key=api_key or "sk-dummy",
+                    base_url=base_url,
+                    http_client=ax.Client(proxy=proxy_url) if proxy_url else None
+                )
+                page = client.beta.models.list()
+                models = sorted([m.id for m in page.data])
+                self.update_progress(100, "Done")
+                return {"success": True, "models": models, "msg": f"Successfully fetched {len(models)} models."}
+            except Exception as e:
+                return {"success": False, "models": [], "msg": str(e)}
+
+        url = f"{base_url.rstrip('/')}/models"
         session = requests.Session()
         if proxy_url:
             session.proxies = {"http": proxy_url, "https": proxy_url}
@@ -75,6 +93,7 @@ class FetchModelsTask(BackgroundTask):
             session.close()
 
 
+
 class TestApiTask(BackgroundTask):
     """测试大模型 API 连通性"""
 
@@ -83,12 +102,34 @@ class TestApiTask(BackgroundTask):
         api_key = self.kwargs.get("api_key", "")
         model_name = self.kwargs.get("model_name", "")
         custom_params = self.kwargs.get("custom_params", {})
+        provider_id = self.kwargs.get("provider_id", "")
 
         self.update_progress(30, f"Sending test prompt to {model_name}...")
+        proxy_url = self.config.user_settings.get("proxy_url", "").strip()
 
+        # 🚀 绝对特判：唯独 Anthropic 走官方 SDK
+        if provider_id == "anthropic" or "api.anthropic.com" in base_url:
+            try:
+                import httpx as ax
+                client = Anthropic(
+                    api_key=api_key or "sk-dummy",
+                    base_url=base_url,
+                    http_client=ax.Client(proxy=proxy_url) if proxy_url else None
+                )
+                response = client.messages.create(
+                    model=model_name,
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": "Hello. Please reply with exactly one word: 'OK'."}]
+                )
+                raw_content = response.content[0].text if response.content else "[Empty]"
+                self.update_progress(100, "Done")
+                return {"success": True, "msg": f"✅ Connection excellent!\nModel replied: '{raw_content.strip()}'"}
+            except Exception as e:
+                return {"success": False, "msg": str(e)}
+
+        # 🚀 其余所有模型，统统强制走 OpenAI 标准的 POST /chat/completions 接口！
         url = f"{base_url.rstrip('/')}/chat/completions"
         httpx_kwargs = {"timeout": 15.0}
-        proxy_url = self.config.user_settings.get("proxy_url", "").strip()
 
         if proxy_url:
             httpx_kwargs["proxy"] = proxy_url
