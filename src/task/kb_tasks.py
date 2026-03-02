@@ -13,6 +13,7 @@ from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
 from src.core.models_registry import get_model_conf, ensure_onnx_model
+from src.core.rerank_engine import RerankEngine
 
 logger = logging.getLogger("Task.kb")
 
@@ -28,6 +29,7 @@ def _setup_worker_env():
 
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     os.environ["ANONYMIZED_TELEMETRY"] = "False"
+    os.environ["HF_HUB_OFFLINE"] = "1"
 
     try:
         from src.core.network_worker import setup_global_network_env
@@ -77,7 +79,7 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
     def __init__(self, onnx_cache_dir, device="cpu"):
         logger = logging.getLogger("Worker.ONNXProvider")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(onnx_cache_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(onnx_cache_dir, local_files_only=True)
         available_providers = ort.get_available_providers()
 
         provider = "CPUExecutionProvider"
@@ -118,6 +120,7 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
         self.model = ORTModelForFeatureExtraction.from_pretrained(
             onnx_cache_dir,
             export=False,
+            local_files_only=True,
             **kwargs
         )
 
@@ -127,6 +130,23 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
         embeddings = outputs.last_hidden_state[:, 0, :]
         embeddings = F.normalize(embeddings, p=2, dim=1)
         return embeddings.tolist()
+
+
+class RerankTask(BackgroundTask):
+    def _execute(self):
+        _setup_worker_env()
+        query = self.kwargs.get("query")
+        docs = self.kwargs.get("docs")
+        domain = self.kwargs.get("domain", "General Academic")
+        top_k = self.kwargs.get("top_k", 8)
+
+        self.send_log("INFO", "Starting isolated Reranker process to bypass GIL...")
+
+        # This executes in a separate process, completely freeing the Main UI
+        engine = RerankEngine()
+        ranked_docs = engine.rerank(query, docs, domain=domain, top_k=top_k)
+
+        return ranked_docs
 
 
 
@@ -278,7 +298,13 @@ class ImportFilesTask(BackgroundTask):
                     if not chunks: continue
 
                     ids = [f"{source_name}_{k}_{uuid.uuid4().hex[:6]}" for k in range(len(chunks))]
-                    metadatas = [{"source": source_name, "chunk_id": k} for k in range(len(chunks))]
+                    metadatas = [{
+                        "source": source_name,
+                        "chunk_id": k,
+                        "page": 1,
+                        "file_path": read_path
+                    } for k in range(len(chunks))]
+
                     for j in range(0, len(chunks), opt_batch):
                         batch_chunks = chunks[j:j + opt_batch]
                         batch_ids = ids[j:j + opt_batch]

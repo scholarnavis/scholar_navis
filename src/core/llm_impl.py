@@ -25,19 +25,24 @@ class OpenAICompatibleLLM:
 
         if not config:
             self.provider_id = sys_cfg.get("active_llm_id", "custom")
-            self.api_key = sys_cfg.get("llm_api_key", "sk-no-key-required")
+            raw_api_key = sys_cfg.get("llm_api_key", "")
             self.base_url = sys_cfg.get("llm_base_url", "http://localhost:11434/v1")
             self.model_name = sys_cfg.get("llm_model_name", "llama3")
         else:
             self.provider_id = config.get("id", "custom")
-            self.api_key = config.get("api_key", "sk-no-key-required")
+            raw_api_key = config.get("api_key", "")
             self.base_url = config.get("base_url", "http://localhost:11434/v1")
             self.model_name = config.get("model_name", "llama3")
 
-        if not self.api_key:
-            self.api_key = "sk-no-key-required"
 
-        # 全部强制使用标准 OpenAI 客户端
+        self._missing_api_key = False
+        if not raw_api_key or str(raw_api_key).strip() == "":
+            if "localhost" not in self.base_url and "127.0.0.1" not in self.base_url:
+                self._missing_api_key = True
+            self.api_key = "sk-no-key-required"
+        else:
+            self.api_key = str(raw_api_key).strip()
+
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url, http_client=self.http_client)
 
         self.logger.info(f"Initialized Pure OpenAI-Compatible LLM: [{self.model_name}] @ {self.base_url}")
@@ -154,6 +159,10 @@ class OpenAICompatibleLLM:
         return processed_msgs
 
     def chat(self, messages: List[Dict], is_translation=False, **kwargs):
+
+        if getattr(self, '_missing_api_key', False):
+            return "\n\n**System Tip:** API Key is missing. Please configure your API key in the settings before proceeding.\n"
+
         payload = self._get_payload_kwargs()
         payload.update(kwargs)
 

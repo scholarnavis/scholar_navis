@@ -32,29 +32,34 @@ class PDFEngine:
 
         try:
             self.logger.debug("Calling PyMuPDF4LLM for Markdown conversion...")
-            md_text = pymupdf4llm.to_markdown(file_path)
 
-            if not md_text:
-                self.logger.error(f"Parser returned empty data! File might be corrupted or unparseable: {display_name}")
+            page_data = pymupdf4llm.to_markdown(file_path, page_chunks=True)
+
+            if not page_data:
+                self.logger.error(f"Parser returned empty data! File might be corrupted: {display_name}")
                 return 0
 
-            total_raw_chars = len(md_text)
-            self.logger.debug(
-                f"Successfully loaded and converted to Markdown. Total {total_raw_chars} characters. Preparing to split...")
+            self.logger.debug(f"Successfully loaded {len(page_data)} pages. Preparing to wrap and split...")
 
-            # 2. Wrap into a Langchain Document object
-            raw_doc = Document(page_content=md_text, metadata={"source": display_name})
-
-            del md_text
+            raw_docs = []
+            for chunk in page_data:
+                text = chunk.get("text", "")
+                if text.strip():
+                    page_num = chunk.get("metadata", {}).get("page", 0) + 1
+                    raw_docs.append(Document(
+                        page_content=text,
+                        metadata={"source": display_name, "page": page_num}
+                    ))
 
             text_splitter = MarkdownTextSplitter(
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap
             )
 
-            splits = text_splitter.split_documents([raw_doc])
+            splits = text_splitter.split_documents(raw_docs)
 
-            del raw_doc
+            del raw_docs
+            del page_data
             gc.collect()
 
             total_chunks = len(splits)
@@ -65,17 +70,17 @@ class PDFEngine:
                 return 0
 
             creation_time = str(os.path.getctime(file_path))
+
             for doc in splits:
                 doc.metadata.update({
-                    "source": display_name,
-                    "file_path": file_path,
+                    "file_path": display_name,
                     "created_at": creation_time
                 })
 
             processed_count = 0
 
             self.logger.debug(
-                f"Preparing to inject into vector DB. Does current DB instance contain a collection?: {hasattr(self.db, 'collection') and self.db.collection is not None}")
+                f"Preparing DB injection. Valid collection: {hasattr(self.db, 'collection') and self.db.collection is not None}")
 
             if hasattr(self.db, 'collection') and self.db.collection is not None:
                 for i in range(0, total_chunks, batch_size):

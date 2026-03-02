@@ -1,6 +1,6 @@
 import locale
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
-                               QTextBrowser, QPushButton, QLabel, QApplication, QComboBox, QCheckBox)
+                               QTextBrowser, QPushButton, QLabel, QApplication, QComboBox, QCheckBox, QSizeGrip)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QPropertyAnimation
 
 from src.core.config_manager import ConfigManager
@@ -108,14 +108,13 @@ class TranslatorWorker(QObject):
 
 class QuickTranslatorWindow(QWidget):
     def __init__(self, parent=None):
-        # 💡 解耦父窗口：通过传入 None 并指定 Window 属性，它不再受 MainWindow 焦点牵连
         super().__init__(None)
         self.is_pinned = True
 
         # 初始属性：无边框 + 顶层显示 + 工具窗口(不在任务栏占位)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(650, 500)
+        self.resize(800, 500)
         self.worker_thread = None
         self.worker = None
         self.drag_pos = None
@@ -134,7 +133,6 @@ class QuickTranslatorWindow(QWidget):
             GlobalSignals().llm_config_changed.connect(self.model_selector.load_llm_configs)
 
     def _setup_ui(self):
-
         self.main_frame = QWidget(self)
         self.main_frame.setStyleSheet(
             "QWidget { background-color: #252526; border: 1px solid #3e3e42; border-radius: 12px; }")
@@ -174,19 +172,21 @@ class QuickTranslatorWindow(QWidget):
         frame_layout.addLayout(top_bar)
 
         # --- 模型选择与语言配置 ---
-        cfg_bar = QHBoxLayout()
+        # 1. 第一行：模型选择器
+        model_bar = QHBoxLayout()
         self.lbl_trans_icon = QLabel()
         self.lbl_trans_icon.setStyleSheet("background: transparent; border: none;")
-        cfg_bar.addWidget(self.lbl_trans_icon)
+        self.lbl_trans_icon.setFixedWidth(24)
+        model_bar.addWidget(self.lbl_trans_icon)
 
         self.model_selector = ModelSelectorWidget(label_text="Translator:", config_key="quick_trans_llm_id",
                                                   model_key="quick_trans_model_name")
-        cfg_bar.addWidget(self.model_selector)
+        model_bar.addWidget(self.model_selector, stretch=1)
+        frame_layout.addLayout(model_bar)
 
-
-        cfg_bar.addSpacing(10)
-        cfg_bar.addSpacing(15)
-
+        # 2. 第二行：语言配置 (From -> To)
+        lang_bar = QHBoxLayout()
+        lang_bar.addSpacing(30)
 
         langs = ["Auto Detect", "English", "Chinese", "Japanese", "French", "German"]
         sys_lang = get_system_language()
@@ -197,22 +197,24 @@ class QuickTranslatorWindow(QWidget):
         self.combo_src = QComboBox()
         self.combo_src.addItems(langs)
         self.combo_src.setCurrentText(saved_src)
-        self.combo_src.setStyleSheet("background: #1e1e1e; color: white; border: 1px solid #444; border-radius: 4px;")
+        self.combo_src.setStyleSheet(
+            "background: #1e1e1e; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px;")
 
         self.combo_tgt = QComboBox()
         self.combo_tgt.addItems([l for l in langs if l != "Auto Detect"] + ["Academic Polish"])
         self.combo_tgt.setCurrentText(saved_tgt)
-        self.combo_tgt.setStyleSheet("background: #1e1e1e; color: white; border: 1px solid #444; border-radius: 4px;")
+        self.combo_tgt.setStyleSheet(
+            "background: #1e1e1e; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px;")
 
         self.combo_src.currentTextChanged.connect(lambda t: self._save_lang("trans_source_lang", t))
         self.combo_tgt.currentTextChanged.connect(lambda t: self._save_lang("trans_target_lang", t))
 
-        cfg_bar.addWidget(QLabel("From:"))
-        cfg_bar.addWidget(self.combo_src)
-        cfg_bar.addWidget(QLabel("To:"))
-        cfg_bar.addWidget(self.combo_tgt)
+        lang_bar.addWidget(QLabel("From:"))
+        lang_bar.addWidget(self.combo_src, stretch=1)
+        lang_bar.addWidget(QLabel("To:"))
+        lang_bar.addWidget(self.combo_tgt, stretch=1)
 
-        frame_layout.addLayout(cfg_bar)
+        frame_layout.addLayout(lang_bar)
 
         # --- 输入输出区 ---
         self.input_box = TranslatorInputEdit()
@@ -258,7 +260,17 @@ class QuickTranslatorWindow(QWidget):
             "background-color: #1e1e1e; color: #fff; border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 14px;")
         frame_layout.addWidget(self.output_box)
 
+        grip_layout = QHBoxLayout()
+        grip_layout.setContentsMargins(0, 0, 0, 0)
+        grip_layout.addStretch()
+        self.size_grip = QSizeGrip(self.main_frame)
+        self.size_grip.setFixedSize(16, 16)
+        self.size_grip.setStyleSheet("background: transparent;")
+        grip_layout.addWidget(self.size_grip)
+        frame_layout.addLayout(grip_layout)
+
         self.current_out_text = ""
+
 
     def _stop_translation(self):
         if getattr(self, 'worker_thread', None):

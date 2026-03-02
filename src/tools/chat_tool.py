@@ -538,6 +538,7 @@ class ChatWorker(QObject):
         self.trans_llm = None
 
     def cancel(self):
+        self._is_cancelled = True
         if self.main_llm: self.main_llm.cancel()
         if self.trans_llm: self.trans_llm.cancel()
 
@@ -549,6 +550,42 @@ class ChatWorker(QObject):
 
         if self.requires_translation and self.trans_config and not self.trans_llm:
             self.trans_llm = OpenAICompatibleLLM(self.trans_config)
+
+    def _process_rerank(self, query, docs, domain, top_k):
+        if not docs: return []
+
+        import multiprocessing as mp
+        from src.core.core_task import TaskState, RunnerProcess
+        from src.task.kb_tasks import RerankTask
+
+        queue = mp.Queue()
+        worker = RunnerProcess(
+            RerankTask, "rerank_sync", queue,
+            {"query": query, "docs": docs, "domain": domain, "top_k": top_k}
+        )
+        worker.start()
+
+        ranked = docs[:top_k]
+        while True:
+            if getattr(self, '_is_cancelled', False):
+                worker.terminate()
+                break
+            try:
+                # Wait for process result synchronously (perfectly safe inside QThread)
+                data = queue.get(timeout=0.2)
+                state = data.get("state")
+
+                if state == TaskState.SUCCESS.value:
+                    if data.get("payload"): ranked = data["payload"]
+                    break
+                elif state == TaskState.FAILED.value:
+                    self.logger.error(f"Rerank process failed: {data.get('msg')}")
+                    break
+            except Exception:
+                if not worker.is_alive(): break
+
+        return ranked
+
 
     def run(self):
         try:
@@ -641,10 +678,8 @@ class ChatWorker(QObject):
 
                     if candidate_docs:
                         candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
-                        # 知识库的 Rerank
-                        final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=10)
+                        final_docs = self._process_rerank(search_query, candidate_docs, domain, 10)
 
-                        # 构建引用字典
                         current_ref_id = 1
                         for doc in final_docs:
                             sources_map[current_ref_id] = {
@@ -675,14 +710,12 @@ class ChatWorker(QObject):
 
             # 3.1 处理上传的长文本 / PDF (启用 Reranker 降低幻觉)
             if docs:
-                self.sig_token.emit(
-                    "<i>📄 Filtering and reranking attached documents to reduce hallucinations...</i>\n\n")
+                self.sig_token.emit("<i>📄 Filtering and reranking attached documents...</i>\n\n")
                 cand_docs = [{"content": d.get("content", ""),
                               "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
 
-                # 如果用户上传的文档切片非常多，通过 Reranker 提纯最相关的几页
-                if len(cand_docs) > 5 and hasattr(self, 'reranker') and getattr(self, 'reranker'):
-                    cand_docs = self.reranker.rerank(search_query, cand_docs, top_k=8)
+                if len(cand_docs) > 5:
+                    cand_docs = self._process_rerank(search_query, cand_docs, "General", 8)
 
                 files_dict = {}
                 for doc in cand_docs:
@@ -754,7 +787,7 @@ class ChatWorker(QObject):
                 "3. If graphics need to be created, use mermaid uniformly.\n\n"
 
                 "### RESPONSE GUIDELINES:\n"
-                "1. GROUNDING: If data comes from Context, append citations (e.g., [1], [2]).\n\n"
+                "1.GROUNDING (CRITICAL RULE): You MUST append inline citations (e.g., [1], [2]) at the end of every sentence that uses information from the Context. NEVER claim facts without appending the corresponding document number. Failure to cite will result in penalties.\n\n"
 
                 "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
                 "At the very end of your response, you MUST output the exact string [FOLLOW_UPS] followed by exactly 6 follow-up questions using this EXACT format:\n"
@@ -893,27 +926,22 @@ class ChatTool(BaseTool):
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # 2. 顶部工具栏
         top_bar = QVBoxLayout()
         top_bar.setSpacing(8)
         top_bar.setContentsMargins(0, 0, 0, 10)
 
-        #  第一行：主模型与思考配置
         row1_layout = QHBoxLayout()
         self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
                                                   model_key="chat_model_name")
-
-
         row1_layout.addWidget(self.model_selector)
-        row1_layout.addSpacing(15)
         row1_layout.addStretch()
 
-        #  第二行：翻译模型与知识库
         row2_layout = QHBoxLayout()
         self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
                                                   model_key="chat_trans_model_name")
+
         lbl_kb = QLabel(" Knowledge Base:")
-        self.combo_kb = BaseComboBox(min_width=250)
+        self.combo_kb = BaseComboBox(max_width=400)
         self.refresh_kb_list()
 
         row2_layout.addWidget(self.trans_selector)
@@ -925,7 +953,6 @@ class ChatTool(BaseTool):
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
         main_layout.addLayout(top_bar)
-
 
         # 加载配置
         self.load_llm_configs()

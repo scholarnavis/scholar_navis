@@ -288,21 +288,8 @@ class ImportTool(BaseTool):
                 self._handle_open([row])
 
     def _adjust_table_height(self):
-        rows = self.file_table.rowCount()
-        base_height = 150
-
-        if rows == 0:
-            self.file_table.setFixedHeight(base_height)
-            return
-
-        header_h = self.file_table.horizontalHeader().height()
-        if header_h == 0: header_h = 30
-        row_h = self.file_table.verticalHeader().defaultSectionSize()
-
-        total_h = header_h + (row_h * rows) + 5
-
-        final_height = max(base_height, min(total_h, 450))
-        self.file_table.setFixedHeight(final_height)
+        self.file_table.setMinimumHeight(150)
+        self.file_table.setMaximumHeight(16777215)
 
     def refresh_kb_list(self):
         self.combo_kb.blockSignals(True)

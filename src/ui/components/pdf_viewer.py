@@ -315,14 +315,16 @@ class InternalPDFViewer(QMainWindow):
             self.setWindowTitle(f"Page {self.current_page + 1} / {len(self.doc)} - {self.display_name}")
 
     def _find_text_quads(self, page, text):
-        # 1. 精确匹配
-        quads = page.search_for(text)
-        if quads: return quads
-        # 2. 清理换行符和多余空格后匹配
-        clean_text = re.sub(r'\s+', ' ', text).strip()
+        clean_text = re.sub(r'[*_#`>]', '', text)
+
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+
+        if not clean_text:
+            return []
+
         quads = page.search_for(clean_text)
         if quads: return quads
-        # 3. 智能切片匹配：按标点符号切分
+
         if len(clean_text) > 30:
             chunks = [c.strip() for c in re.split(r'[,.，。;\n]', clean_text) if len(c.strip()) > 10]
             all_quads = []
@@ -330,8 +332,9 @@ class InternalPDFViewer(QMainWindow):
                 q = page.search_for(chunk)
                 if q: all_quads.extend(q)
             if all_quads: return all_quads
-            # 4. 最终降级：仅匹配头部
+
             return page.search_for(clean_text[:30])
+
         return []
 
     def render_page(self):
@@ -557,24 +560,36 @@ class InternalTextViewer(QMainWindow):
             print(f"Error opening text file: {e}")
 
     def _highlight_and_scroll(self, text):
+        if not text:
+            return
+
         document = self.text_browser.document()
-        # 1. 精确匹配
-        cursor = document.find(text)
-        # 2. 消除多余换行符/空格后降级匹配
+
+        clean_text = re.sub(r'\s+', ' ', text).strip()
+
+        cursor = document.find(clean_text)
+
+
         if cursor.isNull():
-            clean_text = re.sub(r'\s+', ' ', text).strip()
-            cursor = document.find(clean_text)
-        # 3. 提取前30个字符匹配
-        if cursor.isNull() and len(text) > 30:
-            cursor = document.find(text[:30])
+            chunks = [c.strip() for c in re.split(r'[,.，。;\n]', clean_text) if len(c.strip()) > 15]
+            for chunk in chunks:
+                cursor = document.find(chunk)
+                if not cursor.isNull():
+                    break
 
+        if cursor.isNull() and len(clean_text) > 25:
+            cursor = document.find(clean_text[:25])
+
+        # 4. 执行高亮与强制视图滚动
         if not cursor.isNull():
-            fmt = QTextCharFormat()
-            fmt.setBackground(QColor(255, 235, 59, 120))  # 半透明黄色
-            cursor.mergeCharFormat(fmt)
-            self.text_browser.setTextCursor(cursor)
 
-    # --- 导出与外部打开 ---
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor(255, 235, 59, 120))
+            cursor.mergeCharFormat(fmt)
+
+            self.text_browser.setTextCursor(cursor)
+            self.text_browser.ensureCursorVisible()
+
     def open_system_app(self):
         if self.original_file_path and os.path.exists(self.original_file_path):
             try:
