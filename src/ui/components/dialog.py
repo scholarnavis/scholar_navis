@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
-                               QCheckBox, QTableWidgetItem)
+                               QCheckBox, QTableWidgetItem, QListWidget)
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject
 from PySide6.QtGui import QColor
 
@@ -717,6 +717,46 @@ class McpConfigDialog(BaseDialog):
             err_dialog = StandardDialog(self, "连接失败", f"无法连接到服务器：\n{msg}")
             err_dialog.setFixedWidth(500)
             err_dialog.exec()
+
+
+class SelectKBFileDialog(BaseDialog):
+    def __init__(self, parent=None, files=None):
+        super().__init__(parent, title="Select Files from KB", width=500)
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        tm = ThemeManager()
+        self.list_widget.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            QListWidget::item {{ padding: 6px; border-radius: 4px; }}
+            QListWidget::item:selected {{ background-color: {tm.color('accent')}; color: white; }}
+        """)
+
+        for f in files:
+            item = QListWidgetItem(f['name'])
+            item.setData(Qt.UserRole, f['path'])
+            self.list_widget.addItem(item)
+
+        # 允许双击直接应用
+        self.list_widget.itemDoubleClicked.connect(self.accept)
+
+        lbl_tip = QLabel("Hold Ctrl/Shift to select multiple files. Double-click to quick-attach.")
+        lbl_tip.setStyleSheet(f"color: {tm.color('text_muted')}; font-size: 12px;")
+
+        self.content_layout.addWidget(lbl_tip)
+        self.content_layout.addWidget(self.list_widget)
+
+        self.add_button("Cancel", self.reject)
+        self.add_button("Attach", self.accept, is_primary=True)
+
+    def get_selected_paths(self):
+        return [item.data(Qt.UserRole) for item in self.list_widget.selectedItems()]
 
 
 class AddModelDialog(BaseDialog):

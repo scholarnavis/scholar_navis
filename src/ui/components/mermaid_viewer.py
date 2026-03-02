@@ -1,6 +1,7 @@
 import json
+import os
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar,
                                QFileDialog, QComboBox, QSplitter, QTextEdit)
@@ -145,8 +146,13 @@ class MermaidViewer(QMainWindow):
 
         self.source_editor.blockSignals(True)
         self.source_editor.setPlainText(self.mermaid_code)
-
         self.source_editor.blockSignals(False)
+
+        self.render_diagram()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
 
     def _toggle_source(self):
         self.source_editor.setVisible(not self.source_editor.isVisible())
@@ -158,7 +164,6 @@ class MermaidViewer(QMainWindow):
     def render_diagram(self, theme=None):
         tm = ThemeManager()
 
-        # 联动机制：如果用户选择了 "default"，则跟随系统的深色/浅色模式
         current_combo_theme = self.theme_combo.currentText()
         if current_combo_theme == "default":
             mermaid_theme = 'dark' if tm.current_theme == 'dark' else 'default'
@@ -166,6 +171,9 @@ class MermaidViewer(QMainWindow):
             mermaid_theme = current_combo_theme
 
         safe_code = json.dumps(self.mermaid_code)
+
+        js_path = tm.get_resource_path("assets", "js", "mermaid.min.js")
+        js_uri = QUrl.fromLocalFile(js_path).toString()
 
         html_content = f"""
         <!DOCTYPE html>
@@ -180,7 +188,7 @@ class MermaidViewer(QMainWindow):
                 }}
                 .mermaid {{ transform-origin: top left; }}
             </style>
-            <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+            <script src="{js_uri}"></script>
         </head>
         <body>
             <div class="mermaid" id="graphDiv"></div>
@@ -201,4 +209,7 @@ class MermaidViewer(QMainWindow):
         </body>
         </html>
         """
-        self.web_view.setHtml(html_content)
+
+        # 🌟 3. 极其重要：必须传入一个本地的 baseUrl，否则 WebEngine 会因为跨域/安全策略拒绝加载 file:// 的脚本
+        base_url = QUrl.fromLocalFile(os.path.dirname(js_path) + "/")
+        self.web_view.setHtml(html_content, base_url)

@@ -111,7 +111,7 @@ class OpenAICompatibleLLM:
         standard_keys = {
             "temperature", "top_p", "n", "stop", "max_tokens", "presence_penalty",
             "frequency_penalty", "logit_bias", "user", "response_format", "seed",
-            "tools", "tool_choice", "parallel_tool_calls", "logprobs", "top_logprobs", "reasoning_effort"
+            "tools", "tool_choice", "parallel_tool_calls", "logprobs", "top_logprobs"
         }
 
         standard_payload = {}
@@ -128,30 +128,30 @@ class OpenAICompatibleLLM:
 
         return standard_payload
 
-    def _sanitize_messages_for_text_only(self, messages: List[Dict]) -> List[Dict]:
+    def _process_messages(self, messages: List[Dict]) -> List[Dict]:
         """
-        铁腕清理多模态消息：
-        不管上层UI传了什么图片或复杂对象，全部剥离，只提取纯文本发给大模型。
-        保证 PDF/文档文本正常发送，同时掐断所有多模态报错的可能性。
+        支持多模态消息：
+        如果上层 UI 传入了包含 image_url 的复杂 content 结构，予以保留。
         """
-        clean_msgs = []
+        processed_msgs = []
         for m in messages:
             role = m.get("role", "user")
             content = m.get("content", "")
 
             if isinstance(content, list):
-                # 遍历列表，只提取 type 为 text 的内容
-                text_parts = []
+                valid_parts = []
                 for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text" and "text" in part:
-                        text_parts.append(part["text"])
+                    if isinstance(part, dict):
+                        # 兼容纯文本和图像链接的 OpenAI 标准格式
+                        if part.get("type") in ["text", "image_url"]:
+                            valid_parts.append(part)
                     elif isinstance(part, str):
-                        text_parts.append(part)
-                clean_msgs.append({"role": role, "content": "\n".join(text_parts)})
+                        valid_parts.append({"type": "text", "text": part})
+                processed_msgs.append({"role": role, "content": valid_parts})
             else:
-                clean_msgs.append({"role": role, "content": str(content)})
+                processed_msgs.append({"role": role, "content": str(content)})
 
-        return clean_msgs
+        return processed_msgs
 
     def chat(self, messages: List[Dict], is_translation=False, **kwargs):
         payload = self._get_payload_kwargs()
@@ -161,16 +161,14 @@ class OpenAICompatibleLLM:
             for k in ['tools', 'tool_choice', 'response_format', 'image_generation']:
                 payload.pop(k, None)
 
-        # 强制格式化为纯文本
-        clean_messages = self._sanitize_messages_for_text_only(messages)
-
+        processed_messages = self._process_messages(messages)
         safe_payload = self._split_openai_payload(payload)
 
         self._log_params(safe_payload)
 
         response = self.client.chat.completions.create(
             model=self.model_name,
-            messages=clean_messages,
+            messages=processed_messages,
             **safe_payload
         )
         choice = response.choices[0]
@@ -193,19 +191,18 @@ class OpenAICompatibleLLM:
             for k in ['tools', 'tool_choice', 'response_format', 'image_generation']:
                 payload.pop(k, None)
 
-        # 强制格式化为纯文本
-        clean_messages = self._sanitize_messages_for_text_only(messages)
+        processed_messages = self._process_messages(messages)
         self._log_params(payload)
 
-        is_thinking = False
         stream = payload.pop("stream", True)
-
         safe_payload = self._split_openai_payload(payload)
+
+        is_thinking = False
 
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=clean_messages,
+                messages=processed_messages,
                 stream=stream,
                 **safe_payload
             )
@@ -216,14 +213,14 @@ class OpenAICompatibleLLM:
 
             for chunk in response:
                 if self._is_cancelled:
-                    if is_thinking: yield "\n</think>\n"
+                    if is_thinking:
+                        yield "\n</think>\n\n"
                     yield "\n\n[⛔ Generation halted by user.]"
                     break
 
                 if not chunk.choices: continue
                 delta = chunk.choices[0].delta
 
-                # 安全提取 DeepSeek 等模型兼容的 reasoning_content
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if not reasoning and hasattr(delta, 'model_extra') and delta.model_extra:
                     reasoning = delta.model_extra.get('reasoning_content')
@@ -237,11 +234,12 @@ class OpenAICompatibleLLM:
                 content = getattr(delta, 'content', None)
                 if content:
                     if is_thinking:
-                        yield "\n</think>\n"
+                        yield "\n</think>\n\n"
                         is_thinking = False
                     yield content
 
-            if is_thinking: yield "\n</think>\n"
+            if is_thinking:
+                yield "\n</think>\n"
 
         except APIStatusError as e:
             friendly_msg = ""

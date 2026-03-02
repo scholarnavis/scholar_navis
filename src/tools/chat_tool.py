@@ -42,7 +42,7 @@ from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import StandardDialog
+from src.ui.components.dialog import StandardDialog, SelectKBFileDialog
 from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
@@ -570,7 +570,7 @@ class ChatWorker(QObject):
                 try:
                     trans_kwargs = {
                         "is_translation": True,
-                        "thinking_enabled": False,
+                        "stream": False  # 翻译不需要流式
                     }
                     search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm, **trans_kwargs)
                 except Exception as e:
@@ -580,7 +580,9 @@ class ChatWorker(QObject):
 
             self.sig_token.emit("[CLEAR_SEARCH]")
 
-            # Phase 2 & 3: Vector Retrieval & Reranking (Only if KB is selected)
+            # ==========================================
+            # Phase 2: Vector Retrieval & Reranking (Local KB)
+            # ==========================================
             if self.kb_id and self.kb_id != "none":
                 self.sig_token.emit("<i>🔍 Loading local vector model and retrieving literature...</i>\n\n")
 
@@ -597,11 +599,8 @@ class ChatWorker(QObject):
                         real_id = resolve_auto_model("embedding", target_device)
                         conf = get_model_conf(real_id, "embedding")
 
-                    repo_id = conf.get('hf_repo_id')
-
                     try:
-                        embed_fn = _worker_load_model(self.kb_id,self.config)
-
+                        embed_fn = _worker_load_model(self.kb_id, self.config)
                         if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
                             self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
                             return
@@ -609,7 +608,6 @@ class ChatWorker(QObject):
                         self.sig_error.emit(f"Critical Model Error: {str(e)}")
                         return
 
-                    # Multi-query Expansion
                     history_context = ""
                     if len(self.messages) >= 3:
                         prev_assistant = self.messages[-2]['content'][:100]
@@ -618,15 +616,14 @@ class ChatWorker(QObject):
                     expanded_queries = [
                         search_query,
                         f"{search_query}{history_context}",
-                        f"{domain} context: {search_query} research details",
-                        f"{search_query} references bibliography citations",
+                        f"{domain} context: {search_query} research details"
                     ]
 
                     candidate_docs = []
                     seen_contents = set()
 
                     for eq in expanded_queries:
-                        raw_results = self.db.query(eq, n_results=25)
+                        raw_results = self.db.query(eq, n_results=20)
                         if raw_results and raw_results.get('documents') and raw_results['documents'][0]:
                             docs = raw_results['documents'][0]
                             metas = raw_results['metadatas'][0]
@@ -642,40 +639,86 @@ class ChatWorker(QObject):
                                         "v_dist": distances[i]
                                     })
 
-                    # Reranker execution
                     if candidate_docs:
-                        candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:45]
+                        candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
+                        # 知识库的 Rerank
+                        final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=10)
 
-                        final_docs = self.reranker.rerank(search_query, candidate_docs, domain=domain, top_k=15)
-                    else:
-                        final_docs = []
-
-            # ==========================================
-            # Phase 3.5: Inject External Context (e.g., RSS, Selected Docs)
-            # ==========================================
-            if getattr(self, 'external_context', None):
-                if isinstance(self.external_context, list):
-                    current_ref_id = len(sources_map) + 1 if sources_map else 1
-                    for chunk in self.external_context:
-                        sources_map[current_ref_id] = {
-                            "path": chunk.get('path', ''),
-                            "page": chunk.get('page', 1),
-                            "name": chunk.get('name', 'External Document'),
-                            "search_text": chunk.get('content', '')[:100]
-                        }
-                        context_str += (
-                            f"--- [Document {current_ref_id}] ---\n"
-                            f"Source: {chunk.get('name', 'External')} (Page {chunk.get('page', 1)})\n"
-                            f"Content: {chunk.get('content', '')}\n\n"
-                        )
-                        current_ref_id += 1
-                else:
-                    context_str += f"\n\n--- [External Context Provided by User] ---\n{self.external_context}\n\n"
+                        # 构建引用字典
+                        current_ref_id = 1
+                        for doc in final_docs:
+                            sources_map[current_ref_id] = {
+                                "path": doc['metadata'].get('file_path', ''),
+                                "page": doc['metadata'].get('page', 1),
+                                "name": doc['metadata'].get('source', 'Local DB'),
+                                "search_text": doc['content'][:100]
+                            }
+                            context_str += (
+                                f"--- [Document {current_ref_id}] ---\n"
+                                f"Source: {doc['metadata'].get('source', 'Local')} (Page {doc['metadata'].get('page', 1)})\n"
+                                f"Content: {doc['content']}\n\n"
+                            )
+                            current_ref_id += 1
 
             if not context_str.strip():
-                context_str = "No local documents provided. Use tools to fetch real-time data if necessary."
+                context_str = "No local database documents provided."
 
-            # Phase 3.9: Low VRAM 内存/显存释放
+            # ==========================================
+            # Phase 3: Dynamic External Context (Multimodal & On-the-fly Reranking)
+            # ==========================================
+            external_chunks = getattr(self, 'external_context', [])
+            images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
+                ('.png', '.jpg', '.jpeg', '.webp'))]
+            docs = [c for c in external_chunks if c not in images]
+
+            llm_content = []
+
+            # 3.1 处理上传的长文本 / PDF (启用 Reranker 降低幻觉)
+            if docs:
+                self.sig_token.emit(
+                    "<i>📄 Filtering and reranking attached documents to reduce hallucinations...</i>\n\n")
+                cand_docs = [{"content": d.get("content", ""),
+                              "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
+
+                # 如果用户上传的文档切片非常多，通过 Reranker 提纯最相关的几页
+                if len(cand_docs) > 5 and hasattr(self, 'reranker') and getattr(self, 'reranker'):
+                    cand_docs = self.reranker.rerank(search_query, cand_docs, top_k=8)
+
+                files_dict = {}
+                for doc in cand_docs:
+                    f_name = doc["metadata"]["name"]
+                    page = doc["metadata"]["page"]
+                    if f_name not in files_dict:
+                        files_dict[f_name] = ""
+                    files_dict[f_name] += f"\n[Page {page}]\n{doc['content']}"
+
+                # 按照你的要求，以 JSON 格式封装文本内容
+                docs_json = json.dumps(files_dict, ensure_ascii=False)
+                llm_content.append({"type": "text", "text": f"User Uploaded Files (JSON Format):\n{docs_json}\n\n"})
+
+            # 3.2 正常用户文字输入
+            llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
+
+            # 3.3 处理多图顺序挂载
+            for img in images:
+                # 兼容不同来源的 base64 key
+                img_data = img.get("base64_url") or img.get("content")
+                if img_data:
+                    # 确保前缀符合 OpenAI 视觉标准
+                    if not img_data.startswith("data:image"):
+                        ext = str(img.get("path", ".jpeg")).split('.')[-1]
+                        img_data = f"data:image/{ext};base64,{img_data}"
+
+                    llm_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": img_data}
+                    })
+
+            self.sig_token.emit("[CLEAR_SEARCH]")
+
+            # ==========================================
+            # Phase 4: Low VRAM Release
+            # ==========================================
             is_low_vram = self.config.user_settings.get("low_vram_mode", False)
             if is_low_vram:
                 self.sig_token.emit("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
@@ -683,19 +726,16 @@ class ChatWorker(QObject):
                     self.reranker.model = None
                 if hasattr(self, 'db') and self.db:
                     self.db.reload()
-                if 'embed_fn' in locals():
-                    del embed_fn
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # Phase 4: Hybrid Agentic RAG (Local DB + MCP Tools)
-            self.sig_token.emit("[CLEAR_SEARCH]")
+            # ==========================================
+            # Phase 5: Agentic Generation
+            # ==========================================
             self.sig_token.emit("[START_LLM_NETWORK]")
 
             mcp_mgr = MCPManager.get_instance()
-
-            # 按需过滤加载工具
             mcp_tools = None
             if self.use_mcp:
                 selected_tags = getattr(self, 'selected_mcp_tags', [])
@@ -729,41 +769,14 @@ class ChatWorker(QObject):
 
                 f"### CONTEXT:\n{context_str}"
             )
+
+            # 使用列表结构替换掉尾部用户输入，支持多模态
             rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
-            # [重构] 剥离出图片和纯文档
-            external_chunks = getattr(self, 'external_context', [])
-            images = [c for c in external_chunks if c.get("type") == "image"]
-            docs = [c for c in external_chunks if c.get("type") != "image"]
-
-            # 构建当前轮次的用户输入 Content (支持多模态 List)
-            llm_content = []
-
-            # 1. 如果有文档/PDF，将其打包为 JSON 格式置于文字最前方
-            if docs:
-                files_dict = {}
-                for doc in docs:
-                    f_name = doc.get('name', 'Unknown_File')
-                    if f_name not in files_dict:
-                        files_dict[f_name] = ""
-                    files_dict[f_name] += f"\n[Page {doc.get('page', 1)}]\n{doc.get('content', '')}"
-
-                docs_json = json.dumps(files_dict, ensure_ascii=False)
-                llm_content.append({"type": "text", "text": f"Context Files (JSON Format):\n{docs_json}\n\n"})
-
-            # 2. 正常文字输入
-            llm_content.append({"type": "text", "text": f"User Input:\n{search_query}"})
-
-            # 3. 追加图片 (按用户提供的顺序)
-            for img in images:
-                llm_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": img["base64_url"]}
-                })
-
             rag_messages.append({"role": "user", "content": llm_content})
 
             tool_executed = False
 
+            # MCP 循环
             if mcp_tools:
                 try:
                     MAX_ITERATIONS = 5
@@ -771,48 +784,27 @@ class ChatWorker(QObject):
                         response_msg = self.main_llm.chat(
                             messages=rag_messages,
                             tools=mcp_tools,
-                            tool_choice="auto",
+                            tool_choice="auto"
                         )
 
                         tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
-                        content_text = response_msg.get('content', '') if isinstance(response_msg, dict) else str(
-                            response_msg)
 
-                        # 拦截格式幻觉
-                        if not tool_calls and content_text and re.search(r'(?:Tool_args|tool_calls|arguments):\s*\{',
-                                                                         content_text, re.IGNORECASE):
-                            self.logger.warning(f"Intercepted model tool hallucination: {content_text}")
-                            break
-
-                            # 🚀 核心逻辑：如果本次请求没有返回 tool_calls，说明大模型觉得所需数据（如车票）已经全部查完，主动退出循环
                         if not tool_calls:
                             break
 
                         tool_executed = True
-                        rag_messages.append(response_msg)  # 将模型的调用意图加入上下文
+                        rag_messages.append(response_msg)
 
-                        # 遍历并执行本次所有的工具请求
                         for tool_call in tool_calls:
                             tool_name = tool_call['function']['name']
                             try:
                                 tool_args = json.loads(tool_call['function']['arguments'])
                                 self.sig_token.emit(f"<i>📡 Requesting MCP server: {tool_name}...</i>\n\n")
-
                                 tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
-
-                                try:
-                                    res_dict = json.loads(tool_result)
-                                    if isinstance(res_dict, dict) and res_dict.get("status") == "error":
-                                        error_msg = res_dict.get("message", "Unknown error")
-                                        GlobalSignals().sig_toast.emit(f"Tool Request Failed: {error_msg}", "warning")
-                                except Exception:
-                                    pass
-
                             except Exception as e:
                                 self.logger.error(f"MCP tool {tool_name} failed: {e}")
                                 tool_result = f"Tool execution failed: {str(e)}"
 
-                            # 将工具的返回结果追加给大模型，供下一轮判断
                             rag_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call['id'],
@@ -820,28 +812,18 @@ class ChatWorker(QObject):
                                 "content": tool_result
                             })
 
-                    # 循环结束后，所有必要的数据一定集齐了
                     if tool_executed:
                         self.sig_token.emit(
                             "<i>✅ All data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
                 except Exception as e:
                     self.logger.warning(f"Tool calling loop failed: {e}")
 
-            # 🚀 优化闭嘴指令：强化回答，同时强制召回追问格式
             if tool_executed:
-                silence_prompt = (
-                    "CRITICAL SYSTEM INSTRUCTION: "
-                    "The tools have successfully executed and returned the necessary data. "
-                    "You MUST NOW provide the final answer directly to the user based on the tool results. "
-                    "STRICTLY FORBIDDEN: Do not explain your tool execution process. "
-                    "Do not output any JSON argument blocks.\n\n"
-                    "REMEMBER: At the very end of your response, you MUST output the [FOLLOW_UPS] tag followed by exactly 6 follow-up questions using the EXACT format specified in the initial system prompt."
-                )
+                silence_prompt = "CRITICAL: Tools executed. Provide final answer now. No JSON argument blocks. Remember the [FOLLOW_UPS] format."
                 rag_messages.append({"role": "system", "content": silence_prompt})
 
             # --- LLM Output Streaming ---
-            kwargs = {}
-            for token in self.main_llm.stream_chat(rag_messages, **kwargs):
+            for token in self.main_llm.stream_chat(rag_messages):
                 self.full_response_cache += token
                 self.sig_token.emit(token)
 
@@ -1805,76 +1787,13 @@ class ChatTool(BaseTool):
             ToastManager().show("The selected Knowledge Base is empty.", "warning")
             return
 
-        # 简单的文件选择弹窗
-        dlg = QDialog(self.widget)
-        dlg.setWindowTitle("Select Files from KB")
-        dlg.setFixedSize(400, 300)
-        dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
-        layout = QVBoxLayout(dlg)
-
-        list_widget = QListWidget()
-        list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        list_widget.setStyleSheet("background-color: #252526; border: 1px solid #444;")
-        for f in files:
-            item = QListWidgetItem(f['name'])
-            item.setData(Qt.UserRole, f['path'])
-            list_widget.addItem(item)
-
-        layout.addWidget(QLabel("Hold Ctrl/Shift to select multiple files:"))
-        layout.addWidget(list_widget)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(dlg.accept)
-        btn_box.rejected.connect(dlg.reject)
-        layout.addWidget(btn_box)
+        dlg = SelectKBFileDialog(self.widget, files=files)
 
         if dlg.exec():
-            selected_items = list_widget.selectedItems()
-            if not selected_items: return
+            paths = dlg.get_selected_paths()
+            if paths:
+                self.process_attached_files(paths)
 
-            if not hasattr(self, 'external_chunks'):
-                self.external_chunks = []
-            if not hasattr(self, 'external_context_html'):
-                self.external_context_html = ""
-
-            names = []
-            for item in selected_items:
-                f_path = item.data(Qt.UserRole)
-                f_name = item.text()
-                try:
-                    # 按照 PDF 页数进行精确切片
-                    if f_name.lower().endswith('.pdf') or f_path.lower().endswith('.pdf'):
-                        try:
-                            chunks = pymupdf4llm.to_markdown(f_path, page_chunks=True)
-                            for chunk in chunks:
-                                text = chunk.get("text", "").strip()
-                                if len(text) > 10:
-                                    self.external_chunks.append({
-                                        "path": f_path, "name": f_name,
-                                        "page": chunk.get("metadata", {}).get("page", 1),
-                                        "content": text
-                                    })
-                        except Exception as e:
-                            self.logger.error(f"PyMuPDF4LLM failed for {f_name}: {e}")
-                    else:
-                        # 🚨 修正：直接原生读取，不用那个根本不存在的 read_file_content
-                        with open(f_path, 'r', encoding='utf-8') as f:
-                            content = f.read().strip()
-                            if content:
-                                self.external_chunks.append({
-                                    "path": f_path, "name": f_name,
-                                    "page": 1, "content": content
-                                })
-
-                    names.append(f_name)
-                    link = f"cite://view?path={quote(f_path)}&page=1&name={quote(f_name)}"
-                    self.external_context_html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
-                except Exception as e:
-                    print(f"Failed to read {f_name}: {e}")
-
-            if names:
-                self.input_container.show_context_preview(", ".join(names))
-                ToastManager().show(f"Attached {len(names)} document(s).", "success")
 
     def update_ai_bubble(self, token):
         if not self.current_ai_bubble: return

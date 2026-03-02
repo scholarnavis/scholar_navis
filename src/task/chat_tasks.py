@@ -57,12 +57,18 @@ class ProcessAttachmentTask(BackgroundTask):
                 # 3. Text processing
                 else:
                     self.update_progress(int((i / total) * 100), f"Reading file: {f_name}...")
-                    with open(path, 'r', encoding='utf-8') as f:
-                        text = f.read().strip()
-                        if text:
-                            chunks.append({
-                                "path": path, "name": f_name, "page": 1, "content": text
-                            })
+                    try:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            text = f.read().strip()
+                    except UnicodeDecodeError:
+                        # 降级容错：如果 utf-8 失败，尝试用 gbk 读取，忽略无法解码的字符
+                        with open(path, 'r', encoding='gbk', errors='ignore') as f:
+                            text = f.read().strip()
+
+                    if text:
+                        chunks.append({
+                            "path": path, "name": f_name, "page": 1, "content": text
+                        })
                     link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
                     html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
 

@@ -1,10 +1,28 @@
 import re
-
 import markdown
-
 from src.core.theme_manager import ThemeManager
 
+
 class TextFormatter:
+
+    @staticmethod
+    def _render_simple_latex(text):
+
+        def replacer(match):
+            formula = match.group(1)
+            formula = re.sub(r'\\text\{([^}]+)\}', r'\1', formula)
+            formula = re.sub(r'\^\{([^}]+)\}', r'<sup>\1</sup>', formula)
+            formula = re.sub(r'\^([a-zA-Z0-9])', r'<sup>\1</sup>', formula)
+            formula = re.sub(r'_\{([^}]+)\}', r'<sub>\1</sub>', formula)
+            formula = re.sub(r'_([a-zA-Z0-9])', r'<sub>\1</sub>', formula)
+            formula = formula.replace('{}', '')
+            return f"<i>{formula}</i>"
+
+        text = re.sub(r'\$\$(.*?)\$\$', replacer, text, flags=re.DOTALL)
+        text = re.sub(r'\$(.*?)\$', replacer, text)
+        return text
+
+
     @staticmethod
     def format_chat_text(text, index, expanded_indices, user_toggled_thinks):
         tm = ThemeManager()
@@ -17,6 +35,7 @@ class TextFormatter:
         main_text = text
         is_closed = True
 
+        # 兼容旧版本可能残留的 [FINAL_ANSWER] 标签
         final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
 
         if final_answer_match:
@@ -27,31 +46,28 @@ class TextFormatter:
             main_text = re.sub(r'</?think\s*>', '', raw_main, flags=re.IGNORECASE).strip()
             is_closed = True
         else:
+            # 标准化标签
+            text = re.sub(r'<\s*think\s*>', '<think>', text, flags=re.IGNORECASE)
             text = re.sub(r'<\s*/\s*think\s*>', '</think>', text, flags=re.IGNORECASE)
+
+            # 1. 尝试匹配已闭合的完整思考块
             think_match = re.search(r'<think>(.*?)</think>', text, flags=re.DOTALL | re.IGNORECASE)
 
             if think_match:
                 think_content = think_match.group(1).strip()
+                # 从原文中剔除思考块，剩下的就是正文
                 main_text = text.replace(think_match.group(0), "").strip()
                 is_closed = True
             elif "<think>" in text:
+                # 2. 未闭合状态 (流式生成中)：<think> 之后的所有内容绝对都是思考内容
                 parts = text.split("<think>", 1)
-                raw_after = parts[1]
-
-                split_match = re.search(r'\n{2,}(?=\*\*|#|- |\d+\.|Yes,|Certainly,|Here )', raw_after, flags=re.IGNORECASE)
-                if split_match:
-                    split_idx = split_match.start()
-                    think_content = raw_after[:split_idx].strip()
-                    main_text = parts[0].strip() + "\n\n" + raw_after[split_idx:].strip()
-                    is_closed = True
-                else:
-                    think_content = raw_after.strip()
-                    main_text = parts[0].strip()
-                    is_closed = False
-            else:
-                return text
+                main_text = parts[0].strip()
+                think_content = parts[1].strip()
+                is_closed = False
 
         final_html = ""
+
+        # --- 渲染思考块 ---
         if think_content or not is_closed:
             if index in user_toggled_thinks:
                 is_expanded = index in expanded_indices
@@ -61,7 +77,7 @@ class TextFormatter:
             action = "collapse" if is_expanded else "expand"
             icon_name = "chevron-down" if is_expanded else "chevron-right"
             icon_html = f"<img src='assets/icons/{icon_name}.svg' width='14' height='14' style='vertical-align: middle;' />"
-            status = "AI Thinking Process" if is_closed else "AI Thinking..."
+            status = "AI 深度思考 (已完成)" if is_closed else "AI 正在思考..."
 
             link = f"<a href='think://{action}?index={index}' style='color:{accent_color}; text-decoration:none;'><nobr>{icon_html} <b>{status}</b></nobr></a>"
 
@@ -78,7 +94,9 @@ class TextFormatter:
                     f"margin: 10px 0; border-radius: 4px; font-size: 13px; color: {text_muted};'>"
                     f"{link}<br><br><div style='color:{text_muted};'>{safe_content}{suffix}</div></div>")
 
+        # --- 渲染主文本 ---
         if main_text:
+            # 清理可能的杂乱系统尾缀
             main_text = re.sub(r'\[FINAL_ANSWER\]\s*', '', main_text, flags=re.IGNORECASE)
             main_text = re.sub(r'\[FOLLOW_UPS\]\s*', '', main_text, flags=re.IGNORECASE)
             final_html += f"\n\n{main_text}"
@@ -89,7 +107,7 @@ class TextFormatter:
     def markdown_to_html(text):
         tm = ThemeManager()
         processed_text = text
-
+        processed_text = TextFormatter._render_simple_latex(processed_text)
         processed_text = re.sub(r'(?<![="\'/])\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b',
                                 r'<a href="https://doi.org/\1">\1</a>', processed_text)
         processed_text = re.sub(r'(?<![="\'/\[\(])\b(https?://[^\s<>\)\]]+)\b', r'<a href="\1">\1</a>',
@@ -98,7 +116,6 @@ class TextFormatter:
         html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
 
         html = html.replace("<a href=", "<a style='color: #4daafc; text-decoration: none; font-weight: bold;' href=")
-
         final_html = f"<div style='font-family: {tm.font_family()}; line-height: 1.5;'>{html}</div>"
 
         return final_html
@@ -146,9 +163,6 @@ class TextFormatter:
             return ""
         return cleaned.lstrip()
 
-
     @staticmethod
     def clean_text_for_copy(text):
-        """专门提供给聊天气泡的复制操作使用，去掉所有 HTML、引用列表、AI 思考过程及占位符"""
         return TextFormatter.clean_text_for_export(text, include_citations=False)
-
