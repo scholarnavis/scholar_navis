@@ -231,7 +231,8 @@ if __name__ == "__main__":
 
     tm = ThemeManager()
     ico_path = os.path.abspath(tm.get_resource_path("Assets", "ico.ico"))
-
+    print(f"========== 绝对路径: {ico_path} ==========")
+    print(f"========== 图标是否存在: {os.path.exists(ico_path)} ==========")
     if sys.platform == "win32" and os.path.exists(ico_path):
         global_icon = QIcon(ico_path)
     else:

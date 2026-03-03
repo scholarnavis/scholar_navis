@@ -200,13 +200,14 @@ class MCPManager:
         else:
             return [server_name] if server_name else ["Unknown Server"]
 
-
     def get_tools_schema_by_tags(self, selected_tags: list) -> list:
-        """根据 UI 勾选的标签，精准过滤发给大模型的工具列表"""
-        if not selected_tags:
+        if selected_tags is None:
             return self.get_all_tools_schema()
 
-        filtered_tools =[]
+        if not selected_tags:
+            return []
+
+        filtered_tools = []
         for schema in self.tool_schemas.values():
             tool_tags = self._get_tool_effective_tags(schema)
             if any(tag in selected_tags for tag in tool_tags):

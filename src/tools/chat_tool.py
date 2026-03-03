@@ -814,8 +814,8 @@ class ChatWorker(QObject):
             mcp_mgr = MCPManager.get_instance()
             mcp_tools = None
             if self.use_mcp:
-                selected_tags = getattr(self, 'selected_mcp_tags', [])
-                if selected_tags:
+                selected_tags = getattr(self, 'selected_mcp_tags', None)
+                if selected_tags is not None:
                     mcp_tools = mcp_mgr.get_tools_schema_by_tags(selected_tags)
                 else:
                     mcp_tools = mcp_mgr.get_all_tools_schema()
