@@ -1,11 +1,14 @@
+import ipaddress
 import json
 import logging
 import os
 import re
 import socket
+import sys
 import urllib.parse
 import time
 from functools import wraps
+from logging.handlers import RotatingFileHandler
 
 import requests
 from Bio import Entrez
@@ -15,8 +18,36 @@ from src.core.config_manager import ConfigManager
 from src.core.network_worker import setup_global_network_env, _get_explicit_proxy_kwargs, create_robust_session
 from src.core.oa import OAFetcher
 
-logger = logging.getLogger("Academic.Server")
 
+def get_app_root():
+    """Nuitka 安全的根目录解析"""
+    # 如果被 Nuitka 打包（或者 PyInstaller）
+    if getattr(sys, 'frozen', False) or '__compiled__' in globals():
+        return os.path.dirname(sys.executable)
+    # 如果是源码运行（假设该文件在 src/plugins 或类似子目录下，向上退一级）
+    # 请根据你实际的目录层级调整这里的 ".." 数量
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+APP_ROOT = get_app_root()
+
+
+logger = logging.getLogger("Academic.Server")
+logger.setLevel(logging.INFO)
+
+log_dir = os.path.join(APP_ROOT, "logs", "mcp", "academic")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "academic_mcp.log")
+
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# 标准错误输出 (避免污染 MCP 需要的 stdout 协议流)
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setFormatter(formatter)
+logger.addHandler(stderr_handler)
 
 ConfigManager()
 setup_global_network_env()
@@ -26,7 +57,7 @@ ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
 s2_api_key = os.environ.get("S2_API_KEY", "").strip()
 
 
-WORKSPACE_DIR = os.path.abspath(os.path.join(os.getcwd(), "mcp_workspace", "downloads"))
+WORKSPACE_DIR = os.path.join(APP_ROOT, "mcp_workspace", "downloads")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 logger.info(f"Local Workspace initialized at: {WORKSPACE_DIR}")
 
@@ -41,29 +72,6 @@ if ncbi_api_key:
 
 mcp = FastMCP("ScholarNavis-Academic-Plugin")
 
-
-class UDPLogHandler(logging.Handler):
-    def __init__(self, port):
-        super().__init__()
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.address = ('127.0.0.1', port)
-
-    def emit(self, record):
-        try:
-            msg = record.getMessage()
-            if record.exc_info and not record.exc_text:
-                record.exc_text = self.formatter.formatException(record.exc_info)
-            if record.exc_text: msg += f"\n{record.exc_text}"
-            payload = f"{record.levelname}|{msg}"[:65000]
-            self.sock.sendto(payload.encode('utf-8'), self.address)
-        except Exception:
-            pass
-
-
-log_port_str = os.environ.get("SCHOLAR_NAVIS_LOG_PORT", "")
-if log_port_str.isdigit():
-    logger.addHandler(UDPLogHandler(int(log_port_str)))
-    logger.info(f"Connected to Main UI Log System via UDP port {log_port_str}.")
 
 
 def mcp_request(method: str, url: str, **kwargs):
@@ -479,15 +487,20 @@ def search_protein_structure(query: str, max_results: int = 3) -> str:
 @simple_retry()
 def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
     logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
+
+    safe_id = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', accession_id)
+    safe_db = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', db_type)
+
+
     try:
-        fetch_handle = Entrez.efetch(db=db_type, id=accession_id, rettype="fasta", retmode="text")
+        fetch_handle = Entrez.efetch(db=safe_db, id=safe_id, rettype="fasta", retmode="text")
         data = fetch_handle.read()
         fetch_handle.close()
 
         if not data: return json.dumps({"status": "error", "message": "Empty sequence."})
 
         if len(data) > 15000:
-            file_name = f"{accession_id}_{db_type}.fasta"
+            file_name = f"{safe_id}_{safe_db}.fasta"
             file_path = os.path.join(WORKSPACE_DIR, file_name)
             with open(file_path, "w", encoding='utf-8') as f: f.write(data)
             cite_link = f"cite://view?path={urllib.parse.quote(file_path)}&page=1&name={urllib.parse.quote(file_name)}"
@@ -566,6 +579,7 @@ def fetch_pubmed_abstract(pmid: str) -> str:
 )
 @simple_retry()
 def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> str:
+    logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query} | max_results: {max_results}")
     try:
         search_handle = Entrez.esearch(db=database, term=query, retmax=max_results)
         ids = Entrez.read(search_handle).get("IdList", [])
@@ -601,6 +615,32 @@ def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> s
 @simple_retry(max_attempts=2, delay=1)
 def fetch_webpage_content(url: str, timeout: int = 15) -> str:
     logger.info(f"Task: Fetch Webpage | URL: '{url}' | Timeout: {timeout}s")
+
+    if not url.startswith(("http://", "https://")):
+        logger.warning(f"Security Block: Invalid URL scheme requested -> {url}")
+        return json.dumps({"status": "error", "message": "Security Error: Only HTTP and HTTPS protocols are allowed."})
+
+
+    parsed_url = urllib.parse.urlparse(url)
+    hostname = parsed_url.hostname
+
+    # 1. 拦截常见本地及内网域名
+    if hostname in ['localhost', 'broadcasthost'] or hostname.endswith('.local'):
+        logger.warning(f"Security Block: Local network access forbidden -> {url}")
+        return json.dumps(
+            {"status": "error", "message": "Security Error: Access to local network addresses is forbidden."})
+
+    # 2. 深度拦截：将域名解析为 IP 并判断是否为私有局域网 IP
+    try:
+        ip_obj = ipaddress.ip_address(socket.gethostbyname(hostname))
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+            logger.warning(f"Security Block: Private IP access forbidden -> {ip_obj}")
+            return json.dumps(
+                {"status": "error", "message": "Security Error: Probing internal network IPs is forbidden."})
+    except Exception:
+        # 如果域名无法解析或格式错误，忽略此步，让后面的 requests 去抛出正常错误
+        pass
+
     try:
 
         res = mcp_request("GET", url, timeout=timeout)

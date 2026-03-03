@@ -45,14 +45,31 @@ class MCPManager:
         self._loop.run_forever()
 
     def bootstrap_servers(self):
-        """
-        Unified method to load and start all enabled MCP servers from the central configuration.
-        Implements staggered lazy-loading for external servers to prevent UI freezes.
-        """
         config_mgr = ConfigManager()
         servers = config_mgr.mcp_servers.get("mcpServers", {})
+        user_cfg = config_mgr.user_settings
 
-        delay_ms = 500  # 外部服务器初始延迟
+        safe_base_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "SystemRoot": os.environ.get("SystemRoot", ""),
+            "USERPROFILE": os.environ.get("USERPROFILE", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "PYTHONIOENCODING": "utf-8",
+        }
+
+        if user_cfg.get("proxy_mode") == "custom" and user_cfg.get("proxy_url"):
+            proxy = user_cfg.get("proxy_url")
+            safe_base_env["HTTP_PROXY"] = proxy
+            safe_base_env["HTTPS_PROXY"] = proxy
+            safe_base_env["http_proxy"] = proxy
+            safe_base_env["https_proxy"] = proxy
+
+        builtin_env = safe_base_env.copy()
+        if user_cfg.get("ncbi_email"): builtin_env["NCBI_API_EMAIL"] = user_cfg.get("ncbi_email")
+        if user_cfg.get("ncbi_api_key"): builtin_env["NCBI_API_KEY"] = user_cfg.get("ncbi_api_key")
+        if user_cfg.get("s2_api_key"): builtin_env["S2_API_KEY"] = user_cfg.get("s2_api_key")
+
+        delay_ms = 500
 
         for server_name, srv_cfg in servers.items():
             is_enabled = srv_cfg.get("enabled", False)
@@ -60,7 +77,6 @@ class MCPManager:
 
             if is_enabled or always_on:
                 self.server_status[server_name] = "starting"
-
                 run_cfg = dict(srv_cfg)
 
                 if server_name == "builtin":
@@ -70,9 +86,10 @@ class MCPManager:
                     if is_frozen:
                         run_cfg['args'] = ["--run-builtin-mcp"]
                     else:
-                        run_cfg['args'] = ["-c",
-                                           "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
+                        run_cfg['args'] = ["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
 
+                    #  只有内置服务使用 builtin_env
+                    run_cfg['env'] = builtin_env
                     self._async_start(server_name, run_cfg)
 
                 else:
@@ -83,15 +100,19 @@ class MCPManager:
                         run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
 
                     if run_cfg.get('type') == 'stdio':
-                        env_copy = os.environ.copy()
-                        env_copy.update(run_cfg.get('env', {}))
-                        run_cfg['env'] = env_copy
+                        # 第三方服务只能继承纯净的 safe_base_env
+                        custom_env = safe_base_env.copy()
+                        user_defined_env = run_cfg.get('env', {})
+                        if isinstance(user_defined_env, dict):
+                            custom_env.update(user_defined_env)
+                        run_cfg['env'] = custom_env
 
                     def start_lazy_server(name=server_name, cfg=run_cfg):
                         self._async_start(name, cfg)
 
                     QTimer.singleShot(delay_ms, start_lazy_server)
                     delay_ms += 2000
+
 
     async def _run_session(self, server_name: str, connection_config: dict):
         self.server_status[server_name] = "connecting"
@@ -167,19 +188,19 @@ class MCPManager:
             tags.update(self._get_tool_effective_tags(schema))
         return sorted(list(tags))
 
-
     def _get_tool_effective_tags(self, schema: dict) -> list:
         server_name = schema.get("function", {}).get("server", "")
 
-        if server_name in ["builtin", "external"]:
+        if server_name == "builtin":
             desc = schema.get("function", {}).get("description", "")
             import re
             match = re.search(r"\[Tags:\s*(.*?)\]", desc, re.IGNORECASE)
             if match:
                 return [t.strip() for t in match.group(1).split(",")]
-            return ["General Tools"]  # 如果内置工具忘了写标签，默认分到 General
+            return ["General Tools"]
         else:
             return [server_name] if server_name else ["Unknown Server"]
+
 
     def get_tools_schema_by_tags(self, selected_tags: list) -> list:
         """根据 UI 勾选的标签，精准过滤发给大模型的工具列表"""
@@ -196,25 +217,6 @@ class MCPManager:
         return filtered_tools
 
 
-    def connect_manual(self, server_name: str, config: dict) -> bool:
-
-        # 先断开现有的
-        if server_name in self.sessions or server_name in self.server_status:
-            self.disconnect_server(server_name)
-
-        self.server_status[server_name] = "connecting"
-        future = asyncio.run_coroutine_threadsafe(self._run_session(server_name, config), self._loop)
-        self.server_tasks[server_name] = future
-
-        # 等待最多 10 秒，使用 processEvents 防止 UI 界面假死（转圈动画能动）
-        for _ in range(20):
-            status = self.server_status.get(server_name, "")
-            if status == "connected": return True
-            if "error" in status: return False
-            time.sleep(0.5)
-            QApplication.processEvents()
-
-        return False
 
     def _async_start(self, server_name: str, config: dict):
         """非阻塞启动：把任务扔给 asyncio 循环后立即返回，状态靠 UI 的 QTimer 自动刷新"""

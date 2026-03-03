@@ -609,9 +609,24 @@ class SettingsTool(BaseTool):
         self.table_mcp.setCellWidget(row, 5, action_widget)
 
     def _on_add_mcp_clicked(self):
-        dlg = McpConfigDialog(self.widget)
-        if dlg.exec():
-            name, cfg = dlg.get_config()
+
+        warning_msg = (
+            "<b>⚠️ Security Disclaimer for External MCP Servers</b><br><br>"
+            "You are about to connect a third-party MCP server to Scholar Navis.<br>"
+            "External servers are highly privileged and can execute code, read local files, or access the network on your behalf. "
+            "<span style='color:#ff6b6b; font-weight:bold;'>Only connect to servers from trusted developers.</span><br><br>"
+            "<i>The Scholar Navis developers are not responsible for any data loss, security breaches, or system damage caused by third-party MCP servers.</i><br><br>"
+            "Do you understand the risks and wish to proceed?"
+        )
+
+        dlg = StandardDialog(self.widget, "Security Warning", warning_msg, show_cancel=True)
+        if not dlg.exec():
+            return
+
+        # 用户同意后，才弹出真正的配置界面
+        config_dlg = McpConfigDialog(self.widget)
+        if config_dlg.exec():
+            name, cfg = config_dlg.get_config()
             if not name: return
             cfg["enabled"] = True
             self._add_mcp_row(name, cfg)

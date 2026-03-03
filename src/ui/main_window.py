@@ -1,7 +1,8 @@
+import ctypes
 import os
 import sys
 
-from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
@@ -23,9 +24,21 @@ from src.ui.components.dialog import StandardDialog, BaseDialog
 from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
 
+
+def get_app_root():
+    """Nuitka 安全的根目录解析"""
+    # 如果被 Nuitka 打包（或者 PyInstaller）
+    if getattr(sys, 'frozen', False) or '__compiled__' in globals():
+        return os.path.dirname(sys.executable)
+    # 如果是源码运行（假设该文件在 src/plugins 或类似子目录下，向上退一级）
+    # 请根据你实际的目录层级调整这里的 ".." 数量
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+APP_ROOT = get_app_root()
+
+
 def set_window_titlebar_theme(hwnd, is_dark: bool):
     if sys.platform == "win32":
-        import ctypes
         try:
             # 20 是 DWMWA_USE_IMMERSIVE_DARK_MODE 的常量值
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -213,13 +226,10 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-
-
     def _setup_mcp_status_bar(self):
         status_widget = QWidget()
         status_layout = QHBoxLayout(status_widget)
         status_layout.setContentsMargins(5, 2, 15, 2)
-
         status_layout.addStretch()
 
         status_layout.addWidget(QLabel("MCP Servers:"))
@@ -229,61 +239,32 @@ class MainWindow(QMainWindow):
         builtin_status.setStyleSheet("color: #4caf50; font-weight: bold;")
         status_layout.addWidget(builtin_status)
 
-        status_layout.addSpacing(10)  # 增加一些间距
-
-        # 外部MCP状态
-        self.external_status_label = QLabel("External: Disabled")
-        self.external_status_label.setStyleSheet("color: #888;")
-        status_layout.addWidget(self.external_status_label)
-
         status_layout.addSpacing(10)
 
-        # 网络MCP状态
+        # 移除 self.external_status_label 的相关代码...
+
+        # 网络/自定义 MCP 状态
         self.custom_status_label = QLabel("Custom: 0 Active")
         self.custom_status_label.setStyleSheet("color: #888;")
         status_layout.addWidget(self.custom_status_label)
 
-        # 添加到主界面底部的状态栏
         self.statusBar().addPermanentWidget(status_widget)
 
-        # 定期刷新状态
-        from PySide6.QtCore import QTimer
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._update_mcp_status)
-        self.status_timer.start(5000)  # 每5秒刷新一次
+        self.status_timer.start(5000)
 
     def _update_mcp_status(self):
-
         mcp_mgr = MCPManager.get_instance()
         config_mgr = ConfigManager()
         mcp_config = config_mgr.mcp_servers.get("mcpServers", {})
 
-        # 1. 更新外部 MCP 状态 (Legacy External)
-        ext_cfg = mcp_config.get("external", {})
-        if ext_cfg.get("enabled", False):
-            status = mcp_mgr.get_server_status("external")
-            if status == "connected":
-                self.external_status_label.setText("External: Connected")
-                self.external_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
-            elif "error" in status:
-                self.external_status_label.setText("External: Error")
-                self.external_status_label.setStyleSheet("color: #ff6b6b;")
-                self.external_status_label.setToolTip(status)
-            else:
-                self.external_status_label.setText(f"External: {status.capitalize()}")
-                self.external_status_label.setStyleSheet("color: #ffb86c; font-weight: bold;")
-        else:
-            self.external_status_label.setText("External: Disabled")
-            self.external_status_label.setStyleSheet("color: #888;")
-
-        # 全面更新自定义 MCP 状态综合数量
         connected_count = 0
         starting_count = 0
         error_count = 0
 
         for name, cfg in mcp_config.items():
-            # 过滤掉两个内置的，剩下的全算 Custom
-            if name not in ["builtin", "external"]:
+            if name != "builtin":
                 if cfg.get("enabled", False) or cfg.get("always_on", False):
                     status = mcp_mgr.get_server_status(name)
                     if status == "connected":
@@ -293,36 +274,40 @@ class MainWindow(QMainWindow):
                     elif "error" in status:
                         error_count += 1
 
-        # 优先级：正在启动/排队中 > 报错 > 全部连上 > 未启用
         if starting_count > 0:
             self.custom_status_label.setText(f"Custom: {starting_count} Starting...")
-            self.custom_status_label.setStyleSheet("color: #ffb86c; font-weight: bold;") # 橘黄色提示正在加载
+            self.custom_status_label.setStyleSheet("color: #ffb86c; font-weight: bold;")
         elif error_count > 0:
             self.custom_status_label.setText(f"Custom: {connected_count} Active, {error_count} Error")
-            self.custom_status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;") # 红色警告
+            self.custom_status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
         elif connected_count > 0:
             self.custom_status_label.setText(f"Custom: {connected_count} Active")
-            self.custom_status_label.setStyleSheet("color: #4caf50; font-weight: bold;") # 绿色就绪
+            self.custom_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
         else:
             self.custom_status_label.setText("Custom: 0 Active")
             self.custom_status_label.setStyleSheet("color: #888;")
 
 
     def clean_old_logs(self):
-        """保留最近的 30 个日志文件，删除更早的"""
-        log_dir = os.path.join(os.getcwd(), "logs")
-        if not os.path.exists(log_dir):
-            return
+        log_dirs = [
+            os.path.join(APP_ROOT, "logs"),
+            os.path.join(APP_ROOT, "logs", "mcp", "academic"),
+            os.path.join(APP_ROOT, "logs", "mcp", "common")
+        ]
 
-        logs = [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.endswith(".log")]
-        logs.sort(key=os.path.getmtime)
+        for d in log_dirs:
+            if not os.path.exists(d):
+                continue
 
-        if len(logs) > 30:
-            for old_log in logs[:-30]:
-                try:
-                    os.remove(old_log)
-                except Exception:
-                    pass
+            logs = [os.path.join(d, f) for f in os.listdir(d) if ".log" in f]
+            logs.sort(key=os.path.getmtime)
+
+            if len(logs) > 30:
+                for old_log in logs[:-30]:
+                    try:
+                        os.remove(old_log)
+                    except Exception:
+                        pass
 
     def perform_startup_checks(self):
         is_first = self.check_first_run()

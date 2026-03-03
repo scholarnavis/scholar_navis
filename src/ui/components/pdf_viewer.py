@@ -569,7 +569,6 @@ class InternalTextViewer(QMainWindow):
 
         cursor = document.find(clean_text)
 
-
         if cursor.isNull():
             chunks = [c.strip() for c in re.split(r'[,.，。;\n]', clean_text) if len(c.strip()) > 15]
             for chunk in chunks:
@@ -580,8 +579,8 @@ class InternalTextViewer(QMainWindow):
         if cursor.isNull() and len(clean_text) > 25:
             cursor = document.find(clean_text[:25])
 
-        # 4. 执行高亮与强制视图滚动
         if not cursor.isNull():
+            from PySide6.QtGui import QTextCharFormat, QColor
 
             fmt = QTextCharFormat()
             fmt.setBackground(QColor(255, 235, 59, 120))
