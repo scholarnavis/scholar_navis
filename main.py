@@ -1,30 +1,20 @@
-
 import ctypes
-from src.version import __version__
-def fix_taskbar_icon():
-    if sys.platform == "win32":
-        myappid = f"scholarnavis.studio.navis.{__version__}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-
 import os
 import sys
 import time
 
 import qdarktheme
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar, QGraphicsDropShadowEffect
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar
 
 from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import resolve_auto_model, get_model_conf, check_model_exists, ensure_onnx_model
+from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, ensure_onnx_model
 from src.core.network_worker import setup_global_network_env
-from src.core.config_manager import ConfigManager
-from src.core.logger import setup_logger
-from src.core.theme_manager import ThemeManager
 from src.ui.main_window import MainWindow
-
+from src.version import __version__
 
 # 拦截来自 MCPManager 的子进程唤起请求，防止主 UI 被无限循环启动
 if len(sys.argv) > 1 and sys.argv[1] == "--run-builtin-mcp":
@@ -171,9 +161,12 @@ class SplashScreen(QWidget):
 
 
 class AppController(QObject):
-    def __init__(self):
+    def __init__(self, logger):
         super().__init__()
-        self.logger = setup_logger()
+        self.logger = logger
+
+        from src.core.config_manager import ConfigManager
+        from src.core.theme_manager import ThemeManager
 
         cfg = ConfigManager().user_settings
         theme_setting = cfg.get("theme", "Dark").lower()
@@ -212,9 +205,9 @@ class AppController(QObject):
 
 
 if __name__ == "__main__":
-    import ctypes
-    import sys
-    from src.version import __version__
+    from src.core.logger import setup_logger
+
+    global_logger = setup_logger()
 
     if sys.platform == "win32":
         myappid = f"scholarnavis.studio.navigator.{__version__}"
@@ -223,12 +216,12 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     from src.core.theme_manager import ThemeManager
-    from PySide6.QtGui import QIcon
+    from src.core.config_manager import ConfigManager
 
     app.setWindowIcon(QIcon(ThemeManager.get_resource_path("Assets", "ico.svg")))
 
     saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
     qdarktheme.setup_theme(saved_theme)
 
-    controller = AppController()
+    controller = AppController(global_logger)
     sys.exit(app.exec())

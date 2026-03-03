@@ -141,7 +141,7 @@ class ToastWidget(QWidget):
 
     def show_animation(self):
         self.show()
-        self.raise_()  # 强制将其层级提到最高，防止被 QSplitter 或滚动条遮挡
+        self.raise_()
 
         self.anim_in = QPropertyAnimation(self.opacity_effect, b"opacity")
         self.anim_in.setDuration(300)
@@ -154,7 +154,7 @@ class ToastWidget(QWidget):
         QTimer.singleShot(3000, self.hide_animation)
 
     def hide_animation(self):
-        # 拦截机制：防止被手动或多次重复调用
+
         if self.anim_out and self.anim_out.state() == QPropertyAnimation.Running:
             return
 

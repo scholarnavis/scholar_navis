@@ -87,8 +87,10 @@ class ParamEditorWidget(QWidget):
         self.table.setRowHeight(row, 60)
 
         # Delete Button
-        btn_del = QPushButton("❌")
+        btn_del = QPushButton()
+        btn_del.setIcon(ThemeManager().icon("delete", "danger"))  # Assuming 'delete.svg' exists, otherwise use 'close'
         btn_del.setCursor(Qt.PointingHandCursor)
+        btn_del.setToolTip("Delete Parameter")
         btn_del.clicked.connect(lambda *args, r=row: self._remove_row(btn_del))
         self.table.setCellWidget(row, 3, btn_del)
 

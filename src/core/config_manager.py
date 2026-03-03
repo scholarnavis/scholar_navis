@@ -36,6 +36,7 @@ class ConfigManager:
         self.CONFIG_DIR = os.path.join(base_dir, "config")
         self.SETTINGS_PATH = os.path.join(self.CONFIG_DIR, "settings.json")
         self.MCP_SERVERS_PATH = os.path.join(self.CONFIG_DIR, "mcp_servers.json")
+        self.LLM_CONFIG_PATH = os.path.join(self.CONFIG_DIR, "llm_config.json")
 
         # 系统凭据管理器标识
         self.KEYRING_SERVICE = "ScholarNavis"
@@ -129,13 +130,11 @@ class ConfigManager:
                         decrypted_text = self.fernet.decrypt(raw_data).decode('utf-8')
                         return json.loads(decrypted_text)
                     except (InvalidToken, Exception) as e:
-                        # 重点：如果是密钥错误或非密文格式，尝试作为明文读取（兼容迁移）
                         self.logger.warning(f"Decryption failed for {path}, checking if plain text: {e}")
                         try:
                             with open(path, 'r', encoding='utf-8') as f:
                                 plain_data = json.load(f)
 
-                            # 优化点 2：如果明文读取成功，利用 RLock 直接安全地触发加密覆盖保存！
                             self.logger.info(f"Migrating plain-text config to encrypted: {path}")
                             self.save_json(path, plain_data, encrypt=True)
                             return plain_data
@@ -188,6 +187,19 @@ class ConfigManager:
     def save_settings(self):
         self.save_json(self.SETTINGS_PATH, self.user_settings)
         self.apply_env_vars()
+
+    def load_llm_configs(self) -> list:
+        data = self.load_json(self.LLM_CONFIG_PATH, encrypt=True)
+        if data is None:
+            return []
+        if isinstance(data, list):
+            return data
+        self.logger.warning("llm_config.json format unexpected, resetting to empty list.")
+        return []
+
+    def save_llm_configs(self, configs: list):
+        self.save_json(self.LLM_CONFIG_PATH, configs, encrypt=True)
+
 
     def apply_env_vars(self):
         """将配置注入环境变量，影响后续库的行为"""
@@ -244,12 +256,12 @@ class ConfigManager:
             current_servers = default_mcp_servers.copy()
             is_modified = True
         else:
-            for key in ["builtin", "external"]:
-                if key not in current_servers["mcpServers"]:
-                    current_servers["mcpServers"][key] = default_mcp_servers["mcpServers"][key]
-                    is_modified = True
-                else:
-                    current_servers["mcpServers"][key]["command"] = py_path
+
+            if "builtin" not in current_servers["mcpServers"]:
+                current_servers["mcpServers"]["builtin"] = default_mcp_servers["mcpServers"]["builtin"]
+                is_modified = True
+            else:
+                current_servers["mcpServers"]["builtin"]["command"] = py_path
 
             if "deselected_mcp_tags" not in current_servers:
                 current_servers["deselected_mcp_tags"] = []

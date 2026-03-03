@@ -74,17 +74,25 @@ class ThemeManager(QObject):
             if saved_theme in self.themes:
                 self.current_theme = saved_theme
         except Exception:
-            pass
+            self.logger.error(f"Failed to load theme from ConfigManager: {str(e)}")
 
     def font_family(self) -> str:
         return "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', Roboto, sans-serif"
 
+
     @staticmethod
     def get_resource_path(*paths):
-        if getattr(sys, 'frozen', False) or '__compiled__' in globals():
+        if '__compiled__' in globals():
             base_dir = os.path.dirname(sys.executable)
+
+            if sys.platform == "darwin" and ".app/Contents/MacOS" in base_dir:
+                base_dir = os.path.abspath(os.path.join(base_dir, "..", "Resources"))
+
+        elif getattr(sys, 'frozen', False):
+            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
         else:
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
         return os.path.join(base_dir, *paths)
 
 

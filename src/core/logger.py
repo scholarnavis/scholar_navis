@@ -30,6 +30,9 @@ class QtLogHandler(logging.Handler, QObject):
 # 全局单例
 _qt_handler = QtLogHandler()
 
+_early_formatter = logging.Formatter('%(asctime)s | %(name)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
+_qt_handler.setFormatter(_early_formatter)
+logging.getLogger().addHandler(_qt_handler)
 
 def setup_logger():
     """Configure global logging"""

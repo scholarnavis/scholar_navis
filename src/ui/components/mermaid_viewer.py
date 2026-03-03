@@ -40,6 +40,7 @@ class MermaidViewer(QMainWindow):
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+
     def _apply_theme(self):
         tm = ThemeManager()
 
@@ -47,20 +48,19 @@ class MermaidViewer(QMainWindow):
         self.source_editor.setStyleSheet(f"""
             background-color: {tm.color('bg_input')}; 
             color: {tm.color('text_main')}; 
-            font-family: Consolas, monospace;
+            font-family: {tm.font_family()}; /* Changed to unified font */
             border: 1px solid {tm.color('border')};
         """)
 
         # 2. 更新工具栏
         tb_style = f"""
-            QToolBar {{ background: {tm.color('bg_card')}; padding: 6px; border: none; border-bottom: 1px solid {tm.color('border')}; }} 
-            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; }} 
+            QToolBar {{ background: {tm.color('bg_card')}; padding: 6px; border: none; border-bottom: 1px solid {tm.color('border')}; font-family: {tm.font_family()}; }} 
+            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; font-family: {tm.font_family()}; }} 
             QToolButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
         """
         for tb in self.findChildren(QToolBar):
             tb.setStyleSheet(tb_style)
 
-        # 3. 如果当前有图表代码，重新渲染以应用新的网页背景色
         if self.mermaid_code:
             self.render_diagram()
 
@@ -90,10 +90,10 @@ class MermaidViewer(QMainWindow):
         tb.addAction(tm.icon("remove", "text_main"), "Zoom Out",
                      lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() - 0.2))
         tb.addAction(tm.icon("refresh", "text_main"), "Reset Zoom", lambda: self.web_view.setZoomFactor(1.0))
+        tb.addAction(tm.icon("download", "text_main"), "Export Image", self._export_image)
 
         tb.addSeparator()
 
-        tb.addAction("📥 Export Image", self._export_image)
 
     def _export_image(self):
         filters = "PNG Images (*.png);;JPEG Images (*.jpg);;WebP Images (*.webp);;SVG Vector Graphics (*.svg)"

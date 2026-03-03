@@ -36,7 +36,6 @@ class ModelSelectorWidget(QWidget):
         self.load_llm_configs()
 
     def load_llm_configs(self):
-        path = os.path.join(self.config_manager.CONFIG_DIR, "llm_config.json")
 
         self.combo_provider.blockSignals(True)
         self.combo_provider.clear()
@@ -47,7 +46,7 @@ class ModelSelectorWidget(QWidget):
         active_id = self.config_manager.user_settings.get(self.config_key, "openai")
         target_idx = 0
 
-        self.configs = self.config_manager.load_json(path, encrypt=True) or []
+        self.configs = self.config_manager.load_llm_configs()
 
         for i, cfg in enumerate(self.configs):
             provider_name = cfg.get('name', 'Unknown')
@@ -100,15 +99,12 @@ class ModelSelectorWidget(QWidget):
         model_name = self.combo_model.currentText()
         if cfg and model_name:
             cfg[self.model_key] = model_name
-            path = os.path.join(self.config_manager.CONFIG_DIR, "llm_config.json")
-
-            file_configs = self.config_manager.load_json(path, encrypt=True) or []
+            file_configs = self.config_manager.load_llm_configs()
             for c in file_configs:
                 if c["id"] == cfg["id"]:
                     c[self.model_key] = model_name
                     break
-
-            self.config_manager.save_json(path, file_configs, encrypt=True)
+            self.config_manager.save_llm_configs(file_configs)
 
         self.sig_model_changed.emit()
 

@@ -631,7 +631,7 @@ class SettingsTool(BaseTool):
         target_item.setFlags(target_item.flags() ^ Qt.ItemIsEditable)
         self.table_mcp.setItem(row, 3, target_item)
 
-        # 4. Status (纯文字展示)
+        # 4. Status
         status_lbl = QLabel("Checking...")
         status_lbl.setAlignment(Qt.AlignCenter)
         self.table_mcp.setCellWidget(row, 4, status_lbl)
@@ -655,8 +655,7 @@ class SettingsTool(BaseTool):
             btn_del.setCursor(Qt.PointingHandCursor)
             btn_del.setStyleSheet("background: transparent; border: none;")
 
-            def delete_mcp_row(row_idx, srv_name=name):
-                from src.ui.components.dialog import StandardDialog
+            def delete_mcp_row(srv_name):
                 dlg = StandardDialog(
                     self.widget,
                     "Confirm Delete",
@@ -667,12 +666,19 @@ class SettingsTool(BaseTool):
                 if dlg.exec():
                     from src.core.mcp_manager import MCPManager
                     MCPManager.get_instance().disconnect_server(srv_name)
-                    self.table_mcp.removeRow(row_idx)
-                    # 触发未保存标记
+
+                    for i in range(self.table_mcp.rowCount()):
+                        item = self.table_mcp.item(i, 1)
+                        if item and item.text() == srv_name:
+                            self.table_mcp.removeRow(i)
+                            break
+
+                    #
+
                     if hasattr(self, '_mark_unsaved'):
                         self._mark_unsaved()
 
-            btn_del.clicked.connect(lambda _, r=row: delete_mcp_row(self.table_mcp.indexAt(btn_del.pos()).row()))
+            btn_del.clicked.connect(lambda _, n=name: delete_mcp_row(n))
             al.addWidget(btn_del)
 
         self.table_mcp.setCellWidget(row, 5, action_widget)
@@ -878,9 +884,6 @@ class SettingsTool(BaseTool):
 
 
     def _load_llm_config(self):
-        config_path = os.path.join(self.config.CONFIG_DIR, "llm_config.json")
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-
         default_config = [
             {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "",
              "api_key": ""},
@@ -903,23 +906,20 @@ class SettingsTool(BaseTool):
              "model_name": "", "api_key": "ollama"}
         ]
 
-        loaded_configs = self.config.load_json(config_path, encrypt=True) or []
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    loaded_configs = json.load(f)
-                    for cfg in loaded_configs:
-                        cfg.pop("thinking_model_name", None)
-                        if "model_params_mode" in cfg and "models_config" not in cfg:
-                            m_name = cfg.get("model_name", "default")
-                            cfg["models_config"] = {
-                                m_name: {
-                                    "mode": cfg.get("model_params_mode", "inherit"),
-                                    "params": cfg.get("model_params", [])
-                                }
-                            }
-            except Exception as e:
-                self.logger.error(f"Error loading llm_config.json: {e}")
+        try:
+            loaded_configs  = self.config.load_llm_configs()
+            for cfg in loaded_configs:
+                cfg.pop("thinking_model_name", None)
+                if "model_params_mode" in cfg and "models_config" not in cfg:
+                    m_name = cfg.get("model_name", "default")
+                    cfg["models_config"] = {
+                        m_name: {
+                            "mode": cfg.get("model_params_mode", "inherit"),
+                            "params": cfg.get("model_params", [])
+                        }
+                    }
+        except Exception as e:
+            self.logger.error(f"Error loading llm_config.json: {e}")
 
         existing_ids = {c.get("id") for c in loaded_configs}
         needs_resave = False
@@ -928,8 +928,6 @@ class SettingsTool(BaseTool):
                 loaded_configs.insert(i, dc)
                 needs_resave = True
 
-        if needs_resave or not os.path.exists(config_path):
-            self.config.save_json(config_path, loaded_configs, encrypt=True)
 
         return loaded_configs if loaded_configs else default_config
 

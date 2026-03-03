@@ -64,17 +64,17 @@ class InteractivePDFLabel(QLabel):
         menu = QMenu(self)
         tm = ThemeManager()
         menu.setStyleSheet(f"""
-                    QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }}
-                    QMenu::item {{ padding: 6px 25px; border-radius: 2px; }}
-                    QMenu::item:selected {{ background-color: {tm.color('accent')}; }}
-                """)
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; font-family: {tm.font_family()}; }}
+            QMenu::item {{ padding: 6px 25px; border-radius: 2px; }}
+            QMenu::item:selected {{ background-color: {tm.color('accent')}; }}
+        """)
 
         has_text = bool(self.selected_text)
 
         if has_text:
             act_copy = menu.addAction(tm.icon("copy", "text_main"), "Copy")
             act_trans = menu.addAction(tm.icon("language", "text_main"), "Translate")
-            act_sel_all = menu.addAction(tm.icon("menu", "text_main"), "Select Al")
+            act_sel_all = menu.addAction(tm.icon("menu", "text_main"), "Select All")
             act_close = menu.addAction(tm.icon("close", "danger"), "Close")
         else:
             act_prev = menu.addAction(tm.icon("chevron-left", "text_main"), "Previous")
@@ -85,23 +85,23 @@ class InteractivePDFLabel(QLabel):
         action = menu.exec(event.globalPos())
 
         if action:
-            if action.text().startswith("📄"):
+            if has_text and action == act_copy:
                 from PySide6.QtGui import QGuiApplication
                 QGuiApplication.clipboard().setText(self.selected_text)
                 self.clear_selection()
-            elif action.text().startswith("🌐"):
+            elif has_text and action == act_trans:
                 self.sig_translate.emit(self.selected_text)
                 self.clear_selection()
-            elif action.text().startswith("◀"):
+            elif not has_text and action == act_prev:
                 self.sig_prev_page.emit()
-            elif action.text().startswith("▶"):
+            elif not has_text and action == act_next:
                 self.sig_next_page.emit()
-            elif action.text().startswith("📑"):
+            elif action == act_sel_all:
                 if self.current_page:
                     self.selected_text = self.current_page.get_text("text").strip()
                     self.rubber_band.setGeometry(self.rect())
                     self.rubber_band.show()
-            elif action.text().startswith("❌"):
+            elif action == act_close:
                 self.sig_close.emit()
 
 
@@ -456,10 +456,11 @@ class InternalTextViewer(QMainWindow):
             "QToolBar { background: #333; border-bottom: 1px solid #555; padding: 6px; } QToolButton { color: white; padding: 5px 10px; border-radius: 4px; font-weight: bold; } QToolButton:hover { background: #444; color: #05B8CC; }")
         self.addToolBar(Qt.TopToolBarArea, tb2)
 
-        tb2.addAction("🖥️ Open in System", self.open_system_app)
-        tb2.addAction("📥 Export Original File", self.export_file)
+        tm = ThemeManager()
+        tb2.addAction(tm.icon("link", "text_main"), "Open in System", self.open_system_app)
+        tb2.addAction(tm.icon("download", "text_main"), "Export Full PDF", self.export_pdf)
 
-        hint = QLabel("  (💡 Tip: Select text and press Space to Translate)")
+        hint = QLabel("  (Tip: Select text and press Space or Right-Click to Translate)")
         hint.setStyleSheet("color: #aaa; font-style: italic; font-size: 13px; padding-left: 10px;")
         tb2.addWidget(hint)
 
