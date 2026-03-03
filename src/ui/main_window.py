@@ -6,13 +6,14 @@ from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
-                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem, QComboBox)
+                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem, QComboBox,
+                               QFormLayout)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf
+from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, EMBEDDING_MODELS
 from src.core.theme_manager import ThemeManager
 from src.task.common_task import VerifyModelsTask
 from src.tools.about_tool import AboutTool
@@ -363,42 +364,66 @@ class MainWindow(QMainWindow):
         cfg = ConfigManager()
         if cfg.user_settings.get("is_first_run", True):
 
-            dlg = BaseDialog(self, "Welcome to Scholar Navis", width=550)
+            tm = ThemeManager()
+
+            dlg = BaseDialog(self, title="Welcome to Scholar Navis", width=580)
             dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
-            layout = QVBoxLayout(dlg.main_frame)
+            dlg.footer_widget.setVisible(False)
 
-            lbl_desc = QLabel(
-                "<b>First Time Setup</b><br><br>"
-                "Before we begin, please select your computation device and core models based on your hardware capabilities."
-            )
+            welcome_html = f"""
+            <div style="font-family: {tm.font_family()}; font-size: 14px; color: {tm.color('text_main')}; line-height: 1.6;">
+                <h2 style="color: {tm.color('title_blue')}; margin-top: 5px; margin-bottom: 12px; font-weight: bold; letter-spacing: 0.5px;">
+                    Your AI-Powered Research Assistant
+                </h2>
+                <p style="margin-top: 0; color: {tm.color('text_main')};">
+                    Welcome! Scholar Navis is designed to streamline your literature review, data analysis, and academic writing processes.
+                </p>
+
+                <div style="background-color: {tm.color('bg_input')}; border-left: 4px solid {tm.color('danger')}; padding: 12px 16px; margin: 20px 0; border-radius: 4px;">
+                    <b style="color: {tm.color('danger')}; font-size: 14px;">🛡️ Security Notice</b><br>
+                    <span style="font-size: 13px; color: {tm.color('text_muted')}; display: inline-block; margin-top: 4px;">
+                    To ensure the absolute security of your academic data and system integrity, please make sure you are using a version downloaded directly from our official website. We are not responsible for any security breaches caused by unauthorized third-party distributions.
+                    </span>
+                </div>
+
+                <p style="font-size: 13px; color: {tm.color('text_muted')}; text-align: center;">
+                    <i style="color: {tm.color('accent')};">Please proceed to <b>Global Settings</b> to configure your AI models, API keys, and network proxy.</i>
+                </p>
+            </div>
+            """
+
+            lbl_desc = QLabel(welcome_html)
             lbl_desc.setWordWrap(True)
-            layout.addWidget(lbl_desc)
+            lbl_desc.setTextFormat(Qt.RichText)
+            dlg.content_layout.addWidget(lbl_desc)
 
-            # 1. Device
-            combo_dev = QComboBox()
-            from src.core.device_manager import DeviceManager
-            for dev in DeviceManager().get_available_devices():
-                combo_dev.addItem(dev["name"], dev["id"])
-            layout.addWidget(QLabel("<b>Compute Engine:</b> (Select DirectML/CUDA if you have a GPU)"))
-            layout.addWidget(combo_dev)
-
-            # 2. Embed
-            combo_embed = QComboBox()
-            from src.core.models_registry import EMBEDDING_MODELS
-            for m in EMBEDDING_MODELS:
-                combo_embed.addItem(m['ui_name'], m['id'])
-            layout.addWidget(QLabel("<br><b>Text Embedding Model:</b>"))
-            layout.addWidget(combo_embed)
-
-            btn_save = QPushButton("Save & Download Models")
+            btn_save = QPushButton("Acknowledge & Go to Settings")
+            btn_save.setFixedSize(280, 42)
+            btn_save.setCursor(Qt.PointingHandCursor)
+            btn_save.setStyleSheet(f"""
+                QPushButton {{ 
+                    background-color: {tm.color('accent')}; 
+                    color: {tm.color('bg_main')}; 
+                    border-radius: 6px; 
+                    font-weight: bold; 
+                    font-size: 14px; 
+                    border: none;
+                }} 
+                QPushButton:hover {{ 
+                    background-color: {tm.color('accent_hover')}; 
+                }}
+            """)
             btn_save.clicked.connect(dlg.accept)
-            layout.addWidget(btn_save)
+
+            btn_layout = QHBoxLayout()
+            btn_layout.addStretch()
+            btn_layout.addWidget(btn_save)
+            btn_layout.addStretch()
+            dlg.content_layout.addLayout(btn_layout)
 
             if dlg.exec():
                 cfg.user_settings.update({
-                    "is_first_run": False,
-                    "inference_device": combo_dev.currentData(),
-                    "current_model_id": combo_embed.currentData()
+                    "is_first_run": False
                 })
                 cfg.save_settings()
                 self._jump_to_settings()

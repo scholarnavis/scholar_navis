@@ -57,28 +57,37 @@ class StartupWorker(QThread):
 
     def run(self):
         try:
-            # Step 1: 基础环境准备
-            self.sig_progress.emit(10, "Initializing environment...")
+            self.sig_progress.emit(10, "Loading system configuration & network profiles...")
             time.sleep(0.1)
-
-            # Step 2: 统一配置加载
-            self.sig_progress.emit(30, "Loading unified system configuration...")
-            ConfigManager()
+            cfg_mgr = ConfigManager()
+            _ = cfg_mgr.user_settings
             setup_global_network_env()
+
+            self.sig_progress.emit(25, "Scanning local hardware & compute engines...")
             time.sleep(0.1)
-
-            # Step 2.5: ONNX 格式化检查与静默转换
-            self.sig_progress.emit(40, "Checking local AI models format (ONNX)...")
-
-            cfg = ConfigManager().user_settings
-            dev = DeviceManager().get_optimal_device()
+            dev_mgr = DeviceManager()
+            dev = dev_mgr.get_optimal_device()
             dev_str = dev.get('type', 'cpu') if isinstance(dev, dict) else str(dev)
 
-            embed_id = cfg.get("current_model_id", "embed_auto")
+            self.sig_progress.emit(40, "Mounting theme cache and UI assets...")
+            time.sleep(0.1)
+            tm = ThemeManager()
+            _ = tm.color('bg_main')
+
+            self.sig_progress.emit(55, "Connecting to local knowledge base & logs...")
+            time.sleep(0.1)
+
+            self.sig_progress.emit(70, "Loading MCP Subsystem metadata...")
+            time.sleep(0.1)
+            cfg_mgr.load_mcp_servers()
+
+            self.sig_progress.emit(85, "Checking AI models & local cache integrity...")
+            time.sleep(0.1)
+            embed_id = cfg_mgr.user_settings.get("current_model_id", "embed_auto")
+            rerank_id = cfg_mgr.user_settings.get("rerank_model_id", "rerank_auto")
+
             if embed_id == "embed_auto":
                 embed_id = resolve_auto_model("embedding", dev_str)
-
-            rerank_id = cfg.get("rerank_model_id", "rerank_auto")
             if rerank_id == "rerank_auto":
                 rerank_id = resolve_auto_model("reranker", dev_str)
 
@@ -87,20 +96,14 @@ class StartupWorker(QThread):
                 if conf and not conf.get('is_network', False):
                     repo_id = conf.get('hf_repo_id')
                     if repo_id and check_model_exists(repo_id):
-                        self.sig_progress.emit(45, f"Optimizing {mtype} model for ultra-fast startup...")
                         ensure_onnx_model(repo_id, mtype)
+
+            self.sig_progress.emit(95, "Building Main User Interface...")
             time.sleep(0.1)
 
-            # Step 3: MCP 懒加载准备
-            self.sig_progress.emit(60, "Preparing MCP Subsystems (Lazy Mode)...")
-            time.sleep(0.1)
-
-            # Step 4: 构建主界面
-            self.sig_progress.emit(90, "Building User Interface...")
-            time.sleep(0.1)
-
-            # 结束
             self.sig_progress.emit(100, "Ready.")
+            time.sleep(0.1)
+
             self.sig_finished.emit()
 
         except Exception as e:
@@ -109,41 +112,44 @@ class StartupWorker(QThread):
 
 
 class SplashScreen(QWidget):
-    """精美的学术风启动界面"""
+    """Elegant academic startup screen fully integrated with ThemeManager"""
 
-    def __init__(self, theme="dark"):
+    def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(480, 260)
+        self.setFixedSize(500, 280)
 
-        # 根据主题设置启动页颜色
-        is_light = theme == "light"
-        bg_color = "#ffffff" if is_light else "#1e1e1e"
-        text_main = "#222222" if is_light else "#05B8CC"
-        text_sub = "#666666" if is_light else "#888888"
-        border_color = "#cccccc" if is_light else "#333333"
+        tm = ThemeManager()
+        bg_color = tm.color("bg_main")
+        bg_card = tm.color("bg_card")
+        text_main = tm.color("title_blue")
+        text_sub = tm.color("text_muted")
+        border_color = tm.color("border")
+        accent = tm.color("accent")
+        font_family = tm.font_family()
 
         container = QWidget(self)
-        container.setFixedSize(460, 240)
+        container.setFixedSize(480, 260)
         container.move(10, 10)
         container.setStyleSheet(f"""
-            QWidget {{ background-color: {bg_color}; border-radius: 12px; border: 1px solid {border_color}; }}
+            QWidget {{ background-color: {bg_card}; border-radius: 12px; border: 1px solid {border_color}; font-family: {font_family}; }}
         """)
 
         layout = QVBoxLayout(container)
+        layout.setContentsMargins(30, 30, 30, 30)
 
         self.logo = QSvgWidget(ThemeManager.get_resource_path("Assets", "ico.svg"))
-        self.logo.setFixedSize(60, 60)
+        self.logo.setFixedSize(64, 64)
         layout.addWidget(self.logo, alignment=Qt.AlignCenter)
 
         self.title = QLabel("Scholar Navis")
-        self.title.setStyleSheet(f"color: {text_main}; font-size: 24px; font-weight: bold; border: none;")
+        self.title.setStyleSheet(f"color: {text_main}; font-size: 26px; font-weight: bold; border: none; letter-spacing: 1px;")
         self.title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title)
 
         self.subtitle = QLabel("AI-Powered Research Assistant")
-        self.subtitle.setStyleSheet(f"color: {text_sub}; font-size: 13px; border: none;")
+        self.subtitle.setStyleSheet(f"color: {text_sub}; font-size: 14px; border: none; font-style: italic;")
         self.subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.subtitle)
 
@@ -157,9 +163,9 @@ class SplashScreen(QWidget):
         self.progress = QProgressBar()
         self.progress.setFixedHeight(4)
         self.progress.setTextVisible(False)
-        self.progress.setStyleSheet("""
-            QProgressBar { background-color: #2b2b2b; border: none; border-radius: 2px; }
-            QProgressBar::chunk { background-color: #05B8CC; border-radius: 2px; }
+        self.progress.setStyleSheet(f"""
+            QProgressBar {{ background-color: {bg_color}; border: none; border-radius: 2px; }}
+            QProgressBar::chunk {{ background-color: {accent}; border-radius: 2px; }}
         """)
         layout.addWidget(self.progress)
 
@@ -167,21 +173,23 @@ class SplashScreen(QWidget):
 class AppController(QObject):
     def __init__(self):
         super().__init__()
+        self.logger = setup_logger()
+
+        cfg = ConfigManager().user_settings
+        theme_setting = cfg.get("theme", "Dark").lower()
+        qdarktheme.setup_theme(theme_setting)
+        ThemeManager().set_theme(theme_setting)
 
         self.splash = SplashScreen()
         self.splash.show()
         QApplication.processEvents()
 
-        self.logger = setup_logger()
-        cfg = ConfigManager().user_settings
-        theme_setting = cfg.get("theme", "Dark").lower()
-        qdarktheme.setup_theme(theme_setting)
         self.logger.info("System Launching.")
 
         self.worker = StartupWorker(self.logger)
         self.worker.sig_progress.connect(self.update_splash)
         self.worker.sig_finished.connect(self.on_startup_finished)
-        self.worker.start()  # 直接启动 QThread
+        self.worker.start()
 
     @Slot(int, str)
     def update_splash(self, val, msg):

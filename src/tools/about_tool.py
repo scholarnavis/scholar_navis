@@ -77,7 +77,7 @@ class AboutTool(BaseTool):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
-        self.lbl_copy = QLabel("© 2026 Scholar Navis Studio. Built with PySide6.")
+        self.lbl_copy = QLabel("Licensed under AGPL v3 | © 2026 Scholar Navis Studio")
         self.lbl_copy.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_copy)
 

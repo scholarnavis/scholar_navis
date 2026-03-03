@@ -1143,8 +1143,8 @@ class McpTestWorker(QObject):
 
 class LicenseDialog(BaseDialog):
     def __init__(self, parent=None):
-        super().__init__(parent, title="Open Source Licenses", width=650)
-        self.setMinimumHeight(550)
+        super().__init__(parent, title="Open Source Licenses", width=800)
+        self.setMinimumHeight(600)
 
         self.licenses = [
             ("PySide6", "LGPL v3", "Official Python bindings for Qt."),
@@ -1166,18 +1166,20 @@ class LicenseDialog(BaseDialog):
         self.table = QTableWidget(len(self.licenses), 3)
         self.table.setHorizontalHeaderLabels(["Package", "License", "Purpose"])
 
+        self.table.setWordWrap(True)
+
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
 
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(True)
 
-        # 数据填充
         for i, (pkg, lic, desc) in enumerate(self.licenses):
             pkg_item = QTableWidgetItem(pkg)
             pkg_item.setForeground(QColor(self.tm.color('accent')))
