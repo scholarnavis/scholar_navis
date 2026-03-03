@@ -39,8 +39,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Scholar Navis - Research Assistant")
         self.resize(1280, 800)
 
-        # 应用全局窗体图标
-        self.setWindowIcon(QIcon(ThemeManager.get_resource_path("Assets", "ico.svg")))
+        self.setWindowIcon(ThemeManager().get_app_icon())
 
         ToastManager().set_parent(self)
 

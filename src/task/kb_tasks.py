@@ -129,7 +129,19 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
         )
 
     def __call__(self, input: Documents) -> Embeddings:
-        inputs = self.tokenizer(input, padding=True, truncation=True, return_tensors="pt", max_length=512)
+        if not input:
+            return []
+
+        if isinstance(input, str):
+            texts = [input]
+        elif isinstance(input, list):
+            texts = [str(item) for item in input]
+        elif isinstance(input, dict):
+            texts = [str(v) for v in input.values()]
+        else:
+            texts = [str(input)]
+
+        inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt", max_length=512)
         outputs = self.model(**inputs)
         embeddings = outputs.last_hidden_state[:, 0, :]
         embeddings = F.normalize(embeddings, p=2, dim=1)

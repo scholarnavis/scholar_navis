@@ -108,9 +108,19 @@ class SplashScreen(QWidget):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.SplashScreen  # <-- 加上这个
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(500, 280)
 
         tm = ThemeManager()
+
+        icon_path = ThemeManager.get_resource_path("Assets", "ico.svg")
+        self.setWindowIcon(QIcon(icon_path))
+
         bg_color = tm.color("bg_main")
         bg_card = tm.color("bg_card")
         text_main = tm.color("title_blue")
@@ -209,19 +219,32 @@ if __name__ == "__main__":
 
     global_logger = setup_logger()
 
+    # 1. 再次改名，强制 Windows 放弃那个白板缓存
     if sys.platform == "win32":
-        myappid = f"scholarnavis.studio.navigator.{__version__}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        myappid = f"scholarnavis.studio.navigator.{__version__}.v4"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(myappid))
 
     app = QApplication(sys.argv)
 
     from src.core.theme_manager import ThemeManager
     from src.core.config_manager import ConfigManager
+    import qdarktheme
 
-    app.setWindowIcon(QIcon(ThemeManager.get_resource_path("Assets", "ico.svg")))
+    tm = ThemeManager()
+    ico_path = tm.get_resource_path("Assets", "ico.ico")
+
+    if sys.platform == "win32" and os.path.exists(ico_path):
+        global_icon = QIcon(ico_path)
+    else:
+        global_icon = tm.get_app_icon()
+
+    app.setWindowIcon(global_icon)
+    app.processEvents()
 
     saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
     qdarktheme.setup_theme(saved_theme)
 
     controller = AppController(global_logger)
+    controller.splash.setWindowIcon(global_icon)
+
     sys.exit(app.exec())

@@ -663,12 +663,17 @@ class ChatWorker(QObject):
             # Phase 2: Vector Retrieval & Reranking (Local KB)
             # ==========================================
             if self.kb_id and self.kb_id != "none":
-                self.sig_token.emit("<i>Loading local vector model and retrieving literature...</i>\n\n")
 
                 kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
-                if kb_info:
+
+                if kb_info and kb_info.get('doc_count', 0) == 0:
+                    self.logger.warning(f"Knowledge Base '{kb_info.get('name')}' is empty. Skipping vector retrieval.")
+                    pass
+                elif kb_info:
+                    self.sig_token.emit("<i>Loading local vector model and retrieving literature...</i>\n\n")
                     domain = kb_info.get('domain', 'General Academic')
                     model_id = kb_info.get('model_id', 'embed_auto')
+
 
                     user_pref = self.config.user_settings.get("inference_device", "Auto")
                     target_device = DeviceManager().parse_device_string(user_pref)

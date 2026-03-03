@@ -126,6 +126,27 @@ class ThemeManager(QObject):
 
         return QIcon(pixmap)
 
+    def get_app_icon(self) -> QIcon:
+        path = self.get_resource_path("Assets", "ico.svg")
+        if not os.path.exists(path):
+            path = self.get_resource_path("assets", "ico.svg")
+
+        if not os.path.exists(path):
+            self.logger.warning("App icon not found at startup!")
+            return QIcon()
+
+        renderer = QSvgRenderer(path)
+        pixmap = QPixmap(128, 128)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        renderer.render(painter)
+        painter.end()
+
+        return QIcon(pixmap)
+
     def get_custom_qss(self):
         return f"""
         
