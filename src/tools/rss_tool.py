@@ -504,8 +504,6 @@ class RSSTool(BaseTool):
         # RSS 源搜索框
         self.inp_search_feed = QLineEdit()
         self.inp_search_feed.setPlaceholderText("Search feeds...")
-        self.inp_search_feed.setStyleSheet(
-            "background-color: #252526; color: white; border: 1px solid #444; border-radius: 4px; padding: 5px;")
         self.inp_search_feed.textChanged.connect(self._filter_feed_list)
         left_layout.addWidget(self.inp_search_feed)
 
@@ -678,16 +676,19 @@ class RSSTool(BaseTool):
             item.setHidden(text not in item.text().lower())
 
     def _show_feed_context_menu(self, pos):
+        tm = ThemeManager()
         menu = QMenu(self.widget)
-        menu.setStyleSheet("""
-            QMenu { background-color: #252526; color: white; border: 1px solid #444; } 
-            QMenu::item:selected { background-color: #007acc; }
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 4px; border-radius: 4px; }} 
+            QMenu::item {{ padding: 6px 20px; }}
+            QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
         """)
 
-        action_fetch = menu.addAction("🔄 Fetch Checked / Clicked")
-        action_unsub = menu.addAction("❌ Unsubscribe Checked / Clicked")
+        action_fetch = menu.addAction(tm.icon("sync", "success"), "Fetch Checked / Clicked")
+        action_unsub = menu.addAction(tm.icon("delete", "danger"), "Unsubscribe Checked / Clicked")
 
         action = menu.exec(self.feed_list.mapToGlobal(pos))
+
         if action == action_fetch:
             self._batch_action("fetch", pos)
         elif action == action_unsub:

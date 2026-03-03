@@ -55,7 +55,7 @@ class ImportTool(BaseTool):
         self.banner.setFixedHeight(45)
         self.banner.setVisible(False)
         banner_layout = QHBoxLayout(self.banner)
-        self.lbl_banner = QLabel("⚠️ Model not installed locally.")
+        self.lbl_banner = QLabel("Model not installed locally.")
         btn_dl = QPushButton("Download Model")
         btn_dl.clicked.connect(self.download_required_model)
         banner_layout.addWidget(self.lbl_banner)

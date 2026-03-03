@@ -9,10 +9,12 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem, QComboBox)
 
 from src.core.config_manager import ConfigManager
+from src.core.core_task import TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf
 from src.core.theme_manager import ThemeManager
+from src.task.common_task import VerifyModelsTask
 from src.tools.about_tool import AboutTool
 from src.tools.chat_tool import ChatTool
 
@@ -25,16 +27,6 @@ from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
 
 
-def get_app_root():
-    """Nuitka 安全的根目录解析"""
-    # 如果被 Nuitka 打包（或者 PyInstaller）
-    if getattr(sys, 'frozen', False) or '__compiled__' in globals():
-        return os.path.dirname(sys.executable)
-    # 如果是源码运行（假设该文件在 src/plugins 或类似子目录下，向上退一级）
-    # 请根据你实际的目录层级调整这里的 ".." 数量
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-APP_ROOT = get_app_root()
 
 
 def set_window_titlebar_theme(hwnd, is_dark: bool):
@@ -158,15 +150,16 @@ class MainWindow(QMainWindow):
         else:
             self.translator_dialog.hide_with_fade()
 
+
     def _update_logo_theme(self):
         theme = ConfigManager().user_settings.get("theme", "Dark").lower()
         filename = "logo_light.svg" if theme == "light" else "logo_dark.svg"
-        logo_path = os.path.join(os.getcwd(), "Assets", filename)
+
+        logo_path = ThemeManager.get_resource_path("Assets", filename)
 
         if os.path.exists(logo_path):
             self.logo_widget.load(logo_path)
-        else:
-            pass
+
 
     def _apply_theme(self):
         tm = self.tm
@@ -289,10 +282,11 @@ class MainWindow(QMainWindow):
 
 
     def clean_old_logs(self):
+        base_dir = ThemeManager.get_resource_path()
         log_dirs = [
-            os.path.join(APP_ROOT, "logs"),
-            os.path.join(APP_ROOT, "logs", "mcp", "academic"),
-            os.path.join(APP_ROOT, "logs", "mcp", "common")
+            os.path.join(base_dir, "logs"),
+            os.path.join(base_dir, "logs", "mcp", "academic"),
+            os.path.join(base_dir, "logs", "mcp", "common")
         ]
 
         for d in log_dirs:
@@ -327,36 +321,29 @@ class MainWindow(QMainWindow):
     def switch_tool(self, index):
         self.tool_stack.setCurrentIndex(index)
 
-
     def check_model_integrity(self):
-        """
-        启动自检
-        """
+
         cfg = ConfigManager()
-        dev = DeviceManager().get_optimal_device()
 
         embed_id = cfg.user_settings.get("current_model_id", "embed_auto")
-        if embed_id == "embed_auto":
-            embed_id = resolve_auto_model("embedding", dev)
-
         rerank_id = cfg.user_settings.get("rerank_model_id", "rerank_auto")
-        if rerank_id == "rerank_auto":
-            rerank_id = resolve_auto_model("reranker", dev)
 
-        missing_repos = []
+        self.integrity_task_mgr = TaskManager()
+        self.integrity_task_mgr.sig_result.connect(self._on_integrity_check_result)
 
-        for mid, mtype in [(embed_id, "embedding"), (rerank_id, "reranker")]:
-            conf = get_model_conf(mid, mtype)
-            if conf:
-                if conf.get('is_network', False):
-                    continue
+        self.integrity_task_mgr.start_task(
+            VerifyModelsTask,
+            task_id="startup_integrity_check",
+            mode=TaskMode.THREAD,
+            embed_id=embed_id,
+            rerank_id=rerank_id
+        )
 
-                repo_id = conf.get('hf_repo_id')
-                if repo_id and not check_model_exists(repo_id):
-                    missing_repos.append((repo_id, conf.get('ui_name', mid)))
+    def _on_integrity_check_result(self, result):
+        to_download = result.get("to_download", [])
 
-        if missing_repos:
-            names = "\n".join([f"• {m[1]}" for m in missing_repos])
+        if to_download:
+            names = "\n".join([f"• {repo}" for repo in to_download])
             msg = (
                 f"<b>Model Check</b><br><br>"
                 f"The system cannot verify the following models:<br>{names}<br><br>"
@@ -366,6 +353,7 @@ class MainWindow(QMainWindow):
             dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
             dlg.exec()
             self._jump_to_settings()
+
 
     def _jump_to_settings(self):
         self.switch_tool(6)

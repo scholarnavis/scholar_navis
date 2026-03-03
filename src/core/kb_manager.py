@@ -9,15 +9,19 @@ from pathlib import Path
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.models_registry import resolve_auto_model
+from src.core.theme_manager import ThemeManager
 
 
 class KBManager:
     _instance = None
-    WORKSPACE_DIR = os.path.join(os.getcwd(), "scholar_workspace")
+    WORKSPACE_DIR = None  # 移除 os.getcwd()
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(KBManager, cls).__new__(cls)
+
+            cls.WORKSPACE_DIR = ThemeManager.get_resource_path("scholar_workspace")
+
             if not os.path.exists(cls.WORKSPACE_DIR):
                 os.makedirs(cls.WORKSPACE_DIR)
         return cls._instance

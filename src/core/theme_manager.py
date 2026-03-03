@@ -84,7 +84,7 @@ class ThemeManager(QObject):
         if getattr(sys, 'frozen', False) or '__compiled__' in globals():
             base_dir = os.path.dirname(sys.executable)
         else:
-            base_dir = os.getcwd()
+            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         return os.path.join(base_dir, *paths)
 
 

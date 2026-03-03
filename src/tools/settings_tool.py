@@ -27,7 +27,8 @@ from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
 from src.task.hf_download_task import RealTimeHFDownloadTask
-from src.task.settings_tasks import FetchModelsTask, TestApiTask, VerifySettingsTask
+from src.task.settings_tasks import FetchModelsTask, TestApiTask
+from src.task.common_task import VerifyModelsTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, AddModelDialog
@@ -92,14 +93,16 @@ class SettingsTool(BaseTool):
 
         self.btn_undo = QPushButton(" Revert Changes")
         self.btn_undo.clicked.connect(self.on_undo_clicked)
+        self.btn_undo.setEnabled(False)
 
-        self.btn_save = QPushButton(" Save Settings & Verify")
+        self.btn_save = QPushButton(" Save Settings")
         self.btn_save.clicked.connect(self.on_save_clicked)
 
         btn_layout.addWidget(self.btn_undo)
         btn_layout.addWidget(self.btn_save)
         main_layout.addLayout(btn_layout)
 
+        self._setup_change_listeners()
         self._load_current_settings()
         self._apply_theme()
 
@@ -108,6 +111,34 @@ class SettingsTool(BaseTool):
         self.status_timer.start(5000)
 
         return self.widget
+
+    def _setup_change_listeners(self):
+        """挂载全部输入组件变更事件，跟踪是否发生了改动"""
+        self.input_ncbi_email.textChanged.connect(self._mark_unsaved)
+        self.input_ncbi_api_key.textChanged.connect(self._mark_unsaved)
+        self.input_s2_api_key.textChanged.connect(self._mark_unsaved)
+        self.combo_proxy_mode.currentIndexChanged.connect(self._mark_unsaved)
+        self.input_proxy.textChanged.connect(self._mark_unsaved)
+        self.input_mirror.textChanged.connect(self._mark_unsaved)
+        self.combo_embed.currentIndexChanged.connect(self._mark_unsaved)
+        self.combo_rerank.currentIndexChanged.connect(self._mark_unsaved)
+        self.combo_device.currentIndexChanged.connect(self._mark_unsaved)
+        self.chk_low_vram.stateChanged.connect(self._mark_unsaved)
+        self.combo_theme.currentIndexChanged.connect(self._mark_unsaved)
+        self.combo_log.currentIndexChanged.connect(self._mark_unsaved)
+        self.input_ext_python.textChanged.connect(self._mark_unsaved)
+
+        # LLM listeners
+        self.input_llm_name.textChanged.connect(self._mark_unsaved)
+        self.input_llm_url.textChanged.connect(self._mark_unsaved)
+        self.input_llm_key.textChanged.connect(self._mark_unsaved)
+        self.combo_llm_preset.currentIndexChanged.connect(self._mark_unsaved)
+        self.combo_llm_model.currentIndexChanged.connect(self._mark_unsaved)
+        self.combo_model_param_strategy.currentIndexChanged.connect(self._mark_unsaved)
+        self.combo_trans_provider.currentIndexChanged.connect(self._mark_unsaved)
+        self.combo_trans_model.currentTextChanged.connect(self._mark_unsaved)
+        self.editor_provider_params.sig_data_changed.connect(self._mark_unsaved)
+        self.editor_model_params.sig_data_changed.connect(self._mark_unsaved)
 
     def _get_input_style(self):
         tm = ThemeManager()
@@ -148,9 +179,6 @@ class SettingsTool(BaseTool):
         # Update Subtext & Status Labels
         if hasattr(self, 'lbl_mcp_hint'):
             self.lbl_mcp_hint.setStyleSheet(f"color: {tm.color('text_muted')}; font-size: 11px;")
-        if hasattr(self, 'lbl_trans_hint'):
-            self.lbl_trans_hint.setStyleSheet(
-                f"color: {tm.color('text_muted')}; font-size: 11px; font-style: italic; margin-top: 5px;")
         if hasattr(self, 'lbl_embed_status'):
             self.lbl_embed_status.setStyleSheet(
                 f"color: {tm.color('text_muted')}; font-size: 11px; margin-bottom: 5px;")
@@ -170,6 +198,16 @@ class SettingsTool(BaseTool):
                             f"color: {tm.color('text_main')}; background: transparent; margin-left: 10px;")
 
 
+    def _mark_unsaved(self, *args, **kwargs):
+        if getattr(self, '_is_loading', False): return
+        if not self.btn_undo.isEnabled():
+            self.btn_undo.setEnabled(True)
+            self.btn_save.setText(" Save Settings*")
+
+
+    def _clear_unsaved(self):
+        self.btn_undo.setEnabled(False)
+        self.btn_save.setText(" Save Settings")
 
 
     def _apply_theme(self):
@@ -222,17 +260,71 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setIcon(tm.icon("add", "success"))
         if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setIcon(tm.icon("refresh", "text_main"))
 
+    def _load_current_settings(self, is_undo=False):
+        self._is_loading = True  # 阻止信号误触发 _mark_unsaved
 
-    def _load_current_settings(self):
+        self.config.load_settings()
+        self.config.load_mcp_servers()
+
+        # 恢复全部文本框与复选框
+        self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
+        self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
+        self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
+
+        mode_map = {"system": 0, "off": 1, "custom": 2}
+        self.combo_proxy_mode.setCurrentIndex(
+            {"off": 0, "custom": 1}.get(self.config.user_settings.get("proxy_mode", "off"), 0))
+        self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
+        self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
+
+        curr_embed = self.config.user_settings.get("current_model_id", "embed_auto")
+        idx_embed = self.combo_embed.findData(curr_embed)
+        if idx_embed >= 0: self.combo_embed.setCurrentIndex(idx_embed)
+
+        curr_rerank = self.config.user_settings.get("rerank_model_id", "rerank_auto")
+        idx_rerank = self.combo_rerank.findData(curr_rerank)
+        if idx_rerank >= 0: self.combo_rerank.setCurrentIndex(idx_rerank)
+
+        curr_device = self.config.user_settings.get("inference_device", "auto")
+        idx_dev = self.combo_device.findData(curr_device)
+        if idx_dev >= 0: self.combo_device.setCurrentIndex(idx_dev)
+
+        if hasattr(self, 'chk_low_vram'):
+            self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
+
+        self.llm_configs = self._load_llm_config()
+        self.combo_llm_preset.blockSignals(True)
+        self.combo_llm_preset.clear()
+        for conf in self.llm_configs:
+            self.combo_llm_preset.addItem(conf.get("name", "Unnamed Provider"))
+        self.combo_llm_preset.blockSignals(False)
+
+        active_id = self.config.user_settings.get("active_llm_id", "openai")
+        idx_to_select = next((i for i, c in enumerate(self.llm_configs) if c.get("id") == active_id), 0)
+        if self.combo_llm_preset.count() > 0:
+            self.combo_llm_preset.setCurrentIndex(idx_to_select)
+            self._on_llm_preset_changed(idx_to_select)
+
+        trans_id = self.config.user_settings.get("trans_llm_id", None)
+        idx_trans = self.combo_trans_provider.findData(trans_id)
+        if idx_trans >= 0:
+            self.combo_trans_provider.setCurrentIndex(idx_trans)
+
+        self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
+        self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
+        self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
+
         if hasattr(self, '_load_mcp_servers_to_ui'):
-            self.config.load_settings()
-            self.config.load_mcp_servers()
             self._load_mcp_servers_to_ui()
 
-        ToastManager().show("Changes reverted to the last saved state.", "info")
+        self._clear_unsaved()
+        self._is_loading = False
 
-        if hasattr(self, '_refresh_mcp_status'):
-            self._refresh_mcp_status()
+        if is_undo:
+            ToastManager().show("Changes reverted to the last saved state.", "info")
+            if hasattr(self, '_refresh_mcp_status'):
+                self._refresh_mcp_status()
+
 
     def _refresh_mcp_status(self):
         try:
@@ -295,48 +387,10 @@ class SettingsTool(BaseTool):
         self.combo_rerank.blockSignals(False)
         self.check_models_status()
 
+
     def on_undo_clicked(self):
-        self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
-        self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
-        self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
+        self._load_current_settings(is_undo=True)
 
-        mode_map = {"system": 0, "off": 1, "custom": 2}
-        self.combo_proxy_mode.setCurrentIndex(mode_map.get(self.config.user_settings.get("proxy_mode", "system"), 0))
-        self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
-        self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
-
-        curr_embed = self.config.user_settings.get("current_model_id", "embed_auto")
-        idx_embed = self.combo_embed.findData(curr_embed)
-        self.combo_embed.setCurrentIndex(max(0, idx_embed))
-
-        curr_rerank = self.config.user_settings.get("rerank_model_id", "rerank_auto")
-        idx_rerank = self.combo_rerank.findData(curr_rerank)
-        self.combo_rerank.setCurrentIndex(max(0, idx_rerank))
-
-        if hasattr(self, 'chk_low_vram'):
-            self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
-
-        self.llm_configs = self._load_llm_config()
-
-        active_id = self.config.user_settings.get("active_llm_id", "openai")
-        idx_to_select = next((i for i, c in enumerate(self.llm_configs) if c.get("id") == active_id), 0)
-        self.combo_llm_preset.setCurrentIndex(idx_to_select)
-        self._on_llm_preset_changed(idx_to_select)
-
-        trans_id = self.config.user_settings.get("trans_llm_id", None)
-        idx_trans = self.combo_trans_provider.findData(trans_id)
-        if idx_trans >= 0:
-            self.combo_trans_provider.setCurrentIndex(idx_trans)
-
-        self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
-        self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
-        self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
-
-        self.config.load_mcp_servers()
-        if hasattr(self, '_load_mcp_servers_to_ui'):
-            self._load_mcp_servers_to_ui()
-
-        ToastManager().show("Changes reverted to the last saved state.", "info")
 
     def on_download_requested(self, model_id, model_type):
         self.refresh_model_combos()
@@ -366,10 +420,10 @@ class SettingsTool(BaseTool):
         self.layout.addWidget(self.group_hw)
         self._update_hardware_html()
 
+
     def _get_btn_style(self, btn_type="default"):
         tm = ThemeManager()
 
-        # Helper to convert hex to rgba for elegant translucent button backgrounds
         def hex_to_rgba(hex_color, alpha):
             h = hex_color.lstrip('#')
             if len(h) < 6: return "transparent"
@@ -389,7 +443,6 @@ class SettingsTool(BaseTool):
         else:
             bg, hover, text = tm.color('btn_bg'), tm.color('btn_hover'), tm.color('text_main')
 
-        # Only draw border if it's a default button, primary/colored buttons look cleaner without it
         border = f"1px solid {tm.color('border')}" if btn_type == "default" else "none"
 
         return f"""
@@ -397,7 +450,10 @@ class SettingsTool(BaseTool):
                 background-color: {bg}; color: {text};
                 border: {border}; border-radius: 4px; padding: 6px 12px; font-weight: bold;
             }}
-            QPushButton:hover {{ background-color: {hover}; }}
+            QPushButton:hover:!disabled {{ background-color: {hover}; }}
+            QPushButton:disabled {{
+                background-color: transparent; color: {tm.color('text_muted')}; border: 1px dashed {tm.color('border')};
+            }}
         """
 
     def _update_hardware_html(self):
@@ -468,11 +524,13 @@ class SettingsTool(BaseTool):
         if not hasattr(self, 'lbl_ncbi_hint'): return
         tm = ThemeManager()
         self.lbl_ncbi_hint.setText(
-            f"💡 <b>Important Notice:</b><br>"
-            f"• <b>NCBI:</b> API Key increases limits from 3 to 10 requests/sec. "
-            f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>Get NCBI Key</a>.<br>"
-            f"• <b>Semantic Scholar:</b> Prevents '429 Too Many Requests' errors during deep academic RAG tasks. "
-            f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>Get S2 Key</a>."
+            f"<div style='line-height: 1.5;'>"
+            f"<span style='color:{tm.color('accent')}; font-weight:bold;'>INFO & API Keys:</span><br>"
+            f"• <b>NCBI PubMed:</b> An API Key increases rate limits from 3 to 10 requests/sec. "
+            f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for NCBI Key]</a><br>"
+            f"• <b>Semantic Scholar:</b> An API Key severely prevents '429 Too Many Requests' errors during massive literature retrieval. "
+            f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for S2 Key]</a>"
+            f"</div>"
         )
 
     def init_mcp_section(self):
@@ -541,6 +599,11 @@ class SettingsTool(BaseTool):
         if always_on:
             chk.setEnabled(False)
             chk.setToolTip("Core service must remain enabled.")
+
+        # 监听复选框状态变化，标记为未保存
+        if hasattr(self, '_mark_unsaved'):
+            chk.stateChanged.connect(self._mark_unsaved)
+
         chk_widget = QWidget()
         l = QHBoxLayout(chk_widget)
         l.addWidget(chk)
@@ -566,7 +629,7 @@ class SettingsTool(BaseTool):
         target_item.setFlags(target_item.flags() ^ Qt.ItemIsEditable)
         self.table_mcp.setItem(row, 3, target_item)
 
-        # 4. Status
+        # 4. Status (纯文字展示)
         status_lbl = QLabel("Checking...")
         status_lbl.setAlignment(Qt.AlignCenter)
         self.table_mcp.setCellWidget(row, 4, status_lbl)
@@ -591,6 +654,7 @@ class SettingsTool(BaseTool):
             btn_del.setStyleSheet("background: transparent; border: none;")
 
             def delete_mcp_row(row_idx, srv_name=name):
+                from src.ui.components.dialog import StandardDialog
                 dlg = StandardDialog(
                     self.widget,
                     "Confirm Delete",
@@ -599,8 +663,12 @@ class SettingsTool(BaseTool):
                 )
 
                 if dlg.exec():
+                    from src.core.mcp_manager import MCPManager
                     MCPManager.get_instance().disconnect_server(srv_name)
                     self.table_mcp.removeRow(row_idx)
+                    # 触发未保存标记
+                    if hasattr(self, '_mark_unsaved'):
+                        self._mark_unsaved()
 
             btn_del.clicked.connect(lambda _, r=row: delete_mcp_row(self.table_mcp.indexAt(btn_del.pos()).row()))
             al.addWidget(btn_del)
@@ -608,7 +676,6 @@ class SettingsTool(BaseTool):
         self.table_mcp.setCellWidget(row, 5, action_widget)
 
     def _on_add_mcp_clicked(self):
-
         warning_msg = (
             "<b>⚠️ Security Disclaimer for External MCP Servers</b><br><br>"
             "You are about to connect a third-party MCP server to Scholar Navis.<br>"
@@ -699,7 +766,15 @@ class SettingsTool(BaseTool):
         embed_layout.setContentsMargins(0, 0, 0, 0)
         embed_layout.addWidget(self.lbl_embed_icon)
         embed_layout.addWidget(self.lbl_embed_text)
+
+        self.btn_dl_embed = QPushButton(" Download")
+        self.btn_del_embed = QPushButton(" Delete")
+        self.btn_dl_embed.clicked.connect(lambda: self._on_manual_model_action("embedding", "download"))
+        self.btn_del_embed.clicked.connect(lambda: self._on_manual_model_action("embedding", "delete"))
+
         embed_layout.addStretch()
+        embed_layout.addWidget(self.btn_dl_embed)
+        embed_layout.addWidget(self.btn_del_embed)
 
         for m in EMBEDDING_MODELS:
             self.combo_embed.addItem(m['ui_name'], m['id'])
@@ -720,7 +795,14 @@ class SettingsTool(BaseTool):
         rerank_layout.setContentsMargins(0, 0, 0, 0)
         rerank_layout.addWidget(self.lbl_rerank_icon)
         rerank_layout.addWidget(self.lbl_rerank_text)
+        self.btn_dl_rerank = QPushButton(" Download")
+        self.btn_del_rerank = QPushButton(" Delete")
+        self.btn_dl_rerank.clicked.connect(lambda: self._on_manual_model_action("reranker", "download"))
+        self.btn_del_rerank.clicked.connect(lambda: self._on_manual_model_action("reranker", "delete"))
+
         rerank_layout.addStretch()
+        rerank_layout.addWidget(self.btn_dl_rerank)
+        rerank_layout.addWidget(self.btn_del_rerank)
 
         for m in RERANKER_MODELS:
             self.combo_rerank.addItem(m['ui_name'], m['id'])
@@ -785,13 +867,16 @@ class SettingsTool(BaseTool):
             f"</div>"
         )
 
+
     def _open_hf_cache(self):
-        hf_home = constants.HF_HOME
-        os.makedirs(hf_home, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(hf_home))
+        # 修复为打开  Navis 的独立模型文件夹
+        model_dir = os.path.join(self.config.BASE_DIR, "models")
+        os.makedirs(model_dir, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
+
 
     def _load_llm_config(self):
-        config_path = os.path.join(os.getcwd(), "config", "llm_config.json")
+        config_path = os.path.join(self.config.CONFIG_DIR, "llm_config.json")
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
         default_config = [
@@ -851,7 +936,7 @@ class SettingsTool(BaseTool):
         return loaded_configs if loaded_configs else default_config
 
     def _save_llm_config(self):
-        config_path = os.path.join(os.getcwd(), "config", "llm_config.json")
+        config_path = os.path.join(self.config.CONFIG_DIR, "llm_config.json")
         try:
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(self.llm_configs, f, indent=4)
@@ -894,12 +979,6 @@ class SettingsTool(BaseTool):
         header_layout.addWidget(self.btn_del_llm)
         header_layout.addWidget(self.btn_help_params)
 
-        #  服务商特性提示标签
-        self.lbl_provider_desc = QLabel("")
-        self.lbl_provider_desc.setStyleSheet("color: #05B8CC; font-size: 11px; font-style: italic;")
-        self.lbl_provider_desc.setWordWrap(True)
-        self.lbl_provider_desc.setVisible(False)
-        layout.addRow("", self.lbl_provider_desc)
 
         self.input_llm_name = QLineEdit()
         self.input_llm_url = QLineEdit()
@@ -968,8 +1047,9 @@ class SettingsTool(BaseTool):
         trans_provider_layout = QHBoxLayout()
         self.combo_trans_provider = BaseComboBox()
         self.combo_trans_model = BaseComboBox()
-        self.btn_trans_refresh = QPushButton(" Refresh Models")
-        self.btn_trans_refresh.setToolTip("从上方 LLM 配置的缓存模型列表中拉取最新数据")
+        self.btn_trans_refresh = QPushButton()
+        self.btn_trans_refresh.setIcon(ThemeManager().icon("refresh", "text_main"))
+        self.btn_trans_refresh.setToolTip("Refresh models from cache")
 
         for conf in self.llm_configs:
             self.combo_trans_provider.addItem(conf.get("name", "Unnamed Provider"), conf.get("id"))
@@ -980,11 +1060,6 @@ class SettingsTool(BaseTool):
         trans_layout.addRow("Translation Provider:", trans_provider_layout)
         trans_layout.addRow("Translation Model:", self.combo_trans_model)
 
-        self.lbl_trans_hint = QLabel(
-            "💡 <b>Note:</b> Configure the specific translation model for each provider here. It is highly recommended to select a fast, non-reasoning model (e.g., gpt-4o-mini). Do not use 'thinking' models as they inject unwanted reasoning blocks into translations."
-        )
-        self.lbl_trans_hint.setWordWrap(True)
-        trans_layout.addRow("", self.lbl_trans_hint)
 
         layout.addRow("Service Provider:", header_layout)
         layout.addRow("Provider Name:", self.input_llm_name)
@@ -1062,10 +1137,13 @@ class SettingsTool(BaseTool):
                 GlobalSignals().llm_config_changed.emit()
 
     def _extract_real_model_name(self, display_text):
-        for suffix in [" (⚙️ Custom)", " (🚫 Closed)"]:
+        for suffix in [" [Custom]", " [Closed]"]:
             if display_text.endswith(suffix):
                 return display_text[:-len(suffix)]
         return display_text
+
+
+
 
     def _on_copy_params_clicked(self):
         from src.ui.components.dialog import StandardDialog
@@ -1210,20 +1288,20 @@ class SettingsTool(BaseTool):
         fetched = list(conf.get("fetched_models", []))
         models_config = conf.get("models_config", {})
 
-        items_to_add = []
         if curr_real and curr_real not in fetched:
             fetched.insert(0, curr_real)
 
+        tm = ThemeManager()
+
         for m in fetched:
             mode = models_config.get(m, {}).get("mode", "inherit")
-            if mode == "custom":
-                items_to_add.append(f"{m} (⚙️ Custom)")
-            elif mode == "closed":
-                items_to_add.append(f"{m} (🚫 Closed)")
-            else:
-                items_to_add.append(m)
 
-        self.combo_llm_model.addItems(items_to_add)
+            if mode == "custom":
+                self.combo_llm_model.addItem(tm.icon("settings", "warning"), f"{m} [Custom]")
+            elif mode == "closed":
+                self.combo_llm_model.addItem(tm.icon("cancel", "danger"), f"{m} [Closed]")
+            else:
+                self.combo_llm_model.addItem(tm.icon("api", "text_muted"), m)
 
         idx_to_select = -1
         for i in range(self.combo_llm_model.count()):
@@ -1241,19 +1319,29 @@ class SettingsTool(BaseTool):
 
     def _update_current_model_marker(self, real_name, mode):
         self.combo_llm_model.blockSignals(True)
-        marker = ""
+        tm = ThemeManager()
+
         if mode == "custom":
-            marker = " (⚙️ Custom)"
+            marker = " [Custom]"
+            icon = tm.icon("settings", "warning")
         elif mode == "closed":
-            marker = " (🚫 Closed)"
+            marker = " [Closed]"
+            icon = tm.icon("cancel", "danger")
+        else:
+            marker = ""
+            icon = tm.icon("api", "text_muted")
 
         new_text = f"{real_name}{marker}"
-
         idx = self.combo_llm_model.currentIndex()
+
         if idx >= 0 and self._extract_real_model_name(self.combo_llm_model.itemText(idx)) == real_name:
             self.combo_llm_model.setItemText(idx, new_text)
+            self.combo_llm_model.setItemIcon(idx, icon)  # 实时更新图标
         elif self.combo_llm_model.currentText() != new_text:
             self.combo_llm_model.setCurrentText(new_text)
+            current_idx = self.combo_llm_model.findText(new_text)
+            if current_idx >= 0:
+                self.combo_llm_model.setItemIcon(current_idx, icon)
 
         self.combo_llm_model.blockSignals(False)
 
@@ -1301,20 +1389,6 @@ class SettingsTool(BaseTool):
                 label.setVisible(not is_native)
         self.input_llm_url.setVisible(not is_native)
 
-        provider_id = conf.get("id", "")
-        desc_text = ""
-        if provider_id == "qwen":
-            desc_text = "💡 Qwen: Contains Text, Multimodal (vl/qvq) for Image Gen, OCR (ocr), and Translation (mt)."
-        elif provider_id == "zhipu":
-            desc_text = "💡 GLM: Contains Text, Vision (V), OCR, and Image Generation (glm-image)."
-        elif provider_id == "gemini":
-            desc_text = "💡 Gemini: 'image' tagged models support Image Generation (Nano Banana series)."
-        elif provider_id == "deepseek":
-            desc_text = "💡 DeepSeek: Multimodal features are not natively supported by text/reasoner models."
-
-        if hasattr(self, 'lbl_provider_desc'):
-            self.lbl_provider_desc.setText(desc_text)
-            self.lbl_provider_desc.setVisible(bool(desc_text))
 
         self._refresh_model_combo(conf)
 
@@ -1519,53 +1593,101 @@ class SettingsTool(BaseTool):
 
         return f"""
         <div style='margin-top:4px; font-family:Consolas; font-size:10px; color:{tm.color("text_muted")};'>
-           👉 <span style='color:{prio_color}; font-weight:bold;'>[{prio}]</span> 
+           <span style='color:{prio_color}; font-weight:bold;'>[{prio}]</span> 
            | VRAM: <span style='color:{tm.color("text_muted")}'>{vram}</span> 
            | RAM: <span style='color:{tm.color("text_muted")}'>{ram}</span>
         </div>
         """
 
     def check_models_status(self):
+        """Asynchronously trigger VerifyModelsTask to check local ONNX files."""
+        self.lbl_embed_text.setText("Verifying...")
+        self.lbl_rerank_text.setText("Verifying...")
+
+        if hasattr(self, 'verify_task_mgr') and self.verify_task_mgr:
+            self.verify_task_mgr.cancel_task()
+
+        self.verify_task_mgr = TaskManager()
+        self.verify_task_mgr.sig_result.connect(self._on_models_status_result)
+
         embed_id = self.combo_embed.currentData()
-        real_embed = embed_id
-        is_auto = (embed_id == "embed_auto")
+        rerank_id = self.combo_rerank.currentData()
+
+        self.verify_task_mgr.start_task(
+            VerifyModelsTask,
+            task_id="check_models_status",
+            mode=TaskMode.THREAD,
+            embed_id=embed_id,
+            rerank_id=rerank_id
+        )
+
+
+
+    def _on_models_status_result(self, result):
+        """Callback to update the UI based on VerifyModelsTask result."""
         tm = ThemeManager()
+        to_download = result.get("to_download", [])
+        embed_info = result.get("embed", {})
+        rerank_info = result.get("rerank", {})
 
-        if is_auto:
-            real_embed = resolve_auto_model("embedding", self.dev_mgr.get_optimal_device())
+        # --- Embedding UI Update ---
+        embed_id = self.combo_embed.currentData()
+        e_conf = get_model_conf(embed_info.get("id"), "embedding")
+        req_html = self._get_req_html(e_conf)
+        repo_id = embed_info.get("repo_id") or "Unknown"
 
-        embed_conf = get_model_conf(real_embed, "embedding")
-        repo_id = embed_conf.get('hf_repo_id') if embed_conf else "Unknown"
-        req_html = self._get_req_html(embed_conf)
+        msg = f"Target: {embed_info.get('id')}" if embed_id == "embed_auto" else f"Repo: {repo_id}"
+        e_exists = repo_id not in to_download and not embed_info.get("is_network")
 
-        exists = check_model_exists(repo_id)
-        msg = f"Target: {real_embed}" if is_auto else f"Repo: {repo_id}"
-        if exists:
+        if embed_info.get("is_network"):
+            self.lbl_embed_icon.setPixmap(tm.icon("api", "success").pixmap(16, 16))
+            self.lbl_embed_text.setText(f"Ready (Network API) | {msg}{req_html}")
+            self.btn_dl_embed.setVisible(False)
+            self.btn_del_embed.setVisible(False)
+        elif e_exists:
             self.lbl_embed_icon.setPixmap(tm.icon("check-circle", "success").pixmap(16, 16))
-            self.lbl_embed_text.setText(f"Ready | {msg}{req_html}")
+            self.lbl_embed_text.setText(f"Ready (ONNX verified) | {msg}{req_html}")
+            self.btn_dl_embed.setVisible(False)
+            self.btn_del_embed.setVisible(True)
+            self.btn_del_embed.setStyleSheet(self._get_btn_style(btn_type="danger"))
+            self.btn_del_embed.setIcon(tm.icon("delete", "danger"))
         else:
             self.lbl_embed_icon.setPixmap(tm.icon("cancel", "danger").pixmap(16, 16))
-            self.lbl_embed_text.setText(f"Not Found | {msg} (Will Download){req_html}")
+            self.lbl_embed_text.setText(f"ONNX Not Found | {msg}{req_html}")
+            self.btn_dl_embed.setVisible(True)
+            self.btn_del_embed.setVisible(False)
+            self.btn_dl_embed.setStyleSheet(self._get_btn_style(btn_type="primary"))
+            self.btn_dl_embed.setIcon(tm.icon("download", "bg_main"))
 
+        # --- Reranker UI Update ---
         rerank_id = self.combo_rerank.currentData()
-        real_rerank = rerank_id
-        is_auto_r = (rerank_id == "rerank_auto")
+        r_conf = get_model_conf(rerank_info.get("id"), "reranker")
+        req_html_r = self._get_req_html(r_conf)
+        repo_id_r = rerank_info.get("repo_id") or "Unknown"
 
-        if is_auto_r:
-            real_rerank = resolve_auto_model("reranker", self.dev_mgr.get_optimal_device())
+        msg_r = f"Target: {rerank_info.get('id')}" if rerank_id == "rerank_auto" else f"Repo: {repo_id_r}"
+        r_exists = repo_id_r not in to_download and not rerank_info.get("is_network")
 
-        rerank_conf = get_model_conf(real_rerank, "reranker")
-        repo_id_r = rerank_conf.get('hf_repo_id') if rerank_conf else "Unknown"
-        req_html_r = self._get_req_html(rerank_conf)
-
-        exists_r = check_model_exists(repo_id_r)
-        msg_r = f"Target: {real_rerank}" if is_auto_r else f"Repo: {repo_id_r}"
-        if exists_r:
+        if rerank_info.get("is_network"):
+            self.lbl_rerank_icon.setPixmap(tm.icon("api", "success").pixmap(16, 16))
+            self.lbl_rerank_text.setText(f"Ready (Network API) | {msg_r}{req_html_r}")
+            self.btn_dl_rerank.setVisible(False)
+            self.btn_del_rerank.setVisible(False)
+        elif r_exists:
             self.lbl_rerank_icon.setPixmap(tm.icon("check-circle", "success").pixmap(16, 16))
-            self.lbl_rerank_text.setText(f"Ready | {msg_r}{req_html_r}")
+            self.lbl_rerank_text.setText(f"Ready (ONNX verified) | {msg_r}{req_html_r}")
+            self.btn_dl_rerank.setVisible(False)
+            self.btn_del_rerank.setVisible(True)
+            self.btn_del_rerank.setStyleSheet(self._get_btn_style(btn_type="danger"))
+            self.btn_del_rerank.setIcon(tm.icon("delete", "danger"))
         else:
             self.lbl_rerank_icon.setPixmap(tm.icon("cancel", "danger").pixmap(16, 16))
-            self.lbl_rerank_text.setText(f"Not Found | {msg_r} (Will Download){req_html_r}")
+            self.lbl_rerank_text.setText(f"ONNX Not Found | {msg_r}{req_html_r}")
+            self.btn_dl_rerank.setVisible(True)
+            self.btn_del_rerank.setVisible(False)
+            self.btn_dl_rerank.setStyleSheet(self._get_btn_style(btn_type="primary"))
+            self.btn_dl_rerank.setIcon(tm.icon("download", "bg_main"))
+
 
     def on_save_clicked(self):
         self.widget.setFocus()
@@ -1662,7 +1784,7 @@ class SettingsTool(BaseTool):
         rerank_id = self.combo_rerank.currentData()
 
         self.save_task_mgr.start_task(
-            VerifySettingsTask,
+            VerifyModelsTask,
             task_id="verify_settings",
             mode=TaskMode.THREAD,
             embed_id=embed_id,
@@ -1677,15 +1799,14 @@ class SettingsTool(BaseTool):
             self.logger.error(f"Save process failed: {msg}")
             ToastManager().show(f"System Error: {msg}", "error")
 
+
     def _on_save_task_result(self, result_dict):
+        self._clear_unsaved()
+
         if hasattr(self, 'save_pd'):
             self.save_pd.close_safe()
 
-        if not result_dict:
-            return
-
-        to_download = result_dict.get("to_download", [])
-
+        # 启动 MCP
         def _bootstrap_mcp_async():
             try:
                 from src.core.mcp_manager import MCPManager
@@ -1699,22 +1820,13 @@ class SettingsTool(BaseTool):
 
         QTimer.singleShot(100, _bootstrap_mcp_async)
 
-        if not to_download:
-            from src.ui.components.dialog import StandardDialog
-            StandardDialog(self.widget, "Success",
-                           "Settings saved successfully.\nAll models and LLM APIs are ready.").exec()
-            self.check_models_status()
-            return
 
-        dl_msg = "The following models need to be downloaded:\n"
-        for m in to_download: dl_msg += f"• {m}\n"
+        msg = "Settings saved successfully."
+        if result_dict and result_dict.get("to_download"):
+            msg += "\n\nNote: Some selected models are missing locally. Please click 'Download' next to the models to fetch and convert them."
 
-        from src.ui.components.dialog import StandardDialog
-        dlg = StandardDialog(self.widget, "Download Required", dl_msg, show_cancel=True)
-        if dlg.exec():
-            self.start_download(to_download)
-        else:
-            self.check_models_status()
+        StandardDialog(self.widget, "Settings Saved", msg).exec()
+        self.check_models_status()
 
     def _get_active_llm_id(self):
         idx = self.combo_llm_preset.currentIndex()
@@ -1761,6 +1873,6 @@ class SettingsTool(BaseTool):
             QTimer.singleShot(500, self._download_next)
         elif state == TaskState.FAILED.value:
             self.pd.pbar.setRange(0, 100)
-            self.pd.lbl_message.setText(f"❌ Failed to download {self.current_repo}:\n{msg}")
+            self.pd.lbl_message.setText(f"Failed to download {self.current_repo}:\n{msg}")
             self.pd.btn_cancel.setText("Close")
             self.pd.btn_cancel.setEnabled(True)

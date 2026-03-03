@@ -327,9 +327,9 @@ class ChatInputContainer(QFrame):
         self.setStyleSheet(
             f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
 
-        # 🌟 完美解决输入框滚动条乌黑问题，采用半透明 RGBA 悬浮设计
+
         self.text_edit.setStyleSheet(f"""
-            QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; }}
+            QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; font-family: {tm.font_family()}; }}
             QScrollBar:vertical {{ background: transparent; width: 6px; }}
             QScrollBar::handle:vertical {{ background: rgba(150, 150, 150, 0.35); border-radius: 3px; }}
             QScrollBar::handle:vertical:hover {{ background: rgba(150, 150, 150, 0.65); }}
@@ -1471,7 +1471,7 @@ class ChatTool(BaseTool):
 
         def _clean_model_name(name):
             if not name: return ""
-            for suffix in [" (⚙️ Custom)", " (🚫 Closed)"]:
+            for suffix in [" [Custom]", " [Closed]"]:
                 if name.endswith(suffix): return name[:-len(suffix)]
             return name
 
@@ -1660,7 +1660,9 @@ class ChatTool(BaseTool):
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
 
-        self.current_ai_text += "\n\n<div style='color:#ff9800; font-weight:bold;'>[⏹️ Generation Cancelled by User]</div>"
+        tm = ThemeManager()
+        self.current_ai_text += f"\n\n<div style='color:{tm.color('warning')}; font-weight:bold;'>[Generation Cancelled by User]</div>"
+
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)
             self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
@@ -1868,6 +1870,7 @@ class ChatTool(BaseTool):
 
         try:
             pattern = r'```mermaid\s*\n(.*?)\n```'
+            tm = ThemeManager()
 
             def repl_mermaid(match):
                 code = match.group(1).strip()
@@ -1878,10 +1881,11 @@ class ChatTool(BaseTool):
                 self.mermaid_codes[code_hash] = code
 
                 return (
-                    f"<br><div style='padding:12px; margin: 8px 0; border:1px solid #05B8CC; border-radius:6px; background-color: rgba(5, 184, 204, 0.08);'>"
-                    f"<div style='margin-bottom: 5px;'>📊 <b>Mermaid Diagram Generated</b></div>"
-                    f"<a href='mermaid://view?hash={code_hash}' style='color:#05B8CC; text-decoration:none; font-weight:bold;'>"
+                    f"<br><div style='padding:12px; margin: 8px 0; border:1px solid {tm.color('accent')}; border-radius:6px; background-color: transparent;'>"
+                    f"<div style='margin-bottom: 5px;'><b>Mermaid Diagram Generated</b></div>"
+                    f"<a href='mermaid://view?hash={code_hash}' style='color:{tm.color('accent')}; text-decoration:none; font-weight:bold;'>"
                     f"Click here to view / edit interactive diagram</a></div><br>")
+
 
             processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
 
@@ -1919,7 +1923,7 @@ class ChatTool(BaseTool):
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
 
-        self.current_ai_text += f"\n\n<div style='color:#ff6b6b; font-weight:bold;'>[⚠️ AI Error]</div>\n<div style='color:#888; font-size:12px;'>{display_error}</div>"
+        self.current_ai_text += f"\n\n<div style='color:#ff6b6b; font-weight:bold;'>[AI Error]</div>\n<div style='color:#888; font-size:12px;'>{display_error}</div>"
 
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)

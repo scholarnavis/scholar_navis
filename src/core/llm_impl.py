@@ -56,6 +56,8 @@ class OpenAICompatibleLLM:
         for k, v in payload.items():
             if k in ['api_key', 'messages', 'contents', 'input', 'image_url', 'image_base64', 'inline_data']:
                 safe_payload[k] = "<Omitted for Log>"
+            elif k in ['tools']:
+                del safe_payload[k]
             else:
                 safe_payload[k] = v
         self.logger.info(f"[{self.model_name}] Request Parameters: {safe_payload}")

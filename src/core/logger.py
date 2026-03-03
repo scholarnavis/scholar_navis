@@ -6,6 +6,9 @@ import threading
 from datetime import datetime
 from PySide6.QtCore import QObject, Signal
 
+from src.core.theme_manager import ThemeManager
+
+
 class QtLogHandler(logging.Handler, QObject):
     new_log_signal = Signal(str, str)
 
@@ -52,7 +55,7 @@ def setup_logger():
     _qt_handler.setFormatter(formatter)
     root_logger.addHandler(_qt_handler)
 
-    log_dir = os.path.join(os.getcwd(), "logs")
+    log_dir = ThemeManager.get_resource_path("logs")
     os.makedirs(log_dir, exist_ok=True)
     log_filename = f"scholar_navis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     log_path = os.path.join(log_dir, log_filename)

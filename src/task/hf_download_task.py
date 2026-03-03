@@ -36,9 +36,9 @@ def patched_display(self, msg=None, pos=None):
             desc = self.desc if self.desc else "Processing..."
 
             if "files" in desc:
-                display_msg = f"📦 {desc}: {self.n}/{self.total}"
+                display_msg = f"{desc}: {self.n}/{self.total}"
             else:
-                display_msg = f"⬇️ {desc}"
+                display_msg = f"⬇{desc}"
 
             _global_callback(percent, display_msg)
 

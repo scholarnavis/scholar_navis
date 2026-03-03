@@ -36,7 +36,7 @@ class LogTool(BaseTool):
         top_bar.addWidget(self.lbl_title)
         top_bar.addStretch()
 
-        self.btn_clear = QPushButton("🧹 Clear Logs")
+        self.btn_clear = QPushButton("Clear Logs")
         self.btn_clear.clicked.connect(self.clear_logs)
         top_bar.addWidget(self.btn_clear)
 

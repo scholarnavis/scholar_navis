@@ -26,7 +26,7 @@ logger =logging.getLogger("ModelRegistry")
 EMBEDDING_MODELS = [
     {
         "id": "embed_nano_fast",
-        "ui_name": "⚡ Nano (Speed Priority) - Snowflake Arctic XS",
+        "ui_name": "Nano (Speed Priority) - Snowflake Arctic XS",
         "hf_repo_id": "Snowflake/snowflake-arctic-embed-xs",
         "description": "Minimal parameters, suitable for pure CPU environments.",
         "tags": ["Ultra-Fast", "CPU"],
