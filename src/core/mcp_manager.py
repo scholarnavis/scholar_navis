@@ -156,11 +156,11 @@ class MCPManager:
                     self.tool_map[tool.name] = server_name
                     self.tool_schemas[tool.name] = {
                         "type": "function",
+                        "server": server_name,
                         "function": {
                             "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.inputSchema,
-                            "server": server_name
+                            "description": tool.description or "",
+                            "parameters": tool.inputSchema
                         }
                     }
 
@@ -183,38 +183,37 @@ class MCPManager:
     def get_available_tags(self) -> list:
         """供 UI 获取所有可选标签"""
         tags = set()
-        for schema in self.get_all_tools_schema():
+        for schema in self.tool_schemas.values():
             tags.update(self._get_tool_effective_tags(schema))
         return sorted(list(tags))
 
     def _get_tool_effective_tags(self, schema: dict) -> list:
-        server_name = schema.get("function", {}).get("server", "")
+        server_name = schema.get("server", "")
+        desc = schema.get("function", {}).get("description", "")
 
         if server_name == "builtin":
-            desc = schema.get("function", {}).get("description", "")
             import re
-            match = re.search(r"\[Tags:\s*(.*?)\]", desc, re.IGNORECASE)
+            match = re.search(r"\[Tags:\s*(.*?)\]", str(desc), re.IGNORECASE)
             if match:
                 return [t.strip() for t in match.group(1).split(",")]
             return ["General Tools"]
         else:
             return [server_name] if server_name else ["Unknown Server"]
 
-
     def get_tools_schema_by_tags(self, selected_tags: list) -> list:
-        """根据 UI 勾选的标签，精准过滤发给大模型的工具列表"""
         if not selected_tags:
             return self.get_all_tools_schema()
 
         filtered_tools = []
-        for schema in self.get_all_tools_schema():
+        for schema in self.tool_schemas.values():
             tool_tags = self._get_tool_effective_tags(schema)
-            # 只要该工具的任何一个标签在用户勾选的标签里，就塞给大模型
             if any(tag in selected_tags for tag in tool_tags):
-                filtered_tools.append(schema)
+                filtered_tools.append({
+                    "type": schema.get("type", "function"),
+                    "function": schema.get("function", {})
+                })
 
         return filtered_tools
-
 
 
     def _async_start(self, server_name: str, config: dict):
@@ -278,7 +277,14 @@ class MCPManager:
         return self.server_status.get(server_name, "disconnected")
 
     def get_all_tools_schema(self) -> list:
-        return list(self.tool_schemas.values())
+        return [
+            {
+                "type": schema.get("type", "function"),
+                "function": schema.get("function", {})
+            }
+            for schema in self.tool_schemas.values()
+        ]
+
 
     def disconnect_server(self, server_name: str):
         if server_name in self.server_stops:
