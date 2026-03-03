@@ -9,12 +9,12 @@ from PySide6.QtCore import QObject, Signal
 from src.core.theme_manager import ThemeManager
 
 
-class QtLogHandler(logging.Handler, QObject):
+class QtLogHandler(QObject, logging.Handler):
     new_log_signal = Signal(str, str, str, int)
 
     def __init__(self):
-        logging.Handler.__init__(self)
         QObject.__init__(self)
+        logging.Handler.__init__(self)
         self.log_history = []
 
     def emit(self, record):

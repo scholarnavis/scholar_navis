@@ -356,7 +356,7 @@ def ensure_onnx_model(repo_id, model_type="embedding"):
     if os.path.exists(onnx_dir):
         for root, dirs, files in os.walk(onnx_dir):
             if any(f.endswith('.onnx') for f in files):
-                logger.info(f"[Ensure] Local ONNX cache hit, skipping download and conversion.")
+                logger.info(f"Local ONNX cache hit, skipping download and conversion.")
                 return onnx_dir
 
     logger.info(f"Local ONNX cache miss, preparing for download and conversion...")

@@ -73,7 +73,7 @@ class ThemeManager(QObject):
             saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
             if saved_theme in self.themes:
                 self.current_theme = saved_theme
-        except Exception:
+        except Exception as e:
             self.logger.error(f"Failed to load theme from ConfigManager: {str(e)}")
 
     def font_family(self) -> str:
