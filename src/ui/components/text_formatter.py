@@ -77,7 +77,7 @@ class TextFormatter:
             action = "collapse" if is_expanded else "expand"
             icon_name = "chevron-down" if is_expanded else "chevron-right"
             icon_html = f"<img src='assets/icons/{icon_name}.svg' width='14' height='14' style='vertical-align: middle;' />"
-            status = "AI 深度思考 (已完成)" if is_closed else "AI 正在思考..."
+            status = "AI Reasoning (Completed)" if is_closed else "AI is thinking..."
 
             link = f"<a href='think://{action}?index={index}' style='color:{accent_color}; text-decoration:none;'><nobr>{icon_html} <b>{status}</b></nobr></a>"
 

@@ -45,7 +45,6 @@ class RerankEngine:
             provider = "CUDAExecutionProvider" if "cuda" in str(self.device) else "CPUExecutionProvider"
 
             self.tokenizer = AutoTokenizer.from_pretrained(onnx_dir)
-            # 🚀 export=False: 拒绝二次转换，秒加载
             self.model = ORTModelForSequenceClassification.from_pretrained(
                 onnx_dir,
                 export=False,

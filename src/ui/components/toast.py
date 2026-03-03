@@ -13,7 +13,7 @@ class ToastManager:
         if cls._instance is None:
             cls._instance = super(ToastManager, cls).__new__(cls)
             cls._instance.parent_widget = None
-            cls._instance.active_toasts = []  # 记录当前画面中存活的 Toast
+            cls._instance.active_toasts = []
         return cls._instance
 
     def set_parent(self, widget):

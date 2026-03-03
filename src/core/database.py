@@ -16,7 +16,7 @@ class DatabaseManager:
             cls._instance.client = None
             cls._instance.collection = None
             cls._instance.embed_fn = None
-            cls._instance.logger.debug(f"[DB_INIT] Instantiated new DatabaseManager! Memory address: {id(cls._instance)}")
+            cls._instance.logger.debug(f"Instantiated new DatabaseManager! Memory address: {id(cls._instance)}")
         return cls._instance
 
     def switch_kb(self, kb_id, embedding_function=None, progress_callback=None):

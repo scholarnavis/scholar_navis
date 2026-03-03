@@ -4,7 +4,7 @@ import subprocess
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 
-
+# 找个时间把他去了
 class FileService:
     @staticmethod
     def open_file(path: str, page: int = None, line: int = None):

@@ -491,8 +491,8 @@ class ChatInputContainer(QFrame):
         self.text_edit.setFocus()
 
     def lock_input(self):
-        self.text_edit.setPlaceholderText("知识库已变更，请清空历史记录以解锁对话。")
-        tip = "当前关联的知识库内容或模型已发生改变，继续对话会导致上下文错乱。请点击右侧的 '🧹 Clear' 清空历史记录。"
+        self.text_edit.setPlaceholderText("Knowledge base updated. Clear history to resume chat.")
+        tip = "The linked knowledge base or model has changed. Continuing may cause context inconsistency. Please click 'Clear' to reset history."
         self.text_edit.setToolTip(tip)
         self.btn_send.setToolTip(tip)
 
@@ -599,9 +599,7 @@ class ChatWorker(QObject):
             context_str = ""
             sources_map = {}
 
-            # ==========================================
             # Phase 1: Query Extraction & Translation (Cache Accelerated)
-            # ==========================================
             if self.requires_translation:
                 self.sig_token.emit("<i>Translating your query to academic English for precise retrieval...</i>\n\n")
                 try:
@@ -621,7 +619,7 @@ class ChatWorker(QObject):
             # Phase 2: Vector Retrieval & Reranking (Local KB)
             # ==========================================
             if self.kb_id and self.kb_id != "none":
-                self.sig_token.emit("<i>🔍 Loading local vector model and retrieving literature...</i>\n\n")
+                self.sig_token.emit("<i>Loading local vector model and retrieving literature...</i>\n\n")
 
                 kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
                 if kb_info:
@@ -698,9 +696,7 @@ class ChatWorker(QObject):
             if not context_str.strip():
                 context_str = "No local database documents provided."
 
-            # ==========================================
             # Phase 3: Dynamic External Context (Multimodal & On-the-fly Reranking)
-            # ==========================================
             external_chunks = getattr(self, 'external_context', [])
             images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
                 ('.png', '.jpg', '.jpeg', '.webp'))]
@@ -710,7 +706,7 @@ class ChatWorker(QObject):
 
             # 3.1 处理上传的长文本 / PDF (启用 Reranker 降低幻觉)
             if docs:
-                self.sig_token.emit("<i>📄 Filtering and reranking attached documents...</i>\n\n")
+                self.sig_token.emit("<i>Filtering and reranking attached documents...</i>\n\n")
                 cand_docs = [{"content": d.get("content", ""),
                               "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
 
@@ -749,9 +745,7 @@ class ChatWorker(QObject):
 
             self.sig_token.emit("[CLEAR_SEARCH]")
 
-            # ==========================================
             # Phase 4: Low VRAM Release
-            # ==========================================
             is_low_vram = self.config.user_settings.get("low_vram_mode", False)
             if is_low_vram:
                 self.sig_token.emit("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
@@ -847,7 +841,7 @@ class ChatWorker(QObject):
 
                     if tool_executed:
                         self.sig_token.emit(
-                            "<i>✅ All data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
+                            "<i>All data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
                 except Exception as e:
                     self.logger.warning(f"Tool calling loop failed: {e}")
 
@@ -998,7 +992,6 @@ class ChatTool(BaseTool):
         self.scroll_area.installEventFilter(self.overlay_filter)
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._check_scroll_position)
 
-        # 4. 【核心重构】追问建议区域 (shelf) - 位于滚动区之外，输入框之上
         self.follow_up_shelf = QWidget()
         self.follow_up_shelf.setObjectName("FollowUpShelf")
         self.follow_up_shelf.setVisible(False)  # 初始隐藏
@@ -1046,7 +1039,7 @@ class ChatTool(BaseTool):
         # 防止用户重复狂点
         self.input_container.btn_attach.setEnabled(False)
         self.input_container.btn_send.setEnabled(False)
-        self.input_container.show_context_preview("⏳ Loading files into memory...")
+        self.input_container.show_context_preview("Loading files into memory...")
 
         if hasattr(self, 'attach_task_mgr'):
             self.attach_task_mgr.cancel_task()
@@ -1312,7 +1305,7 @@ class ChatTool(BaseTool):
             ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(kb_id)
             if not ready:
                 msg = (
-                    f"<b>⚠️ Model Missing - Action Blocked</b><br><br>"
+                    f"<b>Model Missing - Action Blocked</b><br><br>"
                     f"Required offline model is not installed: <br>"
                     f"<font color='#ff6b6b'>• {missing_label}</font><br><br>"
                     f"Please go to <b>[Global Settings]</b> and click 'Save' to download required models."
@@ -1914,11 +1907,12 @@ class ChatTool(BaseTool):
 
         display_error = msg
         if "translation" in msg.lower() or "translator" in msg.lower():
-            ToastManager().show(f"翻译模型出现异常，对话已终止: {msg}", "error")
-            display_error = f"翻译中断: {msg}"
+            ToastManager().show(f"Translation model error; conversation terminated: {msg}", "error")
+            display_error = f"Translation model error: {msg}"
         elif "time" in msg.lower() or "connect" in msg.lower():
-            ToastManager().show("网络连接失败，请检查 API 配置或网络代理。", "error")
-            display_error = "网络或 API 连接超时。"
+            ToastManager().show("Network connection failed. Please check your API configuration or proxy settings.",
+                                "error")
+            display_error = "Network connection failed."
 
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
@@ -2144,11 +2138,11 @@ class ChatTool(BaseTool):
                     try:
                         shutil.copy2(target_path, temp_file_path)
                         QDesktopServices.openUrl(QUrl.fromLocalFile(temp_file_path))
-                        ToastManager().show(f"已调用系统程序打开: {safe_name}", "success")
+                        ToastManager().show(f"Opening with system default application: {safe_name}", "success")
                     except Exception as e:
-                        ToastManager().show(f"外部程序调用失败: {str(e)}", "error")
+                        ToastManager().show(f"Failed to invoke external program: {str(e)}", "error")
             else:
-                ToastManager().show(f"未找到文件: {source_name or file_path}", "error")
+                ToastManager().show(f"File not found: {source_name or file_path}", "error")
         else:
             QDesktopServices.openUrl(QUrl(url_str))
 
@@ -2161,7 +2155,7 @@ class ChatTool(BaseTool):
         self.combo_kb.blockSignals(True)
         self.combo_kb.clear()
 
-        self.combo_kb.addItem("❌ No Knowledge Base (Direct Chat)", "none")
+        self.combo_kb.addItem("No Knowledge Base (Direct Chat)", "none")
 
         kbs = self.kb_manager.get_all_kbs()
         target_idx = 0  # 默认选中 "none"

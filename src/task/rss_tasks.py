@@ -41,7 +41,7 @@ class FetchRSSTask(BackgroundTask):
 
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-        # 读取旧缓存，实现增量更新
+        # Read existing cache for incremental updates
         results = {}
         if os.path.exists(save_path):
             try:
@@ -56,7 +56,8 @@ class FetchRSSTask(BackgroundTask):
         success_count = 0
         completed_count = 0
 
-        self.send_log("INFO", f"📡 开始多线程并发同步 {total} 个订阅源，并自动嗅探 OA 全文...")
+        self.send_log("INFO",
+                      f"Starting multi-threaded synchronization of {total} feeds with automated OA full-text sniffing...")
 
         def process_single_feed(feed):
             if self._is_cancelled:
@@ -87,15 +88,15 @@ class FetchRSSTask(BackgroundTask):
                     else:
                         err_msg = f"HTTP {e.response.status_code} | Server Reply: {body}"
 
-                # 如果不是 CF 盾，直接报错返回
+                # If not a Cloudflare challenge, return error directly
                 if not is_cf:
                     return {"success": False, "url": url, "name": name, "error": err_msg}
 
-                # 策略2：确认是 CF 盾拦截后，触发公共 API 代理通道
-                self.send_log("WARNING", f"【{name}】被 Cloudflare JS 盾拦截，正在切换代理通道...")
+                # Strategy 2: Trigger public API proxy channel upon Cloudflare interception
+                self.send_log("WARNING", f"[{name}] Intercepted by Cloudflare JS challenge; switching proxy channel...")
                 try:
                     import urllib.parse
-                    # 使用免费的 rss2json API 绕过前端验证
+                    # Bypass frontend validation using free rss2json API
                     proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote(url)}"
                     proxy_resp = session.get(proxy_url, timeout=20)
                     proxy_resp.raise_for_status()
@@ -109,7 +110,7 @@ class FetchRSSTask(BackgroundTask):
                     return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count}
                 except Exception as proxy_e:
                     return {"success": False, "url": url, "name": name,
-                            "error": f"CF拦截，且代理通道也失败: {str(proxy_e)}"}
+                            "error": f"Cloudflare interception persists and proxy failover failed: {str(proxy_e)}"}
             finally:
                 session.close()
 
@@ -130,22 +131,22 @@ class FetchRSSTask(BackgroundTask):
                         results[res["url"]] = res["articles"]
                         success_count += 1
                         self.send_log("INFO",
-                                      f"{res['name']}: 获取 {len(res['articles'])} 篇 (发现 {res['oa_count']} 篇 OA)")
+                                      f"{res['name']}: Fetched {len(res['articles'])} articles ({res['oa_count']} OA papers found)")
                     else:
-                        self.send_log("ERROR", f"获取 {res['name']} 失败: {res['error']}")
+                        self.send_log("ERROR", f"Failed to fetch {res['name']}: {res['error']}")
 
-                # 更新进度条
+                # Update progress bar
                 self.update_progress(int((completed_count / total) * 100), f"Syncing... {completed_count}/{total}")
 
-        # 无论成功、失败还是取消，都将现已抓取的数据落盘
+        # Persist captured data regardless of success, failure, or cancellation
         with open(save_path, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
         if self._is_cancelled:
-            self.send_log("INFO", "同步被用户主动中断，已保存部分数据。")
+            self.send_log("INFO", "Sync interrupted by user; partial data saved.")
         else:
-            self.update_progress(100, f"同步完成。成功: {success_count}/{total}")
-            self.send_log("INFO", f"RSS 并发抓取任务完成，数据已落盘")
+            self.update_progress(100, f"Sync complete. Success: {success_count}/{total}")
+            self.send_log("INFO", f"RSS concurrent fetch task completed; data persisted to disk.")
 
     def _parse_feed(self, xml_string, base_session):
         user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
@@ -161,7 +162,7 @@ class FetchRSSTask(BackgroundTask):
             items = root.findall('.//item')
             if not items: items = root.findall('.//entry')
 
-            # --- 第一阶段：纯本地解析 XML 标签，收集原始数据 ---
+            # --- Phase 1: Local XML parsing to collect raw data ---
             for item in items:
                 title_elem = item.find('title')
                 title_text = title_elem.text.strip() if title_elem is not None and title_elem.text else "No Title"
@@ -198,23 +199,22 @@ class FetchRSSTask(BackgroundTask):
                     "summary": desc_text or "No abstract provided by publisher.",
                     "pub_date": pub_date.text.strip() if pub_date is not None and pub_date.text else "",
                     "doi": doi or "",
-                    "pdf_url": "",  # 待填充
+                    "pdf_url": "",  # To be filled
                     "tags": paper_tags[:5]
                 })
 
                 if len(raw_articles) >= 40: break
 
         except Exception as e:
-            self.send_log("WARNING", f"XML 解析异常: {str(e)}")
+            self.send_log("WARNING", f"XML parsing exception: {str(e)}")
             return []
 
-        # 内层多线程并发探测 OA 全文状态
+        # Internal multi-threading to detect OA full-text status
         def _detect_oa_for_article(article):
             if self._is_cancelled:
                 return article
 
-
-            # 加入 0.2 ~ 0.8 秒的随机抖动，防止触发学术 API 的 429 并发限制
+            # Add 0.2 ~ 0.8s random jitter to avoid triggering rate limits (429) on scholarly APIs
             time.sleep(random.uniform(0.2, 0.8))
 
             doi = article.get("doi")
@@ -225,7 +225,6 @@ class FetchRSSTask(BackgroundTask):
                 s2_key = os.environ.get("S2_API_KEY", "").strip()
                 from src.core.oa import OAFetcher
                 fetcher = OAFetcher()
-
 
                 oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, s2_key, None)
 
@@ -247,7 +246,7 @@ class FetchRSSTask(BackgroundTask):
         return final_articles
 
     def _parse_proxy_json(self, json_data):
-        """专门用于处理 rss2json 代理返回的数据格式"""
+        """Specifically for handling data formats returned by the rss2json proxy"""
         raw_articles = []
         try:
             for item in json_data.get('items', []):
@@ -271,7 +270,7 @@ class FetchRSSTask(BackgroundTask):
                 })
                 if len(raw_articles) >= 40: break
         except Exception as e:
-            self.send_log("WARNING", f"代理数据解析异常: {str(e)}")
+            self.send_log("WARNING", f"Proxy data parsing exception: {str(e)}")
             return []
 
         def _detect_oa_for_article(article):
@@ -307,9 +306,3 @@ class FetchRSSTask(BackgroundTask):
             final_articles = list(executor.map(_detect_oa_for_article, raw_articles))
 
         return final_articles
-
-
-
-
-
-

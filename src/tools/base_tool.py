@@ -7,12 +7,7 @@ from src.ui.components.toast import ToastManager
 
 
 class BaseTool(QObject):
-    """
-    所有工具的极简基类。
-    规范：
-    1. 必须实现 get_ui_widget() 返回界面
-    2. 使用 self.logger 打印日志
-    """
+
 
     def __init__(self, tool_name: str):
         super().__init__()

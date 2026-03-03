@@ -212,6 +212,5 @@ class MermaidViewer(QMainWindow):
         </html>
         """
 
-        # 🌟 3. 极其重要：必须传入一个本地的 baseUrl，否则 WebEngine 会因为跨域/安全策略拒绝加载 file:// 的脚本
         base_url = QUrl.fromLocalFile(os.path.dirname(js_path) + "/")
         self.web_view.setHtml(html_content, base_url)

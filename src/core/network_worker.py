@@ -291,7 +291,7 @@ class LightNetworkWorker(QObject):
             reply = raw_content.strip()
             logger.info(f"API Test successful. Model replied: {reply}")
             self.sig_test_finished.emit(True,
-                                        f"✅ API connectivity is excellent!\nModel '{model_name}' responded successfully:\n'{reply}'")
+                                        f"API connectivity is excellent!\nModel '{model_name}' responded successfully:\n'{reply}'")
 
         except httpx.HTTPStatusError as e:
             err_text = e.response.text

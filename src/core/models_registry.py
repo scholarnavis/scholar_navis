@@ -228,14 +228,14 @@ def check_model_exists(repo_id):
         return False
 
     hf_home = _get_hf_home()
-    onnx_dir = os.path.join(hf_home, "onnx_cache", repo_id.replace("/", "--"))
+    onnx_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
 
     logger.info(f"Detecting ONNX model path: {onnx_dir}")
 
     if os.path.exists(onnx_dir):
         for root, dirs, files in os.walk(onnx_dir):
             if any(f.endswith('.onnx') for f in files):
-                logger.info(f"[Check] Success! .onnx file found at this path.")
+                logger.info(f"Success! .onnx file found at this path.")
                 return True
 
     logger.warning(f"Failed! No .onnx file found at path {onnx_dir}, or directory does not exist.")
@@ -335,8 +335,7 @@ class ModelManager:
 def get_onnx_cache_dir(repo_id):
     """获取模型的专属 ONNX 本地缓存目录"""
     hf_home = _get_hf_home()
-    return os.path.join(hf_home, "onnx_cache", repo_id.replace("/", "--"))
-
+    return os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
 
 def get_model_type_by_repo(repo_id):
     for m in EMBEDDING_MODELS:
@@ -347,11 +346,12 @@ def get_model_type_by_repo(repo_id):
 
 
 def ensure_onnx_model(repo_id, model_type="embedding"):
-    # 动态路径获取，不写死 C 盘
     hf_home = _get_hf_home()
-    onnx_dir = os.path.join(hf_home, "onnx_cache", repo_id.replace("/", "--"))
+
+    onnx_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
 
     logger.info(f"Requesting model: {repo_id} | Target ONNX cache dir: {onnx_dir}")
+
 
     if os.path.exists(onnx_dir):
         for root, dirs, files in os.walk(onnx_dir):

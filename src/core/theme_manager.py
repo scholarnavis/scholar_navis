@@ -140,7 +140,7 @@ class ThemeManager(QObject):
         QComboBox QAbstractItemView {{
             background-color: {self.color('bg_card')};
             color: {self.color('text_main')};
-            border: 2px solid {self.color('accent')}; /* 用醒目的主色框起来与外部隔离 */
+            border: 2px solid {self.color('accent')};
             selection-background-color: {self.color('btn_hover')};
             outline: none;
         }}

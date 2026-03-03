@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
-                                      get_model_conf, check_model_exists, resolve_auto_model)
+                                      get_model_conf, check_model_exists, resolve_auto_model, get_onnx_cache_dir)
 from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
@@ -1100,6 +1101,49 @@ class SettingsTool(BaseTool):
         if index < 0 or index >= len(self.llm_configs): return
         self._refresh_trans_models_ui()
 
+    def _on_manual_model_action(self, model_type, action):
+
+        if model_type == "embedding":
+            model_id = self.combo_embed.currentData()
+        else:
+            model_id = self.combo_rerank.currentData()
+
+        if model_id in ["embed_auto", "rerank_auto"]:
+            dev = self.dev_mgr.get_optimal_device()
+            model_id = resolve_auto_model(model_type, dev)
+
+        conf = get_model_conf(model_id, model_type)
+        if not conf:
+            ToastManager().show(f"Model configuration not found for {model_id}", "error")
+            return
+
+        repo_id = conf.get("hf_repo_id")
+
+        if action == "download":
+            self.start_download([repo_id])
+
+        elif action == "delete":
+            dlg = StandardDialog(
+                self.widget,
+                "Confirm Delete",
+                f"Are you sure you want to delete the local cache for '{repo_id}'?\nThis will free up disk space by removing the ONNX files.",
+                show_cancel=True
+            )
+            if dlg.exec():
+                cache_dir = get_onnx_cache_dir(repo_id)
+                if os.path.exists(cache_dir):
+                    try:
+                        import shutil
+                        shutil.rmtree(cache_dir)
+                        ToastManager().show(f"Successfully deleted {repo_id}", "success")
+                        self.check_models_status()
+                    except Exception as e:
+                        ToastManager().show(f"Failed to delete model: {e}", "error")
+                else:
+                    ToastManager().show("Model cache not found locally.", "info")
+                    self.check_models_status()
+
+
     def _refresh_trans_models_ui(self):
         idx = self.combo_trans_provider.currentIndex()
         if idx < 0: return
@@ -1681,7 +1725,6 @@ class SettingsTool(BaseTool):
             self.btn_dl_rerank.setStyleSheet(self._get_btn_style(btn_type="primary"))
             self.btn_dl_rerank.setIcon(tm.icon("download", "bg_main"))
 
-
     def on_save_clicked(self):
         self.widget.setFocus()
 
@@ -1691,12 +1734,16 @@ class SettingsTool(BaseTool):
 
         new_mcp_servers = {}
         if hasattr(self, 'table_mcp'):
+
+
             for row in range(self.table_mcp.rowCount()):
                 name_item = self.table_mcp.item(row, 1)
                 if not name_item: continue
 
                 name = name_item.text()
-                cfg = name_item.data(Qt.UserRole)
+
+                raw_cfg = name_item.data(Qt.UserRole)
+                cfg = copy.deepcopy(raw_cfg) if isinstance(raw_cfg, dict) else {}
 
                 chk_widget = self.table_mcp.cellWidget(row, 0)
                 if chk_widget and chk_widget.layout():
@@ -1706,6 +1753,9 @@ class SettingsTool(BaseTool):
                     cfg["enabled"] = False
 
                 new_mcp_servers[name] = cfg
+
+            if getattr(self.config, 'mcp_servers', None) is None or not isinstance(self.config.mcp_servers, dict):
+                self.config.mcp_servers = {}
 
             self.config.mcp_servers["mcpServers"] = new_mcp_servers
             self.config.save_mcp_servers()
@@ -1723,7 +1773,6 @@ class SettingsTool(BaseTool):
 
         ThemeManager().set_theme(new_theme)
         qdarktheme.setup_theme(new_theme)
-        # ==========================================
 
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
@@ -1782,7 +1831,7 @@ class SettingsTool(BaseTool):
             mode=TaskMode.THREAD,
             embed_id=embed_id,
             rerank_id=rerank_id,
-            mcp_config={}
+            mcp_config=getattr(self.config, 'mcp_servers', {})
         )
 
     def _on_save_task_state_changed(self, state, msg):

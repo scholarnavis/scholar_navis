@@ -447,7 +447,7 @@ class ImportTool(BaseTool):
 
         except Exception as e:
             import traceback
-            self.logger.error(f"🔥 GUI Error in _update_details_html: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"GUI Error in _update_details_html: {e}\n{traceback.format_exc()}")
 
     def show_context_menu(self, pos):
         indexes = self.file_table.selectedIndexes()

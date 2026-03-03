@@ -2,23 +2,19 @@ import ctypes
 import os
 import sys
 
-from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
-                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem, QComboBox,
-                               QFormLayout)
+                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
-from src.core.device_manager import DeviceManager
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, EMBEDDING_MODELS
 from src.core.theme_manager import ThemeManager
 from src.task.common_task import VerifyModelsTask
 from src.tools.about_tool import AboutTool
 from src.tools.chat_tool import ChatTool
-
 from src.tools.import_tool import ImportTool
 from src.tools.log_tool import LogTool
 from src.tools.rss_tool import RSSTool
@@ -26,8 +22,6 @@ from src.tools.settings_tool import SettingsTool
 from src.ui.components.dialog import StandardDialog, BaseDialog
 from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
-
-
 
 
 def set_window_titlebar_theme(hwnd, is_dark: bool):

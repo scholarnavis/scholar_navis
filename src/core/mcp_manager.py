@@ -154,7 +154,6 @@ class MCPManager:
                 tools_response = await session.list_tools()
                 for tool in tools_response.tools:
                     self.tool_map[tool.name] = server_name
-                    # 🚀 Added: Cache the schema in memory instantly
                     self.tool_schemas[tool.name] = {
                         "type": "function",
                         "function": {
