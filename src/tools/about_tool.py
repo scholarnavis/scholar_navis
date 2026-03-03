@@ -7,7 +7,8 @@ from src.task.common_task import VersionCheckTask
 from src.tools.base_tool import BaseTool
 from src.core.theme_manager import ThemeManager
 from src.core.core_task import TaskManager, TaskMode
-from src.version import __version__, __app_name__, __description__
+from src.ui.components.dialog import LicenseDialog
+from src.version import __version__, __app_name__, __description__, __website__, __github__, __dl__
 
 
 class AboutTool(BaseTool):
@@ -55,20 +56,24 @@ class AboutTool(BaseTool):
         layout.addSpacing(20)
 
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(20)
+        btn_layout.setSpacing(15)
 
         self.btn_web = QPushButton(" Website")
-        self.btn_web.setCursor(Qt.PointingHandCursor)
-        self.btn_web.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://scholarnavis.com")))
-
         self.btn_git = QPushButton(" GitHub")
-        self.btn_git.setCursor(Qt.PointingHandCursor)
-        self.btn_git.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl("https://github.com/scholarnavis/scholar_navis")))
+        self.btn_license = QPushButton(" Licenses")  # 新增按钮
+
+        # 设置鼠标形状
+        for btn in [self.btn_web, self.btn_git, self.btn_license]:
+            btn.setCursor(Qt.PointingHandCursor)
+
+        self.btn_web.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(__website__)))
+        self.btn_git.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(__github__)))
+        self.btn_license.clicked.connect(self._show_licenses)  # 连接新方法
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_web)
         btn_layout.addWidget(self.btn_git)
+        btn_layout.addWidget(self.btn_license)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
@@ -90,9 +95,15 @@ class AboutTool(BaseTool):
         latest_version = payload.get("latest_version")
         if latest_version and latest_version != "0.0.0" and latest_version != __version__:
             self.lbl_update.setText(
-                f'<a href="https://scholarnavis.com/dl" style="color: inherit; text-decoration: none;">New version v{latest_version} available! Click to download.</a>')
+                f'<a href="{__dl__}" style="color: inherit; text-decoration: none;">New version v{latest_version} available! Click to download.</a>')
             self.lbl_update.show()
             self._apply_theme()
+
+
+    def _show_licenses(self):
+        """显示开源许可对话框"""
+        dlg = LicenseDialog(self.widget)
+        dlg.exec()
 
 
     def _apply_theme(self):
@@ -112,8 +123,7 @@ class AboutTool(BaseTool):
 
         self.btn_web.setIcon(tm.icon("link", "text_main"))
         self.btn_git.setIcon(tm.icon("github", "text_main"))
-        self.btn_web.setIconSize(QSize(18, 18))
-        self.btn_git.setIconSize(QSize(18, 18))
+        self.btn_license.setIcon(tm.icon("copyright", "text_main"))
 
         btn_style = f"""
             QPushButton {{ 
@@ -131,5 +141,11 @@ class AboutTool(BaseTool):
                 color: {tm.color('accent')};
             }}
         """
-        self.btn_web.setStyleSheet(btn_style)
-        self.btn_git.setStyleSheet(btn_style)
+
+        for btn in [self.btn_web, self.btn_git, self.btn_license]:
+            btn.setIconSize(QSize(18, 18))
+            btn.setIconSize(QSize(18, 18))
+
+
+            btn.setStyleSheet(btn_style)
+            btn.setStyleSheet(btn_style)

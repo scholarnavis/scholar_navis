@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
-                               QCheckBox, QTableWidgetItem, QListWidget)
+                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem)
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject
 from PySide6.QtGui import QColor
 
@@ -1139,3 +1139,86 @@ class McpTestWorker(QObject):
             self.sig_finished.emit(success, msg)
         except Exception as e:
             self.sig_finished.emit(False, str(e))
+
+
+class LicenseDialog(BaseDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent, title="Open Source Licenses", width=650)
+        self.setMinimumHeight(550)
+
+        self.licenses = [
+            ("PySide6", "LGPL v3", "Official Python bindings for Qt."),
+            ("Mermaid.js", "MIT", "Generation of diagrams and flowcharts."),
+            ("PyMuPDF / 4LLM", "AGPL v3", "High-performance PDF & Document parsing."),
+            ("ChromaDB", "Apache 2.0", "AI-native open-source vector database."),
+            ("LangChain", "MIT", "Framework for developing LLM applications."),
+            ("PyTorch", "BSD", "Tensors and Dynamic neural networks."),
+            ("BioPython", "Biopython", "Tools for biological computation."),
+            ("ONNX Runtime", "MIT", "Cross-platform AI model accelerator."),
+            ("Scikit-learn", "BSD", "Machine learning and data mining tools."),
+            ("NetworkX", "BSD", "Study of complex networks and graphs."),
+            ("Optimum", "Apache 2.0", "Optimization for Transformer models."),
+            ("Curl-cffi", "MIT", "Python binding for curl-impersonate."),
+            ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
+            ("Psutil", "BSD", "Cross-platform process and system utilities.")
+        ]
+
+        self.table = QTableWidget(len(self.licenses), 3)
+        self.table.setHorizontalHeaderLabels(["Package", "License", "Purpose"])
+
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
+
+        # 数据填充
+        for i, (pkg, lic, desc) in enumerate(self.licenses):
+            pkg_item = QTableWidgetItem(pkg)
+            pkg_item.setForeground(QColor(self.tm.color('accent')))
+
+            self.table.setItem(i, 0, pkg_item)
+            self.table.setItem(i, 1, QTableWidgetItem(lic))
+            self.table.setItem(i, 2, QTableWidgetItem(desc))
+
+        self.content_layout.addWidget(self.table)
+
+
+        lbl_thanks = QLabel("Thanks to all the maintainers of these incredible projects.")
+        lbl_thanks.setStyleSheet(f"color: {self.tm.color('text_muted')}; font-style: italic; font-size: 11px;")
+        lbl_thanks.setAlignment(Qt.AlignCenter)
+        self.content_layout.addWidget(lbl_thanks)
+
+        self.add_button("Close", self.accept, is_primary=True)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        # 优化表格样式，使其融入主窗体
+        self.table.setStyleSheet(f"""
+            QTableWidget {{ 
+                background-color: transparent; 
+                color: {tm.color('text_main')}; 
+                border: none;
+                alternate-background-color: {tm.color('bg_input')};
+            }}
+            QHeaderView::section {{ 
+                background-color: {tm.color('bg_card')}; 
+                color: {tm.color('text_muted')}; 
+                padding: 10px; 
+                border: none;
+                border-bottom: 2px solid {tm.color('border')};
+                font-weight: bold;
+                font-family: 'Segoe UI';
+            }}
+            QTableWidget::item {{ 
+                padding: 12px; 
+                border: none;
+            }}
+        """)
