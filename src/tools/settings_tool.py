@@ -516,8 +516,7 @@ class SettingsTool(BaseTool):
 
         name = name_item.text()
 
-        if name in ["builtin", "external"]:
-            from src.ui.components.toast import ToastManager
+        if name == "builtin":
             ToastManager().show(f"Core service '{name}' cannot be edited here.", "info")
             return
 
@@ -585,7 +584,7 @@ class SettingsTool(BaseTool):
         btn_edit.clicked.connect(lambda _, r=row: self._on_edit_mcp_clicked(r))
         al.addWidget(btn_edit)
 
-        if not always_on and name not in ["builtin", "external"]:
+        if not always_on and name != "builtin":
             btn_del = QPushButton()
             btn_del.setIcon(tm.icon("delete", "danger"))
             btn_del.setCursor(Qt.PointingHandCursor)
