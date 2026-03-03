@@ -145,12 +145,24 @@ class AutoResizingTextEdit(QPlainTextEdit):
         fixed_height = int((line_h * 5) + base_padding + 2)
         self.setFixedHeight(fixed_height)
 
+    # 修改后
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return and not event.modifiers() & Qt.ShiftModifier:
+            parent = self.parent()
+            while parent is not None:
+                if hasattr(parent, 'btn_send'):
+                    if not parent.btn_send.isEnabled():
+                        event.accept()
+                        return
+                    break
+                parent = parent.parent()
             self.sig_send.emit()
             event.accept()
         else:
             super().keyPressEvent(event)
+
+
+
 
 
 class ChatInputContainer(QFrame):
@@ -396,6 +408,15 @@ class ChatInputContainer(QFrame):
             self.menu_mcp_guide.setStyleSheet(menu_style)
 
 
+    def set_uploading(self, is_uploading: bool):
+        self.btn_send.setEnabled(not is_uploading)
+        self.btn_attach.setEnabled(not is_uploading)
+        if is_uploading:
+            self.btn_send.setToolTip("Please wait for file upload to complete...")
+            self.btn_send.setStyleSheet(self.btn_send.styleSheet() + "QPushButton:disabled { background-color: #555; color: #888; }")
+        else:
+            self.btn_send.setToolTip("")
+
     def _on_mcp_status_changed(self):
         if self.chk_mcp_enable.isChecked():
             self.refresh_mcp_tags()
@@ -427,13 +448,15 @@ class ChatInputContainer(QFrame):
             self.refresh_mcp_tags()
 
     def _show_filter_menu(self):
-        """完全接管菜单弹出逻辑：确保每次点击绝对会请求最新数据"""
         self.btn_mcp_tags.setText("Filter Tools: Fetching...")
         QApplication.processEvents()
 
         self.refresh_mcp_tags()
-        pos = self.btn_mcp_tags.mapToGlobal(self.btn_mcp_tags.rect().bottomLeft())
-        pos.setY(pos.y() + 2)
+
+        pos = self.btn_mcp_tags.mapToGlobal(self.btn_mcp_tags.rect().topLeft())
+        menu_height = self.menu_mcp_tags.sizeHint().height()
+        pos.setY(pos.y() - menu_height - 4)
+
         self.menu_mcp_tags.popup(pos)
 
     def refresh_mcp_tags(self):
@@ -495,9 +518,13 @@ class ChatInputContainer(QFrame):
         except:
             return []
 
+
     def _emit_send(self):
+        if not self.btn_send.isEnabled():
+            return
         text = self.text_edit.toPlainText().strip()
         if text: self.sig_send_clicked.emit(text)
+
 
     def clear_text(self):
         self.text_edit.clear()
@@ -1049,13 +1076,12 @@ class ChatTool(BaseTool):
 
     def process_attached_files(self, paths):
         if not hasattr(self, 'external_chunks'):
-            self.external_chunks = []
+            self.external_chunks =[]
         if not hasattr(self, 'external_context_html'):
             self.external_context_html = ""
 
         # 防止用户重复狂点
-        self.input_container.btn_attach.setEnabled(False)
-        self.input_container.btn_send.setEnabled(False)
+        self.input_container.set_uploading(True)
         self.input_container.show_context_preview("Loading files into memory...")
 
         if hasattr(self, 'attach_task_mgr'):
@@ -1070,13 +1096,15 @@ class ChatTool(BaseTool):
         self.attach_task_mgr.sig_result.connect(self._on_attachment_result)
         self.attach_task_mgr.sig_state_changed.connect(self._on_attachment_state_changed)
 
-        # 以 THREAD 模式启动，避免多进程的大文本序列化开销
         self.attach_task_mgr.start_task(
             ProcessAttachmentTask,
             task_id="process_attachment",
             mode=TaskMode.THREAD,
             paths=paths
         )
+
+
+
 
     def set_controls_enabled(self, enabled: bool):
         """锁定或解锁对话控制区的关键配置"""
@@ -1111,14 +1139,12 @@ class ChatTool(BaseTool):
 
     def _on_attachment_state_changed(self, state, msg):
         if state == TaskState.FAILED.value:
-            self.input_container.btn_attach.setEnabled(True)
-            self.input_container.btn_send.setEnabled(True)
+            self.input_container.set_uploading(False)
             self.input_container.hide_context_preview()
             ToastManager().show(f"Attachment failed: {msg}", "error")
 
     def _on_attachment_result(self, result):
-        self.input_container.btn_attach.setEnabled(True)
-        self.input_container.btn_send.setEnabled(True)
+        self.input_container.set_uploading(False)
 
         if not result: return
 
