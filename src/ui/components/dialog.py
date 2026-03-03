@@ -239,7 +239,7 @@ class FeedEditorDialog(BaseDialog):
             self.inp_name.setReadOnly(True)
             self.inp_url.setReadOnly(True)
             self.inp_category.setEnabled(False)
-            self.form_layout.addRow("", QLabel("🔒 Built-in source: Read-only."))
+            self.form_layout.addRow("", QLabel("Built-in source: Read-only."))
 
         self.form_layout.addRow("Source Name:", self.inp_name)
         self.form_layout.addRow("RSS URL:", self.inp_url)
@@ -559,10 +559,12 @@ class McpConfigDialog(BaseDialog):
         self.env_editor = ParamEditorWidget()
 
         env_btn_layout = QHBoxLayout()
-        self.btn_add_env = QPushButton("➕ 添加一条")
+        self.btn_add_env = QPushButton(" 添加一条")
+        self.btn_add_env.setIcon(self.tm.icon("add", "text_main"))
         self.btn_add_env.clicked.connect(lambda: self.env_editor.add_param_row())
 
-        self.btn_add_auth = QPushButton("🔑 一键填入 Authorization")
+        self.btn_add_auth = QPushButton(" 一键填入 Authorization")
+        self.btn_add_auth.setIcon(self.tm.icon("lock", "warning"))
         self.btn_add_auth.clicked.connect(self._add_auth_header)
 
         env_btn_layout.addWidget(self.btn_add_env)
@@ -911,7 +913,7 @@ class ProgressDialog(BaseDialog):
                         app_cpu += p.cpu_percent(interval=None)
                     except:
                         pass
-                stats.append(f"🖥️ CPU: {app_cpu:04.1f}%")
+                stats.append(f"CPU: {app_cpu:04.1f}%")
 
             if self.telemetry.get("ram"):
                 app_ram = 0

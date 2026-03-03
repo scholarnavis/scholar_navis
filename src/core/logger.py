@@ -10,7 +10,7 @@ from src.core.theme_manager import ThemeManager
 
 
 class QtLogHandler(logging.Handler, QObject):
-    new_log_signal = Signal(str, str)
+    new_log_signal = Signal(str, str, str, int)
 
     def __init__(self):
         logging.Handler.__init__(self)
@@ -20,11 +20,10 @@ class QtLogHandler(logging.Handler, QObject):
     def emit(self, record):
         try:
             msg = self.format(record)
-            self.log_history.append((record.levelname, msg))
-            # 限制缓冲区防止内存泄漏
+            self.log_history.append((record.levelname, msg, record.pathname, record.lineno))
             if len(self.log_history) > 2000:
                 self.log_history.pop(0)
-            self.new_log_signal.emit(record.levelname, msg)
+            self.new_log_signal.emit(record.levelname, msg, record.pathname, record.lineno)
         except Exception:
             self.handleError(record)
 
@@ -68,33 +67,6 @@ def setup_logger():
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
-    # 启动 UDP 日志接收隧道
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(('127.0.0.1', 0))
-        udp_port = sock.getsockname()[1]
-        os.environ["SCHOLAR_NAVIS_LOG_PORT"] = str(udp_port)
-
-        def udp_listener():
-            mcp_logger = logging.getLogger("MCP.Plugin")
-            while True:
-                try:
-                    data, _ = sock.recvfrom(65535)
-                    msg = data.decode('utf-8')
-                    parts = msg.split('|', 1)
-                    if len(parts) == 2:
-                        level_str, text = parts
-                        level_val = getattr(logging, level_str.upper(), logging.INFO)
-                        # 将收到的日志重新注入主程序的日志系统
-                        mcp_logger.log(level_val, text)
-                except Exception:
-                    pass
-
-        t = threading.Thread(target=udp_listener, daemon=True, name="UDPLogListener")
-        t.start()
-        root_logger.info(f"Subprocess UDP Log IPC listening on port {udp_port} For local MCP Server.")
-    except Exception as e:
-        root_logger.error(f"Failed to start UDP log server: {e}")
 
 
     def global_exception_handler(exc_type, exc_value, exc_traceback):

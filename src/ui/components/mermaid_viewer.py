@@ -80,14 +80,16 @@ class MermaidViewer(QMainWindow):
         tb.addWidget(self.theme_combo)
 
         tb.addSeparator()
-
+        tm = ThemeManager()
         # 功能按钮
-        act_source = tb.addAction("📝 Toggle Source")
+        act_source = tb.addAction(tm.icon("edit", "text_main"), "Toggle Source")
         act_source.triggered.connect(self._toggle_source)
 
-        tb.addAction("🔍 Zoom In", lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() + 0.2))
-        tb.addAction("🔍 Zoom Out", lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() - 0.2))
-        tb.addAction("↔️ Reset Zoom", lambda: self.web_view.setZoomFactor(1.0))
+        tb.addAction(tm.icon("add", "text_main"), "Zoom In",
+                     lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() + 0.2))
+        tb.addAction(tm.icon("remove", "text_main"), "Zoom Out",
+                     lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() - 0.2))
+        tb.addAction(tm.icon("refresh", "text_main"), "Reset Zoom", lambda: self.web_view.setZoomFactor(1.0))
 
         tb.addSeparator()
 

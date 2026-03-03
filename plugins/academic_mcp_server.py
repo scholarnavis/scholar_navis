@@ -15,7 +15,7 @@ from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
 
 from src.core.config_manager import ConfigManager
-from src.core.network_worker import setup_global_network_env, _get_explicit_proxy_kwargs, create_robust_session
+from src.core.network_worker import setup_global_network_env, create_robust_session
 from src.core.oa import OAFetcher
 
 

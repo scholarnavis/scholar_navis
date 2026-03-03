@@ -520,6 +520,7 @@ class SettingsTool(BaseTool):
 
         self.layout.addWidget(group)
 
+
     def _update_ncbi_html(self):
         if not hasattr(self, 'lbl_ncbi_hint'): return
         tm = ThemeManager()

@@ -3,10 +3,36 @@ import sys
 import shutil
 import platform
 import subprocess
+import re  # 新增正则库
 from src.version import __version__, __app_name__, __description__, __company__
+
+def sync_pyproject_version():
+    """将 src.version.__version__ 同步到 pyproject.toml 中"""
+    toml_path = "pyproject.toml"
+    if not os.path.exists(toml_path):
+        return
+
+    with open(toml_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    new_content = re.sub(
+        r'^version\s*=\s*".*?"',
+        f'version = "{__version__}"',
+        content,
+        count=1,
+        flags=re.MULTILINE
+    )
+
+    if content != new_content:
+        with open(toml_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        print(f"[*] Synced pyproject.toml version to {__version__}")
 
 
 def build_app():
+    # 1. 打包前先同步版本号
+    sync_pyproject_version()
+
     sys_os = platform.system()
     win_version = f"{__version__}.0" if len(__version__.split('.')) == 3 else __version__
     dist_dir = "dist"
@@ -87,7 +113,7 @@ def build_app():
             )
             print(f"All done! Packed to {output_archive}.{archive_format}")
         else:
-            print("⚠Build completed, but target folder not found for zipping.")
+            print("Build completed, but target folder not found for zipping.")
     else:
         print("\nBuild failed.")
 

@@ -72,15 +72,15 @@ class InteractivePDFLabel(QLabel):
         has_text = bool(self.selected_text)
 
         if has_text:
-            act_copy = menu.addAction("📄 复制 (Copy)")
-            act_trans = menu.addAction("🌐 翻译 (Translate)")
-            act_sel_all = menu.addAction("📑 全选 (Select All)")
-            act_close = menu.addAction("❌ 关闭 (Close)")
+            act_copy = menu.addAction(tm.icon("copy", "text_main"), "Copy")
+            act_trans = menu.addAction(tm.icon("language", "text_main"), "Translate")
+            act_sel_all = menu.addAction(tm.icon("menu", "text_main"), "Select Al")
+            act_close = menu.addAction(tm.icon("close", "danger"), "Close")
         else:
-            act_prev = menu.addAction("◀ 上一页 (Previous)")
-            act_next = menu.addAction("▶ 下一页 (Next)")
-            act_sel_all = menu.addAction("📑 全选 (Select All)")
-            act_close = menu.addAction("❌ 关闭 (Close)")
+            act_prev = menu.addAction(tm.icon("chevron-left", "text_main"), "Previous")
+            act_next = menu.addAction(tm.icon("chevron-right", "text_main"), "Next")
+            act_sel_all = menu.addAction(tm.icon("menu", "text_main"), "Select All")
+            act_close = menu.addAction(tm.icon("close", "danger"), "Close")
 
         action = menu.exec(event.globalPos())
 
@@ -165,19 +165,19 @@ class InternalPDFViewer(QMainWindow):
 
 
     def _setup_toolbar(self):
+        tm = ThemeManager()
         tb1 = QToolBar()
         tb1.setMovable(False)
         tb1.setStyleSheet(
             "QToolBar { background: #333; padding: 6px; border: none; } QToolButton { color: white; padding: 5px 10px; border-radius: 4px; font-weight: bold; } QToolButton:hover { background: #444; color: #05B8CC; }")
         self.addToolBar(Qt.TopToolBarArea, tb1)
 
-        tb1.addAction("◀ Prev", self.prev_page)
-        tb1.addAction("Next ▶", self.next_page)
+        tb1.addAction(tm.icon("chevron-left", "text_main"), "Prev", self.prev_page)
+        tb1.addAction(tm.icon("chevron-right", "text_main"), "Next", self.next_page)
         tb1.addSeparator()
-        tb1.addAction("🔍 Zoom In", self.zoom_in)
-        tb1.addAction("🔍 Zoom Out", self.zoom_out)
-        tb1.addAction("↔️ Fit Width", self.fit_width)
-
+        tb1.addAction(tm.icon("add", "text_main"), "Zoom In", self.zoom_in)
+        tb1.addAction(tm.icon("remove", "text_main"), "Zoom Out", self.zoom_out)
+        tb1.addAction(tm.icon("menu", "text_main"), "Fit Width", self.fit_width)
         self.addToolBarBreak(Qt.TopToolBarArea)
 
         # 第二行：外部功能区
@@ -358,7 +358,9 @@ class InternalPDFViewer(QMainWindow):
             if quads:
                 painter = QPainter(final_pixmap)
                 painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor(255, 235, 59, 120))  # Yellow transparent
+                hl_color = QColor(ThemeManager().color("warning"))
+                hl_color.setAlpha(120)
+                painter.setBrush(hl_color)
 
                 for quad in quads:
                     rect = quad * mat

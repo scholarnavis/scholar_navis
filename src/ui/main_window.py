@@ -343,7 +343,7 @@ class MainWindow(QMainWindow):
         to_download = result.get("to_download", [])
 
         if to_download:
-            names = "\n".join([f"• {repo}" for repo in to_download])
+            names = "<br>".join([f"• {repo}" for repo in to_download])
             msg = (
                 f"<b>Model Check</b><br><br>"
                 f"The system cannot verify the following models:<br>{names}<br><br>"
