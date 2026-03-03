@@ -27,11 +27,28 @@ from src.ui.components.toast import ToastManager
 def set_window_titlebar_theme(hwnd, is_dark: bool):
     if sys.platform == "win32":
         try:
-            # 20 是 DWMWA_USE_IMMERSIVE_DARK_MODE 的常量值
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 int(hwnd), 20, ctypes.byref(ctypes.c_int(1 if is_dark else 0)), 4)
         except Exception:
             pass
+
+
+def force_taskbar_icon(hwnd, icon_path):
+    if sys.platform == "win32" and os.path.exists(icon_path):
+        try:
+            # 加载图标 (LR_LOADFROMFILE | LR_TRANSPARENT)
+            hicon = ctypes.windll.user32.LoadImageW(
+                0, ctypes.c_wchar_p(icon_path),
+                1, 0, 0, 0x00000010 | 0x00000020
+            )
+            if hicon:
+                # WM_SETICON = 0x0080
+                # 向窗口发送消息强制替换大图标(1)和小图标(0)
+                ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 1, hicon)
+                ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 0, hicon)
+        except Exception:
+            pass
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -40,6 +57,8 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
 
         self.setWindowIcon(ThemeManager().get_app_icon())
+        ico_path = os.path.abspath(ThemeManager.get_resource_path("Assets", "ico.ico"))
+        force_taskbar_icon(self.winId(), ico_path)
 
         ToastManager().set_parent(self)
 

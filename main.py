@@ -219,9 +219,8 @@ if __name__ == "__main__":
 
     global_logger = setup_logger()
 
-    # 1. 再次改名，强制 Windows 放弃那个白板缓存
     if sys.platform == "win32":
-        myappid = f"scholarnavis.studio.navigator.{__version__}.v4"
+        myappid = f"scholarnavis.studio.navigator.{__version__}222222222222222222222222222222"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(myappid))
 
     app = QApplication(sys.argv)
@@ -231,14 +230,16 @@ if __name__ == "__main__":
     import qdarktheme
 
     tm = ThemeManager()
-    ico_path = tm.get_resource_path("Assets", "ico.ico")
+    ico_path = os.path.abspath(tm.get_resource_path("Assets", "ico.ico"))
 
     if sys.platform == "win32" and os.path.exists(ico_path):
         global_icon = QIcon(ico_path)
     else:
+        global_logger.warning(f"Could not find valid .ico at {ico_path}, taskbar icon may fail.")
         global_icon = tm.get_app_icon()
 
     app.setWindowIcon(global_icon)
+
     app.processEvents()
 
     saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
