@@ -162,6 +162,8 @@ class ChatInputContainer(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.config = ConfigManager()
+        self.logger = logging.getLogger("ChatInputContainer")
         self.setObjectName("ChatInputContainer")
         self.setStyleSheet("""
             QFrame#ChatInputContainer {
@@ -399,7 +401,21 @@ class ChatInputContainer(QFrame):
             self.refresh_mcp_tags()
 
     def _on_tag_toggled(self, tag, checked):
-        self.config.toggle_mcp_tag(tag, checked)
+        if hasattr(self.config, 'toggle_mcp_tag'):
+            self.config.toggle_mcp_tag(tag, checked)
+        else:
+            deselected = self.config.mcp_servers.get("deselected_mcp_tags", [])
+            if checked and tag in deselected:
+                deselected.remove(tag)
+            elif not checked and tag not in deselected:
+                deselected.append(tag)
+            self.config.mcp_servers["deselected_mcp_tags"] = deselected
+
+            if hasattr(self.config, 'save_mcp_servers'):
+                self.config.save_mcp_servers()
+            else:
+                self.config.save_settings()
+
         self._update_tag_button_text()
 
     def _on_mcp_enable_toggled(self, checked):
@@ -458,7 +474,8 @@ class ChatInputContainer(QFrame):
             self._update_tag_button_text()
 
         except Exception as e:
-            pass
+            self.logger.error(f"Error fetching MCP tags: {e}", exc_info=True)
+            self.btn_mcp_tags.setText("Filter Tools: Error")
 
     def _update_tag_button_text(self):
         selected = self.get_selected_tags()
