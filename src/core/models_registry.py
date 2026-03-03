@@ -10,7 +10,9 @@ from huggingface_hub import scan_cache_dir, snapshot_download, constants
 from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
 from transformers import AutoTokenizer
 
+from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
+from src.core.kb_manager import KBManager
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -224,15 +226,20 @@ def init_external_models_file():
 def check_model_exists(repo_id):
     if not repo_id:
         return False
-    hf_home = constants.HF_HOME
+
+    hf_home = _get_hf_home()
     onnx_dir = os.path.join(hf_home, "onnx_cache", repo_id.replace("/", "--"))
+
+    logger.info(f"Detecting ONNX model path: {onnx_dir}")
 
     if os.path.exists(onnx_dir):
         for root, dirs, files in os.walk(onnx_dir):
             if any(f.endswith('.onnx') for f in files):
+                logger.info(f"[Check] Success! .onnx file found at this path.")
                 return True
-    return False
 
+    logger.warning(f"Failed! No .onnx file found at path {onnx_dir}, or directory does not exist.")
+    return False
 
 def load_external_models():
     init_external_models_file()
@@ -298,13 +305,6 @@ class ModelManager:
         return cls._instance
 
     def verify_chat_models(self, kb_id):
-        """
-        在对话开始前执行强力自检：
-        1. 检查该知识库绑定的 Embedding 模型是否已下载。
-        2. 检查全局设置中选用的 Reranker 模型是否已下载。
-        """
-        from src.core.kb_manager import KBManager
-        from src.core.config_manager import ConfigManager
 
         config = ConfigManager()
         dev = self.dev_mgr.get_optimal_device()
@@ -320,13 +320,11 @@ class ModelManager:
             ui_name = e_conf.get('ui_name', embed_id) if e_conf else embed_id
             return False, f"Embedding Model ({ui_name})", embed_id, "embedding"
 
-        # --- 校验 B: Reranker 模型 ---
         rerank_id = config.user_settings.get("rerank_model_id", "rerank_auto")
         if rerank_id == "rerank_auto":
             rerank_id = resolve_auto_model("reranker", dev)
 
         r_conf = get_model_conf(rerank_id, "reranker")
-        # Reranker 如果没选或者选了 Auto 但解析失败，通常可以跳过，但如果显式选了却没下载，则拦截
         if r_conf and not check_model_exists(r_conf.get('hf_repo_id')):
             ui_name = r_conf.get('ui_name', rerank_id)
             return False, f"Reranker Model ({ui_name})", rerank_id, "reranker"
@@ -349,15 +347,19 @@ def get_model_type_by_repo(repo_id):
 
 
 def ensure_onnx_model(repo_id, model_type="embedding"):
-    hf_home = constants.HF_HOME
+    # 动态路径获取，不写死 C 盘
+    hf_home = _get_hf_home()
     onnx_dir = os.path.join(hf_home, "onnx_cache", repo_id.replace("/", "--"))
+
+    logger.info(f"Requesting model: {repo_id} | Target ONNX cache dir: {onnx_dir}")
 
     if os.path.exists(onnx_dir):
         for root, dirs, files in os.walk(onnx_dir):
             if any(f.endswith('.onnx') for f in files):
+                logger.info(f"[Ensure] Local ONNX cache hit, skipping download and conversion.")
                 return onnx_dir
 
-    logger.info(f"ONNX models not found for {repo_id}. Starting PyTorch to ONNX conversion trace...")
+    logger.info(f"Local ONNX cache miss, preparing for download and conversion...")
 
     model_path = snapshot_download(repo_id=repo_id)
 
@@ -370,9 +372,9 @@ def ensure_onnx_model(repo_id, model_type="embedding"):
     should_export = not source_has_onnx
 
     if source_has_onnx:
-        logger.info("Detected official ONNX files in repository. Skipping forced re-export.")
+        logger.info("Official ONNX model detected in downloaded source, skipping format conversion.")
     else:
-        logger.info("No official ONNX files found. Starting PyTorch to ONNX conversion trace...")
+        logger.info("No official ONNX model detected, starting PyTorch to ONNX engine...")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
@@ -396,7 +398,7 @@ def ensure_onnx_model(repo_id, model_type="embedding"):
     model.save_pretrained(onnx_dir)
     tokenizer.save_pretrained(onnx_dir)
 
-    logger.info(f"ONNX processing successful and saved to: {onnx_dir}")
+    logger.info(f"ONNX processing complete and saved to: {onnx_dir}")
 
     del model
     del tokenizer
@@ -407,9 +409,9 @@ def ensure_onnx_model(repo_id, model_type="embedding"):
     if os.path.exists(hf_model_dir):
         try:
             shutil.rmtree(hf_model_dir)
-            logger.info(f"🧹 Cleaned up original PyTorch cache to save disk space: {hf_model_dir}")
+            logger.info(f"Cleaned up original PyTorch cache to save disk space: {hf_model_dir}")
         except Exception as e:
-            logger.warning(f"Could not delete original cache: {e}")
+            logger.warning(f"Failed to clean original cache: {e}")
 
     return onnx_dir
 

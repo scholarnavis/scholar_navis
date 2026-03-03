@@ -26,10 +26,14 @@ def _setup_worker_env():
     else:
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+    models_dir = os.path.join(base_dir, "models")
+    os.environ["HF_HOME"] = models_dir
+    os.environ["SENTENCE_TRANSFORMERS_HOME"] = models_dir
 
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     os.environ["ANONYMIZED_TELEMETRY"] = "False"
     os.environ["HF_HUB_OFFLINE"] = "1"
+
 
     try:
         from src.core.network_worker import setup_global_network_env

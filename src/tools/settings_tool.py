@@ -902,7 +902,7 @@ class SettingsTool(BaseTool):
              "model_name": "", "api_key": "ollama"}
         ]
 
-        loaded_configs = []
+        loaded_configs = self.config.load_json(config_path, encrypt=True) or []
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
@@ -928,21 +928,13 @@ class SettingsTool(BaseTool):
                 needs_resave = True
 
         if needs_resave or not os.path.exists(config_path):
-            try:
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(loaded_configs, f, indent=4)
-            except Exception:
-                pass
+            self.config.save_json(config_path, loaded_configs, encrypt=True)
 
         return loaded_configs if loaded_configs else default_config
 
     def _save_llm_config(self):
         config_path = os.path.join(self.config.CONFIG_DIR, "llm_config.json")
-        try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(self.llm_configs, f, indent=4)
-        except Exception as e:
-            self.logger.error(f"Error saving llm_config.json: {e}")
+        self.config.save_json(config_path, self.llm_configs, encrypt=True)
 
     def init_llm_section(self):
         from src.ui.components.param_editor import ParamEditorWidget

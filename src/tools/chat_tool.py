@@ -86,8 +86,8 @@ class ChatDropTargetWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self.config = ConfigManager()
 
-        # 拖拽时的叠加提示层
         self.overlay = QLabel("Drop files here to attach", self)
         self.overlay.setAlignment(Qt.AlignCenter)
         self.overlay.setStyleSheet("""
