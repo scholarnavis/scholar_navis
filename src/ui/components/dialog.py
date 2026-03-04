@@ -535,7 +535,7 @@ class FeedLibraryDialog(BaseDialog):
 
 class McpConfigDialog(BaseDialog):
     def __init__(self, parent=None, server_name="", server_config=None):
-        title = "编辑 MCP 服务器配置" if server_config else "添加 MCP 服务器"
+        title = "Edit MCP Server" if server_config else "Add MCP Server"
         super().__init__(parent, title=title, width=560)
 
         self.form_widget = QWidget()
@@ -544,26 +544,26 @@ class McpConfigDialog(BaseDialog):
         self.form_layout.setLabelAlignment(Qt.AlignRight)
 
         self.inp_name = QLineEdit(server_name)
-        self.inp_name.setPlaceholderText("例如: remote-database-mcp")
+        self.inp_name.setPlaceholderText("e.g. remote-database-mcp")
         if server_name in ["builtin", "external"]:
             self.inp_name.setEnabled(False)
-            self.inp_name.setToolTip("核心组件标识符不可更改")
+            self.inp_name.setToolTip("Core component identifier cannot be changed")
 
         self.combo_type = QComboBox()
-        self.combo_type.addItems(["stdio", "sse"])
+        self.combo_type.addItems(["stdio", "sse", "streamable_http"])
 
         self.inp_cmd_url = QLineEdit()
         self.inp_args = QLineEdit()
-        self.inp_args.setPlaceholderText("arg1, arg2 (使用英文逗号分隔)")
+        self.inp_args.setPlaceholderText("arg1, arg2 (comma-separated)")
 
         self.env_editor = ParamEditorWidget()
 
         env_btn_layout = QHBoxLayout()
-        self.btn_add_env = QPushButton(" 添加一条")
+        self.btn_add_env = QPushButton(" Add Entry")
         self.btn_add_env.setIcon(self.tm.icon("add", "text_main"))
         self.btn_add_env.clicked.connect(lambda: self.env_editor.add_param_row())
 
-        self.btn_add_auth = QPushButton(" 一键填入 Authorization")
+        self.btn_add_auth = QPushButton(" Insert Authorization Header")
         self.btn_add_auth.setIcon(self.tm.icon("lock", "warning"))
         self.btn_add_auth.clicked.connect(self._add_auth_header)
 
@@ -577,18 +577,19 @@ class McpConfigDialog(BaseDialog):
         env_layout.addWidget(self.env_editor)
         env_layout.addLayout(env_btn_layout)
 
-        self.lbl_args = QLabel("启动参数:")
-        self.lbl_env = QLabel("环境变量:")
+        self.lbl_args = QLabel("Arguments:")
+        self.lbl_env = QLabel("Environment:")
 
-        self.form_layout.addRow("服务器标识:", self.inp_name)
-        self.form_layout.addRow("传输协议:", self.combo_type)
-        self.form_layout.addRow("启动命令/URL:", self.inp_cmd_url)
+        self.form_layout.addRow("Server ID:", self.inp_name)
+        self.form_layout.addRow("Transport:", self.combo_type)
+        self.form_layout.addRow("Command / URL:", self.inp_cmd_url)
         self.form_layout.addRow(self.lbl_args, self.inp_args)
         self.form_layout.addRow(self.lbl_env, self.env_container)
 
         if server_config:
-            type_idx = 0 if server_config.get("type", "stdio") == "stdio" else 1
-            self.combo_type.setCurrentIndex(type_idx)
+            type_idx  = {"stdio": 0, "sse": 1, "streamable_http": 2}
+            self.combo_type.setCurrentIndex(type_idx.get(server_config.get("type", "stdio"), 0))
+
 
             if type_idx == 0:
                 self.inp_cmd_url.setText(server_config.get("command", ""))
@@ -604,12 +605,12 @@ class McpConfigDialog(BaseDialog):
 
         self.content_layout.addWidget(self.form_widget)
 
-        self.btn_test = self.add_button("测试连接", self._on_test_clicked)
+        self.btn_test = self.add_button("Test Connection", self._on_test_clicked)
         self.footer_layout.removeWidget(self.btn_test)
         self.footer_layout.insertWidget(0, self.btn_test)
 
-        self.add_button("取消", self.reject)
-        self.add_button("保存", self.accept, is_primary=True)
+        self.add_button("Cancel", self.reject)
+        self.add_button("Save", self.accept, is_primary=True)
 
         self.combo_type.currentIndexChanged.connect(self._on_type_changed)
         self._on_type_changed()
@@ -624,7 +625,7 @@ class McpConfigDialog(BaseDialog):
             QLabel {{ color: {tm.color('text_muted')}; font-size: 13px; border: none; }} 
             QLineEdit, QComboBox {{ 
                 background-color: {tm.color('bg_input')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')}; 
-                border-radius: 4px; padding: 6px; selection-background-color: {tm.color('accent')}; 
+                border-radius: 4px; padding: 6px; selection-background-color: {tm.color('accent')}; selection-color: {tm.color('selection_fg')};
             }} 
             QLineEdit:focus, QComboBox:focus {{ border: 1px solid {tm.color('accent')}; }}
             QLineEdit:disabled {{ background-color: {tm.color('bg_main')}; color: {tm.color('text_muted')}; }}
@@ -635,18 +636,25 @@ class McpConfigDialog(BaseDialog):
         self.btn_test.setStyleSheet(
             f"QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('warning')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 5px 10px; }} QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}")
 
+
     def _on_type_changed(self):
-        is_stdio = self.combo_type.currentText() == "stdio"
+        stype = self.combo_type.currentText()
+        is_stdio = (stype == "stdio")
+
         self.inp_args.setVisible(is_stdio)
         self.lbl_args.setVisible(is_stdio)
         self.btn_add_auth.setVisible(not is_stdio)
 
         if is_stdio:
-            self.inp_cmd_url.setPlaceholderText("例如: python, npx, /usr/bin/node")
-            self.lbl_env.setText("环境变量:")
-        else:
-            self.inp_cmd_url.setPlaceholderText("例如: http://192.168.1.10:8000/sse")
-            self.lbl_env.setText("HTTP请求头:")
+            self.inp_cmd_url.setPlaceholderText("e.g. python, npx, node")
+            self.lbl_env.setText("Environment:")
+        elif stype == "sse":
+            self.inp_cmd_url.setPlaceholderText("e.g. http://domain.com/sse")
+            self.lbl_env.setText("HTTP Headers:")
+        elif stype == "streamable_http":
+            self.inp_cmd_url.setPlaceholderText("e.g. https://api.mcp-server.com/v1/stream")
+            self.lbl_env.setText("Headers (Auth/Token):")
+
 
     def _add_auth_header(self):
         current_data = self.env_editor.extract_data()
@@ -672,19 +680,21 @@ class McpConfigDialog(BaseDialog):
             cfg["args"] = [a.strip() for a in args_raw.split(",") if a.strip()]
             if env_dict: cfg["env"] = env_dict
         else:
+            # 适用于 sse 或 streamable_http
             cfg["url"] = self.inp_cmd_url.text().strip()
             if env_dict: cfg["headers"] = env_dict
 
         return name, cfg
 
+
     def _on_test_clicked(self):
         name, cfg = self.get_config()
         if not name or (not cfg.get("command") and not cfg.get("url")):
-            StandardDialog(self, "信息缺失", "请至少填入服务器标识与命令/URL。").exec()
+            StandardDialog(self, "Missing Info", "Please enter at least a Server ID and Command/URL.").exec()
             return
 
         self.btn_test.setEnabled(False)
-        self.pd = ProgressDialog(self, "测试连接", f"正在尝试连接至 [{name}]...\n请稍候...")
+        self.pd = ProgressDialog(self, "Testing Connection", f"Connecting to [{name}]...\nPlease wait...")
         self.pd.show()
 
         self.test_thread = QThread()
@@ -714,51 +724,116 @@ class McpConfigDialog(BaseDialog):
 
         self.pd.close_safe()
         if success:
-            StandardDialog(self, "连接成功", f"{msg}").exec()
+            StandardDialog(self, "Connection Successful", f"{msg}").exec()
         else:
-            err_dialog = StandardDialog(self, "连接失败", f"无法连接到服务器：\n{msg}")
+            err_dialog = StandardDialog(self, "Connection Failed", f"Unable to connect to server:\n{msg}")
             err_dialog.setFixedWidth(500)
             err_dialog.exec()
 
 
 class SelectKBFileDialog(BaseDialog):
     def __init__(self, parent=None, files=None):
-        super().__init__(parent, title="Select Files from KB", width=500)
+        super().__init__(parent, title="Select Files from Knowledge Base", width=580)
+        self.setMinimumHeight(500)
+        self._all_files = files or []
+
+        # --- 搜索栏 ---
+        self.inp_search = QLineEdit()
+        self.inp_search.setPlaceholderText("Search file names...")
+        self.inp_search.textChanged.connect(self._filter_list)
+        self.content_layout.addWidget(self.inp_search)
+
+        # --- 文件列表 ---
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list_widget.setSpacing(2)
+        self.list_widget.itemDoubleClicked.connect(self.accept)
+        self.list_widget.itemSelectionChanged.connect(self._update_status)
+        self.content_layout.addWidget(self.list_widget, stretch=1)
 
-        tm = ThemeManager()
-        self.list_widget.setStyleSheet(f"""
-            QListWidget {{
+        self._populate_list(self._all_files)
+
+        # --- 底部状态提示 ---
+        self.lbl_status = QLabel()
+        self.footer_layout.insertWidget(0, self.lbl_status)
+
+        self.add_button("Cancel", self.reject)
+        self.btn_attach = self.add_button("Attach", self.accept, is_primary=True)
+
+        self._update_status()
+        self._apply_theme()
+
+    def _populate_list(self, files):
+        self.list_widget.clear()
+        for f in files:
+            item = QListWidgetItem(f"  {f['name']}")
+            item.setData(Qt.UserRole, f['path'])
+            item.setToolTip(f['path'])
+            self.list_widget.addItem(item)
+
+    def _filter_list(self, text):
+        text = text.lower()
+        filtered = [f for f in self._all_files if text in f['name'].lower()]
+        self._populate_list(filtered)
+        self._update_status()
+
+    def _update_status(self):
+        selected = len(self.list_widget.selectedItems())
+        total = self.list_widget.count()
+        if selected > 0:
+            self.lbl_status.setText(f"{selected} of {total} selected")
+        else:
+            self.lbl_status.setText(f"{total} file(s) available")
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+
+        self.inp_search.setStyleSheet(f"""
+            QLineEdit {{
                 background-color: {tm.color('bg_input')};
                 color: {tm.color('text_main')};
                 border: 1px solid {tm.color('border')};
                 border-radius: 4px;
-                padding: 4px;
+                padding: 7px 10px;
+                font-size: 13px;
+                selection-background-color: {tm.color('accent')};
+                selection-color: {tm.color('selection_fg')};
             }}
-            QListWidget::item {{ padding: 6px; border-radius: 4px; }}
-            QListWidget::item:selected {{ background-color: {tm.color('accent')}; color: white; }}
+            QLineEdit:focus {{ border: 1px solid {tm.color('accent')}; }}
         """)
 
-        for f in files:
-            item = QListWidgetItem(f['name'])
-            item.setData(Qt.UserRole, f['path'])
-            self.list_widget.addItem(item)
+        self.list_widget.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {tm.color('bg_card')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                border-radius: 6px;
+                padding: 4px;
+                font-size: 13px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 9px 8px;
+                border-radius: 4px;
+                border-bottom: 1px solid {tm.color('bg_main')};
+            }}
+            QListWidget::item:hover {{
+                background-color: {tm.color('btn_hover')};
+            }}
+            QListWidget::item:selected {{
+                background-color: {tm.color('accent')};
+                color: {tm.color('selection_fg')};
+                border-bottom: 1px solid {tm.color('accent')};
+            }}
+        """)
 
-        # 允许双击直接应用
-        self.list_widget.itemDoubleClicked.connect(self.accept)
-
-        lbl_tip = QLabel("Hold Ctrl/Shift to select multiple files. Double-click to quick-attach.")
-        lbl_tip.setStyleSheet(f"color: {tm.color('text_muted')}; font-size: 12px;")
-
-        self.content_layout.addWidget(lbl_tip)
-        self.content_layout.addWidget(self.list_widget)
-
-        self.add_button("Cancel", self.reject)
-        self.add_button("Attach", self.accept, is_primary=True)
+        self.lbl_status.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 12px; font-weight: bold;")
 
     def get_selected_paths(self):
         return [item.data(Qt.UserRole) for item in self.list_widget.selectedItems()]
+
 
 
 class AddModelDialog(BaseDialog):

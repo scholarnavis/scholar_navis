@@ -554,7 +554,8 @@ class SettingsTool(BaseTool):
         self.btn_add_mcp.clicked.connect(self._on_add_mcp_clicked)
 
         self.btn_refresh_mcp = QPushButton(" Refresh Status")
-        self.btn_refresh_mcp.clicked.connect(self._refresh_mcp_status)
+        self.btn_refresh_mcp.clicked.connect(self._on_refresh_mcp_clicked)
+
 
         header_layout.addWidget(self.btn_add_mcp)
         header_layout.addWidget(self.btn_refresh_mcp)
@@ -593,6 +594,18 @@ class SettingsTool(BaseTool):
         self.table_mcp.setRowCount(0)
         for name, cfg in servers.items():
             self._add_mcp_row(name, cfg)
+
+    def _on_refresh_mcp_clicked(self):
+        try:
+            mcp_mgr = MCPManager.get_instance()
+            mcp_mgr.bootstrap_servers(force_all=False)
+            from src.ui.components.toast import ToastManager
+            ToastManager().show("Retrying offline MCP servers...", "info")
+            self._refresh_mcp_status()
+        except Exception as e:
+            self.logger.error(f"Refresh MCP clicked failed: {e}")
+
+
 
     def _add_mcp_row(self, name, cfg):
         row = self.table_mcp.rowCount()

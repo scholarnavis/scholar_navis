@@ -6,11 +6,15 @@ import os
 import time
 from contextlib import AsyncExitStack
 
+import anyio
+import httpx
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
+from mcp.types import JSONRPCMessage
+
 from typing import Dict, List, Optional
 
 from src.core.config_manager import ConfigManager
@@ -44,18 +48,13 @@ class MCPManager:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def bootstrap_servers(self):
+    def bootstrap_servers(self, force_all=True):  # <-- 增加 force_all 参数，以防强制重启一切
         config_mgr = ConfigManager()
         servers = config_mgr.mcp_servers.get("mcpServers", {})
         user_cfg = config_mgr.user_settings
 
-        safe_base_env = {
-            "PATH": os.environ.get("PATH", ""),
-            "SystemRoot": os.environ.get("SystemRoot", ""),
-            "USERPROFILE": os.environ.get("USERPROFILE", ""),
-            "HOME": os.environ.get("HOME", ""),
-            "PYTHONIOENCODING": "utf-8",
-        }
+        safe_base_env = os.environ.copy()
+        safe_base_env["PYTHONIOENCODING"] = "utf-8"
 
         if user_cfg.get("proxy_mode") == "custom" and user_cfg.get("proxy_url"):
             proxy = user_cfg.get("proxy_url")
@@ -76,6 +75,12 @@ class MCPManager:
             always_on = srv_cfg.get("always_on", False)
 
             if is_enabled or always_on:
+                if not force_all:
+
+                    status = self.server_status.get(server_name, "")
+                    if status == "connected":
+                        continue
+
                 self.server_status[server_name] = "starting"
                 run_cfg = dict(srv_cfg)
 
@@ -84,27 +89,25 @@ class MCPManager:
                     is_frozen = getattr(sys, 'frozen', False) or not sys.executable.endswith('python.exe')
                     run_cfg['command'] = sys.executable
                     if is_frozen:
-                        run_cfg['args'] = ["--run-builtin-mcp"]
+                        run_cfg['args'] =["--run-builtin-mcp"]
                     else:
-                        run_cfg['args'] = ["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
+                        run_cfg['args'] =["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
 
-                    #  只有内置服务使用 builtin_env
                     run_cfg['env'] = builtin_env
                     self._async_start(server_name, run_cfg)
 
                 else:
-                    logger.info(f"Scheduled Lazy Load for External MCP Server: [{server_name}] in {delay_ms}ms")
+                    logger.info(f"Scheduled Lazy Load for External MCP Server:[{server_name}] in {delay_ms}ms")
 
                     if run_cfg.get('type') == 'stdio' and run_cfg.get('command') == 'python':
                         ext_py = config_mgr.user_settings.get("external_python_path", "")
                         run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
 
                     if run_cfg.get('type') == 'stdio':
-                        # 第三方服务只能继承纯净的 safe_base_env
                         custom_env = safe_base_env.copy()
                         user_defined_env = run_cfg.get('env', {})
                         if isinstance(user_defined_env, dict):
-                            custom_env.update(user_defined_env)
+                            custom_env.update({k: str(v) for k, v in user_defined_env.items()})
                         run_cfg['env'] = custom_env
 
                     def start_lazy_server(name=server_name, cfg=run_cfg):
@@ -113,7 +116,6 @@ class MCPManager:
                     QTimer.singleShot(delay_ms, start_lazy_server)
                     delay_ms += 2000
 
-
     async def _run_session(self, server_name: str, connection_config: dict):
         self.server_status[server_name] = "connecting"
         if server_name not in self.server_stops:
@@ -121,6 +123,7 @@ class MCPManager:
 
         try:
             async with AsyncExitStack() as stack:
+
                 if connection_config['type'] == 'stdio':
                     server_params = StdioServerParameters(
                         command=connection_config['command'],
@@ -128,29 +131,89 @@ class MCPManager:
                         env=connection_config.get('env')
                     )
                     transport = await stack.enter_async_context(stdio_client(server_params))
+                    read, write = transport
                 elif connection_config['type'] == 'sse':
                     headers = connection_config.get('headers')
-                    if headers:
-                        transport = await stack.enter_async_context(
-                            sse_client(connection_config['url'], headers=headers))
-                    else:
-                        transport = await stack.enter_async_context(sse_client(connection_config['url']))
-                else:
-                    raise ValueError(f"Unsupported connection type: {connection_config['type']}")
+                    transport = await stack.enter_async_context(sse_client(connection_config['url'], headers=headers))
+                    read, write = transport
 
-                read, write = transport
+
+                elif connection_config['type'] == 'streamable_http':
+
+                    url = connection_config.get('url')
+                    headers = connection_config.get('headers', {})
+                    read_tx, read_rx = anyio.create_memory_object_stream(100)
+                    write_tx, write_rx = anyio.create_memory_object_stream(100)
+
+                    async def http_poster():
+                        import json
+                        # 使用持久化客户端避免频繁握手
+                        async with httpx.AsyncClient() as client:
+                            async with write_rx:
+                                async for message in write_rx:
+                                    try:
+                                        if hasattr(message, "model_dump"):
+                                            payload = message.model_dump(mode='json')
+                                        elif hasattr(message, "dict"):
+                                            payload = message.dict()
+                                        else:
+                                            payload = json.loads(json.dumps(message, default=lambda o: o.__dict__))
+
+                                        # 重要：POST 请求不能带 event-stream 的 Accept，否则部分 Gateway 会返回 400
+                                        post_headers = {k: v for k, v in headers.items() if k.lower() != 'accept'}
+                                        post_headers['Content-Type'] = 'application/json'
+
+                                        await client.post(url, json=payload, headers=post_headers)
+                                    except Exception as e:
+                                        logger.error(f"HTTP POST 失败: {e}")
+
+                    async def http_receiver():
+                        async with read_tx:
+                            try:
+                                # 增加 Keep-alive 和长连接配置
+                                limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                                async with httpx.AsyncClient(timeout=None, limits=limits) as client:
+                                    async with client.stream("GET", url, headers=headers) as resp:
+                                        if resp.status_code != 200:
+                                            logger.error(f"HTTP 连接状态异常: {resp.status_code}")
+                                            return
+
+                                        async for line in resp.aiter_lines():
+                                            line = line.strip()
+                                            if not line: continue
+
+                                            # --- 关键修复：处理 SSE 的 data: 前缀 ---
+                                            if line.startswith("data: "):
+                                                line = line[6:].strip()
+
+                                            if '"jsonrpc"' not in line:
+                                                continue
+
+                                            try:
+                                                msg = JSONRPCMessage.model_validate_json(line)
+                                                await read_tx.send(msg)
+                                            except Exception as val_e:
+                                                logger.warning(f"解析消息失败: {line[:100]} | 错误: {val_e}")
+                            except Exception as e:
+                                logger.error(f"HTTP 接收失败: {e}")
+
+                    tg = await stack.enter_async_context(anyio.create_task_group())
+
+
+                    tg.start_soon(http_poster, *[])
+                    tg.start_soon(http_receiver, *[])
+
+                    read, write = read_rx, write_tx
+                else:
+                    raise ValueError(f"Unsupported type: {connection_config['type']}")
+
                 session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
-
-                try:
-                    await asyncio.wait_for(session.initialize(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    raise Exception(
-                        "Initialization handshake timed out. Please check your Headers/API Keys or proxy settings.")
 
                 self.sessions[server_name] = session
                 self.server_status[server_name] = "connected"
 
+                # 注册工具列表
                 tools_response = await session.list_tools()
                 for tool in tools_response.tools:
                     self.tool_map[tool.name] = server_name
@@ -164,13 +227,23 @@ class MCPManager:
                         }
                     }
 
-                logger.info(f"[{server_name}] Connected. Loaded {len(tools_response.tools)} tools.")
+                logger.info(f"[{server_name}] Connected via HTTP Stream. Loaded {len(tools_response.tools)} tools.")
                 GlobalSignals().mcp_status_changed.emit()
                 await self.server_stops[server_name].wait()
 
         except Exception as e:
-            logger.error(f"[{server_name}] Connection error: {e}")
-            self.server_status[server_name] = f"error: {str(e)}"
+
+            def _unwrap_exception(exc):
+                if hasattr(exc, 'exceptions'):
+                    return " | ".join(_unwrap_exception(sub_e) for sub_e in exc.exceptions)
+                return str(exc)
+
+            err_msg = _unwrap_exception(e)
+            if not err_msg.strip():
+                err_msg = repr(e)
+
+            logger.error(f"[{server_name}] Connection error: {err_msg}")
+            self.server_status[server_name] = f"error: {err_msg}"
             self.sessions.pop(server_name, None)
 
             tools_to_remove = [k for k, v in self.tool_map.items() if v == server_name]
@@ -179,6 +252,9 @@ class MCPManager:
                 self.tool_schemas.pop(tool, None)
 
             GlobalSignals().mcp_status_changed.emit()
+
+
+
 
     def get_available_tags(self) -> list:
         """供 UI 获取所有可选标签"""

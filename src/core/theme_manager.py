@@ -9,7 +9,6 @@ from PySide6.QtSvg import QSvgRenderer
 from src.core.config_manager import ConfigManager
 
 
-
 class ThemeManager(QObject):
     theme_changed = Signal()
     _instance = None
@@ -39,14 +38,15 @@ class ThemeManager(QObject):
                 "accent": "#58a6ff",
                 "accent_hover": "#79b8ff",
                 "academic_blue": "#007acc",
-                "academic_blue_hover": "#005a9e" ,
+                "academic_blue_hover": "#005a9e",
                 "title_blue": "#6BA4E7",
                 "border": "#444444",
                 "danger": "#ff6b6b",
                 "success": "#4caf50",
                 "warning": "#ffb86c",
                 "btn_bg": "#3e3e42",
-                "btn_hover": "#4e4e52"
+                "btn_hover": "#4e4e52",
+                "selection_fg": "#1e1e1e",
             },
             "light": {
                 "bg_main": "#f3f3f3",
@@ -64,7 +64,8 @@ class ThemeManager(QObject):
                 "success": "#2e7d32",
                 "warning": "#ed6c02",
                 "btn_bg": "#e0e0e0",
-                "btn_hover": "#d5d5d5"
+                "btn_hover": "#d5d5d5",
+                "selection_fg": "#ffffff",
             }
         }
         self.current_theme = "dark"
@@ -78,7 +79,6 @@ class ThemeManager(QObject):
 
     def font_family(self) -> str:
         return "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', Roboto, sans-serif"
-
 
     @staticmethod
     def get_resource_path(*paths):
@@ -94,7 +94,6 @@ class ThemeManager(QObject):
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
         return os.path.join(base_dir, *paths)
-
 
     def set_theme(self, theme_name: str):
         theme_name = theme_name.lower()
@@ -149,11 +148,11 @@ class ThemeManager(QObject):
 
     def get_custom_qss(self):
         return f"""
-        
+
         QWidget {{
             font-family: {self.font_family()};
         }}
-        
+
         QGroupBox {{ margin-top: 15px; }}
         QGroupBox::title {{
             color: {self.color('title_blue')} !important;
@@ -164,6 +163,8 @@ class ThemeManager(QObject):
         QLineEdit, QPlainTextEdit, QComboBox {{
             background-color: {self.color('bg_input')}; color: {self.color('text_main')};
             border: 1px solid {self.color('border')}; border-radius: 4px; padding: 5px;
+            selection-background-color: {self.color('accent')};
+            selection-color: {self.color('selection_fg')};
         }}
 
         QComboBox QAbstractItemView {{
@@ -211,8 +212,6 @@ class ThemeManager(QObject):
             text-align: left; border: none; font-weight: bold;
         }}
         """
-
-
 
     def apply_class(self, widget, class_name):
         widget.setProperty("cssClass", class_name)
