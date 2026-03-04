@@ -564,7 +564,7 @@ class ImportTool(BaseTool):
                 return
 
         self.pd = ProgressDialog(
-            self.widget, "Saving", "Synchronizing database and file index...",
+            self.widget, "Synchronizing", "Synchronizing database and file index...",
             telemetry_config={"cpu": True, "ram": True, "gpu": True, "net": False}
         )
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
@@ -579,13 +579,29 @@ class ImportTool(BaseTool):
 
         needs_process = any([self.staged_rename, self.staged_del, self.staged_add, self.rebuild_required])
 
-        if not needs_process:
+        # 如果只有元数据改动，没有耗时任务
+        if self.staged_meta and not needs_process:
+            m = self.staged_meta
+            self.kb_manager.update_kb_info(self.current_kb_id, m['name'], m['description'], m['domain'])
             self.kb_manager.set_kb_status(self.current_kb_id, "ready")
-            self.pd.show_success_state("Complete", "Project information has been successfully updated.")
+
+            self.pd.show_success_state("Info Updated", "Project metadata saved successfully.")
             self._clear_staging_state()
             GlobalSignals().kb_modified.emit(self.current_kb_id)
-        else:
-            self.logger.debug(f"Starting background task chain for KB: {self.current_kb_id}")
+            return
+
+        if needs_process:
+            if self.staged_meta:
+                m = self.staged_meta
+                self.kb_manager.update_kb_info(self.current_kb_id, m['name'], m['description'], m['domain'])
+                if self.rebuild_required:
+                    self.kb_manager._update_meta_field(self.current_kb_id, "model_id", m['model_id'])
+
+
+            self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
+            self.task_mgr.sig_progress.connect(self.pd.update_progress)
+
+
             self._run_task_chain()
 
     def _clear_staging_state(self):
@@ -655,38 +671,37 @@ class ImportTool(BaseTool):
                 self._on_final_done(TaskState.SUCCESS.value, "")
 
     def _on_final_done(self, state, msg):
-        """链式任务最终完成"""
-        if state == TaskState.SUCCESS.value:
-            self.pd.show_success_state("Complete", "Library synchronized.")
+        try:
+            self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
+        except:
+            pass
 
-            kb_id_to_emit = self.current_kb_id
+        if state == TaskState.SUCCESS.value:
+            if self.pd:
+                self.pd.close_safe()
+                self.pd = None
+
+            # 弹出普通通知窗口
+            StandardDialog(
+                self.widget,
+                "Success",
+                "The library has been fully synchronized and indexed."
+            ).exec()
 
             if self.current_kb_id:
                 self.kb_manager.set_kb_status(self.current_kb_id, "ready")
 
-            # 清空暂存并强制 UI 刷新
-            self.staged_add, self.staged_del, self.staged_rename = [], [], {}
-            self.staged_meta, self.rebuild_required = None, False
-            self.btn_save.setEnabled(False)
+            self._clear_staging_state()
+            if self.current_kb_id:
+                GlobalSignals().kb_modified.emit(self.current_kb_id)
 
-            self.refresh_kb_list()
-            self.update_file_list()
-            self.mark_dirty()
-
-            # 后台任务(重建/增删改)必定是实质性更改，向全局广播
-            if kb_id_to_emit:
-                GlobalSignals().kb_modified.emit(kb_id_to_emit)
+        elif state == TaskState.FAILED.value:
+            self._on_error(msg)
 
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_final_done)
-        except Exception:
+        except:
             pass
-        try:
-            self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception:
-            pass
-
-        GlobalSignals().kb_list_changed.emit()
 
     def _on_error(self, msg):
         self.kb_manager.set_kb_status(self.current_kb_id, "corrupted")
@@ -694,7 +709,6 @@ class ImportTool(BaseTool):
 
         if self.pd: self.pd.close_safe()
 
-        # 💡 检查是否是模型文件缺失导致的错误
         is_model_error = "OSError" in msg or "no file named" in msg.lower() or "model weights" in msg.lower()
 
         if is_model_error:

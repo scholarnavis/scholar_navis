@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
                                QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem)
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression
+from PySide6.QtGui import QColor, QRegularExpressionValidator
 
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import EMBEDDING_MODELS
@@ -1203,7 +1203,16 @@ class ProjectEditorDialog(BaseDialog):
 
         self.inp_domain = QLineEdit()
         self.inp_domain.setPlaceholderText("e.g. Plant Biology")
+
+        regex = QRegularExpression(r"^[a-zA-Z0-9\s\-_.,]*$")
+        validator = QRegularExpressionValidator(regex, self.inp_domain)
+        self.inp_domain.setValidator(validator)
+
         self.form_layout.addRow("Domain:", self.inp_domain)
+
+        self.lbl_domain_hint = QLabel("This is the focus area for AI analysis and processing.")
+        self.lbl_domain_hint.setWordWrap(True)
+        self.form_layout.addRow("", self.lbl_domain_hint)
 
         self.inp_desc = QTextEdit()
         self.inp_desc.setPlaceholderText("Optional description...")
@@ -1249,6 +1258,9 @@ class ProjectEditorDialog(BaseDialog):
         if hasattr(self, 'model_warn'):
             self.model_warn.setStyleSheet(
                 f"color: {tm.color('warning')}; font-size: 11px; font-weight: bold; border: none;")
+
+        if hasattr(self, 'lbl_domain_hint'):
+            self.lbl_domain_hint.setStyleSheet(f"color: {tm.color('text_muted')}; font-size: 11px; font-style: italic;")
 
     def get_data(self):
         return {

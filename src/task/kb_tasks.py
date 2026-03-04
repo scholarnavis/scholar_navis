@@ -5,6 +5,7 @@ import shutil
 import uuid
 import zipfile
 import onnxruntime as ort
+import torch
 import torch.nn.functional as F
 from chromadb import Documents, Embeddings, EmbeddingFunction
 from optimum.onnxruntime import ORTModelForFeatureExtraction
@@ -149,8 +150,23 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
             texts = [str(input)]
 
         inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt", max_length=512)
-        outputs = self.model(**inputs)
-        embeddings = outputs.last_hidden_state[:, 0, :]
+
+        try:
+            outputs = self.model(**inputs)
+            embeddings = outputs.last_hidden_state[:, 0, :]
+        except KeyError as e:
+
+            logging.getLogger("Worker.ONNXProvider").debug(f"Optimum mapping failed, bypassing to raw ONNX: {e}")
+
+            ort_inputs = {k: v.cpu().numpy() for k, v in inputs.items()}
+            raw_outputs = self.model.model.run(None, ort_inputs)
+
+            emb_array = raw_outputs[0]
+            if len(emb_array.shape) == 3:
+                emb_array = emb_array[:, 0, :]
+
+            embeddings = torch.tensor(emb_array)
+
         embeddings = F.normalize(embeddings, p=2, dim=1)
         return embeddings.tolist()
 

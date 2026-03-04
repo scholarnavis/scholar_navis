@@ -1,5 +1,5 @@
 import os
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QSizePolicy
 from PySide6.QtCore import Signal, Qt
 from src.core.config_manager import ConfigManager
 from src.ui.components.combo import BaseComboBox
@@ -13,21 +13,21 @@ class ModelSelectorWidget(QWidget):
         self.config_key = config_key
         self.model_key = model_key
         self.config_manager = ConfigManager()
-
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         lbl = QLabel(label_text)
         lbl.setFixedWidth(85)  # 固定 Label 宽度保证对齐
         layout.addWidget(lbl)
 
         # 限制最大宽度，防止全屏时无限拉长
-        self.combo_provider = BaseComboBox(min_width=120, max_width=200)
-        self.combo_model = BaseComboBox(min_width=150, max_width=400)
+        self.combo_provider = BaseComboBox(min_width=120, max_width=300)
+        self.combo_model = BaseComboBox(min_width=180, max_width=2000)
 
-        layout.addWidget(self.combo_provider)
-        layout.addWidget(self.combo_model)
-        layout.addStretch()
+        layout.addWidget(self.combo_provider, 1)
+        layout.addWidget(self.combo_model, 3)
 
         self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
         self.combo_model.currentIndexChanged.connect(self._on_model_changed)

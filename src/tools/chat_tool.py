@@ -1026,8 +1026,8 @@ class ChatTool(BaseTool):
         row1_layout = QHBoxLayout()
         self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
                                                   model_key="chat_model_name")
-        row1_layout.addWidget(self.model_selector)
-        row1_layout.addStretch()
+        row1_layout.addWidget(self.model_selector, 1)
+
 
         row2_layout = QHBoxLayout()
         self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
@@ -1040,8 +1040,8 @@ class ChatTool(BaseTool):
         row2_layout.addWidget(self.trans_selector)
         row2_layout.addSpacing(15)
         row2_layout.addWidget(lbl_kb)
-        row2_layout.addWidget(self.combo_kb)
-        row2_layout.addStretch()
+        row2_layout.addWidget(self.combo_kb, 1)
+
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
