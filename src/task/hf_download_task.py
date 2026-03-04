@@ -1,11 +1,16 @@
+import glob
 import multiprocessing
 import os
+import threading
 import time
 import psutil
 import tqdm
+from huggingface_hub.constants import default_cache_path
 
 from src.core.core_task import BackgroundTask, TaskState
 from src.core.network_worker import setup_global_network_env
+
+_tqdm_lock = threading.Lock()
 
 # 注意：请勿在此处全局 import huggingface_hub 或 torch！
 # 必须等待网络环境和线程环境变量设置完毕后再进行局部 import。
@@ -19,15 +24,14 @@ _original_display = tqdm.std.tqdm.display
 
 def patched_display(self, msg=None, pos=None):
     global _last_emit_time, _global_callback
-
     res = _original_display(self, msg, pos)
 
     if _global_callback:
-        current_time = time.time()
-        is_finished = (self.n >= self.total) if self.total else False
-
-        if is_finished or (current_time - _last_emit_time >= _EMIT_INTERVAL):
-            _last_emit_time = current_time
+        with _tqdm_lock:
+            current_time = time.time()
+            is_finished = (self.n >= self.total) if self.total else False
+            if is_finished or (current_time - _last_emit_time >= _EMIT_INTERVAL):
+                _last_emit_time = current_time
 
             percent = 0
             if self.total and self.total > 0:
@@ -67,12 +71,64 @@ class RealTimeHFDownloadTask(BackgroundTask):
         setup_global_network_env()
         repo_id = self.kwargs.get("repo_id")
 
-        # 手动强行刷新 HF_ENDPOINT 以防缓存
+        cache_dir = os.path.join(default_cache_path, "models--" + repo_id.replace("/", "--"))
+        if os.path.exists(cache_dir):
+            for lock_file in glob.glob(os.path.join(cache_dir, "**", "*.lock"), recursive=True):
+                try:
+                    os.remove(lock_file)
+                except:
+                    pass
+
+
         import huggingface_hub.constants
         if "HF_ENDPOINT" in os.environ:
             huggingface_hub.constants.ENDPOINT = os.environ["HF_ENDPOINT"]
 
+        actual_endpoint = huggingface_hub.constants.ENDPOINT
+        http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or "None"
+        https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or "None"
+
+        network_msg = (
+            f"Network Config -> Endpoint: {actual_endpoint} | "
+            f"HTTP_PROXY: {http_proxy} | HTTPS_PROXY: {https_proxy}"
+        )
+
+        if hasattr(self, "logger") and self.logger:
+            self.logger.info(network_msg)
+
+        self.send_log("INFO", network_msg)
+
         from huggingface_hub import snapshot_download
+        import huggingface_hub.utils.logging as hf_logging
+        import logging
+
+        # --- 接管 HuggingFace 的内部日志 ---
+        hf_logger = hf_logging.get_logger()
+        hf_logging.set_verbosity_info()  # 开启 INFO 级别以记录网络请求和重试
+
+        class HFLogHandler(logging.Handler):
+            def __init__(self, task):
+                super().__init__()
+                self.task = task
+                self.setFormatter(logging.Formatter('%(message)s'))
+
+            def emit(self, record):
+                msg = self.format(record)
+                if hasattr(self.task, "queue"):
+                    self.task.queue.put({
+                        "type": "system_log",
+                        "level": record.levelname,
+                        "msg": f"[HF Hub] {msg}"
+                    })
+
+
+                self.task.send_log(record.levelname, f"HF: {msg}")
+
+        for h in hf_logger.handlers[:]:
+            if isinstance(h, HFLogHandler):
+                hf_logger.removeHandler(h)
+
+        hf_logger.addHandler(HFLogHandler(self))
 
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
@@ -90,8 +146,7 @@ class RealTimeHFDownloadTask(BackgroundTask):
             with DownloadCapture(tqdm_callback):
                 snapshot_download(
                     repo_id=repo_id,
-                    resume_download=True,
-                    max_workers=4,
+                    max_workers=8,
                 )
             self.send_log("INFO", f"Download Finished: {repo_id}. Starting ONNX Conversion...")
 

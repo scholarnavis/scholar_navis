@@ -128,11 +128,21 @@ class TaskManager(QObject):
 
     def _handle_queue_msg(self, data):
         msg_type = data.get("type", "state")
-        if msg_type == "log":
-            self.sig_log.emit(data.get("level", "INFO"), data.get("msg", ""))
+
+        if msg_type in ["log", "system_log"]:
+            lvl_str = data.get("level", "INFO")
+            msg = data.get("msg", "")
+
+            if msg_type == "log":
+                self.sig_log.emit(lvl_str, msg)
+
+            import logging
+            lvl = getattr(logging, lvl_str.upper(), logging.INFO) if isinstance(lvl_str, str) else logging.INFO
+            logging.getLogger("TaskWorker").log(lvl, msg)
             return
 
         if "payload" in data and data["payload"] is not None:
+
             self.sig_result.emit(data["payload"])
 
         state, msg, progress = data.get("state"), data.get("msg", ""), data.get("progress", -2)

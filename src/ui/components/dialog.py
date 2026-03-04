@@ -915,6 +915,20 @@ class ProgressDialog(BaseDialog):
         self.lbl_metrics = QLabel("Initializing App Profiler...")
         self.lbl_metrics.setWordWrap(True)
         self.content_layout.addWidget(self.lbl_metrics)
+
+        self.stalled_warning_widget = QWidget()
+        warn_layout = QHBoxLayout(self.stalled_warning_widget)
+        warn_layout.setContentsMargins(5, 5, 5, 5)
+        self.lbl_warn_icon = QLabel()
+        self.lbl_warn_icon.setFixedSize(16, 16)
+        self.lbl_warn_text = QLabel(
+            "Task is still in progress (e.g., downloading, moving or ONNX conversion). Large models or network latency may take extra time, please wait...")
+        self.lbl_warn_text.setWordWrap(True)
+        warn_layout.addWidget(self.lbl_warn_icon, 0, Qt.AlignTop)
+        warn_layout.addWidget(self.lbl_warn_text, 1)
+        self.stalled_warning_widget.setVisible(False)
+        self.content_layout.addWidget(self.stalled_warning_widget)
+
         self.content_layout.addStretch()
 
         self.btn_cancel = self.add_button("Cancel Task", self.on_cancel_clicked, is_danger=True)
@@ -922,7 +936,14 @@ class ProgressDialog(BaseDialog):
         self._apply_theme()
         self.adjustSize()
 
+        self._last_progress = -1
+        self._last_progress_time = time.time()
+        self.stall_timer = QTimer(self)
+        self.stall_timer.timeout.connect(self._check_stalled_progress)
+        self.stall_timer.start(2000)
+
         self.main_process = psutil.Process(os.getpid())
+
         self.main_process.cpu_percent(interval=None)
 
         if any(self.telemetry.values()):
@@ -960,20 +981,28 @@ class ProgressDialog(BaseDialog):
             }}
             QProgressBar::chunk {{ background-color: {tm.color('accent')}; border-radius: 3px; }}
         """)
-        self.lbl_metrics.setStyleSheet(f"""
-            QLabel {{
-                font-family: 'Consolas', 'Courier New', monospace; 
-                color: {tm.color('success')}; font-size: 11px; background-color: {tm.color('bg_main')};
-                border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 6px; margin-top: 5px;
-            }}
-        """)
 
-        # 处理在 show_success_state 中修改过的按钮样式
-        if self.btn_cancel.text() == "OK":
-            self.btn_cancel.setStyleSheet(f"""
-                QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 4px; border: none; font-weight:bold;}}
-                QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
-            """)
+
+        self.lbl_metrics.setStyleSheet(f"""
+                   QLabel {{
+                       font-family: 'Consolas', 'Courier New', monospace; 
+                       color: {tm.color('success')}; font-size: 11px; background-color: {tm.color('bg_main')};
+                       border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 6px; margin-top: 5px;
+                   }}
+               """)
+
+        self.lbl_warn_icon.setPixmap(tm.icon("info", "warning").pixmap(16, 16))
+
+        self.lbl_warn_icon.setStyleSheet("border: none; background: transparent;")
+
+        self.lbl_warn_text.setStyleSheet(
+            f"color: {tm.color('warning')}; font-size: 12px; font-weight: bold; border: none; background: transparent;")
+
+
+        self.stalled_warning_widget.setObjectName("StallWarningBox")
+        self.stalled_warning_widget.setStyleSheet(
+            f"QWidget#StallWarningBox {{ background-color: {tm.color('bg_input')}; border: 1px dashed {tm.color('warning')}; border-radius: 4px; }}")
+
 
     def _format_speed(self, bytes_per_sec):
         if bytes_per_sec >= 1024 * 1024:
@@ -988,6 +1017,12 @@ class ProgressDialog(BaseDialog):
             return [self.main_process] + self.main_process.children(recursive=True)
         except psutil.NoSuchProcess:
             return [self.main_process]
+
+    def _check_stalled_progress(self):
+        if time.time() - self._last_progress_time > 120:
+            if not self.stalled_warning_widget.isVisible() and self.pbar.isVisible():
+                self.stalled_warning_widget.setVisible(True)
+
 
     def _get_process_tree_io(self):
         read_bytes, write_bytes = 0, 0
@@ -1083,7 +1118,14 @@ class ProgressDialog(BaseDialog):
         except Exception as e:
             self.lbl_metrics.setText(f"Profiler Error: {str(e)}")
 
+
     def update_progress(self, percent, msg=None):
+        if percent != self._last_progress:
+            self._last_progress = percent
+            self._last_progress_time = time.time()
+            if self.stalled_warning_widget.isVisible():
+                self.stalled_warning_widget.setVisible(False)
+
         if percent < 0:
             if self.pbar.maximum() != 0:
                 self.pbar.setRange(0, 0)
@@ -1097,7 +1139,10 @@ class ProgressDialog(BaseDialog):
 
     def show_success_state(self, title="Success", message="Task completed successfully."):
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
+        if hasattr(self, 'stall_timer'): self.stall_timer.stop()
         self.lbl_metrics.setVisible(False)
+        self.stalled_warning_widget.setVisible(False)
+
         self.pbar.setVisible(False)
         self.lbl_title.setText(title)
         self.lbl_message.setText(message)
@@ -1116,13 +1161,14 @@ class ProgressDialog(BaseDialog):
             pass
         self.btn_cancel.clicked.connect(self.accept)
 
+
     def on_cancel_clicked(self):
-        """修复逻辑：点击取消后，给后台发送信号，并设置500ms强制关闭定时器"""
         self.lbl_message.setText("Stopping... forcing termination.")
         self.btn_cancel.setEnabled(False)
 
         # 1. 停止监控
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
+        if hasattr(self, 'stall_timer'): self.stall_timer.stop()
 
         # 2. 发送信号给 TaskManager 去杀进程
         self.sig_canceled.emit()
@@ -1132,12 +1178,14 @@ class ProgressDialog(BaseDialog):
 
     def close_safe(self):
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
+        if hasattr(self, 'stall_timer'): self.stall_timer.stop()
         self.accept()
+
 
     def closeEvent(self, event):
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
+        if hasattr(self, 'stall_timer'): self.stall_timer.stop()
         super().closeEvent(event)
-
 
 class ProjectEditorDialog(BaseDialog):
     def __init__(self, parent=None, is_edit=False, current_data=None):

@@ -28,7 +28,7 @@ from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
 from src.task.hf_download_task import RealTimeHFDownloadTask
-from src.task.settings_tasks import FetchModelsTask, TestApiTask
+from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask
 from src.task.common_task import VerifyModelsTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.combo import BaseComboBox
@@ -262,7 +262,10 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'btn_help_params'): self.btn_help_params.setIcon(tm.icon("help", "text_main"))
         if hasattr(self, 'btn_copy_params'): self.btn_copy_params.setIcon(tm.icon("copy", "text_main"))
         if hasattr(self, 'btn_trans_refresh'): self.btn_trans_refresh.setIcon(tm.icon("refresh", "text_main"))
+
+        # 将这里的 btn_open_cache 后追加一行 test_device
         if hasattr(self, 'btn_open_cache'): self.btn_open_cache.setIcon(tm.icon("folder", "accent"))
+        if hasattr(self, 'btn_test_device'): self.btn_test_device.setIcon(tm.icon("test", "accent"))
 
         if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setIcon(tm.icon("add", "success"))
         if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setIcon(tm.icon("refresh", "text_main"))
@@ -787,6 +790,13 @@ class SettingsTool(BaseTool):
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
+        # 把 Open Model Directory 按钮提前，并放在模型布局旁边/上方
+        self.btn_open_cache = QPushButton(" Open Model Storage Directory")
+        ThemeManager().apply_class(self.btn_open_cache, "link-btn")
+        self.btn_open_cache.setCursor(Qt.PointingHandCursor)
+        self.btn_open_cache.clicked.connect(self._open_hf_cache)
+        layout.addRow("Model Storage:", self.btn_open_cache)
+
         # --- 1. Embedding 模型选择 ---
         self.combo_embed = BaseComboBox()
         self.lbl_embed_icon = QLabel()
@@ -849,7 +859,7 @@ class SettingsTool(BaseTool):
         layout.addRow("Reranker:", self.combo_rerank)
         layout.addRow("", rerank_layout)
 
-        # --- 3. 硬件加速设备选择 (新增) ---
+        # --- 3. 硬件加速设备选择 ---
         self.combo_device = BaseComboBox()
         dev_mgr = DeviceManager()
         for dev in dev_mgr.get_available_devices():
@@ -862,11 +872,11 @@ class SettingsTool(BaseTool):
         layout.addRow("Compute Device:", self.combo_device)
 
         # --- 4. 其他模型设置 ---
-        self.btn_open_cache = QPushButton(" Open Model Storage Directory")
-        ThemeManager().apply_class(self.btn_open_cache, "link-btn")
-        self.btn_open_cache.setCursor(Qt.PointingHandCursor)
-        self.btn_open_cache.clicked.connect(self._open_hf_cache)
-        layout.addRow("", self.btn_open_cache)
+        self.btn_test_device = QPushButton(" Test Compute Device")
+        ThemeManager().apply_class(self.btn_test_device, "link-btn")
+        self.btn_test_device.setCursor(Qt.PointingHandCursor)
+        self.btn_test_device.clicked.connect(self._test_compute_device)
+        layout.addRow("", self.btn_test_device)
 
         self.chk_low_vram = QCheckBox("Low VRAM Mode (Release RAG models after search)")
         self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
@@ -888,6 +898,7 @@ class SettingsTool(BaseTool):
         self.combo_embed.currentTextChanged.connect(self.combo_embed.setToolTip)
         self.combo_rerank.currentTextChanged.connect(self.combo_rerank.setToolTip)
 
+
     def _update_vram_html(self):
         if not hasattr(self, 'lbl_vram_desc'): return
         tm = ThemeManager()
@@ -904,10 +915,41 @@ class SettingsTool(BaseTool):
 
 
     def _open_hf_cache(self):
-        # 修复为打开  Navis 的独立模型文件夹
         model_dir = os.path.join(self.config.BASE_DIR, "models")
         os.makedirs(model_dir, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
+
+
+    def _test_compute_device(self):
+        device_id = self.combo_device.currentData()
+        if not device_id:
+            return
+
+        self.test_dev_pd = ProgressDialog(self.widget, "Device Connection Test",
+                                          f"Testing inference device '{device_id}'...")
+        self.test_dev_pd.show()
+
+        self.test_dev_task_mgr = TaskManager()
+        self.test_dev_task_mgr.sig_progress.connect(self.test_dev_pd.update_progress)
+        self.test_dev_task_mgr.sig_result.connect(self._on_test_device_finished)
+        self.test_dev_pd.sig_canceled.connect(self.test_dev_task_mgr.cancel_task)
+
+        self.test_dev_task_mgr.start_task(
+            TestDeviceTask, task_id="test_device", mode=TaskMode.THREAD,
+            device_id=device_id
+        )
+
+    def _on_test_device_finished(self, result):
+        if hasattr(self, 'test_dev_pd'):
+            self.test_dev_pd.close_safe()
+
+        if result.get("success"):
+            StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
+        else:
+            ToastManager().show("Device Test Failed", "error")
+            StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
+
+
 
 
     def _load_llm_config(self):

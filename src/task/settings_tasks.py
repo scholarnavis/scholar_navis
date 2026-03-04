@@ -39,6 +39,36 @@ class FetchModelsTask(BackgroundTask):
             return {"success": False, "models": [], "msg": str(e)}
 
 
+class TestDeviceTask(BackgroundTask):
+    """测试计算设备可用性"""
+
+    def _execute(self):
+        device_id = self.kwargs.get("device_id", "cpu")
+        self.update_progress(10, f"Testing {device_id}...")
+
+        try:
+            import onnxruntime as ort
+            providers = ort.get_available_providers()
+
+            provider_to_use = "CPUExecutionProvider"
+            if "cuda" in device_id.lower():
+                provider_to_use = "CUDAExecutionProvider"
+            elif "dml" in device_id.lower():
+                provider_to_use = "DmlExecutionProvider"
+            elif "coreml" in device_id.lower():
+                provider_to_use = "CoreMLExecutionProvider"
+
+            if provider_to_use not in providers:
+                return {"success": False,
+                        "msg": f"'{provider_to_use}' is not detected by ONNXRuntime.\nAvailable providers: {', '.join(providers)}"}
+
+            self.update_progress(100, "Device test passed.")
+            return {"success": True,
+                    "msg": f"Device '{device_id}' ({provider_to_use}) is correctly configured and ready for inference."}
+
+        except Exception as e:
+            return {"success": False, "msg": f"Device test failed:\n{str(e)}"}
+
 
 class TestApiTask(BackgroundTask):
     """测试大模型 API 连通性 """
