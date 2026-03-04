@@ -1,8 +1,0 @@
-__version__ = "2.0.0_alpha"
-__app_name__ = "Scholar Navis"
-__description__ = "AI-Powered Research Assistant"
-__company__ = "Scholar Navis Studio"
-__website__ = "https://scholarnavis.com"
-__github__ = "https://github.com/scholarnavis/scholar_navis"
-__dl__= f"{__website__}/dl"
-__latest__ = f"{__website__}/latest"
