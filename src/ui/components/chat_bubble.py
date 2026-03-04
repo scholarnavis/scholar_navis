@@ -19,7 +19,6 @@ from src.core.network_worker import LightNetworkWorker
 
 
 def hex_to_rgba(hex_color, alpha):
-    """将 #RRGGBB 格式的十六进制颜色转换为 rgba(r, g, b, alpha) 字符串"""
     hex_color = hex_color.lstrip('#')
     if len(hex_color) == 3:
         hex_color = ''.join([c*2 for c in hex_color])
@@ -182,8 +181,8 @@ class ChatBubbleWidget(QWidget):
         if self.is_user:
             self.edit_btn_widget = QWidget()
             self.edit_btn_layout = QHBoxLayout(self.edit_btn_widget)
-            self.edit_btn_layout.setContentsMargins(0, 0, 0, 0)
-            self.edit_btn_layout.setSpacing(10)
+            self.edit_btn_layout.setContentsMargins(0, 4, 0, 0)
+            self.edit_btn_layout.setSpacing(6)
             self.edit_btn_layout.setAlignment(btn_alignment)
 
             self.btn_cancel = QPushButton(" Cancel")
@@ -356,7 +355,7 @@ class ChatBubbleWidget(QWidget):
 
                     elif src_url in getattr(self, 'download_failed_urls', {}):
                         error_msg = self.download_failed_urls[src_url]
-                        return f'<div style="color:#ff6b6b; padding: 15px; border: 2px dashed #ff6b6b; border-radius: 8px; width: 400px; margin-top: 5px;">❌ <b>图像下载失败</b><br><span style="font-size: 12px;">{error_msg}</span></div>'
+                        return f'<div style="color:#ff6b6b; padding: 15px; border: 2px dashed #ff6b6b; border-radius: 8px; width: 400px; margin-top: 5px;">❌ <b>Image download failed.</b><br><span style="font-size: 12px;">{error_msg}</span></div>'
 
                     else:
                         if src_url not in self.downloading_urls:
@@ -369,7 +368,7 @@ class ChatBubbleWidget(QWidget):
                                 self.image_loading_timer.start(500)
 
                         dots = "." * getattr(self, 'image_loading_dots', 0)
-                        return f'<div style="color:#05B8CC; padding: 20px; border: 2px dashed #05B8CC; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">正在将图像下载到本地缓存，请稍候{dots}</span></div>'
+                        return f'<div style="color:#05B8CC; padding: 20px; border: 2px dashed #05B8CC; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">Downloading image to local cache, please wait. {dots}</span></div>'
 
                 return match.group(0)
             html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
@@ -389,7 +388,6 @@ class ChatBubbleWidget(QWidget):
         self.downloaded_images.clear()
 
     def add_translation_widget(self, translated_text):
-        """向当前用户气泡中注入可折叠的翻译结果面板"""
         if not self.is_user:
             return
 
@@ -401,31 +399,19 @@ class ChatBubbleWidget(QWidget):
         trans_layout.setSpacing(4)
 
         self.btn_toggle_trans = QPushButton(" Show Translated Query")
-        self.btn_toggle_trans.setIcon(tm.icon("language", "text_muted"))  # 使用 ThemeManager 提供图标
+        self.btn_toggle_trans.setIcon(tm.icon("language", "text_muted"))
         self.btn_toggle_trans.setCursor(Qt.PointingHandCursor)
-        self.btn_toggle_trans.setStyleSheet(f"""
-            QPushButton {{ 
-                background: transparent; border: none; text-align: left; 
-                color: {tm.color('text_muted')}; font-size: 11px; font-weight: bold;
-            }}
-            QPushButton:hover {{ color: {tm.color('accent')}; }}
-        """)
 
         self.lbl_trans = QLabel(translated_text)
         self.lbl_trans.setWordWrap(True)
         self.lbl_trans.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.lbl_trans.setStyleSheet(f"""
-            color: {tm.color('text_muted')}; 
-            background-color: {tm.color('bg_input')}; 
-            border: 1px solid {tm.color('border')};
-            border-radius: 6px; padding: 8px; font-size: 12px;
-        """)
         self.lbl_trans.setVisible(False)
 
         def toggle_trans():
             is_vis = self.lbl_trans.isVisible()
             self.lbl_trans.setVisible(not is_vis)
             self.btn_toggle_trans.setText(" Hide Translated Query" if not is_vis else " Show Translated Query")
+            self._apply_trans_theme()
 
         self.btn_toggle_trans.clicked.connect(toggle_trans)
 
@@ -438,15 +424,64 @@ class ChatBubbleWidget(QWidget):
         else:
             self.content_layout.addWidget(self.trans_container)
 
+        ThemeManager().theme_changed.connect(self._apply_trans_theme)
+
+        self._apply_trans_theme()
+
+    def _apply_trans_theme(self):
+        if not hasattr(self, 'btn_toggle_trans') or not hasattr(self, 'lbl_trans'):
+            return
+
+        tm = ThemeManager()
+        font_family = tm.font_family()
+
+        self.btn_toggle_trans.setIcon(tm.icon("language", "text_muted"))
+        self.btn_toggle_trans.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                text-align: left;
+                color: {tm.color('text_muted')};
+                font-size: 11px;
+                font-weight: bold;
+                font-family: {font_family};
+                padding: 2px 0px;
+            }}
+            QPushButton:hover {{
+                color: {tm.color('accent')};
+            }}
+        """)
+
+        if tm.current_theme == 'dark':
+            bg = hex_to_rgba(tm.color('accent'), 0.08)
+            border = hex_to_rgba(tm.color('accent'), 0.35)
+            text_color = tm.color('text_muted')
+        else:
+            bg = hex_to_rgba(tm.color('academic_blue'), 0.06)
+            border = hex_to_rgba(tm.color('academic_blue'), 0.3)
+            text_color = tm.color('text_muted')
+
+        self.lbl_trans.setStyleSheet(f"""
+            QLabel {{
+                color: {text_color};
+                background-color: {bg};
+                border: 1px solid {border};
+                border-left: 3px solid {tm.color('accent')};
+                border-radius: 6px;
+                padding: 8px 10px;
+                font-size: 12px;
+                font-family: {font_family};
+                line-height: 1.5;
+            }}
+        """)
+
     def _start_image_download(self, url):
-        """丢进后台线程进行安全下载，不卡主界面"""
         ext = url.split("?")[0].split(".")[-1]
         if ext.lower() not in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
             ext = 'png'
         file_name = f"navis_img_{hashlib.md5(url.encode()).hexdigest()}.{ext}"
         save_path = os.path.join(tempfile.gettempdir(), file_name)
 
-        # 命中缓存秒渲染
         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
             self._on_image_downloaded(True, url, save_path)
             return
@@ -499,9 +534,10 @@ class ChatBubbleWidget(QWidget):
 
             self.lbl_text.setVisible(False)
             self.btn_widget.setVisible(False)
-            self.content_layout.setSpacing(2)
+            self.content_layout.setSpacing(0)
+            self.content_layout.setContentsMargins(12, 12, 12, 8)
 
-            self.edit_input.setMinimumHeight(current_height)  # 防止塌陷
+            self.edit_input.setMinimumHeight(current_height)
             self.edit_input.setVisible(True)
             self.edit_btn_widget.setVisible(True)
 
@@ -512,6 +548,7 @@ class ChatBubbleWidget(QWidget):
         else:
             self.cancel_edit()
 
+
     def cancel_edit(self):
         self.is_editing = False
         self.edit_input.setVisible(False)
@@ -519,9 +556,11 @@ class ChatBubbleWidget(QWidget):
             self.edit_btn_widget.setVisible(False)
 
         self.content_layout.setSpacing(6)
+        self.content_layout.setContentsMargins(12, 12, 12, 12)
 
         self.lbl_text.setVisible(True)
         self.btn_widget.setVisible(True)
+
 
     def eventFilter(self, obj, event):
         if obj == self.edit_input and event.type() == QEvent.KeyPress:

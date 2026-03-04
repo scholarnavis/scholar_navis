@@ -3,6 +3,7 @@ import base64
 import mimetypes
 from urllib.parse import quote
 
+import chardet
 
 from src.core.core_task import BackgroundTask
 

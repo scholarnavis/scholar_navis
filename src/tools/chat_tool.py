@@ -738,7 +738,7 @@ class ChatWorker(QObject):
                             }
                             context_str += (
                                 f"--- [Document {current_ref_id}] ---\n"
-                                f"Source: {doc['metadata'].get('source', 'Local')} (Page {doc['metadata'].get('page', 1)})\n"
+                                f"Source: {doc['metadata'].get('source', 'Local')}\n"
                                 f"Content: {doc['content']}\n\n"
                             )
                             current_ref_id += 1
@@ -966,7 +966,7 @@ class ChatWorker(QObject):
                         safe_name = quote(info['name'])
 
                         link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}&name={safe_name}"
-                        ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']} (Page {info['page']})</a></div>"
+                        ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']}</a></div>"
                         displayed += 1
                 if displayed > 0:
                     self.sig_token.emit(ref_html)
@@ -1459,7 +1459,7 @@ class ChatTool(BaseTool):
         llm_text = text
         if current_chunks:
             context_block = "\n".join(
-                [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in current_chunks]
+                [f"--- {c['name']} ---\n{c['content']}" for c in current_chunks]
             )
             llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
 
@@ -1721,7 +1721,7 @@ class ChatTool(BaseTool):
         llm_text = new_text
         if old_chunks:
             context_block = "\n".join(
-                [f"--- {c['name']} (Page {c['page']}) ---\n{c['content']}" for c in old_chunks]
+                [f"--- {c['name']} ---\n{c['content']}" for c in old_chunks]
             )
             llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{new_text}"
         elif "Context Info:\n" in old_msg['content'] and "\n\nQuestion:\n" in old_msg['content']:
@@ -1737,7 +1737,30 @@ class ChatTool(BaseTool):
         })
 
         self.external_chunks = old_chunks
-        self.start_ai_response(kb_id)
+
+        trans_config = self.trans_selector.get_current_config()
+        if trans_config:
+            trans_config = trans_config.copy()
+            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
+
+        is_english = True
+        try:
+            detected_lang = detect(new_text)
+            is_english = (detected_lang == 'en')
+        except Exception:
+            is_english = True
+
+        requires_translation = (not is_english) and (trans_config is not None)
+
+        if not is_english and trans_config is None:
+            if not getattr(self.__class__, '_has_shown_lang_warning', False):
+                ToastManager().show(
+                    "Non-English input detected, but translation model is not enabled. \nThe core model may not perfectly handle this language; please verify the accuracy of the results.",
+                    "warning"
+                )
+                self.__class__._has_shown_lang_warning = True
+
+        self.start_ai_response(kb_id, requires_translation)
 
     def cancel_generation(self):
         if hasattr(self, 'worker') and self.worker:
@@ -2217,7 +2240,8 @@ class ChatTool(BaseTool):
             parsed = urlparse(url_str)
             params = parse_qs(parsed.query)
             file_path = params.get('path', [''])[0]
-            page_num = int(params.get('page', ['1'])[0]) - 1
+            #page_num = int(params.get('page', ['1'])[0]) - 1
+            page_num = 0
             text_snippet = params.get('text', [''])[0]
             source_name = params.get('name', [''])[0]
 
@@ -2243,12 +2267,12 @@ class ChatTool(BaseTool):
                 if ext == 'pdf':
                     if self.pdf_viewer is None: self.pdf_viewer = InternalPDFViewer(None)
                     self.pdf_viewer.load_document(target_path, page_num, text_snippet, display_name=source_name)
-                    ToastManager().show(f"已打开文档，位于第 {page_num + 1} 页", "success")
-                elif ext in ['md', 'txt', 'csv', 'json', 'py']:  # 常见纯文本格式拦截
+                    ToastManager().show(f"Document opened.", "success")
+                elif ext in ['md', 'txt', 'csv', 'json', 'py']:
                     if not hasattr(self, 'text_viewer') or self.text_viewer is None:
                         self.text_viewer = InternalTextViewer(None)
                     self.text_viewer.load_document(target_path, text_snippet, display_name=source_name)
-                    ToastManager().show(f"已打开文档片段", "success")
+                    ToastManager().show("Document snippet opened", "success")
                 else:
                     # 对于图片或我们无法渲染的格式，降级交给操作系统处理
                     temp_dir = tempfile.gettempdir()
