@@ -220,7 +220,7 @@ if __name__ == "__main__":
     global_logger = setup_logger()
 
     if sys.platform == "win32":
-        myappid = f"scholarnavis.studio.navigator.{__version__}222222222222222222222222222222"
+        myappid = f"scholarnavis.studio.navigator.{__version__}"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(myappid))
 
     app = QApplication(sys.argv)
@@ -230,9 +230,8 @@ if __name__ == "__main__":
     import qdarktheme
 
     tm = ThemeManager()
-    ico_path = os.path.abspath(tm.get_resource_path("Assets", "ico.ico"))
-    print(f"========== 绝对路径: {ico_path} ==========")
-    print(f"========== 图标是否存在: {os.path.exists(ico_path)} ==========")
+    ico_path = os.path.abspath(tm.get_resource_path("Assets", "icon.ico"))
+
     if sys.platform == "win32" and os.path.exists(ico_path):
         global_icon = QIcon(ico_path)
     else:

@@ -17,6 +17,7 @@ from src.core.models_registry import get_model_conf, ensure_onnx_model
 from src.core.rerank_engine import RerankEngine
 
 logger = logging.getLogger("Task.kb")
+_embed_fn_cache: dict = {}
 
 def _setup_worker_env():
     import os
@@ -69,13 +70,21 @@ def _worker_load_model(kb_id, config):
 
     try:
         onnx_dir = ensure_onnx_model(repo_id, "embedding")
-        logger.info(f"Loading cached ONNX model from: {onnx_dir}")
 
+        cache_key = (onnx_dir, str(device_str))
+        if cache_key in _embed_fn_cache:
+            logger.info(f"Embedding model cache hit: {cache_key}")
+            return _embed_fn_cache[cache_key]
+
+        logger.info(f"Loading cached ONNX model from: {onnx_dir}")
         embed_fn = ONNXEmbeddingFunction(onnx_dir, device=device_str)
+
+        # ✅ 存入缓存
+        _embed_fn_cache[cache_key] = embed_fn
         return embed_fn
 
     except Exception as e:
-        error_info = f"FATAL: Model {repo_id} load failed. Check ONNX conversion or cache."
+        error_info = f"Model {repo_id} load failed. Check ONNX conversion or cache."
         logger.error(f"{error_info} | {e}")
         raise RuntimeError(error_info)
 

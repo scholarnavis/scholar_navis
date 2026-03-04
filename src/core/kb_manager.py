@@ -50,8 +50,8 @@ class KBManager:
 
         return sorted(kbs, key=lambda x: x.get('created_at', ''), reverse=True)
 
+
     def get_kb_by_id(self, kb_id):
-        """直接获取指定 ID 的知识库元数据"""
         kb_root = os.path.join(self.WORKSPACE_DIR, kb_id)
         meta_path = os.path.join(kb_root, "meta.json")
 
@@ -60,10 +60,13 @@ class KBManager:
                 with open(meta_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     data['root_path'] = kb_root
+                    doc_dir = os.path.join(kb_root, "documents")
+                    data['doc_count'] = len(os.listdir(doc_dir)) if os.path.exists(doc_dir) else 0
                     return data
             except:
                 return None
         return None
+
 
     def create_kb(self, name, desc, domain, model_id):
 
@@ -295,6 +298,13 @@ class DatabaseManager:
         return cls._instance
 
     def switch_kb(self, kb_id, embedding_function=None, progress_callback=None):
+
+        if getattr(self, '_current_kb_id', None) == kb_id and self.collection is not None:
+            self.logger.info(f"KB {kb_id} already loaded, reusing existing connection.")
+            if embedding_function is not None:
+                self.embed_fn = embedding_function
+            return True
+
         from src.core.kb_manager import KBManager
         kb_mgr = KBManager()
         kb_info = kb_mgr.get_kb_by_id(kb_id)

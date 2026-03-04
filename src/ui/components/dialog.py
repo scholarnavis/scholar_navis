@@ -922,7 +922,7 @@ class ProgressDialog(BaseDialog):
         self.lbl_warn_icon = QLabel()
         self.lbl_warn_icon.setFixedSize(16, 16)
         self.lbl_warn_text = QLabel(
-            "Task is still in progress (e.g., downloading, moving or ONNX conversion). Large models or network latency may take extra time, please wait...")
+            "Task is still in progress. Large models or network latency may take extra time, please wait...")
         self.lbl_warn_text.setWordWrap(True)
         warn_layout.addWidget(self.lbl_warn_icon, 0, Qt.AlignTop)
         warn_layout.addWidget(self.lbl_warn_text, 1)
