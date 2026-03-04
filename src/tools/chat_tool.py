@@ -590,10 +590,13 @@ class ChatWorker(QObject):
         """初始化主模型与翻译模型池"""
         if self.main_config and not self.main_llm:
             cfg = self.main_config.copy()
+            if "tools" not in cfg:
+                cfg["tools"] = []
             self.main_llm = OpenAICompatibleLLM(cfg)
 
         if self.requires_translation and self.trans_config and not self.trans_llm:
             self.trans_llm = OpenAICompatibleLLM(self.trans_config)
+
 
     def _process_rerank(self, query, docs, domain, top_k):
         if not docs: return []
@@ -863,12 +866,33 @@ class ChatWorker(QObject):
                             tool_choice="auto"
                         )
 
-                        tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
+
+                        if isinstance(response_msg, dict):
+                            tool_calls = response_msg.get('tool_calls')
+                        else:
+
+                            tool_calls = getattr(response_msg, 'tool_calls', None)
+                            response_msg = {
+                                "role": getattr(response_msg, "role", "assistant"),
+                                "content": getattr(response_msg, "content", ""),
+                                "tool_calls": [
+                                    {
+                                        "id": tc.id,
+                                        "type": tc.type,
+                                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                                    } for tc in tool_calls
+                                ] if tool_calls else None
+                            }
 
                         if not tool_calls:
                             break
 
                         tool_executed = True
+
+
+                        if isinstance(response_msg, dict) and response_msg.get("tool_calls"):
+                            response_msg["tools"] = response_msg["tool_calls"]
+
                         rag_messages.append(response_msg)
 
                         for tool_call in tool_calls:

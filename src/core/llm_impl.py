@@ -57,7 +57,7 @@ class OpenAICompatibleLLM:
             if k in ['api_key', 'messages', 'contents', 'input', 'image_url', 'image_base64', 'inline_data']:
                 safe_payload[k] = "<Omitted for Log>"
             elif k in ['tools']:
-                del safe_payload[k]
+                pass
             else:
                 safe_payload[k] = v
         self.logger.info(f"[{self.model_name}] Request Parameters: {safe_payload}")
@@ -145,18 +145,28 @@ class OpenAICompatibleLLM:
             role = m.get("role", "user")
             content = m.get("content", "")
 
+            msg_dict = {"role": role}
+
             if isinstance(content, list):
                 valid_parts = []
                 for part in content:
                     if isinstance(part, dict):
-                        # 兼容纯文本和图像链接的 OpenAI 标准格式
                         if part.get("type") in ["text", "image_url"]:
                             valid_parts.append(part)
                     elif isinstance(part, str):
                         valid_parts.append({"type": "text", "text": part})
-                processed_msgs.append({"role": role, "content": valid_parts})
+                msg_dict["content"] = valid_parts
             else:
-                processed_msgs.append({"role": role, "content": str(content)})
+                msg_dict["content"] = str(content) if content is not None else ""
+
+            if "tool_calls" in m:
+                msg_dict["tool_calls"] = m["tool_calls"]
+            if "tool_call_id" in m:
+                msg_dict["tool_call_id"] = m["tool_call_id"]
+            if "name" in m:
+                msg_dict["name"] = m["name"]
+
+            processed_msgs.append(msg_dict)
 
         return processed_msgs
 
