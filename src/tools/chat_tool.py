@@ -559,6 +559,7 @@ class ChatWorker(QObject):
     sig_token = Signal(str)
     sig_finished = Signal()
     sig_error = Signal(str)
+    sig_translated = Signal(str)
 
     def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False, external_context=None,
                  use_mcp=False):
@@ -632,10 +633,8 @@ class ChatWorker(QObject):
 
         return ranked
 
-
     def run(self):
         try:
-            from src.core.config_manager import ConfigManager
             self.config = ConfigManager()
 
             self._init_llms()
@@ -651,9 +650,10 @@ class ChatWorker(QObject):
                 try:
                     trans_kwargs = {
                         "is_translation": True,
-                        "stream": False  # 翻译不需要流式
+                        "stream": False
                     }
                     search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm, **trans_kwargs)
+                    self.sig_translated.emit(search_query)
                 except Exception as e:
                     self.sig_error.emit(
                         f"Translation model request failed. Please check your translation API configuration.\nDetails: {e}")
@@ -675,7 +675,6 @@ class ChatWorker(QObject):
                     self.sig_token.emit("<i>Loading local vector model and retrieving literature...</i>\n\n")
                     domain = kb_info.get('domain', 'General Academic')
                     model_id = kb_info.get('model_id', 'embed_auto')
-
 
                     user_pref = self.config.user_settings.get("inference_device", "Auto")
                     target_device = DeviceManager().parse_device_string(user_pref)
@@ -747,7 +746,6 @@ class ChatWorker(QObject):
             if not context_str.strip():
                 context_str = "No local database documents provided."
 
-            # Phase 3: Dynamic External Context (Multimodal & On-the-fly Reranking)
             external_chunks = getattr(self, 'external_context', [])
             images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
                 ('.png', '.jpg', '.jpeg', '.webp'))]
@@ -772,7 +770,7 @@ class ChatWorker(QObject):
                         files_dict[f_name] = ""
                     files_dict[f_name] += f"\n[Page {page}]\n{doc['content']}"
 
-                # 按照你的要求，以 JSON 格式封装文本内容
+
                 docs_json = json.dumps(files_dict, ensure_ascii=False)
                 llm_content.append({"type": "text", "text": f"User Uploaded Files (JSON Format):\n{docs_json}\n\n"})
 
@@ -804,7 +802,9 @@ class ChatWorker(QObject):
                     self.reranker.model = None
                 if hasattr(self, 'db') and self.db:
                     self.db.reload()
+
                 gc.collect()
+
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
@@ -828,8 +828,9 @@ class ChatWorker(QObject):
 
                 "### TOOL USE PROTOCOL (STRICT):\n"
                 "1. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
-                "2. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n\n"
-                "3. If graphics need to be created, use mermaid uniformly.\n\n"
+                "2. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n"
+                "3. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
+                "4. If graphics need to be created, use mermaid uniformly.\n\n"
 
                 "### RESPONSE GUIDELINES:\n"
                 "1.GROUNDING (CRITICAL RULE): You MUST append inline citations (e.g., [1], [2]) at the end of every sentence that uses information from the Context. NEVER claim facts without appending the corresponding document number. Failure to cite will result in penalties.\n\n"
@@ -868,17 +869,24 @@ class ChatWorker(QObject):
 
                         if isinstance(response_msg, dict):
                             tool_calls = response_msg.get('tool_calls')
+                            response_msg.pop("tools", None)
+                            if response_msg.get("content") is None:
+                                response_msg["content"] = ""
                         else:
-
                             tool_calls = getattr(response_msg, 'tool_calls', None)
                             response_msg = {
-                                "role": getattr(response_msg, "role", "assistant"),
-                                "content": getattr(response_msg, "content", ""),
+                                "role": getattr(response_msg, "role", "assistant") or "assistant",
+                                "content": getattr(response_msg, "content", "") or "",
                                 "tool_calls": [
                                     {
                                         "id": tc.id,
                                         "type": tc.type,
-                                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                                        "function": {
+                                            "name": tc.function.name,
+                                            "arguments": tc.function.arguments if isinstance(tc.function.arguments,
+                                                                                             str) else json.dumps(
+                                                tc.function.arguments)
+                                        }
                                     } for tc in tool_calls
                                 ] if tool_calls else None
                             }
@@ -887,22 +895,34 @@ class ChatWorker(QObject):
                             break
 
                         tool_executed = True
-
-
-                        if isinstance(response_msg, dict) and response_msg.get("tool_calls"):
-                            response_msg["tools"] = response_msg["tool_calls"]
-
                         rag_messages.append(response_msg)
 
                         for tool_call in tool_calls:
                             tool_name = tool_call['function']['name']
                             try:
-                                tool_args = json.loads(tool_call['function']['arguments'])
-                                self.sig_token.emit(f"<i>📡 Requesting MCP server: {tool_name}...</i>\n\n")
+                                raw_args = tool_call['function']['arguments']
+                                # 兼容不同 SDK: 有些返回 string，有些已经 load 成了 dict
+                                tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+
+                                # 添加交互动画提示
+                                self.sig_token.emit(f"<br><i>📡 Requesting remote tool: <b>{tool_name}</b>...</i><br>")
                                 tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
+
                             except Exception as e:
                                 self.logger.error(f"MCP tool {tool_name} failed: {e}")
                                 tool_result = f"Tool execution failed: {str(e)}"
+
+                            # 确保内容为字符串，防止部分工具返回原始 JSON 崩溃
+                            if not isinstance(tool_result, str):
+                                tool_result = json.dumps(tool_result, ensure_ascii=False)
+
+                            if "API Key" in tool_result or "error" in tool_result.lower() or "missing" in tool_result.lower():
+                                tool_result = (
+                                    f"[CRITICAL SYSTEM ALERT] The remote tool '{tool_name}' CRASHED and returned this error:\n"
+                                    f"\"{tool_result}\"\n"
+                                    f"INSTRUCTION TO AI: Do not assume the user pasted this. You must apologize to the user and explain that the remote ModelScope plugin failed."
+                                )
+
 
                             rag_messages.append({
                                 "role": "tool",
@@ -911,15 +931,18 @@ class ChatWorker(QObject):
                                 "content": tool_result
                             })
 
-                    if tool_executed:
-                        self.sig_token.emit(
-                            "<i>All data retrieved successfully. Conducting comprehensive analysis...</i>\n\n")
                 except Exception as e:
                     self.logger.warning(f"Tool calling loop failed: {e}")
 
             if tool_executed:
-                silence_prompt = "CRITICAL: Tools executed. Provide final answer now. No JSON argument blocks. Remember the [FOLLOW_UPS] format."
-                rag_messages.append({"role": "system", "content": silence_prompt})
+                silence_prompt = (
+                    "System Notification: Tool execution is complete. "
+                    "Please analyze the tool results and answer the user's original query. "
+                    "If the tool returned an error (such as 'API key missing', 'unauthorized', or 'failed'), "
+                    "DO NOT pretend the user said it. Explicitly tell the user that the remote tool plugin failed and quote the error message."
+                )
+                rag_messages.append({"role": "user", "content": silence_prompt})
+                self.sig_token.emit("[CLEAR_SEARCH]")
 
             # --- LLM Output Streaming ---
             for token in self.main_llm.stream_chat(rag_messages):
@@ -929,6 +952,7 @@ class ChatWorker(QObject):
             # ==========================================
             # Phase 6: Dynamic Citation Mounting
             # ==========================================
+            import re
             has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
             if sources_map and has_citation:
                 ref_html = "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'><b>📚 Cited Sources:</b><br>"
@@ -936,6 +960,7 @@ class ChatWorker(QObject):
                 displayed = 0
                 for rid, info in sources_map.items():
                     if rid in used_indices:
+                        from urllib.parse import quote
                         safe_path = quote(info['path'])
                         safe_text = quote(info['search_text'])
                         safe_name = quote(info['name'])
@@ -947,9 +972,11 @@ class ChatWorker(QObject):
                     self.sig_token.emit(ref_html)
 
         except Exception as e:
+            import traceback
             self.sig_error.emit(f"Error: {str(e)}\n{traceback.format_exc()}")
         finally:
             self.sig_finished.emit()
+
 
 
 class ChatTool(BaseTool):
@@ -1511,6 +1538,17 @@ class ChatTool(BaseTool):
         sb = self.scroll_area.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    def _on_query_translated(self, translated_text):
+        for i in range(self.chat_layout.count() - 1, -1, -1):
+            item = self.chat_layout.itemAt(i)
+            if item and item.widget():
+                w = item.widget()
+                if getattr(w, 'is_user', False):
+                    if hasattr(w, 'add_translation_widget'):
+                        w.add_translation_widget(translated_text)
+                    else:
+                        self.logger.warning("ChatBubbleWidget is missing 'add_translation_widget' method.")
+                    break
 
     def start_ai_response(self, kb_id, requires_translation=False):
         if getattr(self, 'worker_thread', None) is not None:
@@ -1623,6 +1661,7 @@ class ChatTool(BaseTool):
         self.worker.sig_finished.connect(self.worker_thread.quit)
         self.worker.sig_finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        self.worker.sig_translated.connect(self._on_query_translated)
 
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
         self.worker.sig_finished.connect(self.worker_thread.quit)

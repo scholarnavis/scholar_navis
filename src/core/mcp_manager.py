@@ -116,6 +116,11 @@ class MCPManager:
                     QTimer.singleShot(delay_ms, start_lazy_server)
                     delay_ms += 2000
 
+            else:
+                if server_name in self.sessions or server_name in self.server_status:
+                    self.disconnect_server(server_name)
+
+
     async def _run_session(self, server_name: str, connection_config: dict):
         self.server_status[server_name] = "connecting"
         if server_name not in self.server_stops:
@@ -137,71 +142,102 @@ class MCPManager:
                     transport = await stack.enter_async_context(sse_client(connection_config['url'], headers=headers))
                     read, write = transport
 
-
                 elif connection_config['type'] == 'streamable_http':
 
                     url = connection_config.get('url')
+
                     headers = connection_config.get('headers', {})
+
                     read_tx, read_rx = anyio.create_memory_object_stream(100)
+
                     write_tx, write_rx = anyio.create_memory_object_stream(100)
 
                     async def http_poster():
+
                         import json
-                        # 使用持久化客户端避免频繁握手
-                        async with httpx.AsyncClient() as client:
+
+                        # [修复] 增加超时时间，防止工具调用执行时间过长被意外截断
+
+                        async with httpx.AsyncClient(timeout=120.0) as client:
+
                             async with write_rx:
+
                                 async for message in write_rx:
+
                                     try:
+
+                                        # [修复] 严格排除 None 值，防止外部服务端严格校验格式时报错
+
                                         if hasattr(message, "model_dump"):
-                                            payload = message.model_dump(mode='json')
+
+                                            payload = message.model_dump(mode='json', exclude_none=True)
+
                                         elif hasattr(message, "dict"):
-                                            payload = message.dict()
+
+                                            payload = message.dict(exclude_none=True)
+
                                         else:
+
                                             payload = json.loads(json.dumps(message, default=lambda o: o.__dict__))
 
                                         post_headers = {k: v for k, v in headers.items() if k.lower() != 'accept'}
+
                                         post_headers['Content-Type'] = 'application/json'
 
                                         await client.post(url, json=payload, headers=post_headers)
+
                                     except Exception as e:
+
                                         logger.error(f"HTTP POST failed: {e}")
 
                     async def http_receiver():
+
+                        from pydantic import TypeAdapter
+
+                        from mcp.types import JSONRPCMessage
+
+                        # [修复] JSONRPCMessage 是 Union 类型，必须借助 TypeAdapter 来反序列化
+
+                        adapter = TypeAdapter(JSONRPCMessage)
+
                         async with read_tx:
+
                             try:
 
                                 limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+
                                 async with httpx.AsyncClient(timeout=None, limits=limits) as client:
+
                                     async with client.stream("GET", url, headers=headers) as resp:
+
                                         if resp.status_code != 200:
                                             logger.error(f"Abnormal HTTP status code: {resp.status_code}")
+
                                             return
 
                                         async for line in resp.aiter_lines():
-                                            line = line.strip()
-                                            if not line: continue
 
+                                            line = line.strip()
+
+                                            if not line: continue
                                             if line.startswith("data: "):
                                                 line = line[6:].strip()
-
                                             if '"jsonrpc"' not in line:
                                                 continue
-
                                             try:
-                                                msg = JSONRPCMessage.model_validate_json(line)
+                                                msg = adapter.validate_json(line)
                                                 await read_tx.send(msg)
                                             except Exception as val_e:
                                                 logger.warning(
                                                     f"Failed to parse message: {line[:100]} | Error: {val_e}")
 
+
                             except Exception as e:
-                                logger.error(f"HTTP POST failed: {e}")
+                                logger.error(f"HTTP GET stream failed: {e}")
 
                     tg = await stack.enter_async_context(anyio.create_task_group())
-
-
-                    tg.start_soon(http_poster, *[])
-                    tg.start_soon(http_receiver, *[])
+                    tg.start_soon(http_poster)
+                    tg.start_soon(http_receiver)
 
                     read, write = read_rx, write_tx
                 else:
@@ -213,16 +249,23 @@ class MCPManager:
                 self.sessions[server_name] = session
                 self.server_status[server_name] = "connected"
 
+                # 获取你在 UI 里配置的 Server 描述
+                server_desc = connection_config.get("description", "").strip()
+
                 # 注册工具列表
                 tools_response = await session.list_tools()
                 for tool in tools_response.tools:
                     self.tool_map[tool.name] = server_name
+
+                    raw_desc = tool.description or ""
+                    enhanced_desc = f"[Tool Context: {server_desc}] {raw_desc}" if server_desc else raw_desc
+
                     self.tool_schemas[tool.name] = {
                         "type": "function",
                         "server": server_name,
                         "function": {
                             "name": tool.name,
-                            "description": tool.description or "",
+                            "description": enhanced_desc,
                             "parameters": tool.inputSchema
                         }
                     }

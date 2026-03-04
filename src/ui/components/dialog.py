@@ -533,10 +533,11 @@ class FeedLibraryDialog(BaseDialog):
         unique_feeds = {f["url"]: f for f in final_list}
         return list(unique_feeds.values())
 
+
 class McpConfigDialog(BaseDialog):
     def __init__(self, parent=None, server_name="", server_config=None):
         title = "Edit MCP Server" if server_config else "Add MCP Server"
-        super().__init__(parent, title=title, width=560)
+        super().__init__(parent, title=title, width=660)
 
         self.form_widget = QWidget()
         self.form_layout = QFormLayout(self.form_widget)
@@ -549,8 +550,36 @@ class McpConfigDialog(BaseDialog):
             self.inp_name.setEnabled(False)
             self.inp_name.setToolTip("Core component identifier cannot be changed")
 
+
+        self.desc_container = QWidget()
+        desc_v_layout = QVBoxLayout(self.desc_container)
+        desc_v_layout.setContentsMargins(0, 0, 0, 0)
+        desc_v_layout.setSpacing(4)
+
+        self.inp_desc = QLineEdit()
+        self.inp_desc.setPlaceholderText("e.g. Provide 12306 train ticket search capabilities")
+
+        self.desc_hint_widget = QWidget()
+        hint_layout = QHBoxLayout(self.desc_hint_widget)
+        hint_layout.setContentsMargins(0, 0, 0, 0)
+        hint_layout.setSpacing(6)
+
+        self.lbl_desc_icon = QLabel()
+        self.lbl_desc_icon.setFixedSize(14, 14)
+
+        self.lbl_desc_text = QLabel(
+            "<b>Crucial for AI:</b> Clearly describe the tool's purpose so the AI knows exactly when to use it.")
+        self.lbl_desc_text.setWordWrap(True)
+        self.lbl_desc_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        hint_layout.addWidget(self.lbl_desc_icon, 0, Qt.AlignTop)
+        hint_layout.addWidget(self.lbl_desc_text, 1)
+
+        desc_v_layout.addWidget(self.inp_desc)
+        desc_v_layout.addWidget(self.desc_hint_widget)
+
         self.combo_type = QComboBox()
-        self.combo_type.addItems(["stdio", "sse", "streamable_http"])
+        self.combo_type.addItems(["stdio", "sse"])
 
         self.inp_cmd_url = QLineEdit()
         self.inp_args = QLineEdit()
@@ -581,17 +610,18 @@ class McpConfigDialog(BaseDialog):
         self.lbl_env = QLabel("Environment:")
 
         self.form_layout.addRow("Server ID:", self.inp_name)
+        self.form_layout.addRow("Description:", self.desc_container)
         self.form_layout.addRow("Transport:", self.combo_type)
         self.form_layout.addRow("Command / URL:", self.inp_cmd_url)
         self.form_layout.addRow(self.lbl_args, self.inp_args)
         self.form_layout.addRow(self.lbl_env, self.env_container)
 
         if server_config:
-            type_idx  = {"stdio": 0, "sse": 1, "streamable_http": 2}
+            self.inp_desc.setText(server_config.get("description", ""))
+            type_idx = {"stdio": 0, "sse": 1, "streamable_http": 2}
             self.combo_type.setCurrentIndex(type_idx.get(server_config.get("type", "stdio"), 0))
 
-
-            if type_idx == 0:
+            if self.combo_type.currentIndex() == 0:  # stdio
                 self.inp_cmd_url.setText(server_config.get("command", ""))
                 self.inp_args.setText(", ".join(server_config.get("args", [])))
                 dict_data = server_config.get("env", {})
@@ -606,6 +636,7 @@ class McpConfigDialog(BaseDialog):
         self.content_layout.addWidget(self.form_widget)
 
         self.btn_test = self.add_button("Test Connection", self._on_test_clicked)
+        self.btn_test.setFixedSize(140, 32)
         self.footer_layout.removeWidget(self.btn_test)
         self.footer_layout.insertWidget(0, self.btn_test)
 
@@ -630,12 +661,17 @@ class McpConfigDialog(BaseDialog):
             QLineEdit:focus, QComboBox:focus {{ border: 1px solid {tm.color('accent')}; }}
             QLineEdit:disabled {{ background-color: {tm.color('bg_main')}; color: {tm.color('text_muted')}; }}
         """)
+
+        self.lbl_desc_icon.setPixmap(tm.icon("help", "warning").pixmap(14, 14))
+        self.lbl_desc_text.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 11.5px; font-style: italic; border: none; background: transparent;")
+        self.desc_hint_widget.setStyleSheet("background: transparent;")
+
         self.btn_add_auth.setStyleSheet(
             f"color: {tm.color('warning')}; font-weight: bold; background: transparent; border: none;")
         self.btn_add_env.setStyleSheet(f"color: {tm.color('text_main')}; background: transparent; border: none;")
         self.btn_test.setStyleSheet(
             f"QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('warning')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 5px 10px; }} QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}")
-
 
     def _on_type_changed(self):
         stype = self.combo_type.currentText()
@@ -651,10 +687,6 @@ class McpConfigDialog(BaseDialog):
         elif stype == "sse":
             self.inp_cmd_url.setPlaceholderText("e.g. http://domain.com/sse")
             self.lbl_env.setText("HTTP Headers:")
-        elif stype == "streamable_http":
-            self.inp_cmd_url.setPlaceholderText("e.g. https://api.mcp-server.com/v1/stream")
-            self.lbl_env.setText("Headers (Auth/Token):")
-
 
     def _add_auth_header(self):
         current_data = self.env_editor.extract_data()
@@ -669,7 +701,7 @@ class McpConfigDialog(BaseDialog):
     def get_config(self):
         name = self.inp_name.text().strip()
         stype = self.combo_type.currentText()
-        cfg = {"type": stype, "description": f"Custom {stype} server"}
+        cfg = {"type": stype, "description": self.inp_desc.text().strip()}
 
         raw_params = self.env_editor.extract_data()
         env_dict = {p["name"].strip(): str(p.get("value", "")) for p in raw_params if p.get("name", "").strip()}
@@ -680,12 +712,10 @@ class McpConfigDialog(BaseDialog):
             cfg["args"] = [a.strip() for a in args_raw.split(",") if a.strip()]
             if env_dict: cfg["env"] = env_dict
         else:
-            # 适用于 sse 或 streamable_http
             cfg["url"] = self.inp_cmd_url.text().strip()
             if env_dict: cfg["headers"] = env_dict
 
         return name, cfg
-
 
     def _on_test_clicked(self):
         name, cfg = self.get_config()
@@ -719,9 +749,7 @@ class McpConfigDialog(BaseDialog):
         self.test_thread.start()
 
     def _on_test_finished(self, success, msg):
-
         self.btn_test.setEnabled(True)
-
         self.pd.close_safe()
         if success:
             StandardDialog(self, "Connection Successful", f"{msg}").exec()
@@ -729,6 +757,7 @@ class McpConfigDialog(BaseDialog):
             err_dialog = StandardDialog(self, "Connection Failed", f"Unable to connect to server:\n{msg}")
             err_dialog.setFixedWidth(500)
             err_dialog.exec()
+
 
 
 class SelectKBFileDialog(BaseDialog):

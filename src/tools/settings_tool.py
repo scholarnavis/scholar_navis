@@ -343,7 +343,7 @@ class SettingsTool(BaseTool):
                 if not name_item: continue
                 name = name_item.text()
 
-                status_lbl = self.table_mcp.cellWidget(row, 4)
+                status_lbl = self.table_mcp.cellWidget(row, 5)
                 if not status_lbl: continue
 
                 chk_widget = self.table_mcp.cellWidget(row, 0)
@@ -561,11 +561,13 @@ class SettingsTool(BaseTool):
         header_layout.addWidget(self.btn_refresh_mcp)
         layout.addLayout(header_layout)
 
-        self.table_mcp = QTableWidget(0, 6)
-        self.table_mcp.setHorizontalHeaderLabels(["Enabled", "Name", "Type", "Target", "Status", "Action"])
+        self.table_mcp = QTableWidget(0, 7)
+        self.table_mcp.setHorizontalHeaderLabels(
+            ["Enabled", "Name", "Description", "Type", "Target", "Status", "Action"])
         self.table_mcp.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table_mcp.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
-        self.table_mcp.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table_mcp.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
+        self.table_mcp.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.table_mcp.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_mcp.setFixedHeight(220)
         self.table_mcp.cellDoubleClicked.connect(self._on_mcp_double_clicked)
@@ -621,7 +623,6 @@ class SettingsTool(BaseTool):
             chk.setEnabled(False)
             chk.setToolTip("Core service must remain enabled.")
 
-        # 监听复选框状态变化，标记为未保存
         if hasattr(self, '_mark_unsaved'):
             chk.stateChanged.connect(self._mark_unsaved)
 
@@ -632,30 +633,30 @@ class SettingsTool(BaseTool):
         l.setContentsMargins(0, 0, 0, 0)
         self.table_mcp.setCellWidget(row, 0, chk_widget)
 
-        # 1. Name
         name_item = QTableWidgetItem(name)
         name_item.setData(Qt.UserRole, cfg)
         name_item.setFlags(name_item.flags() ^ Qt.ItemIsEditable)
         self.table_mcp.setItem(row, 1, name_item)
 
-        # 2. Type
+        desc_str = cfg.get("description", "")
+        desc_item = QTableWidgetItem(desc_str)
+        desc_item.setFlags(desc_item.flags() ^ Qt.ItemIsEditable)
+        self.table_mcp.setItem(row, 2, desc_item)
+
         stype = cfg.get("type", "stdio")
         type_item = QTableWidgetItem(stype)
         type_item.setFlags(type_item.flags() ^ Qt.ItemIsEditable)
-        self.table_mcp.setItem(row, 2, type_item)
+        self.table_mcp.setItem(row, 3, type_item)
 
-        # 3. Target
         target = cfg.get("command", "") if stype == "stdio" else cfg.get("url", "")
         target_item = QTableWidgetItem(target)
         target_item.setFlags(target_item.flags() ^ Qt.ItemIsEditable)
-        self.table_mcp.setItem(row, 3, target_item)
+        self.table_mcp.setItem(row, 4, target_item)
 
-        # 4. Status
         status_lbl = QLabel("Checking...")
         status_lbl.setAlignment(Qt.AlignCenter)
-        self.table_mcp.setCellWidget(row, 4, status_lbl)
+        self.table_mcp.setCellWidget(row, 5, status_lbl)
 
-        # 5. Actions
         action_widget = QWidget()
         al = QHBoxLayout(action_widget)
         al.setContentsMargins(0, 0, 0, 0)
@@ -683,7 +684,6 @@ class SettingsTool(BaseTool):
                 )
 
                 if dlg.exec():
-                    from src.core.mcp_manager import MCPManager
                     MCPManager.get_instance().disconnect_server(srv_name)
 
                     for i in range(self.table_mcp.rowCount()):
@@ -692,15 +692,13 @@ class SettingsTool(BaseTool):
                             self.table_mcp.removeRow(i)
                             break
 
-                    #
-
                     if hasattr(self, '_mark_unsaved'):
                         self._mark_unsaved()
 
             btn_del.clicked.connect(lambda _, n=name: delete_mcp_row(n))
             al.addWidget(btn_del)
 
-        self.table_mcp.setCellWidget(row, 5, action_widget)
+        self.table_mcp.setCellWidget(row, 6, action_widget)
 
     def _on_add_mcp_clicked(self):
         warning_msg = (
@@ -724,6 +722,9 @@ class SettingsTool(BaseTool):
             cfg["enabled"] = True
             self._add_mcp_row(name, cfg)
 
+            if hasattr(self, '_mark_unsaved'):
+                self._mark_unsaved()
+
     def _on_edit_mcp_clicked(self, row):
         name_item = self.table_mcp.item(row, 1)
         if not name_item: return
@@ -739,9 +740,13 @@ class SettingsTool(BaseTool):
 
             name_item.setText(new_name)
             name_item.setData(Qt.UserRole, new_cfg)
-            self.table_mcp.item(row, 2).setText(new_cfg.get("type", "stdio"))
+            self.table_mcp.item(row, 2).setText(new_cfg.get("description", ""))
+            self.table_mcp.item(row, 3).setText(new_cfg.get("type", "stdio"))
             target = new_cfg.get("command", "") if new_cfg.get("type", "stdio") == "stdio" else new_cfg.get("url", "")
-            self.table_mcp.item(row, 3).setText(target)
+            self.table_mcp.item(row, 4).setText(target)
+
+            if hasattr(self, '_mark_unsaved'):
+                self._mark_unsaved()
 
     def init_network_section(self):
         group = QGroupBox("Network Proxy")

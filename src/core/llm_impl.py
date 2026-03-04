@@ -173,7 +173,7 @@ class OpenAICompatibleLLM:
     def chat(self, messages: List[Dict], is_translation=False, **kwargs):
 
         if getattr(self, '_missing_api_key', False):
-            return "\n\n**System Tip:** API Key is missing. Please configure your API key in the settings before proceeding.\n"
+            raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
 
         payload = self._get_payload_kwargs()
         payload.update(kwargs)
@@ -205,6 +205,11 @@ class OpenAICompatibleLLM:
         return choice.message.content or ""
 
     def stream_chat(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[str, None, None]:
+
+        if getattr(self, '_missing_api_key', False):
+            # [修改] 抛出异常阻断对话
+            raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
+
         payload = self._get_payload_kwargs()
         payload.update(kwargs)
 

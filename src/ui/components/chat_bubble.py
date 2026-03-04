@@ -388,6 +388,55 @@ class ChatBubbleWidget(QWidget):
                 pass
         self.downloaded_images.clear()
 
+    def add_translation_widget(self, translated_text):
+        """向当前用户气泡中注入可折叠的翻译结果面板"""
+        if not self.is_user:
+            return
+
+        tm = ThemeManager()
+
+        self.trans_container = QWidget()
+        trans_layout = QVBoxLayout(self.trans_container)
+        trans_layout.setContentsMargins(0, 5, 0, 0)
+        trans_layout.setSpacing(4)
+
+        self.btn_toggle_trans = QPushButton(" Show Translated Query")
+        self.btn_toggle_trans.setIcon(tm.icon("language", "text_muted"))  # 使用 ThemeManager 提供图标
+        self.btn_toggle_trans.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle_trans.setStyleSheet(f"""
+            QPushButton {{ 
+                background: transparent; border: none; text-align: left; 
+                color: {tm.color('text_muted')}; font-size: 11px; font-weight: bold;
+            }}
+            QPushButton:hover {{ color: {tm.color('accent')}; }}
+        """)
+
+        self.lbl_trans = QLabel(translated_text)
+        self.lbl_trans.setWordWrap(True)
+        self.lbl_trans.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_trans.setStyleSheet(f"""
+            color: {tm.color('text_muted')}; 
+            background-color: {tm.color('bg_input')}; 
+            border: 1px solid {tm.color('border')};
+            border-radius: 6px; padding: 8px; font-size: 12px;
+        """)
+        self.lbl_trans.setVisible(False)
+
+        def toggle_trans():
+            is_vis = self.lbl_trans.isVisible()
+            self.lbl_trans.setVisible(not is_vis)
+            self.btn_toggle_trans.setText(" Hide Translated Query" if not is_vis else " Show Translated Query")
+
+        self.btn_toggle_trans.clicked.connect(toggle_trans)
+
+        trans_layout.addWidget(self.btn_toggle_trans)
+        trans_layout.addWidget(self.lbl_trans)
+
+        if hasattr(self, 'btn_widget'):
+            idx = self.content_layout.indexOf(self.btn_widget)
+            self.content_layout.insertWidget(max(0, idx), self.trans_container)
+        else:
+            self.content_layout.addWidget(self.trans_container)
 
     def _start_image_download(self, url):
         """丢进后台线程进行安全下载，不卡主界面"""
