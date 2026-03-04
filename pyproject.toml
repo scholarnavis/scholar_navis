@@ -1,7 +1,7 @@
 [project]
 name = "scholar-navis"
 version = "2.0.0"
-description = "Scholar Navis
+description = "Scholar Navis"
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
 dependencies = [
@@ -27,6 +27,7 @@ dependencies = [
     "onnxruntime-directml>=1.24.2 ; sys_platform == 'win32'",
     "cryptography>=46.0.5",
     "keyring>=25.7.0",
+    "chardet>=7.0.0",
 ]
 
 

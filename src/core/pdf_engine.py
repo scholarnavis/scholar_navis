@@ -8,7 +8,7 @@ import gc
 import pymupdf4llm
 from langchain_core.documents import Document
 from langchain_text_splitters import MarkdownTextSplitter
-from src.core.database import DatabaseManager
+from src.core.kb_manager import DatabaseManager
 
 
 class PDFEngine:

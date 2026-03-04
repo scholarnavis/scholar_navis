@@ -2,23 +2,32 @@ import os
 import base64
 import mimetypes
 from urllib.parse import quote
+
+
 from src.core.core_task import BackgroundTask
 
 
 class ProcessAttachmentTask(BackgroundTask):
     def _execute(self):
-        paths = self.kwargs.get('paths', [])
+        file_infos = self.kwargs.get('file_infos', [])
+
+        if not file_infos:
+            paths = self.kwargs.get('paths', [])
+            file_infos = [{"path": p, "name": os.path.basename(p)} for p in paths]
+
         chunks = []
         html = ""
-        total = len(paths)
+        total = len(file_infos)
 
-        for i, path in enumerate(paths):
+        for i, info in enumerate(file_infos):
             if self._is_cancelled:
                 self.send_log("INFO", "Attachment processing cancelled by user.")
                 break
 
-            f_name = os.path.basename(path)
-            ext = path.lower()
+            path = info['path']
+            f_name = info['name']
+
+            ext = f_name.lower()
 
             try:
                 # 1. Image processing
@@ -26,7 +35,7 @@ class ProcessAttachmentTask(BackgroundTask):
                     self.update_progress(int((i / total) * 100), f"Encoding image: {f_name}...")
                     with open(path, "rb") as image_file:
                         encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                        mime_type, _ = mimetypes.guess_type(path)
+                        mime_type, _ = mimetypes.guess_type(f_name)
                         mime_type = mime_type or 'image/jpeg'
 
                         chunks.append({
@@ -57,13 +66,15 @@ class ProcessAttachmentTask(BackgroundTask):
                 # 3. Text processing
                 else:
                     self.update_progress(int((i / total) * 100), f"Reading file: {f_name}...")
-                    try:
-                        with open(path, 'r', encoding='utf-8') as f:
-                            text = f.read().strip()
-                    except UnicodeDecodeError:
-                        # 降级容错：如果 utf-8 失败，尝试用 gbk 读取，忽略无法解码的字符
-                        with open(path, 'r', encoding='gbk', errors='ignore') as f:
-                            text = f.read().strip()
+                    text = ""
+
+                    with open(path, 'rb') as f:
+                        raw_data = f.read()
+                        detected = chardet.detect(raw_data)
+
+                        # 如果文件太小或特征不明显导致检测失败，默认回退到 utf-8
+                        encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
+                        text = raw_data.decode(encoding, errors='replace').strip()
 
                     if text:
                         chunks.append({

@@ -10,7 +10,6 @@ import time
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 
-import requests
 from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
 
@@ -20,12 +19,8 @@ from src.core.oa import OAFetcher
 
 
 def get_app_root():
-    """Nuitka 安全的根目录解析"""
-    # 如果被 Nuitka 打包（或者 PyInstaller）
     if getattr(sys, 'frozen', False) or '__compiled__' in globals():
         return os.path.dirname(sys.executable)
-    # 如果是源码运行（假设该文件在 src/plugins 或类似子目录下，向上退一级）
-    # 请根据你实际的目录层级调整这里的 ".." 数量
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 APP_ROOT = get_app_root()
@@ -365,7 +360,7 @@ def search_biological_entity(query: str, entity_type: str = "gene", organism: st
 @mcp.tool(
     name="search_phytozome_phytomine",
     description=(
-            "[Tags: Genomics, Plant] "
+            "[Tags: Genomics] "
             "Search the JGI Phytozome (PhytoMine) database for plant genomics data. "
             "Use this to find plant-specific genes, proteins, orthologs, and families across assembled plant genomes without requiring a login."
     )
@@ -392,7 +387,7 @@ def search_phytozome_phytomine(query: str) -> str:
 @mcp.tool(
     name="search_omics_datasets",
     description=(
-            "[Tags: Genomics] "
+            "[Tags: Transcriptomics] "
             "Search high-throughput sequencing and microarray datasets (SRA / GEO). "
             "Use this to find raw multi-omics datasets (RNA-Seq, ChIP-Seq, WGS), biosample details, and accession IDs associated with specific phenotypes, treatments, or organisms. "
             "Provide db_type as 'sra' for raw sequencing reads or 'geo' for expression/array studies."
@@ -442,7 +437,7 @@ def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5
 @mcp.tool(
     name="search_protein_structure",
     description=(
-            "[Tags: Protein, Structure] "
+            "[Tags: Protein] "
             "Search the RCSB PDB (Protein Data Bank) for 3D protein structures, experimental methods (X-ray, Cryo-EM), and resolution details. "
             "Use this when the user needs structural biology information."
     )
@@ -638,7 +633,6 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
             return json.dumps(
                 {"status": "error", "message": "Security Error: Probing internal network IPs is forbidden."})
     except Exception:
-        # 如果域名无法解析或格式错误，忽略此步，让后面的 requests 去抛出正常错误
         pass
 
     try:
@@ -648,7 +642,6 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
 
         html_content = res.text
 
-        # 简单清洗 HTML，去除 script 和 style 标签，提取纯文本，防止撑爆上下文
         text_content = re.sub(r'<script.*?>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
         text_content = re.sub(r'<style.*?>.*?</style>', '', text_content, flags=re.DOTALL | re.IGNORECASE)
         text_content = re.sub(r'<[^>]+>', ' ', text_content)
@@ -671,6 +664,222 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
             "status": "error",
             "message": f"Failed to fetch URL. It might be unreachable, strictly protected by WAF, or timed out. Error: {str(e)}"
         })
+
+
+@mcp.tool(
+    name="search_web",
+    description=(
+            "[Tags: Web] "
+            "Search the web for general information or current events. "
+            "Automatically rotates through Google, Bing, and Baidu with a 5-second timeout per engine. "
+            "Returns a list of relevant titles and URLs."
+    )
+)
+def search_web(query: str, max_results: int = 2) -> str:
+    logger.info(f"Task: Web Search | Query: '{query}'")
+
+    # 定义搜索引擎队列与对应的构造规则
+    engines = [
+        {
+            "name": "Google",
+            "url": f"https://www.google.com/search?q={urllib.parse.quote(query)}&hl=en",
+            "headers": {"Referer": "https://www.google.com/"}
+        },
+        {
+            "name": "Bing",
+            "url": f"https://www.bing.com/search?q={urllib.parse.quote(query)}",
+            "headers": {"Referer": "https://www.bing.com/"}
+        },
+        {
+            "name": "Baidu",
+            "url": f"https://www.baidu.com/s?wd={urllib.parse.quote(query)}",
+            "headers": {"Referer": "https://www.baidu.com/"}
+        }
+    ]
+
+    for engine in engines:
+        logger.info(f"Trying search engine: {engine['name']}")
+        try:
+            res = mcp_request("GET", engine["url"], headers=engine["headers"], timeout=5)
+            res.raise_for_status()
+            html = res.text
+
+            results = _parse_search_html(html, engine["name"], max_results)
+
+            if results:
+                logger.info(f"Success with {engine['name']}. Found {len(results)} results.")
+                return json.dumps({
+                    "status": "success",
+                    "engine": engine["name"],
+                    "query": query,
+                    "results": results
+                }, ensure_ascii=False)
+            else:
+                logger.warning(f"No results successfully parsed from {engine['name']}. Moving to next...")
+
+        except Exception as e:
+            logger.warning(f"{engine['name']} search failed or timed out: {e}")
+            continue
+
+    return json.dumps({
+        "status": "error",
+        "message": "All search engines failed, timed out, or returned unparseable results."
+    })
+
+
+def _parse_search_html(html: str, engine_name: str, max_results: int) -> list:
+
+    results = []
+
+    if engine_name == "Google":
+        pattern = r'<a[^>]+href="(http[s]?://[^"]+)"[^>]*>.*?<h3[^>]*>(.*?)</h3>'
+    elif engine_name == "Bing":
+        pattern = r'<li class="b_algo">.*?<h2[^>]*>.*?<a[^>]+href="(http[s]?://[^"]+)"[^>]*>(.*?)</a>'
+    elif engine_name == "Baidu":
+        pattern = r'<h3[^>]*[cC]lass="[a-zA-Z0-9_ -]*t[a-zA-Z0-9_ -]*"[^>]*>.*?<a[^>]+href="(http[s]?://[^"]+)"[^>]*>(.*?)</a>'
+    else:
+        return []
+
+    matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
+
+    for url, title in matches:
+        clean_title = re.sub(r'<[^>]+>', '', title).strip()
+
+        if "google.com" in url and engine_name == "Google": continue
+        if "bing.com" in url and engine_name == "Bing": continue
+
+        # 去重（有时同一个页面会有多个入口）
+        if not any(r['url'] == url for r in results):
+            results.append({"title": clean_title, "url": url})
+
+        if len(results) >= max_results:
+            break
+
+    return results
+
+
+@mcp.tool(
+    name="search_preprints",
+    description=(
+            "[Tags: Literature] "
+            "Search bioRxiv and medRxiv for the latest life science and medical preprints. "
+            "Use this to find cutting-edge, yet-to-be-peer-reviewed research before formal publication."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def search_preprints(query: str, max_results: int = 5) -> str:
+    logger.info(f"Task: Preprint Search | Query: '{query}'")
+    try:
+        url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+        params = {
+            "query": f'({query}) AND (SRC:PPR)',
+            "format": "json",
+            "resultType": "core",
+            "pageSize": max_results
+        }
+        res = mcp_request("GET", url, params=params, timeout=15)
+        res.raise_for_status()
+
+        results = []
+        for p in res.json().get("resultList", {}).get("result", []):
+            results.append({
+                "title": p.get("title", ""),
+                "year": p.get("pubYear", "Unknown"),
+                "authors": p.get("authorString", ""),
+                "doi": p.get("doi", ""),
+                "source": p.get("bookOrReportDetails", {}).get("publisher", "Preprint Server"),
+                "abstract": p.get("abstractText", "No abstract available.")[:600] + "...",
+                "url": f"https://doi.org/{p.get('doi')}" if p.get("doi") else ""
+            })
+
+        return json.dumps({"status": "success", "results": results}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Preprint search failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
+    name="fetch_wikipedia_summary",
+    description=(
+            "[Tags: Web] "
+            "Fetch the exact introductory summary of a concept, entity, or algorithm from Wikipedia. "
+            "Returns clean text directly without needing full webpage extraction. Fast and token-efficient."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def fetch_wikipedia_summary(query: str, language: str = "en") -> str:
+    logger.info(f"Task: Wikipedia Extract | Query: '{query}' | Lang: {language}")
+    try:
+        url = f"https://{language}.wikipedia.org/w/api.php"
+        params = {
+            "action": "query",
+            "prop": "extracts",
+            "exchars": 1500,
+            "explaintext": 1,
+            "generator": "search",
+            "gsrsearch": query,
+            "gsrlimit": 1,
+            "format": "json"
+        }
+        res = mcp_request("GET", url, params=params, timeout=10)
+        res.raise_for_status()
+
+        pages = res.json().get("query", {}).get("pages", {})
+        if not pages:
+            return json.dumps({"status": "error", "message": "No Wikipedia article found for this query."})
+
+        page = list(pages.values())[0]
+        return json.dumps({
+            "status": "success",
+            "title": page.get("title", ""),
+            "extract": page.get("extract", "").strip(),
+            "url": f"https://{language}.wikipedia.org/wiki/{urllib.parse.quote(page.get('title', ''))}"
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Wikipedia fetch failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
+    name="search_github_repos",
+    description=(
+            "[Tags: Code] "
+            "Search GitHub for open-source repositories, bioinformatics pipelines, tools, or academic code. "
+            "Returns repository links, star counts, descriptions, and primary programming languages."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def search_github_repos(query: str, max_results: int = 5) -> str:
+    logger.info(f"Task: GitHub Search | Query: '{query}'")
+    try:
+        url = "https://api.github.com/search/repositories"
+        params = {
+            "q": query,
+            "sort": "stars",  # 按 Star 数降序
+            "order": "desc",
+            "per_page": max_results
+        }
+        headers = {
+            "Accept": "application/vnd.github.v3+json"
+        }
+        res = mcp_request("GET", url, params=params, headers=headers, timeout=10)
+        res.raise_for_status()
+
+        results = []
+        for repo in res.json().get("items", []):
+            results.append({
+                "name": repo.get("full_name", ""),
+                "description": repo.get("description", "No description"),
+                "url": repo.get("html_url", ""),
+                "stars": repo.get("stargazers_count", 0),
+                "language": repo.get("language", "Unknown"),
+                "last_updated": repo.get("updated_at", "")[:10]
+            })
+
+        return json.dumps({"status": "success", "results": results}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"GitHub search failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
 
 
 

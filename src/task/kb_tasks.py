@@ -11,7 +11,7 @@ from optimum.onnxruntime import ORTModelForFeatureExtraction
 from transformers import AutoTokenizer
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
-from src.core.kb_manager import KBManager
+from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.models_registry import get_model_conf, ensure_onnx_model
 from src.core.rerank_engine import RerankEngine
 
@@ -177,7 +177,6 @@ class ImportFilesTask(BackgroundTask):
         import tempfile
         import traceback
         from src.core.kb_manager import KBManager
-        from src.core.database import DatabaseManager
         from src.services.file_service import FileService
         from langchain_text_splitters import RecursiveCharacterTextSplitter
 

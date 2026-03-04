@@ -1160,9 +1160,10 @@ class LicenseDialog(BaseDialog):
             ("Optimum", "Apache 2.0", "Optimization for Transformer models."),
             ("Curl-cffi", "MIT", "Python binding for curl-impersonate."),
             ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
-            ("Psutil", "BSD", "Cross-platform process and system utilities.")
+            ("Psutil", "BSD", "Cross-platform process and system utilities."),
+            ("Chardet", "LGPL v2.1", "Universal character encoding detector.")
         ]
-
+        self.licenses.sort(key=lambda item: item[0].lower())
         self.table = QTableWidget(len(self.licenses), 3)
         self.table.setHorizontalHeaderLabels(["Package", "License", "Purpose"])
 

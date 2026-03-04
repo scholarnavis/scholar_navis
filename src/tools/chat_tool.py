@@ -27,9 +27,8 @@ from langdetect import detect
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode, TaskState
-from src.core.database import DatabaseManager
 from src.core.device_manager import DeviceManager
-from src.core.kb_manager import KBManager
+from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_impl import OpenAICompatibleLLM
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
@@ -1103,11 +1102,19 @@ class ChatTool(BaseTool):
         if not paths: return
         self.process_attached_files(paths)
 
-    def process_attached_files(self, paths):
+    def process_attached_files(self, items):
         if not hasattr(self, 'external_chunks'):
-            self.external_chunks =[]
+            self.external_chunks = []
         if not hasattr(self, 'external_context_html'):
             self.external_context_html = ""
+
+
+        file_infos = []
+        for item in items:
+            if isinstance(item, str):
+                file_infos.append({"path": item, "name": os.path.basename(item)})
+            elif isinstance(item, dict):
+                file_infos.append(item)
 
         # 防止用户重复狂点
         self.input_container.set_uploading(True)
@@ -1118,7 +1125,6 @@ class ChatTool(BaseTool):
 
         self.attach_task_mgr = TaskManager()
 
-        # 连接信号
         self.attach_task_mgr.sig_progress.connect(
             lambda p, m: self.input_container.show_context_preview(f"⏳ {m}")
         )
@@ -1129,9 +1135,8 @@ class ChatTool(BaseTool):
             ProcessAttachmentTask,
             task_id="process_attachment",
             mode=TaskMode.THREAD,
-            paths=paths
+            file_infos=file_infos
         )
-
 
 
 
@@ -1886,7 +1891,11 @@ class ChatTool(BaseTool):
         if dlg.exec():
             paths = dlg.get_selected_paths()
             if paths:
-                self.process_attached_files(paths)
+                file_infos = []
+                for p in paths:
+                    real_name = next((f["name"] for f in files if f["path"] == p), os.path.basename(p))
+                    file_infos.append({"path": p, "name": real_name})
+                self.process_attached_files(file_infos)
 
 
     def update_ai_bubble(self, token):
