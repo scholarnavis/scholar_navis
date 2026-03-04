@@ -1,3 +1,5 @@
+import platform
+
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
 from PySide6.QtCore import Qt, QUrl, QSize
 from PySide6.QtGui import QDesktopServices
@@ -88,14 +90,19 @@ class AboutTool(BaseTool):
 
         return self.widget
 
+
     def _on_version_checked(self, payload):
         if not payload:
             return
 
         latest_version = payload.get("latest_version")
         if latest_version and latest_version != "0.0.0" and latest_version != __version__:
+
+            os_name = platform.system().lower()
+            dl_url = f"{__dl__}?os={os_name}"
+
             self.lbl_update.setText(
-                f'<a href="{__dl__}" style="color: inherit; text-decoration: none;">New version v{latest_version} available! Click to download.</a>')
+                f'<a href="{dl_url}" style="color: inherit; text-decoration: none;">New version v{latest_version} available! Click to download.</a>')
             self.lbl_update.show()
             self._apply_theme()
 
