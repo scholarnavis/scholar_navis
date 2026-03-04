@@ -1,0 +1,41 @@
+[project]
+name = "scholar-navis"
+version = "2.0.0"
+description = "Scholar Navis"
+readme = "README.md"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "chromadb>=1.5.0",
+    "langchain-text-splitters>=1.1.0",
+    "markdown>=3.10.2",
+    "networkx>=3.6.1",
+    "pymupdf>=1.26.7",
+    "pyqtdarktheme>=2.1.0",
+    "pyside6>=6.10.2",
+    "scikit-learn>=1.8.0",
+    "psutil>=7.2.2",
+    "nvidia-ml-py>=13.590.48",
+    "pymupdf4llm>=0.2.9",
+    "langdetect>=1.0.9",
+    "mcp[cli]>=1.26.0",
+    "biopython>=1.86",
+    "openai>=2.24.0",
+    "optimum[onnxruntime]>=2.1.0",
+    "curl-cffi>=0.14.0",
+    "torch>=2.10.0",
+    "onnxruntime-gpu>=1.24.2",
+    "onnxruntime-directml>=1.24.2 ; sys_platform == 'win32'",
+    "cryptography>=46.0.5",
+    "keyring>=25.7.0",
+    "chardet>=7.0.0",
+    "hf-xet>=1.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "boto3>=1.42.60",
+    "nuitka>=4.0.2",
+    "python-dotenv>=1.2.1",
+]
+
+
