@@ -159,30 +159,28 @@ class MCPManager:
                                         else:
                                             payload = json.loads(json.dumps(message, default=lambda o: o.__dict__))
 
-                                        # 重要：POST 请求不能带 event-stream 的 Accept，否则部分 Gateway 会返回 400
                                         post_headers = {k: v for k, v in headers.items() if k.lower() != 'accept'}
                                         post_headers['Content-Type'] = 'application/json'
 
                                         await client.post(url, json=payload, headers=post_headers)
                                     except Exception as e:
-                                        logger.error(f"HTTP POST 失败: {e}")
+                                        logger.error(f"HTTP POST failed: {e}")
 
                     async def http_receiver():
                         async with read_tx:
                             try:
-                                # 增加 Keep-alive 和长连接配置
+
                                 limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
                                 async with httpx.AsyncClient(timeout=None, limits=limits) as client:
                                     async with client.stream("GET", url, headers=headers) as resp:
                                         if resp.status_code != 200:
-                                            logger.error(f"HTTP 连接状态异常: {resp.status_code}")
+                                            logger.error(f"Abnormal HTTP status code: {resp.status_code}")
                                             return
 
                                         async for line in resp.aiter_lines():
                                             line = line.strip()
                                             if not line: continue
 
-                                            # --- 关键修复：处理 SSE 的 data: 前缀 ---
                                             if line.startswith("data: "):
                                                 line = line[6:].strip()
 
@@ -193,9 +191,11 @@ class MCPManager:
                                                 msg = JSONRPCMessage.model_validate_json(line)
                                                 await read_tx.send(msg)
                                             except Exception as val_e:
-                                                logger.warning(f"解析消息失败: {line[:100]} | 错误: {val_e}")
+                                                logger.warning(
+                                                    f"Failed to parse message: {line[:100]} | Error: {val_e}")
+
                             except Exception as e:
-                                logger.error(f"HTTP 接收失败: {e}")
+                                logger.error(f"HTTP POST failed: {e}")
 
                     tg = await stack.enter_async_context(anyio.create_task_group())
 
