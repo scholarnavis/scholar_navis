@@ -1,13 +1,15 @@
 import multiprocessing
 import os
 import time
-
 import psutil
-import torch
 import tqdm
-from huggingface_hub import snapshot_download, constants
+
 from src.core.core_task import BackgroundTask, TaskState
 from src.core.network_worker import setup_global_network_env
+
+# 注意：请勿在此处全局 import huggingface_hub 或 torch！
+# 必须等待网络环境和线程环境变量设置完毕后再进行局部 import。
+
 
 _global_callback = None
 _last_emit_time = 0
@@ -20,11 +22,9 @@ def patched_display(self, msg=None, pos=None):
 
     res = _original_display(self, msg, pos)
 
-    # 我们的拦截逻辑
     if _global_callback:
         current_time = time.time()
         is_finished = (self.n >= self.total) if self.total else False
-
 
         if is_finished or (current_time - _last_emit_time >= _EMIT_INTERVAL):
             _last_emit_time = current_time
@@ -58,7 +58,6 @@ class DownloadCapture:
 
     def __exit__(self, exc_type, exc_value, traceback):
         tqdm.std.tqdm.display = _original_display
-
         global _global_callback
         _global_callback = None
 
@@ -68,8 +67,15 @@ class RealTimeHFDownloadTask(BackgroundTask):
         setup_global_network_env()
         repo_id = self.kwargs.get("repo_id")
 
+        # 手动强行刷新 HF_ENDPOINT 以防缓存
+        import huggingface_hub.constants
+        if "HF_ENDPOINT" in os.environ:
+            huggingface_hub.constants.ENDPOINT = os.environ["HF_ENDPOINT"]
+
+        from huggingface_hub import snapshot_download
+
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
-        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
         def tqdm_callback(percent, msg):
             self.queue.put({
@@ -85,7 +91,7 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 snapshot_download(
                     repo_id=repo_id,
                     resume_download=True,
-                    max_workers=8,
+                    max_workers=4,
                 )
             self.send_log("INFO", f"Download Finished: {repo_id}. Starting ONNX Conversion...")
 
@@ -96,15 +102,13 @@ class RealTimeHFDownloadTask(BackgroundTask):
             })
 
             try:
-                # 获取真实物理核心数，避免超线程导致上下文切换开销
                 physical_cores = psutil.cpu_count(logical=False) or multiprocessing.cpu_count() - 1
 
-                # 强行拉满底层并行计算库的线程数
                 os.environ["OMP_NUM_THREADS"] = str(physical_cores)
                 os.environ["MKL_NUM_THREADS"] = str(physical_cores)
                 os.environ["OPENBLAS_NUM_THREADS"] = str(physical_cores)
 
-                # 强行拉满 PyTorch 推理和内部图优化线程数
+                import torch
                 torch.set_num_threads(physical_cores)
                 torch.set_num_interop_threads(physical_cores)
 

@@ -122,7 +122,6 @@ class ImportTool(BaseTool):
         self.file_table.customContextMenuRequested.connect(self.show_context_menu)
 
         layout.addWidget(self.file_table)
-        layout.addStretch(1)
 
         # 5. 底部保存区
         save_group = QGroupBox("Changes Staging")

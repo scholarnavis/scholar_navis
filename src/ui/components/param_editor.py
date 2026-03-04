@@ -4,6 +4,12 @@ from PySide6.QtCore import Qt, Signal
 from src.core.theme_manager import ThemeManager
 
 
+class ScrollInterceptTableWidget(QTableWidget):
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
+        event.accept()
+
+
 class ParamEditorWidget(QWidget):
     sig_data_changed = Signal()
 

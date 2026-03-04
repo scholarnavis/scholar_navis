@@ -32,6 +32,9 @@ class ModelSelectorWidget(QWidget):
         self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
         self.combo_model.currentIndexChanged.connect(self._on_model_changed)
 
+        self.combo_provider.currentTextChanged.connect(self.combo_provider.setToolTip)
+        self.combo_model.currentTextChanged.connect(self.combo_model.setToolTip)
+
         self.configs = []
         self.load_llm_configs()
 

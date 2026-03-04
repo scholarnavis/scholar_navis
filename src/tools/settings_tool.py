@@ -33,8 +33,14 @@ from src.task.common_task import VerifyModelsTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, AddModelDialog
+from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
+
+class ScrollInterceptTableWidget(QTableWidget):
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
+        event.accept()
 
 
 class FloatingOverlayFilter(QObject):
@@ -861,6 +867,9 @@ class SettingsTool(BaseTool):
         QThread.msleep(50)
         self.check_models_status()
 
+        self.combo_embed.currentTextChanged.connect(self.combo_embed.setToolTip)
+        self.combo_rerank.currentTextChanged.connect(self.combo_rerank.setToolTip)
+
     def _update_vram_html(self):
         if not hasattr(self, 'lbl_vram_desc'): return
         tm = ThemeManager()
@@ -936,8 +945,6 @@ class SettingsTool(BaseTool):
         self.config.save_json(config_path, self.llm_configs, encrypt=True)
 
     def init_llm_section(self):
-        from src.ui.components.param_editor import ParamEditorWidget
-        from PySide6.QtWidgets import QFrame
 
         group = QGroupBox("LLM Generation API")
         layout = QFormLayout(group)
@@ -1090,6 +1097,10 @@ class SettingsTool(BaseTool):
         self.btn_trans_refresh.clicked.connect(self._on_trans_refresh_clicked)
 
         self._on_trans_provider_changed(0)
+
+        self.combo_llm_model.currentTextChanged.connect(self.combo_llm_model.setToolTip)
+        self.combo_trans_model.currentTextChanged.connect(self.combo_trans_model.setToolTip)
+
 
     def _on_trans_refresh_clicked(self):
         self._refresh_trans_models_ui()

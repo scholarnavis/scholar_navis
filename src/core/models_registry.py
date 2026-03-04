@@ -345,22 +345,18 @@ def get_model_type_by_repo(repo_id):
     return "embedding"
 
 
-def ensure_onnx_model(repo_id, model_type="embedding"):
+def ensure_onnx_model(repo_id, model_type=None):
     hf_home = _get_hf_home()
-
     onnx_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
-
     logger.info(f"Requesting model: {repo_id} | Target ONNX cache dir: {onnx_dir}")
-
 
     if os.path.exists(onnx_dir):
         for root, dirs, files in os.walk(onnx_dir):
             if any(f.endswith('.onnx') for f in files):
-                logger.info(f"Local ONNX cache hit, skipping download and conversion.")
+                logger.info("Local ONNX cache hit, skipping download and conversion.")
                 return onnx_dir
 
-    logger.info(f"Local ONNX cache miss, preparing for download and conversion...")
-
+    logger.info("Local ONNX cache miss, preparing for download and conversion...")
     model_path = snapshot_download(repo_id=repo_id)
 
     source_has_onnx = False
@@ -376,33 +372,53 @@ def ensure_onnx_model(repo_id, model_type="embedding"):
     else:
         logger.info("No official ONNX model detected, starting PyTorch to ONNX engine...")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if not model_type:
+        model_type = get_model_type_by_repo(repo_id)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    is_trust_remote = False
+    for m in EMBEDDING_MODELS + RERANKER_MODELS:
+        if m.get('hf_repo_id') == repo_id:
+            is_trust_remote = m.get('trust_remote_code', False)
+            break
 
-        if model_type == "embedding":
-            model = ORTModelForFeatureExtraction.from_pretrained(
-                model_path,
-                export=should_export,
-                provider="CPUExecutionProvider"
-            )
-        else:
-            model = ORTModelForSequenceClassification.from_pretrained(
-                model_path,
-                export=should_export,
-                provider="CPUExecutionProvider"
-            )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=is_trust_remote
+        )
 
-    os.makedirs(onnx_dir, exist_ok=True)
-    model.save_pretrained(onnx_dir)
-    tokenizer.save_pretrained(onnx_dir)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
 
-    logger.info(f"ONNX processing complete and saved to: {onnx_dir}")
+            if model_type == "embedding":
+                model = ORTModelForFeatureExtraction.from_pretrained(
+                    model_path,
+                    export=should_export,
+                    provider="CPUExecutionProvider",
+                    trust_remote_code=is_trust_remote
+                )
+            else:
+                model = ORTModelForSequenceClassification.from_pretrained(
+                    model_path,
+                    export=should_export,
+                    provider="CPUExecutionProvider",
+                    trust_remote_code=is_trust_remote
+                )
 
-    del model
-    del tokenizer
-    gc.collect()
+        os.makedirs(onnx_dir, exist_ok=True)
+        model.save_pretrained(onnx_dir)
+        tokenizer.save_pretrained(onnx_dir)
+        logger.info(f"ONNX processing complete and saved to: {onnx_dir}")
+
+    except Exception as e:
+        logger.error(f"ONNX Export Failed (Possible Out of Memory for 7B+ models): {str(e)}")
+        raise e
+
+    finally:
+        # 无论成功失败，尝试释放内存
+        if 'model' in locals(): del model
+        if 'tokenizer' in locals(): del tokenizer
+        gc.collect()
 
     folder_name = "models--" + repo_id.replace("/", "--")
     hf_model_dir = os.path.join(hf_home, "hub", folder_name)

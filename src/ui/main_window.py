@@ -27,11 +27,15 @@ from src.ui.components.toast import ToastManager
 def set_window_titlebar_theme(hwnd, is_dark: bool):
     if sys.platform == "win32":
         try:
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                int(hwnd), 20, ctypes.byref(ctypes.c_int(1 if is_dark else 0)), 4)
+            hwnd_int = int(hwnd)
+            value = ctypes.c_int(1 if is_dark else 0)
+
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd_int, 20, ctypes.byref(value), 4)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd_int, 19, ctypes.byref(value), 4)
+
+            ctypes.windll.user32.SetWindowPos(hwnd_int, 0, 0, 0, 0, 0, 0x0037)
         except Exception:
             pass
-
 
 def force_taskbar_icon(hwnd, icon_path):
     if sys.platform == "win32" and os.path.exists(icon_path):
@@ -383,26 +387,33 @@ class MainWindow(QMainWindow):
             dlg.footer_widget.setVisible(False)
 
             welcome_html = f"""
-            <div style="font-family: {tm.font_family()}; font-size: 14px; color: {tm.color('text_main')}; line-height: 1.6;">
-                <h2 style="color: {tm.color('title_blue')}; margin-top: 5px; margin-bottom: 12px; font-weight: bold; letter-spacing: 0.5px;">
-                    Your AI-Powered Research Assistant
-                </h2>
-                <p style="margin-top: 0; color: {tm.color('text_main')};">
-                    Welcome! Scholar Navis is designed to streamline your literature review, data analysis, and academic writing processes.
-                </p>
+                        <div style="font-family: {tm.font_family()}; font-size: 14px; color: {tm.color('text_main')}; line-height: 1.6;">
+                            <h2 style="color: {tm.color('title_blue')}; margin-top: 5px; margin-bottom: 12px; font-weight: bold; letter-spacing: 0.5px;">
+                                Your AI-Powered Research Assistant
+                            </h2>
+                            <p style="margin-top: 0; color: {tm.color('text_main')};">
+                                Welcome! Scholar Navis is designed to streamline your literature review, data analysis, and academic writing processes.
+                            </p>
 
-                <div style="background-color: {tm.color('bg_input')}; border-left: 4px solid {tm.color('danger')}; padding: 12px 16px; margin: 20px 0; border-radius: 4px;">
-                    <b style="color: {tm.color('danger')}; font-size: 14px;">🛡️ Security Notice</b><br>
-                    <span style="font-size: 13px; color: {tm.color('text_muted')}; display: inline-block; margin-top: 4px;">
-                    To ensure the absolute security of your academic data and system integrity, please make sure you are using a version downloaded directly from our official website. We are not responsible for any security breaches caused by unauthorized third-party distributions.
-                    </span>
-                </div>
+                            <div style="background-color: {tm.color('bg_input')}; border-left: 4px solid {tm.color('warning')}; padding: 12px 16px; margin: 15px 0; border-radius: 4px;">
+                                <b style="color: {tm.color('warning')}; font-size: 14px;">🌐 Global Network Connectivity</b><br>
+                                <span style="font-size: 13px; color: {tm.color('text_muted')}; display: inline-block; margin-top: 4px;">
+                                To fully utilize AI models, fetch literature, and track global preprints, please ensure your device has unrestricted access to the global internet for the best possible experience.
+                                </span>
+                            </div>
 
-                <p style="font-size: 13px; color: {tm.color('text_muted')}; text-align: center;">
-                    <i style="color: {tm.color('accent')};">Please proceed to <b>Global Settings</b> to configure your AI models, API keys, and network proxy.</i>
-                </p>
-            </div>
-            """
+                            <div style="background-color: {tm.color('bg_input')}; border-left: 4px solid {tm.color('danger')}; padding: 12px 16px; margin: 15px 0; border-radius: 4px;">
+                                <b style="color: {tm.color('danger')}; font-size: 14px;">🛡️ Security Notice</b><br>
+                                <span style="font-size: 13px; color: {tm.color('text_muted')}; display: inline-block; margin-top: 4px;">
+                                To ensure the absolute security of your academic data and system integrity, please make sure you are using a version downloaded directly from our official website. We are not responsible for any security breaches caused by unauthorized third-party distributions.
+                                </span>
+                            </div>
+
+                            <p style="font-size: 13px; color: {tm.color('text_muted')}; text-align: center; margin-top: 20px;">
+                                <i style="color: {tm.color('accent')};">Please proceed to <b>Global Settings</b> to configure your AI models, API keys, and network proxy.</i>
+                            </p>
+                        </div>
+                        """
 
             lbl_desc = QLabel(welcome_html)
             lbl_desc.setWordWrap(True)
