@@ -1161,7 +1161,9 @@ class LicenseDialog(BaseDialog):
             ("Curl-cffi", "MIT", "Python binding for curl-impersonate."),
             ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
             ("Psutil", "BSD", "Cross-platform process and system utilities."),
-            ("Chardet", "LGPL v2.1", "Universal character encoding detector.")
+            ("Chardet", "LGPL v2.1", "Universal character encoding detector."),
+            ("hf_xet", "MIT", "Efficient large-file storage and transfer for Hugging Face.")
+
         ]
         self.licenses.sort(key=lambda item: item[0].lower())
         self.table = QTableWidget(len(self.licenses), 3)

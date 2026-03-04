@@ -28,6 +28,7 @@ dependencies = [
     "cryptography>=46.0.5",
     "keyring>=25.7.0",
     "chardet>=7.0.0",
+    "hf-xet>=1.2.0",
 ]
 
 
