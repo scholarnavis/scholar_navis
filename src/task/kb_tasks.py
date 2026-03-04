@@ -53,7 +53,7 @@ def _worker_load_model(kb_id, config):
 
     kb_data = kb_mgr.get_kb_by_id(kb_id)
     if not kb_data:
-        raise RuntimeError(f"未找到 KB ID: {kb_id} 的元数据")
+        raise RuntimeError(f"Metadata not found for KB ID: {kb_id}")
 
     model_id = kb_data.get('model_id', 'embed_auto')
     conf = get_model_conf(model_id, "embedding")
@@ -80,6 +80,7 @@ def _worker_load_model(kb_id, config):
 
 
 class ONNXEmbeddingFunction(EmbeddingFunction):
+
     def __init__(self, onnx_cache_dir, device="cpu"):
         logger = logging.getLogger("Worker.ONNXProvider")
 
@@ -96,12 +97,12 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
         if device_str.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
             provider = "CUDAExecutionProvider"
             if ":" in device_str:
-                provider_options = [{'device_id': int(device_str.split(":")[1])}]
+                provider_options = {'device_id': int(device_str.split(":")[1])}
 
         elif device_str.startswith("dml") and "DmlExecutionProvider" in available_providers:
             provider = "DmlExecutionProvider"
             if ":" in device_str:
-                provider_options = [{'device_id': int(device_str.split(":")[1])}]
+                provider_options = {'device_id': int(device_str.split(":")[1])}
 
         elif device_str.startswith("coreml") and "CoreMLExecutionProvider" in available_providers:
             provider = "CoreMLExecutionProvider"
@@ -127,6 +128,12 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
             local_files_only=True,
             **kwargs
         )
+
+        actual_providers = self.model.providers
+        if provider != "CPUExecutionProvider" and actual_providers and actual_providers[0] == "CPUExecutionProvider":
+            fallback_msg = f"CRITICAL: Silent fallback detected! Requested '{provider}' but ONNX Runtime forced 'CPUExecutionProvider'. Hardware acceleration failed."
+            logger.error(fallback_msg)
+            raise RuntimeError(fallback_msg)
 
     def __call__(self, input: Documents) -> Embeddings:
         if not input:
@@ -353,9 +360,6 @@ class DeleteFilesTask(BackgroundTask):
         # 1. 进门防隔离
         _setup_worker_env()
 
-        from src.core.kb_manager import KBManager
-        from src.core.database import DatabaseManager
-
         kb_id = self.kwargs.get('kb_id')
         file_names = self.kwargs.get('file_names', [])
         kb_mgr = KBManager()
@@ -395,8 +399,6 @@ class DeleteFilesTask(BackgroundTask):
 class RenameFilesTask(BackgroundTask):
     def _execute(self):
         _setup_worker_env()
-        from src.core.kb_manager import KBManager
-        from src.core.database import DatabaseManager
 
         kb_id = self.kwargs.get('kb_id')
         renames = self.kwargs.get('renames', {})

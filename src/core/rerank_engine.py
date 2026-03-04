@@ -26,6 +26,7 @@ class RerankEngine:
             return
 
         try:
+            import onnxruntime as ort
             user_pref = self.config.user_settings.get("inference_device", "Auto")
             self.device = self.dev_mgr.parse_device_string(user_pref)
 
@@ -40,17 +41,43 @@ class RerankEngine:
             actual_repo_id = r_conf['hf_repo_id']
             self.logger.info(f"Loading local ONNX Reranker ({actual_repo_id})...")
 
-            # 保险措施，获取已转换好的文件夹
             onnx_dir = ensure_onnx_model(actual_repo_id, "reranker")
-            provider = "CUDAExecutionProvider" if "cuda" in str(self.device) else "CPUExecutionProvider"
+
+            available_providers = ort.get_available_providers()
+            provider = "CPUExecutionProvider"
+            provider_options = None
+            device_str = str(self.device).lower()
+
+            if device_str.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
+                provider = "CUDAExecutionProvider"
+                if ":" in device_str:
+                    provider_options = {"device_id": int(device_str.split(":")[1])}
+            elif device_str.startswith("dml") and "DmlExecutionProvider" in available_providers:
+                provider = "DmlExecutionProvider"
+                if ":" in device_str:
+                    provider_options = {"device_id": int(device_str.split(":")[1])}
+            elif device_str.startswith("coreml") and "CoreMLExecutionProvider" in available_providers:
+                provider = "CoreMLExecutionProvider"
+
+            kwargs = {"provider": provider}
+            if provider_options:
+                kwargs["provider_options"] = provider_options
 
             self.tokenizer = AutoTokenizer.from_pretrained(onnx_dir)
             self.model = ORTModelForSequenceClassification.from_pretrained(
                 onnx_dir,
                 export=False,
-                provider=provider
+                **kwargs
             )
-            self.logger.info("ONNX Reranker loaded instantly from disk.")
+
+            actual_providers = self.model.providers
+            if provider != "CPUExecutionProvider" and actual_providers and actual_providers[
+                0] == "CPUExecutionProvider":
+                fallback_msg = f"Hardware acceleration failed! Requested '{provider}' but ONNX Runtime silently fell back to 'CPUExecutionProvider'. Please check your GPU drivers."
+                self.logger.error(fallback_msg)
+            else:
+                self.logger.info(f"ONNX Reranker loaded successfully on {provider}.")
+
         except Exception as e:
             self.logger.error(f"Failed to load ONNX Reranker: {e}")
             self.model = None

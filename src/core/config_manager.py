@@ -37,6 +37,7 @@ class ConfigManager:
         self.SETTINGS_PATH = os.path.join(self.CONFIG_DIR, "settings.json")
         self.MCP_SERVERS_PATH = os.path.join(self.CONFIG_DIR, "mcp_servers.json")
         self.LLM_CONFIG_PATH = os.path.join(self.CONFIG_DIR, "llm_config.json")
+        self.EXTERNAL_MODELS_PATH = os.path.join(self.CONFIG_DIR, "external_models.json")
 
         # 系统凭据管理器标识
         self.KEYRING_SERVICE = "ScholarNavis"
@@ -202,7 +203,7 @@ class ConfigManager:
 
 
     def apply_env_vars(self):
-        """将配置注入环境变量，影响后续库的行为"""
+
         models_dir = os.path.join(self.BASE_DIR, "models")
         os.makedirs(models_dir, exist_ok=True)
         os.environ["HF_HOME"] = models_dir
@@ -229,6 +230,27 @@ class ConfigManager:
         os.environ["NCBI_API_EMAIL"] = self.user_settings.get("ncbi_email", "")
         os.environ["NCBI_API_KEY"] = self.user_settings.get("ncbi_api_key", "")
         os.environ["S2_API_KEY"] = self.user_settings.get("s2_api_key", "")
+
+    def toggle_mcp_tag(self, tag: str, is_checked: bool):
+        tags = self.mcp_servers.get("deselected_mcp_tags", [])
+        if is_checked and tag in tags:
+            tags.remove(tag)
+        elif not is_checked and tag not in tags:
+            tags.append(tag)
+        else:
+            return
+
+        self.mcp_servers["deselected_mcp_tags"] = tags
+        self.save_mcp_servers()
+
+
+    def save_external_models(self, data):
+        self.save_json(self.EXTERNAL_MODELS_PATH, data, encrypt=False)
+
+    def load_external_models_data(self):
+        data = self.load_json(self.EXTERNAL_MODELS_PATH, encrypt=False)
+        return data if data else {"embedding": [], "reranker": []}
+
 
     def load_mcp_servers(self):
         py_path = sys.executable

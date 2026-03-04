@@ -23,7 +23,7 @@ CONFIG_DIR = os.path.join(BASE_DIR, "config")
 EXTERNAL_MODELS_FILE = os.path.join(CONFIG_DIR, "external_models.json")
 
 
-logger =logging.getLogger("ModelRegistry")
+logger = logging.getLogger("ModelRegistry")
 
 EMBEDDING_MODELS = [
     {
@@ -207,20 +207,19 @@ def resolve_auto_model(model_type="embedding", device="cpu"):
         else: return "rerank_lite"
     return None
 
+
 def get_model_conf(model_id, model_type="embedding"):
     target_list = EMBEDDING_MODELS if model_type == "embedding" else RERANKER_MODELS
     for m in target_list:
         if m['id'] == model_id: return m
     return None
 
+
 def init_external_models_file():
-    if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR, exist_ok=True)
-    if not os.path.exists(EXTERNAL_MODELS_FILE):
+    cfg = ConfigManager()
+    if not os.path.exists(cfg.EXTERNAL_MODELS_PATH):
         default_structure = {"embedding": [], "reranker": []}
-        try:
-            with open(EXTERNAL_MODELS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(default_structure, f, indent=4)
-        except: pass
+        cfg.save_external_models(default_structure)
 
 
 def check_model_exists(repo_id):
@@ -241,17 +240,41 @@ def check_model_exists(repo_id):
     logger.warning(f"Failed! No .onnx file found at path {onnx_dir}, or directory does not exist.")
     return False
 
+
 def load_external_models():
     init_external_models_file()
-    if os.path.exists(EXTERNAL_MODELS_FILE):
-        try:
-            with open(EXTERNAL_MODELS_FILE, 'r', encoding='utf-8') as f:
-                ext_models = json.load(f)
-                for m in ext_models.get("embedding", []):
-                    if not get_model_conf(m['id'], "embedding"): EMBEDDING_MODELS.append(m)
-                for m in ext_models.get("reranker", []):
-                    if not get_model_conf(m['id'], "reranker"): RERANKER_MODELS.append(m)
-        except: pass
+    cfg = ConfigManager()
+    ext_models = cfg.load_external_models_data()
+    if ext_models:
+        for m in ext_models.get("embedding", []):
+            if not get_model_conf(m['id'], "embedding"): EMBEDDING_MODELS.append(m)
+        for m in ext_models.get("reranker", []):
+            if not get_model_conf(m['id'], "reranker"): RERANKER_MODELS.append(m)
+
+
+def register_external_model(model_info, model_type="embedding"):
+    if not model_info: return
+    model_id = model_info.get("id")
+
+    if get_model_conf(model_id, model_type):
+        return
+
+    # 加入当前可用列表
+    if model_type == "embedding":
+        EMBEDDING_MODELS.append(model_info)
+    else:
+        RERANKER_MODELS.append(model_info)
+
+    # 写入外部配置，使得下一次启动自动生效
+    cfg = ConfigManager()
+    ext_models = cfg.load_external_models_data()
+    if model_type not in ext_models:
+        ext_models[model_type] = []
+
+    # 去重后不加密落盘
+    if not any(m.get("id") == model_id for m in ext_models[model_type]):
+        ext_models[model_type].append(model_info)
+        cfg.save_external_models(ext_models)
 
 load_external_models()
 

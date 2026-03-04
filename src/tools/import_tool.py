@@ -49,23 +49,12 @@ class ImportTool(BaseTool):
         layout.setSpacing(15)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        # 1. 顶部：模型缺失 Banner
-        self.banner = QWidget()
-        self.banner.setStyleSheet("background-color: #442222; border: 1px solid #ff5555; border-radius: 4px;")
-        self.banner.setFixedHeight(45)
-        self.banner.setVisible(False)
-        banner_layout = QHBoxLayout(self.banner)
-        self.lbl_banner = QLabel("Model not installed locally.")
-        btn_dl = QPushButton("Download Model")
-        btn_dl.clicked.connect(self.download_required_model)
-        banner_layout.addWidget(self.lbl_banner)
-        banner_layout.addWidget(btn_dl)
-        layout.addWidget(self.banner)
 
-        # 2. 项目管理
+
+        # 2项目管理
         kb_group = QGroupBox("Project / Library Management")
         kb_layout = QHBoxLayout(kb_group)
-        self.combo_kb = BaseComboBox(min_height=55)  # 恢复了 combo_kb
+        self.combo_kb = BaseComboBox(min_height=55)
         self.combo_kb.currentIndexChanged.connect(self.on_kb_switched)
 
         btn_col = QVBoxLayout()
@@ -917,8 +906,16 @@ class ImportTool(BaseTool):
             self._toggle_kb_actions(True, status=kb_status)
 
         conf = get_model_conf(data.get('model_id', ''), "embedding")
-        if hasattr(self, 'banner'):
-            self.banner.setVisible(not check_model_exists(conf.get('hf_repo_id')) if conf else False)
+        if conf and not check_model_exists(conf.get('hf_repo_id')):
+            dlg = StandardDialog(
+                self.widget,
+                "Model Required",
+                f"The required AI model '{conf.get('ui_name', conf.get('id'))}' for this project is not downloaded locally.\nWould you like to go to Global Settings to download it now?",
+                show_cancel=True
+            )
+            if dlg.exec():
+                GlobalSignals().navigate_to_tool.emit("Global Settings")
+                GlobalSignals().request_model_download.emit(conf.get('id'), "embedding")
 
         self.update_file_list()
 

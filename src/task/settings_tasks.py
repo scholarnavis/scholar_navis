@@ -1,4 +1,5 @@
 import httpx
+from onnx import helper, TensorProto
 
 from src.core.core_task import BackgroundTask
 
@@ -40,7 +41,7 @@ class FetchModelsTask(BackgroundTask):
 
 
 class TestDeviceTask(BackgroundTask):
-    """测试计算设备可用性"""
+    """Tests compute device availability (includes real hardware spin-up and anti-fallback detection)"""
 
     def _execute(self):
         device_id = self.kwargs.get("device_id", "cpu")
@@ -48,26 +49,78 @@ class TestDeviceTask(BackgroundTask):
 
         try:
             import onnxruntime as ort
-            providers = ort.get_available_providers()
+            import numpy as np
 
+            providers = ort.get_available_providers()
             provider_to_use = "CPUExecutionProvider"
+            provider_options = {}
+
             if "cuda" in device_id.lower():
                 provider_to_use = "CUDAExecutionProvider"
+                if ":" in device_id:
+                    provider_options["device_id"] = int(device_id.split(":")[1])
             elif "dml" in device_id.lower():
                 provider_to_use = "DmlExecutionProvider"
+                if ":" in device_id:
+                    provider_options["device_id"] = int(device_id.split(":")[1])
             elif "coreml" in device_id.lower():
                 provider_to_use = "CoreMLExecutionProvider"
 
             if provider_to_use not in providers:
-                return {"success": False,
-                        "msg": f"'{provider_to_use}' is not detected by ONNXRuntime.\nAvailable providers: {', '.join(providers)}"}
+                return {
+                    "success": False,
+                    "msg": f"Missing Environment: '{provider_to_use}' is not installed or detected. Please check your onnxruntime installation.\nCurrently available: {', '.join(providers)}"
+                }
 
-            self.update_progress(100, "Device test passed.")
-            return {"success": True,
-                    "msg": f"Device '{device_id}' ({provider_to_use}) is correctly configured and ready for inference."}
+            if provider_to_use == "CPUExecutionProvider":
+                self.update_progress(100, "CPU test passed.")
+                return {"success": True, "msg": "CPU is correctly configured and ready."}
+
+            self.update_progress(40, "Creating in-memory test model...")
+
+            try:
+                X = helper.make_tensor_value_info('X', TensorProto.FLOAT, [1])
+                Y = helper.make_tensor_value_info('Y', TensorProto.FLOAT, [1])
+                node = helper.make_node('Identity', ['X'], ['Y'])
+                graph = helper.make_graph([node], 'test_graph', [X], [Y])
+                model = helper.make_model(graph)
+                model_bytes = model.SerializeToString()
+            except ImportError:
+                return {
+                    "success": False,
+                    "msg": "Deep hardware testing requires the 'onnx' package. Please run 'pip install onnx'."
+                }
+
+            self.update_progress(60, "Initializing hardware session...")
+
+            session_options = ort.SessionOptions()
+            session_options.log_severity_level = 3
+
+            provider_config = [(provider_to_use, provider_options)] if provider_options else [provider_to_use]
+            provider_config.append("CPUExecutionProvider")
+
+            session = ort.InferenceSession(model_bytes, sess_options=session_options, providers=provider_config)
+
+            actual_providers = session.get_providers()
+            if actual_providers[0] != provider_to_use:
+                return {
+                    "success": False,
+                    "msg": f"Silent fallback intercepted!\nRequested '{provider_to_use}' (Device ID: {provider_options.get('device_id', 0)}), but ONNX Runtime silently fell back to '{actual_providers[0]}'.\nThis usually means the GPU does not support DML/CUDA, the index is invalid, or the graphics drivers are missing/faulty."
+                }
+
+            self.update_progress(80, "Running inference on hardware...")
+
+            input_data = np.array([1.0], dtype=np.float32)
+            session.run(['Y'], {'X': input_data})
+
+            self.update_progress(100, "Hardware test passed.")
+            return {
+                "success": True,
+                "msg": f"Hardware acceleration activated successfully!\nDevice '{device_id}' ({provider_to_use}) passed the real VRAM inference test."
+            }
 
         except Exception as e:
-            return {"success": False, "msg": f"Device test failed:\n{str(e)}"}
+            return {"success": False, "msg": f"Hardware initialization crashed:\n{str(e)}"}
 
 
 class TestApiTask(BackgroundTask):

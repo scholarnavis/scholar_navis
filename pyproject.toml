@@ -31,4 +31,11 @@ dependencies = [
     "hf-xet>=1.2.0",
 ]
 
+[dependency-groups]
+dev = [
+    "boto3>=1.42.60",
+    "nuitka>=4.0.2",
+    "python-dotenv>=1.2.1",
+]
+
 
