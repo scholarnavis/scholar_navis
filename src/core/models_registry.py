@@ -14,13 +14,6 @@ from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
 
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
-CONFIG_DIR = os.path.join(BASE_DIR, "config")
-EXTERNAL_MODELS_FILE = os.path.join(CONFIG_DIR, "external_models.json")
 
 
 logger = logging.getLogger("ModelRegistry")

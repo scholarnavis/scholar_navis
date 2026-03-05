@@ -52,6 +52,15 @@ ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
 s2_api_key = os.environ.get("S2_API_KEY", "").strip()
 
 
+if ncbi_email:
+    logger.info("Using NCBI Email: {}...".format(ncbi_email[0:5]))
+if ncbi_api_key:
+    logger.info("Using NCBI API Key: {}...".format(ncbi_api_key[0:5]))
+if s2_api_key:
+    logger.info("Using S2 API Key: {}...".format(s2_api_key[0:5]))
+
+
+
 WORKSPACE_DIR = os.path.join(APP_ROOT, "mcp_workspace", "downloads")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 logger.info(f"Local Workspace initialized at: {WORKSPACE_DIR}")

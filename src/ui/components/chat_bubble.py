@@ -181,7 +181,7 @@ class ChatBubbleWidget(QWidget):
         if self.is_user:
             self.edit_btn_widget = QWidget()
             self.edit_btn_layout = QHBoxLayout(self.edit_btn_widget)
-            self.edit_btn_layout.setContentsMargins(0, 4, 0, 0)
+            self.edit_btn_layout.setContentsMargins(0, 0, 0, 0)
             self.edit_btn_layout.setSpacing(6)
             self.edit_btn_layout.setAlignment(btn_alignment)
 
@@ -530,21 +530,23 @@ class ChatBubbleWidget(QWidget):
         if not self.is_editing:
             self.is_editing = True
 
-            current_height = self.lbl_text.height()
+            scroll_area = self.window().findChild(QScrollArea)
+            current_scroll = scroll_area.verticalScrollBar().value() if scroll_area else 0
 
             self.lbl_text.setVisible(False)
             self.btn_widget.setVisible(False)
-            self.content_layout.setSpacing(0)
+
+            self.content_layout.setSpacing(4)
             self.content_layout.setContentsMargins(12, 12, 12, 8)
 
-            self.edit_input.setMinimumHeight(current_height)
             self.edit_input.setVisible(True)
             self.edit_btn_widget.setVisible(True)
 
             self.edit_input.setText(self.original_text)
             self.edit_input.setFocus()
 
-            QTimer.singleShot(0, self.adjust_edit_height)
+            if scroll_area:
+                scroll_area.verticalScrollBar().setValue(current_scroll)
         else:
             self.cancel_edit()
 

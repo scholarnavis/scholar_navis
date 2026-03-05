@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import sys
 import shutil
@@ -8,6 +9,7 @@ import boto3
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from src.version import __version__, __app_name__, __description__, __company__
+
 
 def sync_pyproject_version():
     toml_path = "pyproject.toml"
@@ -30,6 +32,7 @@ def sync_pyproject_version():
             f.write(new_content)
         print(f"[*] Synced pyproject.toml version to {__version__}")
 
+
 def get_r2_client():
     load_dotenv()
     account_id = os.getenv("R2_ACCOUNT_ID")
@@ -48,42 +51,13 @@ def get_r2_client():
         region_name="auto"
     )
 
+
 def manage_r2_files(s3_client, bucket_name):
-    """List files in R2 and provide an interactive deletion prompt."""
-    while True:
-        print(f"\n--- Current Files in R2 Bucket: {bucket_name} ---")
-        try:
-            response = s3_client.list_objects_v2(Bucket=bucket_name)
-            if 'Contents' not in response:
-                print("Bucket is currently empty.")
-                return
+    # 仅作保留，供后续可能的手动管理需求
+    pass
 
-            objects = response['Contents']
-            for idx, obj in enumerate(objects):
-                size_mb = obj['Size'] / (1024 * 1024)
-                print(f"[{idx}] {obj['Key']} ({size_mb:.2f} MB)")
-
-            print("------------------------------------------------")
-            choice = input("Enter file index to DELETE, or 'c' to continue to upload: ").strip()
-
-            if choice.lower() == 'c':
-                break
-
-            if choice.isdigit() and 0 <= int(choice) < len(objects):
-                target_key = objects[int(choice)]['Key']
-                confirm = input(f"Are you sure you want to delete '{target_key}'? (y/n): ").strip()
-                if confirm.lower() == 'y':
-                    s3_client.delete_object(Bucket=bucket_name, Key=target_key)
-                    print(f"[+] Successfully deleted {target_key}")
-            else:
-                print("[-] Invalid input. Please enter a valid index or 'c'.")
-
-        except ClientError as e:
-            print(f"[-] R2 Error: {e}")
-            break
 
 def upload_to_r2(s3_client, bucket_name, file_path, object_name):
-    """Upload the build archive to Cloudflare R2."""
     print(f"\n[*] Uploading {file_path} to R2 bucket '{bucket_name}'...")
     try:
         s3_client.upload_file(file_path, bucket_name, object_name)
@@ -92,10 +66,7 @@ def upload_to_r2(s3_client, bucket_name, file_path, object_name):
         print(f"[-] Upload failed: {e}")
 
 
-
 def delete_old_r2_versions(s3_client, bucket_name, current_object_name):
-    """自动查找并删除 R2 桶中相同平台的旧版本文件"""
-    # 通过正则提取前缀，例如从 'scholar_navis_win_v1.0.0.zip' 提取 'scholar_navis_win_v'
     match = re.match(r"^(.*?_v)", current_object_name)
     if not match:
         print(f"[-] Could not parse prefix from {current_object_name}. Skipping cleanup.")
@@ -123,7 +94,6 @@ def delete_old_r2_versions(s3_client, bucket_name, current_object_name):
         print(f"[-] Failed to scan or delete old versions: {e}")
 
 
-
 def build_app():
     sync_pyproject_version()
 
@@ -138,8 +108,12 @@ def build_app():
     if os.path.exists(dist_dir):
         shutil.rmtree(dist_dir)
 
+    cpu_count = multiprocessing.cpu_count()
+    jobs = max(1, cpu_count - 1)
+
     cmd = [
-        "python", "-m", "nuitka", "--standalone",
+        sys.executable, "-m", "nuitka", "--standalone",
+        f"--jobs={jobs}",
         "--show-progress", "--show-memory",
         "--enable-plugin=pyside6",
         "--enable-plugin=anti-bloat",
@@ -150,10 +124,13 @@ def build_app():
         "--include-data-dir=assets=Assets",
     ]
 
+    win_icon = "Assets/icon.ico"
+    mac_icon = "Assets/icon.icns"
+    linux_icon = "Assets/icon.png"
+
     if sys_os == "Windows":
         cmd.extend([
             "--windows-console-mode=disable",
-            "--windows-icon-from-ico=Assets/icon.ico",
             f"--company-name={__company__}",
             f"--product-name={__app_name__}",
             f"--file-description={__description__}",
@@ -161,27 +138,40 @@ def build_app():
             f"--product-version={win_version}",
             f"--output-filename={__app_name__}.exe"
         ])
+        if os.path.exists(win_icon):
+            cmd.append(f"--windows-icon-from-ico={win_icon}")
+        else:
+            print(f"[*] Warning: Windows icon '{win_icon}' not found. Skipping icon packaging.")
+
         output_archive = f"{build_name}_win_v{__version__}"
         archive_format = "zip"
 
     elif sys_os == "Darwin":
         cmd.extend([
             "--macos-create-app-bundle",
-            "--macos-app-icon=Assets/icon.icns",
             f"--macos-app-name={__app_name__}",
         ])
+        if os.path.exists(mac_icon):
+            cmd.append(f"--macos-app-icon={mac_icon}")
+        else:
+            print(f"[*] Warning: macOS icon '{mac_icon}' not found. Skipping icon packaging.")
+
         output_archive = f"{build_name}_mac_v{__version__}"
         archive_format = "gztar"
 
     elif sys_os == "Linux":
         cmd.extend([
-            "--linux-icon=Assets/icon.png",
             f"--output-filename={__app_name__}"
         ])
+        if os.path.exists(linux_icon):
+            cmd.append(f"--linux-icon={linux_icon}")
+        else:
+            print(f"[*] Warning: Linux icon '{linux_icon}' not found. Skipping icon packaging.")
+
         output_archive = f"{build_name}_linux_v{__version__}"
         archive_format = "gztar"
     else:
-        print(f"Unsupported OS: {sys_os}")
+        print(f"[-] Unsupported OS: {sys_os}")
         return
 
     cmd.append(entry_point)
@@ -207,41 +197,37 @@ def build_app():
                 root_dir=dist_dir if sys_os == "Darwin" else target_folder
             )
             final_archive_path = archive_path
-            print(f"All done! Packed to {archive_path}")
+            print(f"[+] All done! Packed to {archive_path}")
         else:
-            print(f"Build completed, but target folder '{target_folder}' not found for zipping.")
+            print(f"[-] Build completed, but target folder '{target_folder}' not found for zipping.")
     else:
-        print("\nBuild failed.")
+        print("\n[-] Build failed.")
         return
 
-    # Phase 4: Cloudflare R2 Integration (适配 CI 并自动清理旧版本)
+    # 关键修复 3: 云端与本地逻辑隔离
     print(f"\n[4/4] Cloudflare R2 Operations...")
+    is_ci = os.getenv("GITHUB_ACTIONS") == "true"
+
+    if not is_ci:
+        print("[*] Local environment detected. Skipping Cloudflare R2 upload.")
+        return
+
     if final_archive_path:
         s3_client = get_r2_client()
         load_dotenv()
         bucket_name = os.getenv("R2_BUCKET_NAME")
 
         if s3_client and bucket_name:
-            is_ci = os.getenv("GITHUB_ACTIONS") == "true"
+            print("[*] GitHub Actions environment detected. Auto-uploading...")
+            object_name = os.path.basename(final_archive_path)
 
-            if not is_ci:
-                manage_r2_files(s3_client, bucket_name)
-                upload_confirm = input(f"Do you want to upload {final_archive_path} to R2? (y/n): ").strip()
-            else:
-                print("[*] GitHub Actions environment detected. Skipping prompts and auto-uploading...")
-                upload_confirm = 'y'
+            upload_to_r2(s3_client, bucket_name, final_archive_path, object_name)
+            delete_old_r2_versions(s3_client, bucket_name, object_name)
 
-            if upload_confirm.lower() == 'y':
-                object_name = os.path.basename(final_archive_path)
-
-                # 1. 先上传新版本
-                upload_to_r2(s3_client, bucket_name, final_archive_path, object_name)
-
-                delete_old_r2_versions(s3_client, bucket_name, object_name)
-
-                print(f"\n[+] All R2 operations completed successfully!")
+            print(f"\n[+] All R2 operations completed successfully!")
         else:
-            print("[-] Skipping upload. Please verify R2_BUCKET_NAME in .env or GitHub Secrets.")
+            print("[-] Skipping upload. Please verify R2 credentials and bucket name.")
+
 
 if __name__ == "__main__":
     build_app()

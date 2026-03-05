@@ -480,7 +480,9 @@ class SettingsTool(BaseTool):
         ])
 
         has_accel = any(p in info.get('ort_providers', []) for p in
-                        ["CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider"])
+                        ["CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider",
+                         "ROCmExecutionProvider"])
+
         status_color = tm.color("success") if has_accel else tm.color("warning")
         accel_status = "Hardware Accelerated" if has_accel else "CPU Fallback"
 

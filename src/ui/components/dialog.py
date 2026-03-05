@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
                                QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem)
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QRegularExpressionValidator
 
 from src.core.mcp_manager import MCPManager
@@ -23,6 +23,9 @@ class BaseDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedWidth(width)
         self._drag_pos = None
+
+        self.setWindowOpacity(0.0)
+        self._is_closing = False
 
         self.tm = ThemeManager()
         self._tracked_buttons = []
@@ -179,6 +182,43 @@ class BaseDialog(QDialog):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
         super().mouseReleaseEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.fade_in = QPropertyAnimation(self, b"windowOpacity")
+        self.fade_in.setDuration(150)
+        self.fade_in.setStartValue(0.0)
+        self.fade_in.setEndValue(1.0)
+        self.fade_in.setEasingCurve(QEasingCurve.OutQuad)
+        self.fade_in.start()
+
+    def _do_accept(self):
+        super().accept()
+
+    def _do_reject(self):
+        super().reject()
+
+
+    def accept(self):
+        if getattr(self, '_is_closing', False): return
+        self._is_closing = True
+        self._close_with_animation(self._do_accept)
+
+
+    def reject(self):
+        if getattr(self, '_is_closing', False): return
+        self._is_closing = True
+        self._close_with_animation(self._do_reject)
+
+
+    def _close_with_animation(self, close_callback):
+        self.fade_out = QPropertyAnimation(self, b"windowOpacity")
+        self.fade_out.setDuration(150)
+        self.fade_out.setStartValue(self.windowOpacity())
+        self.fade_out.setEndValue(0.0)
+        self.fade_out.setEasingCurve(QEasingCurve.InQuad)
+        self.fade_out.finished.connect(close_callback)
+        self.fade_out.start()
 
 
 class StandardDialog(BaseDialog):
@@ -1326,9 +1366,16 @@ class LicenseDialog(BaseDialog):
             ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
             ("Psutil", "BSD", "Cross-platform process and system utilities."),
             ("Chardet", "LGPL v2.1", "Universal character encoding detector."),
-            ("hf_xet", "MIT", "Efficient large-file storage and transfer for Hugging Face.")
-
+            ("hf_xet", "MIT", "Efficient large-file storage and transfer for Hugging Face."),
+            ("Markdown", "BSD", "Python implementation of Markdown."),
+            ("PyQtDarkTheme", "MIT", "Flat dark theme for PySide/PyQt."),
+            ("nvidia-ml-py", "BSD", "Python bindings for the NVIDIA Management Library."),
+            ("langdetect", "MIT", "Port of Google's language-detection library."),
+            ("MCP", "MIT", "Model Context Protocol Python SDK."),
+            ("OpenAI", "Apache 2.0", "OpenAI Python API library."),
+            ("Keyring", "MIT", "Store and access credentials safely.")
         ]
+        
         self.licenses.sort(key=lambda item: item[0].lower())
         self.table = QTableWidget(len(self.licenses), 3)
         self.table.setHorizontalHeaderLabels(["Package", "License", "Purpose"])

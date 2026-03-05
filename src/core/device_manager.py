@@ -106,7 +106,6 @@ class DeviceManager:
 
     def get_available_devices(self):
         providers = self.get_onnx_providers()
-
         gpu_info_list = self.get_gpu_info()
 
         devices = [
@@ -116,29 +115,55 @@ class DeviceManager:
         has_cuda = "CUDAExecutionProvider" in providers
         has_dml = "DmlExecutionProvider" in providers
         has_coreml = "CoreMLExecutionProvider" in providers
+        has_rocm = "ROCmExecutionProvider" in providers
 
         if has_coreml:
             devices.append({"id": "coreml", "name": "Apple Silicon (CoreML)"})
 
-        # Windows / Linux 智能分配
+        sys_name = platform.system()
+
         for i, gpu_dict in enumerate(gpu_info_list):
             gpu_name = gpu_dict.get("name", "Unknown GPU")
             gpu_lower = gpu_name.lower()
 
-            # 如果是 Nvidia 显卡，优先挂载 CUDA
             if "nvidia" in gpu_lower:
                 if has_cuda:
-                    devices.append({"id": f"cuda:{i}", "name": f"{gpu_name} (CUDA)"})
-                elif has_dml:
-                    devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML)"})
-            # 如果是 AMD 或 Intel 核显
-            else:
-                if has_dml:
+                    devices.append({"id": f"cuda:{i}", "name": f"{gpu_name} (CUDA Accelerated)"})
+                elif sys_name == "Windows" and has_dml:
+                    devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML Fallback)"})
+                else:
+                    devices.append({"id": f"unsupported_{i}", "name": f"{gpu_name} (Needs 'onnxruntime-gpu')"})
+
+            elif "amd" in gpu_lower or "radeon" in gpu_lower:
+                if sys_name == "Windows":
+                    if has_dml:
+                        devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML)"})
+                    else:
+                        devices.append({"id": f"unsupported_{i}", "name": f"{gpu_name} (Needs 'onnxruntime-directml')"})
+                elif sys_name == "Linux":
+                    if has_rocm:
+                        devices.append({"id": f"rocm:{i}", "name": f"{gpu_name} (ROCm)"})
+                    else:
+                        devices.append(
+                            {"id": f"unsupported_{i}", "name": f"{gpu_name} (Needs 'onnxruntime-rocm' on Linux)"})
+                else:
+                    if not has_coreml:
+                        devices.append({"id": f"unsupported_{i}", "name": f"{gpu_name} (OS unsupported for AMD AI)"})
+
+            elif "intel" in gpu_lower or "uhd" in gpu_lower or "iris" in gpu_lower:
+                if sys_name == "Windows" and has_dml:
                     devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML)"})
                 else:
-                    devices.append({"id": "cpu", "name": f"{gpu_name} (Needs 'onnxruntime-directml')"})
+                    devices.append({"id": f"unsupported_{i}", "name": f"{gpu_name} (Needs DirectML or OpenVINO)"})
 
-        return devices
+        seen_ids = set()
+        unique_devices = []
+        for d in devices:
+            if d['id'] not in seen_ids:
+                seen_ids.add(d['id'])
+                unique_devices.append(d)
+
+        return unique_devices
 
     def get_sys_info(self):
         info = {}

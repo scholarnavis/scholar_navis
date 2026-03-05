@@ -114,6 +114,11 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
             if ":" in device_str:
                 provider_options = {'device_id': int(device_str.split(":")[1])}
 
+        elif device_str.startswith("rocm") and "ROCmExecutionProvider" in available_providers:
+            provider = "ROCmExecutionProvider"
+            if ":" in device_str:
+                provider_options = {'device_id': int(device_str.split(":")[1])}
+
         elif device_str.startswith("coreml") and "CoreMLExecutionProvider" in available_providers:
             provider = "CoreMLExecutionProvider"
 
@@ -122,6 +127,8 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
                 provider = "CUDAExecutionProvider"
             elif "DmlExecutionProvider" in available_providers:
                 provider = "DmlExecutionProvider"
+            elif "ROCmExecutionProvider" in available_providers:
+                provider = "ROCmExecutionProvider"
             elif "CoreMLExecutionProvider" in available_providers:
                 provider = "CoreMLExecutionProvider"
 

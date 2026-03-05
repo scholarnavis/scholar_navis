@@ -56,6 +56,10 @@ class RerankEngine:
                 provider = "DmlExecutionProvider"
                 if ":" in device_str:
                     provider_options = {"device_id": int(device_str.split(":")[1])}
+            elif device_str.startswith("rocm") and "ROCmExecutionProvider" in available_providers:
+                provider = "ROCmExecutionProvider"
+                if ":" in device_str:
+                    provider_options = {"device_id": int(device_str.split(":")[1])}
             elif device_str.startswith("coreml") and "CoreMLExecutionProvider" in available_providers:
                 provider = "CoreMLExecutionProvider"
 

@@ -20,16 +20,19 @@ dependencies = [
     "mcp[cli]>=1.26.0",
     "biopython>=1.86",
     "openai>=2.24.0",
-    "optimum[onnxruntime]>=2.1.0",
+    "optimum>=2.1.0",
     "curl-cffi>=0.14.0",
     "torch>=2.10.0",
-    "onnxruntime-gpu>=1.24.2",
-    "onnxruntime-directml>=1.24.2 ; sys_platform == 'win32'",
     "cryptography>=46.0.5",
     "keyring>=25.7.0",
     "chardet>=7.0.0",
     "hf-xet>=1.2.0",
+    "onnxruntime-directml>=1.19.0 ; sys_platform == 'win32'",
+    "onnxruntime-gpu>=1.19.0 ; sys_platform == 'linux'",
+    "onnxruntime>=1.19.0 ; sys_platform == 'darwin'",
+    "optimum-onnx>=0.1.0",
 ]
+
 
 [dependency-groups]
 dev = [

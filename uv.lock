@@ -1165,7 +1165,7 @@ wheels = [
 
 [[package]]
 name = "onnxruntime"
-version = "1.24.1"
+version = "1.24.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flatbuffers" },
@@ -1175,10 +1175,11 @@ dependencies = [
     { name = "sympy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c8/30/437de870e4e1c6d237a2ca5e11f54153531270cb5c745c475d6e3d5c5dcf/onnxruntime-1.24.1-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:7307aab9e2e879c0171f37e0eb2808a5b4aec7ba899bb17c5f0cedfc301a8ac2", size = 17211043, upload-time = "2026-02-05T17:32:16.909Z" },
-    { url = "https://files.pythonhosted.org/packages/21/60/004401cd86525101ad8aa9eec301327426555d7a77fac89fd991c3c7aae6/onnxruntime-1.24.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:780add442ce2d4175fafb6f3102cdc94243acffa3ab16eacc03dd627cc7b1b54", size = 15016224, upload-time = "2026-02-05T17:30:56.791Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/a1/43ad01b806a1821d1d6f98725edffcdbad54856775643718e9124a09bfbe/onnxruntime-1.24.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:34b6119526eda12613f0d0498e2ae59563c247c370c9cef74c2fc93133dde157", size = 17098191, upload-time = "2026-02-05T17:31:31.87Z" },
-    { url = "https://files.pythonhosted.org/packages/ff/37/5beb65270864037d5c8fb25cfe6b23c48b618d1f4d06022d425cbf29bd9c/onnxruntime-1.24.1-cp312-cp312-win_amd64.whl", hash = "sha256:df0af2f1cfcfff9094971c7eb1d1dfae7ccf81af197493c4dc4643e4342c0946", size = 12493108, upload-time = "2026-02-05T17:32:07.076Z" },
+    { url = "https://files.pythonhosted.org/packages/23/1c/38af1cfe82c75d2b205eb5019834b0f2b0b6647ec8a20a3086168e413570/onnxruntime-1.24.2-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:d8a50b422d45c0144864c0977d04ad4fa50a8a48e5153056ab1f7d06ea9fc3e2", size = 17217857, upload-time = "2026-02-19T17:15:14.297Z" },
+    { url = "https://files.pythonhosted.org/packages/01/8a/e2d4332ae18d6383376e75141cd914256bee12c3cc439f42260eb176ceb9/onnxruntime-1.24.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:76c44fc9a89dcefcd5a4ab5c6bbbb9ff1604325ab2d5d0bc9ff5a9cba7b37f4a", size = 15027167, upload-time = "2026-02-19T17:13:21.92Z" },
+    { url = "https://files.pythonhosted.org/packages/35/af/ad86cfbfd65d5a86204b3a30893e92c0cf3f1a56280efc5a12e69d81f52d/onnxruntime-1.24.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:09aa6f8d766b4afc3cfba68dd10be39586b49f9462fbd1386c5d5644239461ca", size = 17106547, upload-time = "2026-02-19T17:14:05.758Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/62/9d725326f933bf8323e309956a17e52d33fb59d35bb5dda1886f94352938/onnxruntime-1.24.2-cp312-cp312-win_amd64.whl", hash = "sha256:ebcee9276420a65e5fa08b05f18379c2271b5992617e5bdc0d0d6c5ea395c1a1", size = 12506161, upload-time = "2026-02-19T17:14:59.377Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/a9/7b06efd5802db881860d961a7cb4efacb058ed694c1c8f096c0c1499d017/onnxruntime-1.24.2-cp312-cp312-win_arm64.whl", hash = "sha256:8d770a934513f6e17937baf3438eaaec5983a23cdaedb81c9fc0dfcf26831c24", size = 12169884, upload-time = "2026-02-19T17:14:49.962Z" },
 ]
 
 [[package]]
@@ -1209,7 +1210,6 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/92/1d/2eb4443d9e85c5e219b61cd4995ef1d30bc5981c4bbb5dd624c9445edb8d/onnxruntime_gpu-1.24.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e4a3f793b291fb678583db0e78836319ab662f10a8485f7de858631b4ea5361c", size = 252647554, upload-time = "2026-02-19T17:10:01.43Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/cd/5e9b0d094e573c1409a2c1155f146ea1d5d5b805329ebde146d2c5584b2c/onnxruntime_gpu-1.24.2-cp312-cp312-win_amd64.whl", hash = "sha256:77cbfcb08943d2edba069c774451831d28be215bf875a989811188ee59e0833f", size = 207102891, upload-time = "2026-02-19T20:09:12.43Z" },
 ]
 
 [[package]]
@@ -1329,11 +1329,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/98/c409ed937331839fdadc03cef6ebd19982bf3834711134db8898eeb31585/optimum-2.1.0-py3-none-any.whl", hash = "sha256:bc3af32e1236a9b2c2ca1d27ed9d3ab1b6591e24c6bcd47f9671a8198a30ea88", size = 161231, upload-time = "2025-12-19T10:47:17.054Z" },
 ]
 
-[package.optional-dependencies]
-onnxruntime = [
-    { name = "optimum-onnx", extra = ["onnxruntime"] },
-]
-
 [[package]]
 name = "optimum-onnx"
 version = "0.1.0"
@@ -1346,11 +1341,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/08/da/3a0073af8f436d72c1e4d9c655c00628b857bd1d9ccc101d35301d5bb2df/optimum_onnx-0.1.0.tar.gz", hash = "sha256:182c54b25eddaded1618af7b58516da34749393a987ec7111f74677f249676f9", size = 165531, upload-time = "2025-12-23T14:20:18.97Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/89/4be9d226bc74fd0eb405d1efea62e86d6f0f31841dae9c5898ee12eb482f/optimum_onnx-0.1.0-py3-none-any.whl", hash = "sha256:0301ec7a6ec5c77a57581e9970d380a6dc104bdb8f15b282e05af40d829c2eda", size = 194155, upload-time = "2025-12-23T14:20:17.741Z" },
-]
-
-[package.optional-dependencies]
-onnxruntime = [
-    { name = "onnxruntime" },
 ]
 
 [[package]]
@@ -1902,10 +1892,12 @@ dependencies = [
     { name = "mcp", extra = ["cli"] },
     { name = "networkx" },
     { name = "nvidia-ml-py" },
+    { name = "onnxruntime", marker = "sys_platform == 'darwin'" },
     { name = "onnxruntime-directml", marker = "sys_platform == 'win32'" },
-    { name = "onnxruntime-gpu" },
+    { name = "onnxruntime-gpu", marker = "sys_platform == 'linux'" },
     { name = "openai" },
-    { name = "optimum", extra = ["onnxruntime"] },
+    { name = "optimum" },
+    { name = "optimum-onnx" },
     { name = "psutil" },
     { name = "pymupdf" },
     { name = "pymupdf4llm" },
@@ -1937,10 +1929,12 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=1.26.0" },
     { name = "networkx", specifier = ">=3.6.1" },
     { name = "nvidia-ml-py", specifier = ">=13.590.48" },
-    { name = "onnxruntime-directml", marker = "sys_platform == 'win32'", specifier = ">=1.24.2" },
-    { name = "onnxruntime-gpu", specifier = ">=1.24.2" },
+    { name = "onnxruntime", marker = "sys_platform == 'darwin'", specifier = ">=1.19.0" },
+    { name = "onnxruntime-directml", marker = "sys_platform == 'win32'", specifier = ">=1.19.0" },
+    { name = "onnxruntime-gpu", marker = "sys_platform == 'linux'", specifier = ">=1.19.0" },
     { name = "openai", specifier = ">=2.24.0" },
-    { name = "optimum", extras = ["onnxruntime"], specifier = ">=2.1.0" },
+    { name = "optimum", specifier = ">=2.1.0" },
+    { name = "optimum-onnx", specifier = ">=0.1.0" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pymupdf", specifier = ">=1.26.7" },
     { name = "pymupdf4llm", specifier = ">=0.2.9" },

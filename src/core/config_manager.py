@@ -263,10 +263,6 @@ class ConfigManager:
                     "args": ["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"],
                     "enabled": True, "always_on": True, "description": "Core Tools"
                 },
-                "external": {
-                    "type": "stdio", "command": py_path, "args": ["plugins_ext/common_server.py"],
-                    "enabled": False, "always_on": False, "description": "External Tools"
-                }
             },
             "deselected_mcp_tags": []
         }
