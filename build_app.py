@@ -92,6 +92,7 @@ def upload_to_r2(s3_client, bucket_name, file_path, object_name):
         print(f"[-] Upload failed: {e}")
 
 
+
 def delete_old_r2_versions(s3_client, bucket_name, current_object_name):
     """自动查找并删除 R2 桶中相同平台的旧版本文件"""
     # 通过正则提取前缀，例如从 'scholar_navis_win_v1.0.0.zip' 提取 'scholar_navis_win_v'
@@ -152,7 +153,7 @@ def build_app():
     if sys_os == "Windows":
         cmd.extend([
             "--windows-console-mode=disable",
-            "--windows-icon-from-ico=resources/icon.ico",
+            "--windows-icon-from-ico=Assets/icon.ico",
             f"--company-name={__company__}",
             f"--product-name={__app_name__}",
             f"--file-description={__description__}",
@@ -166,7 +167,7 @@ def build_app():
     elif sys_os == "Darwin":
         cmd.extend([
             "--macos-create-app-bundle",
-            "--macos-app-icon=resources/icon.icns",
+            "--macos-app-icon=Assets/icon.icns",
             f"--macos-app-name={__app_name__}",
         ])
         output_archive = f"{build_name}_mac_v{__version__}"
@@ -174,7 +175,7 @@ def build_app():
 
     elif sys_os == "Linux":
         cmd.extend([
-            "--linux-icon=resources/icon.png",
+            "--linux-icon=Assets/icon.png",
             f"--output-filename={__app_name__}"
         ])
         output_archive = f"{build_name}_linux_v{__version__}"
