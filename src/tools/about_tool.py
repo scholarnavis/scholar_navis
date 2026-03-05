@@ -9,7 +9,8 @@ from src.task.common_task import VersionCheckTask
 from src.tools.base_tool import BaseTool
 from src.core.theme_manager import ThemeManager
 from src.core.core_task import TaskManager, TaskMode
-from src.ui.components.dialog import LicenseDialog
+# 确保在这里引入了刚刚写好的 ApiProvidersDialog
+from src.ui.components.dialog import LicenseDialog, ApiProvidersDialog
 from src.version import __version__, __app_name__, __description__, __website__, __github__, __dl__
 
 
@@ -28,7 +29,6 @@ class AboutTool(BaseTool):
         layout.setAlignment(Qt.AlignCenter)
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(12)
-
 
         self.logo = QSvgWidget(ThemeManager.get_resource_path("assets", "ico.svg"))
         self.logo.setFixedSize(140, 140)
@@ -57,26 +57,30 @@ class AboutTool(BaseTool):
         layout.addWidget(self.lbl_update)
         layout.addSpacing(20)
 
+        # 按钮容器
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(15)
+        btn_layout.setSpacing(12)
 
         self.btn_web = QPushButton(" Website")
         self.btn_git = QPushButton(" GitHub")
-        self.btn_license = QPushButton(" Licenses")  # 新增按钮
+        self.btn_license = QPushButton(" Licenses")
+        self.btn_api = QPushButton(" Data Providers")
 
-        # 设置鼠标形状
-        for btn in [self.btn_web, self.btn_git, self.btn_license]:
+        for btn in [self.btn_web, self.btn_git, self.btn_license, self.btn_api]:
             btn.setCursor(Qt.PointingHandCursor)
 
         self.btn_web.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(__website__)))
         self.btn_git.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(__github__)))
-        self.btn_license.clicked.connect(self._show_licenses)  # 连接新方法
+        self.btn_license.clicked.connect(self._show_licenses)
+        self.btn_api.clicked.connect(self._show_api_providers)  # 连接到新弹窗
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_web)
         btn_layout.addWidget(self.btn_git)
         btn_layout.addWidget(self.btn_license)
+        btn_layout.addWidget(self.btn_api)
         btn_layout.addStretch()
+
         layout.addLayout(btn_layout)
 
         self.lbl_copy = QLabel("Licensed under AGPL v3 | © 2026 Scholar Navis Studio")
@@ -90,14 +94,12 @@ class AboutTool(BaseTool):
 
         return self.widget
 
-
     def _on_version_checked(self, payload):
         if not payload:
             return
 
         latest_version = payload.get("latest_version")
         if latest_version and latest_version != "0.0.0" and latest_version != __version__:
-
             os_name = platform.system().lower()
             dl_url = f"{__dl__}?os={os_name}"
 
@@ -106,12 +108,13 @@ class AboutTool(BaseTool):
             self.lbl_update.show()
             self._apply_theme()
 
-
     def _show_licenses(self):
-        """显示开源许可对话框"""
         dlg = LicenseDialog(self.widget)
         dlg.exec()
 
+    def _show_api_providers(self):
+        dlg = ApiProvidersDialog(self.widget)
+        dlg.exec()
 
     def _apply_theme(self):
         tm = ThemeManager()
@@ -127,10 +130,10 @@ class AboutTool(BaseTool):
             f"{base_font} color: {tm.color('success')}; font-weight: bold; font-size: 13px; text-decoration: underline;")
         self.lbl_copy.setStyleSheet(f"{base_font} color: {tm.color('text_muted')}; font-size: 11px; margin-top: 30px;")
 
-
         self.btn_web.setIcon(tm.icon("link", "text_main"))
         self.btn_git.setIcon(tm.icon("github", "text_main"))
         self.btn_license.setIcon(tm.icon("copyright", "text_main"))
+        self.btn_api.setIcon(tm.icon("api", "text_main"))  # 使用 API 或 database 图标
 
         btn_style = f"""
             QPushButton {{ 
@@ -139,7 +142,7 @@ class AboutTool(BaseTool):
                 color: {tm.color('text_main')}; 
                 border: 1px solid {tm.color('border')}; 
                 border-radius: 8px; 
-                padding: 8px 20px; 
+                padding: 8px 18px; 
                 font-weight: bold;
             }}
             QPushButton:hover {{ 
@@ -149,10 +152,6 @@ class AboutTool(BaseTool):
             }}
         """
 
-        for btn in [self.btn_web, self.btn_git, self.btn_license]:
-            btn.setIconSize(QSize(18, 18))
-            btn.setIconSize(QSize(18, 18))
-
-
-            btn.setStyleSheet(btn_style)
+        for btn in [self.btn_web, self.btn_git, self.btn_license, self.btn_api]:
+            btn.setIconSize(QSize(16, 16))
             btn.setStyleSheet(btn_style)

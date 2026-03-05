@@ -598,41 +598,6 @@ class ChatWorker(QObject):
             self.trans_llm = OpenAICompatibleLLM(self.trans_config)
 
 
-    def _process_rerank(self, query, docs, domain, top_k):
-        if not docs: return []
-
-        import multiprocessing as mp
-        from src.core.core_task import TaskState, RunnerProcess
-        from src.task.kb_tasks import RerankTask
-
-        queue = mp.Queue()
-        worker = RunnerProcess(
-            RerankTask, "rerank_sync", queue,
-            {"query": query, "docs": docs, "domain": domain, "top_k": top_k}
-        )
-        worker.start()
-
-        ranked = docs[:top_k]
-        while True:
-            if getattr(self, '_is_cancelled', False):
-                worker.terminate()
-                break
-            try:
-                # Wait for process result synchronously (perfectly safe inside QThread)
-                data = queue.get(timeout=0.2)
-                state = data.get("state")
-
-                if state == TaskState.SUCCESS.value:
-                    if data.get("payload"): ranked = data["payload"]
-                    break
-                elif state == TaskState.FAILED.value:
-                    self.logger.error(f"Rerank process failed: {data.get('msg')}")
-                    break
-            except Exception:
-                if not worker.is_alive(): break
-
-        return ranked
-
     def run(self):
         try:
             self.config = ConfigManager()
@@ -808,19 +773,29 @@ class ChatWorker(QObject):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # ==========================================
+            ## ==========================================
             # Phase 5: Agentic Generation
             # ==========================================
             self.sig_token.emit("[START_LLM_NETWORK]")
 
             mcp_mgr = MCPManager.get_instance()
             mcp_tools = None
+
             if self.use_mcp:
                 selected_tags = getattr(self, 'selected_mcp_tags', None)
+
+                # 1. 获取用户在 UI 层面允许的所有候选工具
+                raw_mcp_tools = []
                 if selected_tags is not None:
-                    mcp_tools = mcp_mgr.get_tools_schema_by_tags(selected_tags)
+                    raw_mcp_tools = mcp_mgr.get_tools_schema_by_tags(selected_tags)
                 else:
-                    mcp_tools = mcp_mgr.get_all_tools_schema()
+                    raw_mcp_tools = mcp_mgr.get_all_tools_schema()
+
+                # 2. RAG 动态路由：从候选池中挑出最匹配的 Top-K 给大模型
+                if raw_mcp_tools:
+                    self.sig_token.emit("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
+                    mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=4)
+                    self.sig_token.emit("[CLEAR_SEARCH]")
 
             system_prompt = (
                 f"You are a Senior Research Scientist specializing in {domain}. "
@@ -978,6 +953,111 @@ class ChatWorker(QObject):
             self.sig_error.emit(f"Error: {str(e)}\n{traceback.format_exc()}")
         finally:
             self.sig_finished.emit()
+
+    def filter_tools_by_rag(self, user_query, raw_mcp_tools, top_k=4):
+        """
+        根据用户查询，使用 Reranker 对工具进行打分排序，仅提取 Top-K 工具。
+        如果模型不可用，静默降级并返回所有工具。
+        """
+        if not raw_mcp_tools or len(raw_mcp_tools) <= top_k:
+            return raw_mcp_tools
+
+        try:
+            self.reranker.load_model()
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to load Reranker model for tool selection: {e}. Silently degrading to use all tools.")
+            return raw_mcp_tools
+
+        if not getattr(self.reranker, 'model', None):
+            self.logger.warning(
+                "Reranker model is not installed or unavailable. Silently degrading to use all selected tools.")
+            return raw_mcp_tools
+
+        try:
+            candidate_docs = []
+            for tool in raw_mcp_tools:
+                func = tool.get("function", {})
+                content = f"Tool Name: {func.get('name', '')}. Description: {func.get('description', '')}"
+                candidate_docs.append({
+                    "content": content,
+                    "metadata": {"tool_schema": tool}
+                })
+
+            ranked_docs = self.reranker.rerank(user_query, candidate_docs, domain="Tool Selection", top_k=top_k)
+
+            best_tools = [doc["metadata"]["tool_schema"] for doc in ranked_docs]
+
+            web_tool = next((t for t in raw_mcp_tools if t.get("function", {}).get("name") == "search_web"), None)
+            if web_tool and web_tool not in best_tools:
+                best_tools.append(web_tool)
+
+            self.logger.info(f"RAG successfully routed {len(best_tools)} tools out of {len(raw_mcp_tools)}.")
+            return best_tools
+
+        except Exception as e:
+            self.logger.warning(f"Exception during tool reranking: {e}. Silently degrading to use all selected tools.")
+            return raw_mcp_tools
+
+    def _process_rerank(self, query, docs, domain, top_k):
+        if not docs: return []
+
+        import multiprocessing as mp
+        import queue as q
+        from src.core.core_task import TaskState, RunnerProcess
+        from src.task.kb_tasks import RerankTask
+
+        queue = mp.Queue()
+        worker = RunnerProcess(
+            RerankTask, "rerank_sync", queue,
+            {"query": query, "docs": docs, "domain": domain, "top_k": top_k}
+        )
+        worker.start()
+
+        ranked = docs[:top_k]
+        while True:
+            if getattr(self, '_is_cancelled', False):
+                worker.terminate()
+                break
+            try:
+                data = queue.get(timeout=0.2)
+                state = data.get("state")
+
+                if state == TaskState.SUCCESS.value:
+                    if data.get("payload"): ranked = data["payload"]
+                    break
+                elif state == TaskState.FAILED.value:
+                    error_msg = data.get('msg', 'Unknown execution error')
+                    self.logger.error(f"Rerank process failed: {error_msg}")
+
+                    warning_html = (
+                        f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
+                        f"⚠️ <b>Reranker Processing Skipped</b><br><br>"
+                        f"Failed to rerank documents: <i>{error_msg}</i>.<br>"
+                        f"If the model is missing, please go to <b>[Global Settings] -> [Models]</b> to manually download a Reranker model.<br><br>"
+                        f"<i>* Continuing analysis with default document ordering.</i>"
+                        f"</div><br>"
+                    )
+                    self.sig_token.emit(warning_html)
+                    break
+            except q.Empty:
+                if not worker.is_alive():
+                    self.logger.error("Rerank process died unexpectedly.")
+                    self.sig_token.emit(
+                        f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
+                        f"⚠️ <b>Reranker Process Terminated</b><br><br>"
+                        f"The background reranking process terminated unexpectedly. This is often caused by missing models or insufficient memory.<br><br>"
+                        f"<i>* Continuing analysis with default document ordering.</i>"
+                        f"</div><br>"
+                    )
+                    break
+            except Exception:
+                if not worker.is_alive():
+                    break
+
+        return ranked
+
+
 
 
 

@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
-                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem)
+                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea)
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QRegularExpressionValidator
 
@@ -1345,6 +1345,122 @@ class McpTestWorker(QObject):
             self.sig_finished.emit(False, str(e))
 
 
+class ApiProvidersDialog(BaseDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent, title="Data Providers & External APIs", width=850)
+        self.setMinimumHeight(600)
+
+        self.providers = [
+            ("NCBI Entrez", "Genomics & Literature", "Access to PubMed, Taxonomy, SRA, GEO, and other core databases."),
+            ("Semantic Scholar", "Literature Search", "AI-backed academic search and citation graph traversal."),
+            ("OpenAlex", "Literature Search", "Open catalog of the global research system and citation metrics."),
+            ("Crossref", "Literature Search", "Digital Object Identifier (DOI) registration and metadata tracking."),
+            ("UniProt", "Protein Database", "Comprehensive resource for protein sequences, annotations, and mapping."),
+            ("RCSB PDB", "Structural Biology",
+             "Information about the 3D shapes of proteins, nucleic acids, and complexes."),
+            ("STRING DB", "Systems Biology",
+             "Protein-protein interaction networks and functional enrichment analysis."),
+            ("Ensembl", "Genomics", "Centralized resource for genetics, molecular biology, and genomic annotations."),
+            ("KEGG", "Pathways", "Database resource for understanding high-level functions of the biological system."),
+            ("PubChem", "Cheminformatics", "World's largest collection of freely accessible chemical information."),
+            ("ChEMBL", "Pharmacology", "Manually curated database of bioactive molecules with drug-like properties."),
+            ("Europe PMC", "Preprints", "Access to life sciences publications and preprints (bioRxiv, medRxiv)."),
+            ("Wikipedia", "General Knowledge", "Free online encyclopedia for quick concept and entity summaries."),
+            ("GitHub API", "Code & Repositories", "Search for open-source bioinformatics pipelines and academic code.")
+        ]
+
+        self.providers.sort(key=lambda item: item[0].lower())
+
+        self.table = QTableWidget(len(self.providers), 3)
+        self.table.setHorizontalHeaderLabels(["Data Provider", "Domain / Type", "Purpose & Description"])
+        self.table.setWordWrap(True)
+
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
+
+        for i, (pkg, domain, desc) in enumerate(self.providers):
+            pkg_item = QTableWidgetItem(f" {pkg}")
+            pkg_item.setForeground(QColor(self.tm.color('academic_blue')))
+
+            domain_item = QTableWidgetItem(domain)
+            domain_item.setForeground(QColor(self.tm.color('text_main')))
+
+            self.table.setItem(i, 0, pkg_item)
+            self.table.setItem(i, 1, domain_item)
+            self.table.setItem(i, 2, QTableWidgetItem(desc))
+
+        self.table.resizeRowsToContents()
+        total_h = self.table.horizontalHeader().height()
+        for r in range(self.table.rowCount()):
+            row_h = self.table.rowHeight(r) + 24
+            self.table.setRowHeight(r, row_h)
+            total_h += row_h
+
+        self.table.setFixedHeight(total_h + 10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background: transparent;")
+
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(0)
+        scroll_layout.addWidget(self.table)
+
+        bottom_spacer = QWidget()
+        bottom_spacer.setFixedHeight(50)
+        scroll_layout.addWidget(bottom_spacer)
+
+        scroll.setWidget(scroll_content)
+        self.content_layout.addWidget(scroll)
+
+        lbl_thanks = QLabel("Powered by the generous open APIs of the global scientific community.")
+        lbl_thanks.setStyleSheet(f"color: {self.tm.color('text_muted')}; font-style: italic; font-size: 11px;")
+        lbl_thanks.setAlignment(Qt.AlignCenter)
+        self.content_layout.addWidget(lbl_thanks)
+
+        self.add_button("Close", self.accept, is_primary=True)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.table.setStyleSheet(f"""
+            QTableWidget {{ 
+                background-color: transparent; 
+                color: {tm.color('text_main')}; 
+                border: none;
+                alternate-background-color: {tm.color('bg_input')};
+            }}
+            QHeaderView::section {{ 
+                background-color: {tm.color('bg_card')}; 
+                color: {tm.color('text_muted')}; 
+                padding: 10px; 
+                border: none;
+                border-bottom: 2px solid {tm.color('border')};
+                font-weight: bold;
+            }}
+            QTableWidget::item {{ 
+                padding: 12px; 
+                border: none;
+            }}
+        """)
+
 class LicenseDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__(parent, title="Open Source Licenses", width=800)
@@ -1375,7 +1491,7 @@ class LicenseDialog(BaseDialog):
             ("OpenAI", "Apache 2.0", "OpenAI Python API library."),
             ("Keyring", "MIT", "Store and access credentials safely.")
         ]
-        
+
         self.licenses.sort(key=lambda item: item[0].lower())
         self.table = QTableWidget(len(self.licenses), 3)
         self.table.setHorizontalHeaderLabels(["Package", "License", "Purpose"])

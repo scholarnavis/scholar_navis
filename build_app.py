@@ -128,12 +128,11 @@ def build_app():
         "--plugin-enable=torch",
         "--output-dir=dist",
         "--include-data-dir=Assets=Assets",
-        "--lto=no"
+        "--lto=no",
 
-        "--nofollow-import-to=chromadb.telemetry",
+        "--include-package-data=langdetect",
+
         "--nofollow-import-to=chromadb.test",
-        "--nofollow-import-to=chromadb.migrations",
-        "--nofollow-import-to=chromadb.server",
         "--nofollow-import-to=duckdb",
         "--nofollow-import-to=clickhouse_connect",
 
@@ -171,7 +170,6 @@ def build_app():
         "--nofollow-import-to=botocore",
         "--nofollow-import-to=scipy.sparse",
         "--nofollow-import-to=paramiko",
-        "--nofollow-import-to=fitz",
     ]
 
     win_icon = "Assets/icon.ico"
@@ -180,7 +178,7 @@ def build_app():
 
     if sys_os == "Windows":
         cmd.extend([
-            "--windows-console-mode=disable",
+            #"--windows-console-mode=disable",
             f"--company-name={__company__}",
             f"--product-name={__app_name__}",
             f"--file-description={__description__}",

@@ -4,7 +4,8 @@ from transformers import AutoTokenizer
 
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
-from src.core.models_registry import resolve_auto_model, get_model_conf, ensure_onnx_model
+from src.core.models_registry import resolve_auto_model, get_model_conf, ensure_onnx_model, ModelManager, \
+    check_model_exists
 
 
 class RerankEngine:
@@ -41,7 +42,17 @@ class RerankEngine:
             actual_repo_id = r_conf['hf_repo_id']
             self.logger.info(f"Loading local ONNX Reranker ({actual_repo_id})...")
 
+            if not check_model_exists(actual_repo_id):
+                ui_name = r_conf.get('ui_name', actual_repo_id)
+                self.logger.warning(
+                    f"Reranker model {ui_name} not found locally.")
+                raise FileNotFoundError(f"Reranker model '{ui_name}' is missing.")
+
             onnx_dir = ensure_onnx_model(actual_repo_id, "reranker")
+
+            if not onnx_dir or not __import__('os').path.exists(onnx_dir):
+                raise FileNotFoundError("Reranker model directory not found.")
+
 
             available_providers = ort.get_available_providers()
             provider = "CPUExecutionProvider"
