@@ -230,3 +230,6 @@ dist/
 /models/
 /scholar_workspace/
 /mcp_workspace/
+
+nuitka-crash-report.xml
+.nuitka_cache

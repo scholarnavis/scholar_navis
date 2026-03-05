@@ -11,6 +11,14 @@ from dotenv import load_dotenv
 from src.version import __version__, __app_name__, __description__, __company__
 
 
+os.environ["TRANSFORMERS_VERBOSITY"] = "error" #
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+print("[-] Set environment variables for stable compilation.")
+
+
+
 def sync_pyproject_version():
     toml_path = "pyproject.toml"
     if not os.path.exists(toml_path):
@@ -117,11 +125,10 @@ def build_app():
         "--show-progress", "--show-memory",
         "--enable-plugin=pyside6",
         "--enable-plugin=anti-bloat",
-        "--include-package=chromadb",
-        "--include-package=onnxruntime",
-        "--include-package=optimum",
+        "--plugin-enable=torch",
         "--output-dir=dist",
         "--include-data-dir=Assets=Assets",
+        "--lto=no"
 
         "--nofollow-import-to=chromadb.telemetry",
         "--nofollow-import-to=chromadb.test",
@@ -150,6 +157,7 @@ def build_app():
 
         "--nofollow-import-to=matplotlib",
         "--nofollow-import-to=seaborn",
+        "--nofollow-import-to=cv2",
         "--nofollow-import-to=plotly",
 
         "--nofollow-import-to=tensorboard",
@@ -157,6 +165,13 @@ def build_app():
         "--nofollow-import-to=setuptools",
         "--nofollow-import-to=pip",
         "--nofollow-import-to=wheel",
+
+        "--nofollow-import-to=pygame",
+        "--nofollow-import-to=scipy.sparse",
+        "--nofollow-import-to=botocore",
+        "--nofollow-import-to=scipy.sparse",
+        "--nofollow-import-to=paramiko",
+        "--nofollow-import-to=fitz",
     ]
 
     win_icon = "Assets/icon.ico"
@@ -212,8 +227,18 @@ def build_app():
     cmd.append(entry_point)
 
     print(f"\n[2/4] Executing Nuitka (This may take a while)...")
-    result = subprocess.run(cmd)
 
+    custom_env = os.environ.copy()
+    custom_env.update({
+        "NO_COLOR": "1",
+        "ANSI_COLORS_DISABLED": "1",
+        "TERM": "dumb",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONWARNINGS": "ignore"
+    })
+
+
+    result = subprocess.run(cmd, env=custom_env)
     final_archive_path = None
 
     if result.returncode == 0:

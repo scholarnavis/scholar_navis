@@ -6,7 +6,7 @@ import time
 
 import markdown
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QTextBrowser)
+                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QTextBrowser, QScrollArea)
 from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer, QThread, QUrl
 from PySide6.QtGui import QClipboard, QGuiApplication, QCursor
 

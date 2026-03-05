@@ -638,7 +638,7 @@ class ChatWorker(QObject):
             self.config = ConfigManager()
 
             self._init_llms()
-            original_user_query = self.messages[-1]['content']
+            original_user_query = self.messages[-1].get('display_text', self.messages[-1].get('content', ''))
             search_query = original_user_query
             domain = "General Academic"
             context_str = ""
@@ -849,8 +849,10 @@ class ChatWorker(QObject):
                 f"### CONTEXT:\n{context_str}"
             )
 
-            # 使用列表结构替换掉尾部用户输入，支持多模态
-            rag_messages = [{"role": "system", "content": system_prompt}] + self.messages[:-1]
+            clean_history = [
+                {k: v for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in
+                self.messages[:-1]]
+            rag_messages = [{"role": "system", "content": system_prompt}] + clean_history
             rag_messages.append({"role": "user", "content": llm_content})
 
             tool_executed = False
