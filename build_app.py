@@ -121,7 +121,42 @@ def build_app():
         "--include-package=onnxruntime",
         "--include-package=optimum",
         "--output-dir=dist",
-        "--include-data-dir=assets=Assets",
+        "--include-data-dir=Assets=Assets",
+
+        "--nofollow-import-to=chromadb.telemetry",
+        "--nofollow-import-to=chromadb.test",
+        "--nofollow-import-to=chromadb.migrations",
+        "--nofollow-import-to=chromadb.server",
+        "--nofollow-import-to=duckdb",
+        "--nofollow-import-to=clickhouse_connect",
+
+        "--nofollow-import-to=mcp.testing",
+
+        "--nofollow-import-to=pytest",
+        "--nofollow-import-to=unittest",
+        "--nofollow-import-to=nose",
+
+        "--nofollow-import-to=tkinter",
+        "--nofollow-import-to=PyQt5",
+        "--nofollow-import-to=PyQt6",
+        "--nofollow-import-to=wx",
+
+        "--nofollow-import-to=IPython",
+        "--nofollow-import-to=jupyter",
+        "--nofollow-import-to=notebook",
+        "--nofollow-import-to=pydoc",
+
+        "--nofollow-import-to=Bio.Graphics",
+
+        "--nofollow-import-to=matplotlib",
+        "--nofollow-import-to=seaborn",
+        "--nofollow-import-to=plotly",
+
+        "--nofollow-import-to=tensorboard",
+
+        "--nofollow-import-to=setuptools",
+        "--nofollow-import-to=pip",
+        "--nofollow-import-to=wheel",
     ]
 
     win_icon = "Assets/icon.ico"
