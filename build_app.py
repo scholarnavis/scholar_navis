@@ -139,7 +139,7 @@ def build_app():
         shutil.rmtree(dist_dir)
 
     cmd = [
-        "python", "-m", "nuitka", "--standalone",
+        sys.executable, "-m", "nuitka", "--standalone",
         "--show-progress", "--show-memory",
         "--enable-plugin=pyside6",
         "--enable-plugin=anti-bloat",
