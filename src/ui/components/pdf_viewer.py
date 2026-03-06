@@ -1,14 +1,14 @@
 import html
+import os
+import re
+import shutil
 
 import fitz
-import os
-import shutil
-import re
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QScrollArea, QLabel, QMenu,
+from PySide6.QtCore import Qt, QRect, QSize, QPoint, Signal, QUrl, QEvent
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, Qt, QDesktopServices, QFont
+from PySide6.QtWidgets import (QScrollArea, QLabel, QMenu,
                                QMainWindow, QToolBar, QApplication, QFileDialog, QMessageBox,
                                QTextBrowser, QRubberBand)
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QTextCharFormat, QTextCursor, Qt, QDesktopServices
-from PySide6.QtCore import Qt, QRect, QSize, QPoint, Signal, QUrl, QEvent
 
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
@@ -64,9 +64,9 @@ class InteractivePDFLabel(QLabel):
         menu = QMenu(self)
         tm = ThemeManager()
         menu.setStyleSheet(f"""
-                    QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }}
+                    QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; font-family: {tm.font_family()}; }}
                     QMenu::item {{ padding: 6px 25px; border-radius: 2px; }}
-                    QMenu::item:selected {{ background-color: {tm.color('accent')}; }}
+                    QMenu::item:selected {{ background-color: {tm.color('accent')}; color: {tm.color('selection_fg')}; }}
                 """)
 
         has_text = bool(self.selected_text)
@@ -117,13 +117,12 @@ class InternalPDFViewer(QMainWindow):
         self.highlight_text = ""
         self.display_name = ""
         self.original_file_path = ""
-        self.zoom_factor = 2.0  # 默认高清渲染倍率
+        self.zoom_factor = 2.0
 
         # UI Layout
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setAlignment(Qt.AlignCenter)
-        self.scroll_area.setStyleSheet("background-color: #525659;")
 
         self.lbl_page = InteractivePDFLabel()
         self.scroll_area.setWidget(self.lbl_page)
@@ -140,6 +139,7 @@ class InternalPDFViewer(QMainWindow):
                                                                                      'sig_invoke_translator') else None)
         # 拦截滚动条事件，实现滚轮翻页
         self.scroll_area.verticalScrollBar().installEventFilter(self)
+        self.scroll_area.viewport().installEventFilter(self)
 
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
@@ -151,7 +151,7 @@ class InternalPDFViewer(QMainWindow):
 
         tb_style = f"""
             QToolBar {{ background: {tm.color('bg_card')}; padding: 6px; border: none; border-bottom: 1px solid {tm.color('border')}; }} 
-            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; }} 
+            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; font-family: {tm.font_family()}; }} 
             QToolButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
         """
         for tb in self.findChildren(QToolBar):
@@ -160,37 +160,40 @@ class InternalPDFViewer(QMainWindow):
         for lbl in self.findChildren(QLabel):
             if "(Tip:" in lbl.text():
                 lbl.setStyleSheet(
-                    f"color: {tm.color('text_muted')}; font-style: italic; font-size: 13px; padding-left: 10px;")
+                    f"color: {tm.color('text_muted')}; font-style: italic; font-size: 13px; padding-left: 10px; font-family: {tm.font_family()};")
 
+        # 动态更新图标，适配深色/浅色模式切换
+        if hasattr(self, 'act_prev'):
+            self.act_prev.setIcon(tm.icon("chevron-left", "text_main"))
+            self.act_next.setIcon(tm.icon("chevron-right", "text_main"))
+            self.act_zoom_in.setIcon(tm.icon("add", "text_main"))
+            self.act_zoom_out.setIcon(tm.icon("remove", "text_main"))
+            self.act_fit_width.setIcon(tm.icon("menu", "text_main"))
+            self.act_open_sys.setIcon(tm.icon("link", "text_main"))
+            self.act_export.setIcon(tm.icon("download", "text_main"))
 
     def _setup_toolbar(self):
         tm = ThemeManager()
         tb1 = QToolBar()
         tb1.setMovable(False)
-        tb1.setStyleSheet(
-            "QToolBar { background: #333; padding: 6px; border: none; } QToolButton { color: white; padding: 5px 10px; border-radius: 4px; font-weight: bold; } QToolButton:hover { background: #444; color: #05B8CC; }")
         self.addToolBar(Qt.TopToolBarArea, tb1)
 
-        tb1.addAction(tm.icon("chevron-left", "text_main"), "Prev", self.prev_page)
-        tb1.addAction(tm.icon("chevron-right", "text_main"), "Next", self.next_page)
+        self.act_prev = tb1.addAction(tm.icon("chevron-left", "text_main"), "Prev", self.prev_page)
+        self.act_next = tb1.addAction(tm.icon("chevron-right", "text_main"), "Next", self.next_page)
         tb1.addSeparator()
-        tb1.addAction(tm.icon("add", "text_main"), "Zoom In", self.zoom_in)
-        tb1.addAction(tm.icon("remove", "text_main"), "Zoom Out", self.zoom_out)
-        tb1.addAction(tm.icon("menu", "text_main"), "Fit Width", self.fit_width)
+        self.act_zoom_in = tb1.addAction(tm.icon("add", "text_main"), "Zoom In", self.zoom_in)
+        self.act_zoom_out = tb1.addAction(tm.icon("remove", "text_main"), "Zoom Out", self.zoom_out)
+        self.act_fit_width = tb1.addAction(tm.icon("menu", "text_main"), "Fit Width", self.fit_width)
         self.addToolBarBreak(Qt.TopToolBarArea)
 
         tb2 = QToolBar()
         tb2.setMovable(False)
-        tb2.setStyleSheet(
-            "QToolBar { background: #333; border-bottom: 1px solid #555; padding: 6px; } QToolButton { color: white; padding: 5px 10px; border-radius: 4px; font-weight: bold; } QToolButton:hover { background: #444; color: #05B8CC; }")
         self.addToolBar(Qt.TopToolBarArea, tb2)
 
-
-        tb2.addAction(tm.icon("link", "text_main"), "Open in System", self.open_system_app)
-        tb2.addAction(tm.icon("download", "text_main"), "Export Full PDF", self.export_pdf)
+        self.act_open_sys = tb2.addAction(tm.icon("link", "text_main"), "Open in System", self.open_system_app)
+        self.act_export = tb2.addAction(tm.icon("download", "text_main"), "Export Full PDF", self.export_pdf)
 
         hint = QLabel("  (Tip: Select text and press Space or Right-Click to Translate)")
-        hint.setStyleSheet("color: #aaa; font-style: italic; font-size: 13px; padding-left: 10px;")
         tb2.addWidget(hint)
 
 
@@ -213,21 +216,32 @@ class InternalPDFViewer(QMainWindow):
             print(f"Error opening PDF: {e}")
 
     def eventFilter(self, obj, event):
-        if obj == self.scroll_area.verticalScrollBar() and event.type() == QEvent.Wheel:
-            bar = self.scroll_area.verticalScrollBar()
-            delta = event.angleDelta().y()
+        if event.type() == QEvent.Wheel:
+            if event.modifiers() == Qt.ControlModifier:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self.zoom_in()
+                else:
+                    self.zoom_out()
+                return True
 
-            if delta < 0 and bar.value() >= bar.maximum():
-                if self.doc and self.current_page < len(self.doc) - 1:
-                    self.next_page()
-                    bar.setValue(0)
-                    return True
-            elif delta > 0 and bar.value() <= bar.minimum():
-                if self.doc and self.current_page > 0:
-                    self.prev_page()
-                    QApplication.processEvents()
-                    bar.setValue(bar.maximum())
-                    return True
+
+            if obj == self.scroll_area.verticalScrollBar() or obj == self.scroll_area.viewport():
+                bar = self.scroll_area.verticalScrollBar()
+                delta = event.angleDelta().y()
+
+                if delta < 0 and bar.value() >= bar.maximum():
+                    if self.doc and self.current_page < len(self.doc) - 1:
+                        self.next_page()
+                        bar.setValue(0)
+                        return True
+                elif delta > 0 and bar.value() <= bar.minimum():
+                    if self.doc and self.current_page > 0:
+                        self.prev_page()
+                        QApplication.processEvents()
+                        bar.setValue(bar.maximum())
+                        return True
+
         return super().eventFilter(obj, event)
 
     # --- 缩放与自适应功能 ---
@@ -383,7 +397,6 @@ class InternalPDFViewer(QMainWindow):
             self.scroll_area.verticalScrollBar().setValue(max(0, scroll_val))
 
 
-#  全新的文本阅读器（支持 TXT, MD 等）
 class InternalTextViewer(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -393,24 +406,15 @@ class InternalTextViewer(QMainWindow):
         self.original_file_path = ""
         self.display_name = ""
 
-        # 使用 QTextBrowser 显示纯文本
+
         self.text_browser = QTextBrowser()
         self.text_browser.setOpenExternalLinks(True)
-        self.text_browser.setStyleSheet("""
-            QTextBrowser {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                font-size: 14px;
-                font-family: 'Consolas', 'Microsoft YaHei', monospace;
-                padding: 20px;
-                border: none;
-                selection-background-color: #05B8CC;
-                selection-color: white;
-            }
-        """)
+        base_font = self.text_browser.font()
+        base_font.setPointSize(13)
+        self.text_browser.setFont(base_font)
+
         self.setCentralWidget(self.text_browser)
 
-        # 2. 安装事件过滤器，捕获空格键快捷翻译
         self.text_browser.installEventFilter(self)
 
         self._setup_toolbar()
@@ -424,23 +428,33 @@ class InternalTextViewer(QMainWindow):
             QTextBrowser {{
                 background-color: {tm.color('bg_main')};
                 color: {tm.color('text_main')};
-                font-size: 14px;
-                font-family: 'Consolas', 'Microsoft YaHei', monospace;
+                font-family: {tm.font_family()};
                 padding: 20px;
                 border: none;
                 selection-background-color: {tm.color('accent')};
-                selection-color: {tm.color('bg_card')};
+                selection-color: {tm.color('selection_fg')};
             }}
         """)
 
-        # 同样更新 ToolBar 样式
+
         tb_style = f"""
             QToolBar {{ background: {tm.color('bg_card')}; border-bottom: 1px solid {tm.color('border')}; padding: 6px; }} 
-            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; }} 
+            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; font-family: {tm.font_family()}; }} 
             QToolButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
         """
         for tb in self.findChildren(QToolBar):
             tb.setStyleSheet(tb_style)
+
+        for lbl in self.findChildren(QLabel):
+            if "(Tip:" in lbl.text():
+                lbl.setStyleSheet(
+                    f"color: {tm.color('text_muted')}; font-style: italic; font-size: 13px; padding-left: 10px; font-family: {tm.font_family()};")
+
+        if hasattr(self, 'act_zoom_in'):
+            self.act_zoom_in.setIcon(tm.icon("add", "text_main"))
+            self.act_zoom_out.setIcon(tm.icon("remove", "text_main"))
+            self.act_open_sys.setIcon(tm.icon("link", "text_main"))
+            self.act_export.setIcon(tm.icon("download", "text_main"))
 
 
     def _setup_toolbar(self):
@@ -448,40 +462,61 @@ class InternalTextViewer(QMainWindow):
 
         tb1 = QToolBar()
         tb1.setMovable(False)
-        tb1.setStyleSheet(
-            "QToolBar { background: #333; padding: 6px; border: none; } QToolButton { color: white; padding: 5px 10px; border-radius: 4px; font-weight: bold; } QToolButton:hover { background: #444; color: #05B8CC; }")
         self.addToolBar(Qt.TopToolBarArea, tb1)
 
-        tb1.addAction(tm.icon("add", "text_main"), "Zoom In", self.zoom_in)
-        tb1.addAction(tm.icon("remove", "text_main"), "Zoom Out", self.zoom_out)
+        self.act_zoom_in = tb1.addAction(tm.icon("add", "text_main"), "Zoom In", self.zoom_in)
+        self.act_zoom_out = tb1.addAction(tm.icon("remove", "text_main"), "Zoom Out", self.zoom_out)
 
         self.addToolBarBreak(Qt.TopToolBarArea)
 
         tb2 = QToolBar()
         tb2.setMovable(False)
-        tb2.setStyleSheet(
-            "QToolBar { background: #333; border-bottom: 1px solid #555; padding: 6px; } QToolButton { color: white; padding: 5px 10px; border-radius: 4px; font-weight: bold; } QToolButton:hover { background: #444; color: #05B8CC; }")
         self.addToolBar(Qt.TopToolBarArea, tb2)
 
-        tb2.addAction(tm.icon("link", "text_main"), "Open in System", self.open_system_app)
-        tb2.addAction(tm.icon("download", "text_main"), "Export Full PDF", self.export_pdf)
+        self.act_open_sys = tb2.addAction(tm.icon("link", "text_main"), "Open in System", self.open_system_app)
+
+        self.act_export = tb2.addAction(tm.icon("download", "text_main"), "Export File", self.export_file)
 
         hint = QLabel("  (Tip: Select text and press Space or Right-Click to Translate)")
-        hint.setStyleSheet("color: #aaa; font-style: italic; font-size: 13px; padding-left: 10px;")
         tb2.addWidget(hint)
 
+    def _show_context_menu(self, pos):
+        menu = QMenu(self)
+        tm = ThemeManager()
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; font-family: {tm.font_family()}; }}
+            QMenu::item {{ padding: 6px 25px; border-radius: 2px; }}
+            QMenu::item:selected {{ background-color: {tm.color('accent')}; color: {tm.color('selection_fg')}; }}
+        """)
 
+        selected_text = self.text_browser.textCursor().selectedText()
+        has_text = bool(selected_text)
 
-    # --- 呼出全局翻译 ---
+        act_copy = act_trans = act_sel_all = None
+
+        if has_text:
+            act_copy = menu.addAction(tm.icon("copy", "text_main"), "Copy")
+            act_trans = menu.addAction(tm.icon("language", "text_main"), "Translate")
+
+        act_sel_all = menu.addAction(tm.icon("menu", "text_main"), "Select All")
+
+        action = menu.exec(self.text_browser.mapToGlobal(pos))
+
+        if action:
+            if action == act_copy:
+                self.text_browser.copy()
+            elif action == act_trans:
+                self._invoke_translator(selected_text)
+            elif action == act_sel_all:
+                self.text_browser.selectAll()
+
     def _invoke_translator(self, text):
         if hasattr(GlobalSignals(), 'sig_invoke_translator'):
             GlobalSignals().sig_invoke_translator.emit(text)
-            # 翻译后自动取消选中状态，保持 UI 干净
             cursor = self.text_browser.textCursor()
             cursor.clearSelection()
             self.text_browser.setTextCursor(cursor)
 
-    # --- 缩放控制 ---
     def zoom_in(self):
         self.text_browser.zoomIn(2)
 
@@ -489,13 +524,21 @@ class InternalTextViewer(QMainWindow):
         self.text_browser.zoomOut(2)
 
     def eventFilter(self, obj, event):
-        # 监听空格键，实现快捷划词翻译
-        if obj == self.text_browser and event.type() == QEvent.KeyPress:
-            if event.key() == Qt.Key_Space:
+        if obj == self.text_browser:
+            if event.type() == QEvent.Wheel and event.modifiers() == Qt.ControlModifier:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self.text_browser.zoomIn(1)
+                else:
+                    self.text_browser.zoomOut(1)
+                return True  #
+
+            elif event.type() == QEvent.KeyPress and event.key() == Qt.Key_Space:
                 selected_text = self.text_browser.textCursor().selectedText()
                 if selected_text:
                     self._invoke_translator(selected_text)
-                    return True  # 拦截事件，防止文本框向下滚动
+                    return True
+
         return super().eventFilter(obj, event)
 
     def load_document(self, file_path, highlight_text="", display_name=""):
@@ -507,6 +550,8 @@ class InternalTextViewer(QMainWindow):
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
+            tm = ThemeManager()
+            accent_color = tm.color('accent')
 
             pattern = re.compile(
                 r'('
@@ -525,33 +570,31 @@ class InternalTextViewer(QMainWindow):
                 if not part:
                     continue
 
-                # 偶数索引代表“未匹配到的普通文本”
                 if i % 2 == 0:
                     html_chunks.append(html.escape(part).replace('\n', '<br>'))
-                # 奇数索引代表“被上面正则命中抽离的特殊目标”
                 else:
                     if part.startswith('['):
-                        # 是 Markdown 链接，将其解析为安全的 HTML a 标签
                         match_md = re.match(r'\[([^\]]+)\]\(([^)]+)\)', part)
                         if match_md:
                             t = html.escape(match_md.group(1))
                             u = html.escape(match_md.group(2))
-                            html_chunks.append(f'<a href="{u}" style="color: #05B8CC; text-decoration: none;">{t}</a>')
+                            html_chunks.append(
+                                f'<a href="{u}" style="color: {accent_color}; text-decoration: none;">{t}</a>')
                         else:
                             html_chunks.append(html.escape(part))
 
                     elif part.lower().startswith('<a '):
-                        # 原生 HTML a 标签，信任内容，直接放行
                         html_chunks.append(part)
 
                     elif part.lower().startswith('http'):
                         u = html.escape(part)
-                        html_chunks.append(f'<a href="{u}" style="color: #05B8CC; text-decoration: none;">{u}</a>')
+                        html_chunks.append(
+                            f'<a href="{u}" style="color: {accent_color}; text-decoration: none;">{u}</a>')
 
                     elif part.startswith('10.'):
                         doi = html.escape(part)
                         html_chunks.append(
-                            f'<a href="https://doi.org/{doi}" style="color: #05B8CC; text-decoration: none;">{doi}</a>')
+                            f'<a href="https://doi.org/{doi}" style="color: {accent_color}; text-decoration: none;">{doi}</a>')
 
                     else:
                         html_chunks.append(html.escape(part))
@@ -592,7 +635,9 @@ class InternalTextViewer(QMainWindow):
             from PySide6.QtGui import QTextCharFormat, QColor
 
             fmt = QTextCharFormat()
-            fmt.setBackground(QColor(255, 235, 59, 120))
+            hl_color = QColor(ThemeManager().color('warning'))
+            hl_color.setAlpha(120)
+            fmt.setBackground(hl_color)
             cursor.mergeCharFormat(fmt)
 
             self.text_browser.setTextCursor(cursor)
