@@ -21,6 +21,7 @@ from huggingface_hub import constants
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
+from src.core.email_check import verify_email_robust
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, check_model_exists, resolve_auto_model, get_onnx_cache_dir)
@@ -1868,11 +1869,11 @@ class SettingsTool(BaseTool):
 
         new_email = self.input_ncbi_email.text().strip()
 
-        if new_email and not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", new_email):
+        if new_email and not verify_email_robust(new_email).get("is_valid"):
             StandardDialog(
                 self.widget,
                 "Validation Error",
-                "Invalid NCBI Email format.\n\nPlease provide a structurally valid email address (e.g., name@domain.com) or leave it completely empty (which will disable NCBI tools)."
+                "Invalid Email format.\n\nPlease provide a structurally valid email address (e.g., name@domain.com) or leave it completely empty (which will disable NCBI tools)."
             ).exec()
             return
 

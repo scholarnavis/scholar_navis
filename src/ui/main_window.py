@@ -30,12 +30,28 @@ def force_windows_taskbar_icon(hwnd, icon_path):
     if not os.path.exists(icon_path):
         return
     try:
-        hIcon = ctypes.windll.user32.LoadImageW(
-            0, os.path.abspath(icon_path), 1, 0, 0, 0x0010
+
+        hIcon_small = ctypes.windll.user32.LoadImageW(
+            0, os.path.abspath(icon_path), 1, 16, 16, 0x0010
         )
-        if hIcon:
-            ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 0, hIcon)
-            ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 1, hIcon)
+        if hIcon_small:
+            ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 0, hIcon_small)
+
+        hIcon_big = ctypes.windll.user32.LoadImageW(
+            0, os.path.abspath(icon_path), 1, 256, 256, 0x0010
+        )
+        if not hIcon_big:
+            hIcon_big = ctypes.windll.user32.LoadImageW(
+                0, os.path.abspath(icon_path), 1, 128, 128, 0x0010
+            )
+        if not hIcon_big:
+            hIcon_big = ctypes.windll.user32.LoadImageW(
+                0, os.path.abspath(icon_path), 1, 64, 64, 0x0010
+            )
+
+        if hIcon_big:
+            ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 1, hIcon_big)
+
     except Exception:
         pass
 

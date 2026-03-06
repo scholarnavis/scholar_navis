@@ -75,11 +75,6 @@ if ncbi_api_key:
 mcp = FastMCP("ScholarNavis-Academic-Plugin")
 
 
-def is_valid_ncbi_email(email: str) -> bool:
-    if not email or "example.com" in email.lower() or "university.edu" in email.lower():
-        return False
-    return bool(re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email))
-
 
 def mcp_request(method: str, url: str, **kwargs):
     session = create_robust_session()
@@ -123,6 +118,10 @@ def simple_retry(max_attempts=3, delay=2):
 @simple_retry(max_attempts=2, delay=1)
 def search_academic_literature(query: str, max_results: int = 5, offset: int = 0, source: str = "auto") -> str:
     logger.info(f"Task: Unified Literature Search | Query: '{query}' | Offset: {offset} | Source: {source}")
+
+    if not verify_email_robust(ncbi_email).get("is_valid"):
+        logger.error("NCBI has been disabled due to the lack of available email addresses; other tools are still functioning normally.")
+
     try:
         if s2_api_key and source in ["auto", "semantic_scholar"]:
             url = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -183,7 +182,7 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
             except Exception as e:
                 logger.warning(f"Crossref search failed: {e}")
 
-        if verify_email_robust(ncbi_email) and source in ["auto", "pubmed"]:
+        if verify_email_robust(ncbi_email).get("is_valid") and source in ["auto", "pubmed"]:
             search_handle = Entrez.esearch(db="pubmed", term=query, retstart=offset, retmax=max_results)
             ids = Entrez.read(search_handle).get("IdList", [])
             search_handle.close()
@@ -292,7 +291,7 @@ def fetch_open_access_pdf(doi: str) -> str:
 def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5) -> str:
     logger.info(f"Task: Omics Dataset Search | DB: {db_type} | Query: '{query}'")
 
-    if not verify_email_robust(ncbi_email):
+    if not verify_email_robust(ncbi_email).get("is_valid"):
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -341,7 +340,7 @@ def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5
 def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
     logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
 
-    if not verify_email_robust(ncbi_email):
+    if not verify_email_robust(ncbi_email).get("is_valid"):
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -376,7 +375,7 @@ def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
 def fetch_taxonomy_info(organism_name: str) -> str:
     logger.info(f"Task: Taxonomy Fetch | Organism: '{organism_name}'")
 
-    if not verify_email_robust(ncbi_email):
+    if not verify_email_robust(ncbi_email).get("is_valid"):
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -407,7 +406,7 @@ def fetch_taxonomy_info(organism_name: str) -> str:
 def fetch_pubmed_abstract(pmid: str) -> str:
     logger.info(f"Task: Fetch Abstract | PMID: {pmid}")
 
-    if not verify_email_robust(ncbi_email):
+    if not verify_email_robust(ncbi_email).get("is_valid"):
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -444,7 +443,7 @@ def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> s
     logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query}")
 
 
-    if not verify_email_robust(ncbi_email):
+    if not verify_email_robust(ncbi_email).get("is_valid"):
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 

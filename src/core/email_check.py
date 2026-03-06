@@ -1,6 +1,9 @@
+import logging
+
 from email_validator import validate_email, EmailNotValidError
 from disposable_email_domains import blocklist as DISPOSABLE_BLOCKLIST
 
+logger = logging.getLogger("Email Checker")
 
 ROLE_PREFIXES = {
     "admin", "support", "info", "sales", "contact",
@@ -38,10 +41,11 @@ def verify_email_robust(email: str, check_mx: bool = True, check_roles: bool = T
         "error_msg": ""
     }
 
-    # 1基础非空校验
+    # 1 基础非空校验
     if not email or not isinstance(email, str):
         result["error_type"] = "empty_or_invalid_type"
         result["error_msg"] = "The email address cannot be empty."
+        logger.error(result["error_msg"])
         return result
 
     email = email.strip()
@@ -52,6 +56,7 @@ def verify_email_robust(email: str, check_mx: bool = True, check_roles: bool = T
         if local_part in ROLE_PREFIXES:
             result["error_type"] = "role_account"
             result["error_msg"] = f"Public or system-reserved email addresses are not allowed: {local_part}@...)。"
+            logger.error(result["error_msg"])
             return result
 
     # 语法及 DNS/MX 记录校验
@@ -62,24 +67,28 @@ def verify_email_robust(email: str, check_mx: bool = True, check_roles: bool = T
     except EmailNotValidError as e:
         result["error_type"] = "syntax_or_dns_error"
         result["error_msg"] = f"Invalid email addresses or domains cannot receive emails: {str(e)}"
+        logger.error(result["error_msg"])
         return result
 
     # 4. 虚拟/一次性邮箱拦截
     if domain_part in DISPOSABLE_BLOCKLIST:
         result["error_type"] = "disposable_email"
         result["error_msg"] = "The system refuses registration using temporary or disposable email addresses. Please use a regular email address."
+        logger.error(result["error_msg"])
         return result
 
     # 5. 业务自定义黑名单拦截
     if domain_part in CUSTOM_DOMAIN_BLOCKLIST:
         result["error_type"] = "custom_blocked_domain"
         result["error_msg"] = f"The email domain ({domain_part}) is on the restricted list of this system."
+        logger.error(result["error_msg"])
         return result
 
     # 6. 自定义黑名单拦截
     if domain_part in CUSTOM_DOMAIN_BLOCKLIST:
         result["error_type"] = "custom_blocked_domain"
         result["error_msg"] = f"The email domain ({domain_part}) is on the restricted list of this system."
+        logger.error(result["error_msg"])
         return result
 
     # 校验全部通过
