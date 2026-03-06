@@ -64,6 +64,32 @@ class ProcessAttachmentTask(BackgroundTask):
                     link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
                     html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
 
+                # 2.5 DOCX processing
+                elif ext.endswith('.docx'):
+                    self.update_progress(int((i / total) * 100), f"Parsing DOCX: {f_name}...")
+                    import docx
+                    doc = docx.Document(path)
+
+                    text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
+
+                    if len(text) > 10:
+                        chunks.append({
+                            "path": path, "name": f_name, "page": 1,
+                            "content": text
+                        })
+                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
+                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
+
+                # 2.6 老旧 DOC 拦截
+                elif ext.endswith('.doc'):
+                    self.send_log("ERROR",
+                                  f"Legacy .doc format is not natively supported. Please convert {f_name} to .docx")
+                    # 给用户一个 HTML 提示，不用提取内容
+                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
+                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#ffb86c; text-decoration:none;'>⚠️ {f_name} (Please convert to .docx)</a></div>"
+
+
+
                 # 3. Text processing
                 else:
                     self.update_progress(int((i / total) * 100), f"Reading file: {f_name}...")

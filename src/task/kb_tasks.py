@@ -344,6 +344,11 @@ class ImportFilesTask(BackgroundTask):
                 # 其他格式文档走基础切分
                 else:
                     text_content = FileService.read_file_content(read_path)
+
+                    if source_name.lower().endswith('.doc'):
+                        self.send_log("WARNING", f"Skipping {source_name}: Legacy .doc is not supported for indexing.")
+                        continue
+
                     if not text_content or len(text_content.strip()) < 10:
                         self.send_log("WARNING", f"Skipped empty/unreadable file: {source_name}")
                         continue

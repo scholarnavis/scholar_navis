@@ -126,6 +126,15 @@ class ThemeManager(QObject):
         return QIcon(pixmap)
 
     def get_app_icon(self) -> QIcon:
+        if sys.platform == "win32":
+            ico_path = self.get_resource_path("Assets", "icon.ico")
+            if os.path.exists(ico_path):
+                return QIcon(ico_path)
+
+        png_path = self.get_resource_path("Assets", "icon.png")
+        if os.path.exists(png_path):
+            return QIcon(png_path)
+
         path = self.get_resource_path("Assets", "ico.svg")
         if not os.path.exists(path):
             path = self.get_resource_path("assets", "ico.svg")

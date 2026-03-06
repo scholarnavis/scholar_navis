@@ -2,7 +2,7 @@ import ctypes
 import os
 import sys
 
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
@@ -24,6 +24,22 @@ from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
 
 
+def force_windows_taskbar_icon(hwnd, icon_path):
+    if sys.platform != "win32":
+        return
+    if not os.path.exists(icon_path):
+        return
+    try:
+        hIcon = ctypes.windll.user32.LoadImageW(
+            0, os.path.abspath(icon_path), 1, 0, 0, 0x0010
+        )
+        if hIcon:
+            ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 0, hIcon)
+            ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 1, hIcon)
+    except Exception:
+        pass
+
+
 def set_window_titlebar_theme(hwnd, is_dark: bool):
     if sys.platform == "win32":
         try:
@@ -42,21 +58,6 @@ def set_window_titlebar_theme(hwnd, is_dark: bool):
         except Exception:
             pass
 
-def force_taskbar_icon(hwnd, icon_path):
-    if sys.platform == "win32" and os.path.exists(icon_path):
-        try:
-            hicon = ctypes.windll.user32.LoadImageW(
-                0, ctypes.c_wchar_p(icon_path),
-                1, 0, 0, 0x00000010 | 0x00000020
-            )
-            if hicon:
-                # WM_SETICON = 0x0080
-                # 向窗口发送消息强制替换大图标(1)和小图标(0)
-                ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 1, hicon)
-                ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 0, hicon)
-        except Exception:
-            pass
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -65,14 +66,12 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
 
         self.setWindowIcon(ThemeManager().get_app_icon())
-        ico_path = os.path.abspath(ThemeManager.get_resource_path("Assets", "icon.ico"))
-        QTimer.singleShot(200, lambda: force_taskbar_icon(self.winId(), ico_path))
 
         ToastManager().set_parent(self)
 
         # 主分割器
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.main_splitter.setHandleWidth(1)  # 更现代的细线分割
+        self.main_splitter.setHandleWidth(1)
         self.setCentralWidget(self.main_splitter)
 
         # --- 左侧面板 ---
@@ -83,10 +82,8 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(10, 15, 10, 15)
         left_layout.setSpacing(10)
 
-        # 顶部：汉堡菜单(折叠按钮) + Logo
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(5, 0, 5, 0)
-
 
         self.logo_widget = QSvgWidget(ThemeManager.get_resource_path("Assets", "ico.svg"))
         self.logo_widget.setFixedSize(36, 36)
@@ -130,7 +127,7 @@ class MainWindow(QMainWindow):
         handle = self.main_splitter.handle(1)
         handle.setDisabled(True)
 
-        self.tools = []
+        self.tools =[]
 
         self.tm = ThemeManager()
         self.icon_map = {
@@ -162,6 +159,11 @@ class MainWindow(QMainWindow):
         self.tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+        if sys.platform == "win32":
+            ico_path = ThemeManager.get_resource_path("Assets", "icon.ico")
+            hwnd = int(self.winId())
+            QTimer.singleShot(100, lambda: force_windows_taskbar_icon(hwnd, ico_path))
+
     def toggle_quick_translator(self):
         if self.translator_dialog.isHidden() or self.translator_dialog.windowOpacity() == 0.0:
             self.translator_dialog.setWindowOpacity(1.0)
@@ -170,7 +172,6 @@ class MainWindow(QMainWindow):
             self.translator_dialog.input_box.setFocus()
         else:
             self.translator_dialog.hide_with_fade()
-
 
     def _update_logo_theme(self):
         theme = ConfigManager().user_settings.get("theme", "Dark").lower()
@@ -181,12 +182,12 @@ class MainWindow(QMainWindow):
         if os.path.exists(logo_path):
             self.logo_widget.load(logo_path)
 
-
     def _apply_theme(self):
         tm = self.tm
         is_dark = tm.current_theme == "dark"
 
-        set_window_titlebar_theme(self.winId(), is_dark)
+        hwnd = int(self.winId())
+        QTimer.singleShot(100, lambda: set_window_titlebar_theme(hwnd, is_dark))
 
         self.setStyleSheet(f"QMainWindow {{ background-color: {tm.color('bg_main')}; }}")
         self.main_splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {tm.color('border')}; }}")
@@ -255,8 +256,6 @@ class MainWindow(QMainWindow):
 
         status_layout.addSpacing(10)
 
-        # 移除 self.external_status_label 的相关代码...
-
         # 网络/自定义 MCP 状态
         self.custom_status_label = QLabel("Custom: 0 Active")
         self.custom_status_label.setStyleSheet("color: #888;")
@@ -267,6 +266,13 @@ class MainWindow(QMainWindow):
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._update_mcp_status)
         self.status_timer.start(5000)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
+            is_dark = self.tm.current_theme == "dark"
+            QTimer.singleShot(10, lambda: set_window_titlebar_theme(self.winId(), is_dark))
+
 
     def _update_mcp_status(self):
         mcp_mgr = MCPManager.get_instance()
@@ -301,10 +307,9 @@ class MainWindow(QMainWindow):
             self.custom_status_label.setText("Custom: 0 Active")
             self.custom_status_label.setStyleSheet("color: #888;")
 
-
     def clean_old_logs(self):
         base_dir = ThemeManager.get_resource_path()
-        log_dirs = [
+        log_dirs =[
             os.path.join(base_dir, "logs"),
             os.path.join(base_dir, "logs", "mcp", "academic"),
             os.path.join(base_dir, "logs", "mcp", "common")
@@ -314,7 +319,7 @@ class MainWindow(QMainWindow):
             if not os.path.exists(d):
                 continue
 
-            logs = [os.path.join(d, f) for f in os.listdir(d) if ".log" in f]
+            logs =[os.path.join(d, f) for f in os.listdir(d) if ".log" in f]
             logs.sort(key=os.path.getmtime)
 
             if len(logs) > 30:
@@ -338,12 +343,10 @@ class MainWindow(QMainWindow):
         item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {tool.tool_name}")
         self.sidebar.addItem(item)
 
-
     def switch_tool(self, index):
         self.tool_stack.setCurrentIndex(index)
 
     def check_model_integrity(self):
-
         cfg = ConfigManager()
 
         embed_id = cfg.user_settings.get("current_model_id", "embed_auto")
@@ -361,7 +364,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_integrity_check_result(self, result):
-        to_download = result.get("to_download", [])
+        to_download = result.get("to_download",[])
 
         if to_download:
             names = "<br>".join([f"• {repo}" for repo in to_download])
@@ -374,7 +377,6 @@ class MainWindow(QMainWindow):
             dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
             dlg.exec()
             self._jump_to_settings()
-
 
     def _jump_to_settings(self):
         self.switch_tool(6)
@@ -454,4 +456,3 @@ class MainWindow(QMainWindow):
                 })
                 cfg.save_settings()
                 self._jump_to_settings()
-

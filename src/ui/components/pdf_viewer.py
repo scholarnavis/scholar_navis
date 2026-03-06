@@ -547,12 +547,32 @@ class InternalTextViewer(QMainWindow):
         self.setWindowTitle(f"Text Viewer - {self.display_name}")
 
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+            content = ""
+            ext = file_path.lower()
+
+            if ext.endswith('.docx'):
+                try:
+                    import docx
+                    doc = docx.Document(file_path)
+                    content = "\n".join([p.text for p in doc.paragraphs])
+                except Exception as e:
+                    content = f"Error reading DOCX:\n{str(e)}"
+
+            else:
+                try:
+                    import chardet
+                    with open(file_path, 'rb') as f:
+                        raw_data = f.read()
+                        detected = chardet.detect(raw_data)
+                        encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
+                        content = raw_data.decode(encoding, errors='replace')
+                except Exception as e:
+                    content = f"Error reading text file:\n{str(e)}"
 
             tm = ThemeManager()
             accent_color = tm.color('accent')
 
+            # 保护 Markdown 链接和 HTML 标签的正则
             pattern = re.compile(
                 r'('
                 r'\[[^\]]+\]\([^)]+\)|'  # 1. 最优先：保护已有的 Markdown 链接
@@ -609,7 +629,8 @@ class InternalTextViewer(QMainWindow):
             self.raise_()
             self.activateWindow()
         except Exception as e:
-            print(f"Error opening text file: {e}")
+            print(f"Error opening text document: {e}")
+
 
     def _highlight_and_scroll(self, text):
         if not text:

@@ -923,8 +923,8 @@ class RSSTool(BaseTool):
             oa_url = art.get('pdf_url', '')
             oa_html = f" | <img src='{icon_oa_b64}' width='12' height='12' style='vertical-align: middle;'> <b style='color:#28a745;'>Open Access</b>" if oa_url else ""
 
-            html += f"<p style='color:gray; font-size: 10pt;'>{date_html}{doi_html}{oa_html}</p>"
-            html += f"<div style='font-size: 11pt; line-height: 1.4;'>{art.get('summary', '')}</div><hr>"
+            html += f"<p style='color:#555555; font-size: 10pt;'>{date_html}{doi_html}{oa_html}</p>"
+            html += f"<div style='color:#333333; font-size: 11pt; line-height: 1.5;'>{art.get('summary', '')}</div><hr>"
 
         # 4. 配置打印机与文档
         pd.update_progress(0, "Calculating pages...")

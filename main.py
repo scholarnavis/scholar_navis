@@ -23,7 +23,6 @@ if len(sys.argv) > 1 and sys.argv[1] == "--run-builtin-mcp":
     mcp.run(transport='stdio')
     sys.exit(0)
 
-
 is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
 if is_compiled:
@@ -81,7 +80,7 @@ class StartupWorker(QThread):
             if rerank_id == "rerank_auto":
                 rerank_id = resolve_auto_model("reranker", dev_str)
 
-            for mid, mtype in [(embed_id, "embedding"), (rerank_id, "reranker")]:
+            for mid, mtype in[(embed_id, "embedding"), (rerank_id, "reranker")]:
                 conf = get_model_conf(mid, mtype)
                 if conf and not conf.get('is_network', False):
                     repo_id = conf.get('hf_repo_id')
@@ -106,20 +105,19 @@ class SplashScreen(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowFlags(
-            Qt.FramelessWindowHint |
-            Qt.WindowStaysOnTopHint |
-            Qt.SplashScreen  # <-- 加上这个
-        )
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SplashScreen)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(500, 280)
 
         tm = ThemeManager()
 
-        icon_path = ThemeManager.get_resource_path("Assets", "icon.ico")
-        self.setWindowIcon(QIcon(icon_path))
+        ico_path = ThemeManager.get_resource_path("Assets", "icon.ico")
+        png_path = ThemeManager.get_resource_path("Assets", "icon.png")
+        if sys.platform == "win32" and os.path.exists(ico_path):
+            self.setWindowIcon(QIcon(ico_path))
+        else:
+            self.setWindowIcon(QIcon(png_path))
+
 
         bg_color = tm.color("bg_main")
         bg_card = tm.color("bg_card")
@@ -220,8 +218,16 @@ if __name__ == "__main__":
     global_logger = setup_logger()
 
     if sys.platform == "win32":
-        myappid = f"scholarnavis.studio.navigator.{__version__}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(myappid))
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+
+        try:
+            myappid = ctypes.c_wchar_p("scholar.navis.app")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
 
     app = QApplication(sys.argv)
 
@@ -230,13 +236,8 @@ if __name__ == "__main__":
     import qdarktheme
 
     tm = ThemeManager()
-    ico_path = os.path.abspath(tm.get_resource_path("Assets", "icon.ico"))
 
-    if sys.platform == "win32" and os.path.exists(ico_path):
-        global_icon = QIcon(ico_path)
-    else:
-        global_logger.warning(f"Could not find valid .ico at {ico_path}, taskbar icon may fail.")
-        global_icon = tm.get_app_icon()
+    global_icon = tm.get_app_icon()
 
     app.setWindowIcon(global_icon)
 

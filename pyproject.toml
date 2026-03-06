@@ -31,6 +31,9 @@ dependencies = [
     "onnxruntime-directml>=1.19.0 ; sys_platform == 'win32'",
     "onnxruntime-gpu>=1.19.0 ; sys_platform == 'linux'",
     "onnxruntime>=1.19.0 ; sys_platform == 'darwin'",
+    "python-docx>=1.2.0",
+    "email-validator>=2.3.0",
+    "disposable-email-domains>=0.0.167",
 ]
 
 

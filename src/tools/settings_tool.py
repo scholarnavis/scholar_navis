@@ -88,7 +88,7 @@ class SettingsTool(BaseTool):
         self.init_network_section()
         self.init_llm_section()
         self.init_model_section()
-        self.init_ncbi_section()
+        self.init_api_keys_section()
         self.init_mcp_section()
 
         self.layout.addStretch()
@@ -124,6 +124,7 @@ class SettingsTool(BaseTool):
         self.input_ncbi_email.textChanged.connect(self._mark_unsaved)
         self.input_ncbi_api_key.textChanged.connect(self._mark_unsaved)
         self.input_s2_api_key.textChanged.connect(self._mark_unsaved)
+        self.input_github_token.textChanged.connect(self._mark_unsaved)
         self.combo_proxy_mode.currentIndexChanged.connect(self._mark_unsaved)
         self.input_proxy.textChanged.connect(self._mark_unsaved)
         self.input_mirror.textChanged.connect(self._mark_unsaved)
@@ -216,7 +217,6 @@ class SettingsTool(BaseTool):
         self.btn_undo.setEnabled(False)
         self.btn_save.setText(" Save Settings")
 
-
     def _apply_theme(self):
         if not self.widget: return
         tm = ThemeManager()
@@ -225,15 +225,15 @@ class SettingsTool(BaseTool):
 
         if hasattr(self, 'table_mcp'):
             self.table_mcp.setStyleSheet(f"""
-                QTableWidget {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; }}
-                QHeaderView::section {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_muted')}; border: 1px solid {tm.color('border')}; padding: 4px; }}
-            """)
+                   QTableWidget {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; }}
+                   QHeaderView::section {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_muted')}; border: 1px solid {tm.color('border')}; padding: 4px; }}
+               """)
 
         self._update_all_styles()
         self._update_all_icons()
 
         if hasattr(self, '_update_hardware_html'): self._update_hardware_html()
-        if hasattr(self, '_update_ncbi_html'): self._update_ncbi_html()
+        if hasattr(self, '_update_api_keys_html'): self._update_api_keys_html()
         if hasattr(self, '_update_vram_html'): self._update_vram_html()
         if hasattr(self, '_refresh_mcp_status'): self._refresh_mcp_status()
 
@@ -269,7 +269,7 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setIcon(tm.icon("refresh", "text_main"))
 
     def _load_current_settings(self, is_undo=False):
-        self._is_loading = True  # 阻止信号误触发 _mark_unsaved
+        self._is_loading = True
 
         self.config.load_settings()
         self.config.load_mcp_servers()
@@ -278,6 +278,7 @@ class SettingsTool(BaseTool):
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
+        self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
 
         mode_map = {"system": 0, "off": 1, "custom": 2}
         self.combo_proxy_mode.setCurrentIndex(
@@ -332,6 +333,61 @@ class SettingsTool(BaseTool):
             ToastManager().show("Changes reverted to the last saved state.", "info")
             if hasattr(self, '_refresh_mcp_status'):
                 self._refresh_mcp_status()
+
+    def init_api_keys_section(self):
+        group = QGroupBox("Application Interface (API Keys)")
+        layout = QFormLayout(group)
+        layout.setLabelAlignment(Qt.AlignRight)
+
+        self.input_ncbi_email = QLineEdit()
+        self.input_ncbi_email.setPlaceholderText("Required for NCBI Tools: e.g. user@university.edu")
+        self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
+
+        self.input_ncbi_api_key = QLineEdit()
+        self.input_ncbi_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_ncbi_api_key.setPlaceholderText("NCBI API Key (Optional but recommended)")
+        self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
+
+        self.input_s2_api_key = QLineEdit()
+        self.input_s2_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
+        self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
+
+        self.input_github_token = QLineEdit()
+        self.input_github_token.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_github_token.setPlaceholderText("GitHub Personal Access Token (Prevents rate limiting)")
+        self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
+
+        self.lbl_api_hint = QLabel()
+        self.lbl_api_hint.setWordWrap(True)
+        self.lbl_api_hint.setOpenExternalLinks(True)
+        ThemeManager().apply_class(self.lbl_api_hint, "hint")
+        self._update_api_keys_html()
+
+        layout.addRow("NCBI Email:", self.input_ncbi_email)
+        layout.addRow("NCBI API Key:", self.input_ncbi_api_key)
+        layout.addRow("S2 API Key:", self.input_s2_api_key)
+        layout.addRow("GitHub Token:", self.input_github_token)
+        layout.addRow("", self.lbl_api_hint)
+
+        self.layout.addWidget(group)
+
+    def _update_api_keys_html(self):
+        if not hasattr(self, 'lbl_api_hint'): return
+        tm = ThemeManager()
+        self.lbl_api_hint.setText(
+            f"<div style='line-height: 1.5;'>"
+            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>⚠️ NCBI STRICT POLICY:</span> "
+            f"You MUST provide a valid real email address. Empty or incorrectly formatted emails will <span style='color:{tm.color('danger')}; font-weight:bold;'>completely disable</span> the NCBI PubMed/Omics tools to prevent server IP bans.<br><br>"
+            f"<span style='color:{tm.color('accent')}; font-weight:bold;'>INFO & API Keys:</span><br>"
+            f"• <b>NCBI PubMed:</b> An API Key increases rate limits from 3 to 10 requests/sec. "
+            f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for NCBI Key]</a><br>"
+            f"• <b>Semantic Scholar:</b> An API Key severely prevents '429 Too Many Requests' errors during massive literature retrieval. "
+            f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for S2 Key]</a><br>"
+            f"• <b>GitHub Token:</b> Increases search limits from 10/min to 30/min. "
+            f"<a href='https://github.com/settings/tokens?type=beta' style='color:{tm.color('accent')}; text-decoration:none;'>[Generate Token]</a>"
+            f"</div>"
+        )
 
 
     def _refresh_mcp_status(self):
@@ -1810,14 +1866,22 @@ class SettingsTool(BaseTool):
     def on_save_clicked(self):
         self.widget.setFocus()
 
+        new_email = self.input_ncbi_email.text().strip()
+
+        if new_email and not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", new_email):
+            StandardDialog(
+                self.widget,
+                "Validation Error",
+                "Invalid NCBI Email format.\n\nPlease provide a structurally valid email address (e.g., name@domain.com) or leave it completely empty (which will disable NCBI tools)."
+            ).exec()
+            return
+
         if hasattr(self, '_sync_llm_data'):
             self._sync_llm_data()
         self._save_llm_config()
 
         new_mcp_servers = {}
         if hasattr(self, 'table_mcp'):
-
-
             for row in range(self.table_mcp.rowCount()):
                 name_item = self.table_mcp.item(row, 1)
                 if not name_item: continue
@@ -1842,9 +1906,10 @@ class SettingsTool(BaseTool):
             self.config.mcp_servers["mcpServers"] = new_mcp_servers
             self.config.save_mcp_servers()
 
-        new_email = self.input_ncbi_email.text().strip()
         new_key = self.input_ncbi_api_key.text().strip()
         new_s2_key = self.input_s2_api_key.text().strip()
+
+        new_github_token = self.input_github_token.text().strip()
 
         mode_idx = self.combo_proxy_mode.currentIndex()
         new_proxy_mode = ["off", "custom"][mode_idx]
@@ -1870,6 +1935,7 @@ class SettingsTool(BaseTool):
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
             "s2_api_key": new_s2_key,
+            "github_token": new_github_token,
             "external_python_path": getattr(self, 'input_ext_python', QLineEdit()).text().strip(),
             "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked()
         })
@@ -1892,7 +1958,6 @@ class SettingsTool(BaseTool):
             telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
         )
         self.save_pd.show()
-
 
         if hasattr(self, 'save_task_mgr') and self.save_task_mgr:
             self.save_task_mgr.cancel_task()

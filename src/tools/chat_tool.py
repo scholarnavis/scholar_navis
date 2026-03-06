@@ -113,11 +113,21 @@ class ChatDropTargetWidget(QWidget):
         self.overlay.hide()
         super().dragLeaveEvent(event)
 
+
     def dropEvent(self, event):
         self.overlay.hide()
-        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+
+        supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx')
+        paths = [
+            url.toLocalFile() for url in event.mimeData().urls()
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(supported_exts)
+        ]
+
         if paths:
             self.sig_files_dropped.emit(paths)
+        else:
+            ToastManager().show("Unsupported file format.", "warning")
+
         event.acceptProposedAction()
 
 
@@ -912,9 +922,12 @@ class ChatWorker(QObject):
 
                             if "API Key" in tool_result or "error" in tool_result.lower() or "missing" in tool_result.lower():
                                 tool_result = (
-                                    f"[CRITICAL SYSTEM ALERT] The remote tool '{tool_name}' CRASHED and returned this error:\n"
-                                    f"\"{tool_result}\"\n"
-                                    f"INSTRUCTION TO AI: Do not assume the user pasted this. You must apologize to the user and explain that the remote ModelScope plugin failed."
+                                    f"[TOOL EXECUTION FAILED] The tool '{tool_name}' returned an error:\n"
+                                    f"\"{tool_result}\"\n\n"
+                                    f"INSTRUCTION TO AI:\n"
+                                    f"1. DO NOT claim the article, website, or data does not exist. It likely exists but access was blocked (e.g., paywalled, 403 Forbidden) or your input parameter was improperly formatted (e.g., 400 Bad Request).\n"
+                                    f"2. Explain to the user EXACTLY why the access failed (e.g., 'Cell Press actively blocks automated access', or 'The tool received an incorrectly formatted ID').\n"
+                                    f"3. Ask the user to provide the abstract text directly, or switch to other tools like search_academic_literature to correct the ID."
                                 )
 
                             rag_messages.append({
@@ -930,9 +943,11 @@ class ChatWorker(QObject):
             if tool_executed:
                 silence_prompt = (
                     "System Notification: Tool execution is complete. "
-                    "Please analyze the tool results and answer the user's original query. "
-                    "If the tool returned an error (such as 'API key missing', 'unauthorized', or 'failed'), "
-                    "DO NOT pretend the user said it. Explicitly tell the user that the remote tool plugin failed and quote the error message."
+                    "Please analyze the tool results and answer the user's original query.\n"
+                    "CRITICAL ANTI-HALLUCINATION RULE: If ANY tool returned an error (such as HTTP 403 Forbidden, 400 Bad Request, or connection failure), "
+                    "DO NOT pretend the requested target (like a paper, protein, or webpage) is fake or missing. "
+                    "Explicitly state that platform restrictions (like Elsevier/Cell Press paywalls) or API limitations prevented data retrieval, "
+                    "and provide your insights based on what you already know or retrieved successfully."
                 )
                 rag_messages.append({"role": "user", "content": silence_prompt})
                 self.sig_token.emit("[CLEAR_SEARCH]")
@@ -1220,10 +1235,10 @@ class ChatTool(BaseTool):
     def attach_from_local(self):
         """按钮点击触发的文件选择器"""
         paths, _ = QFileDialog.getOpenFileNames(
-            self.widget, "Select Document(s) or Image(s)", "",
-            "All Supported (*.pdf *.md *.txt *.csv *.py *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
-            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
-            "Documents (*.pdf *.md *.txt *.csv *.py)"
+            self.widget, "Select Document(s)", "",
+            #"All Supported (*.pdf *.md *.txt *.csv *.py *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+           # "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "Documents (*.pdf *.md *.txt *.csv *docx)"
         )
         if not paths: return
         self.process_attached_files(paths)
@@ -1235,11 +1250,19 @@ class ChatTool(BaseTool):
             self.external_context_html = ""
 
         file_infos = []
+        has_legacy_doc = False
+
         for item in items:
             if isinstance(item, str):
                 file_infos.append({"path": item, "name": os.path.basename(item)})
+                if item.lower().endswith('.doc'): has_legacy_doc = True
             elif isinstance(item, dict):
                 file_infos.append(item)
+                if item.get("name", "").lower().endswith('.doc'): has_legacy_doc = True
+
+        # 如果检测到 .doc，弹出 Toast 警告
+        if has_legacy_doc:
+            ToastManager().show("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx", "warning")
 
         # 防止用户重复狂点
         self.input_container.set_uploading(True)
@@ -2072,7 +2095,12 @@ class ChatTool(BaseTool):
 
         # 1. Handle clearing of status prompts via Regex
         if token == "[CLEAR_SEARCH]":
-            self.current_ai_text = re.sub(r'<i>.*?</i>(?:\n\n)?', '', self.current_ai_text, flags=re.DOTALL)
+            self.current_ai_text = re.sub(
+                r'(?:<br>\s*)*<i>(?:Translating|Loading|Filtering|\[Low VRAM|📡).*?</i>\s*(?:<br>\s*)*(?:\n)*',
+                '',
+                self.current_ai_text,
+                flags=re.DOTALL | re.IGNORECASE
+            )
             self.current_ai_text = self.current_ai_text.lstrip()
             self._is_rendering_dirty = True
             return
@@ -2376,13 +2404,16 @@ class ChatTool(BaseTool):
                     if self.pdf_viewer is None: self.pdf_viewer = InternalPDFViewer(None)
                     self.pdf_viewer.load_document(target_path, page_num, text_snippet, display_name=source_name)
                     ToastManager().show(f"Document opened.", "success")
-                elif ext in ['md', 'txt', 'csv', 'json', 'py']:
+
+                elif ext in ['md', 'txt', 'csv', 'json']:
                     if not hasattr(self, 'text_viewer') or self.text_viewer is None:
+                        from src.ui.components.pdf_viewer import InternalTextViewer
                         self.text_viewer = InternalTextViewer(None)
                     self.text_viewer.load_document(target_path, text_snippet, display_name=source_name)
                     ToastManager().show("Document snippet opened", "success")
+
                 else:
-                    # 对于图片或我们无法渲染的格式，降级交给操作系统处理
+                    # 对于图片或无法渲染的格式，降级交给操作系统处理
                     temp_dir = tempfile.gettempdir()
                     safe_name = source_name if source_name else "document.bin"
                     temp_file_path = os.path.join(temp_dir, f"scholar_navis_view_{safe_name}")

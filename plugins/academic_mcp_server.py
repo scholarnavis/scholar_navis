@@ -14,6 +14,7 @@ from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
 
 from src.core.config_manager import ConfigManager
+from src.core.email_check import verify_email_robust
 from src.core.network_worker import setup_global_network_env, create_robust_session
 from src.core.oa import OAFetcher
 
@@ -46,13 +47,17 @@ logger.addHandler(stderr_handler)
 ConfigManager()
 setup_global_network_env()
 
-ncbi_email = os.environ.get("NCBI_API_EMAIL", "scholar.navis.admin@example.com").strip()
+ncbi_email = os.environ.get("NCBI_API_EMAIL", "").strip()
 ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
 s2_api_key = os.environ.get("S2_API_KEY", "").strip()
+github_token = os.environ.get("GITHUB_TOKEN", "").strip()
 
-if ncbi_email: logger.info("Using NCBI Email: {}...".format(ncbi_email[0:5]))
-if ncbi_api_key: logger.info("Using NCBI API Key: {}...".format(ncbi_api_key[0:5]))
-if s2_api_key: logger.info("Using S2 API Key: {}...".format(s2_api_key[0:5]))
+
+if ncbi_email: logger.info("Using NCBI Email.")
+if ncbi_api_key: logger.info("Using NCBI API Key.")
+if s2_api_key: logger.info("Using S2 API Key.")
+if github_token: logger.info("Using GitHub Token.")
+
 
 WORKSPACE_DIR = os.path.join(APP_ROOT, "mcp_workspace", "downloads")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -68,6 +73,12 @@ if ncbi_api_key:
     Entrez.api_key = ncbi_api_key
 
 mcp = FastMCP("ScholarNavis-Academic-Plugin")
+
+
+def is_valid_ncbi_email(email: str) -> bool:
+    if not email or "example.com" in email.lower() or "university.edu" in email.lower():
+        return False
+    return bool(re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email))
 
 
 def mcp_request(method: str, url: str, **kwargs):
@@ -172,7 +183,7 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
             except Exception as e:
                 logger.warning(f"Crossref search failed: {e}")
 
-        if ncbi_email and source in ["auto", "pubmed"]:
+        if verify_email_robust(ncbi_email) and source in ["auto", "pubmed"]:
             search_handle = Entrez.esearch(db="pubmed", term=query, retstart=offset, retmax=max_results)
             ids = Entrez.read(search_handle).get("IdList", [])
             search_handle.close()
@@ -184,6 +195,7 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
                 summary_handle.close()
                 parsed = [{"title": d.get("Title", ""), "year": d.get("PubDate", "")[:4],
                            "authors": list(d.get("AuthorList", [])), "abstract": "Fetch via fetch_pubmed_abstract.",
+                           "pmid": d.get("Id", ""),
                            "doi": next(
                                (a.get("Value", "") for a in d.get("ArticleIds", []) if a.get("IdType") == "doi"), ""),
                            "url": f"https://pubmed.ncbi.nlm.nih.gov/{d.get('Id', '')}/", "source_db": "PubMed"} for d in
@@ -209,7 +221,7 @@ def traverse_citation_graph(doi: str, direction: str = "references", max_results
     logger.info(f"Task: Citation Graph | DOI: {doi} | Direction: {direction}")
     if direction not in ["references", "citations"]: return json.dumps(
         {"status": "error", "message": "direction must be 'references' or 'citations'"})
-    clean_doi = doi.replace("https://doi.org/", "").strip()
+    clean_doi = re.sub(r'^(https?://(dx\.)?doi\.org/)?', '', doi.strip())
 
     if s2_api_key:
         try:
@@ -279,6 +291,12 @@ def fetch_open_access_pdf(doi: str) -> str:
 @simple_retry()
 def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5) -> str:
     logger.info(f"Task: Omics Dataset Search | DB: {db_type} | Query: '{query}'")
+
+    if not verify_email_robust(ncbi_email):
+        return json.dumps({"status": "error",
+                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
+
+
     try:
         db = "gds" if db_type.lower() == "geo" else "sra"
         search_handle = Entrez.esearch(db=db, term=query, retmax=max_results)
@@ -322,6 +340,12 @@ def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5
 @simple_retry()
 def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
     logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
+
+    if not verify_email_robust(ncbi_email):
+        return json.dumps({"status": "error",
+                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
+
+
     safe_id = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', accession_id)
     safe_db = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', db_type)
     try:
@@ -351,6 +375,12 @@ def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
 @simple_retry()
 def fetch_taxonomy_info(organism_name: str) -> str:
     logger.info(f"Task: Taxonomy Fetch | Organism: '{organism_name}'")
+
+    if not verify_email_robust(ncbi_email):
+        return json.dumps({"status": "error",
+                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
+
+
     try:
         search_handle = Entrez.esearch(db="taxonomy", term=organism_name, retmax=1)
         ids = Entrez.read(search_handle).get("IdList", [])
@@ -376,11 +406,30 @@ def fetch_taxonomy_info(organism_name: str) -> str:
 @simple_retry()
 def fetch_pubmed_abstract(pmid: str) -> str:
     logger.info(f"Task: Fetch Abstract | PMID: {pmid}")
+
+    if not verify_email_robust(ncbi_email):
+        return json.dumps({"status": "error",
+                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
+
+
+
+    clean_pmid = str(pmid).strip()
+    if clean_pmid.lower().startswith("pmid:"):
+        clean_pmid = clean_pmid[5:].strip()
+    elif clean_pmid.lower().startswith("pmid"):
+        clean_pmid = clean_pmid[4:].strip()
+
+    if not clean_pmid.isdigit():
+        return json.dumps({
+            "status": "error",
+            "message": f"Invalid PMID: '{pmid}'. Must be a purely numeric PubMed ID (e.g., '31234567'). If you only have a DOI or title, use search_academic_literature first to find the correct PMID."
+        })
+
     try:
-        handle = Entrez.efetch(db="pubmed", id=pmid, rettype="abstract", retmode="text")
+        handle = Entrez.efetch(db="pubmed", id=clean_pmid, rettype="abstract", retmode="text")
         abstract_text = handle.read()
         handle.close()
-        return json.dumps({"status": "success", "pmid": pmid, "abstract": abstract_text.strip()})
+        return json.dumps({"status": "success", "pmid": clean_pmid, "abstract": abstract_text.strip()})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
@@ -393,6 +442,13 @@ def fetch_pubmed_abstract(pmid: str) -> str:
 @simple_retry()
 def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> str:
     logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query}")
+
+
+    if not verify_email_robust(ncbi_email):
+        return json.dumps({"status": "error",
+                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
+
+
     try:
         search_handle = Entrez.esearch(db=database, term=query, retmax=max_results)
         ids = Entrez.read(search_handle).get("IdList", [])
@@ -446,7 +502,12 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
         if len(text_content) > 30000: text_content = text_content[:30000] + "\n...[Content truncated]"
         return json.dumps({"status": "success", "url": url, "content": text_content}, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        err_str = str(e)
+        if "403" in err_str or "Forbidden" in err_str:
+            err_str += " (Access Denied: The website actively blocks automated access or requires a subscription/captcha.)"
+        elif "404" in err_str or "Not Found" in err_str:
+            err_str += " (Not Found: The page does not exist.)"
+        return json.dumps({"status": "error", "message": err_str})
 
 
 @mcp.tool(
@@ -869,11 +930,21 @@ def query_pdb_structure(query: str, action: str = "search", max_results: int = 3
                                         "ncbi_scientific_name", "Unknown")})
             return json.dumps({"status": "success", "action": "search", "results": results})
 
+
         elif action == "details":
+
             url = f"https://data.rcsb.org/rest/v1/core/entry/{query.upper()}"
+
             res = mcp_request("GET", url, timeout=15)
+
+            if res.status_code == 404:
+                return json.dumps(
+                    {"status": "error", "message": f"PDB ID '{query.upper()}' not found. Please verify the ID."})
+
             res.raise_for_status()
+
             data = res.json()
+
             entry_info = data.get("rcsb_entry_info", {})
             citation_data = data.get("citation", [{}])[0]
             exptl_data = data.get("exptl", [{}])[0]

@@ -3,6 +3,8 @@ import platform
 import subprocess
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
+import chardet
+
 
 # 找个时间把他去了
 class FileService:
@@ -52,3 +54,37 @@ class FileService:
             subprocess.Popen(['open', '-R', path])
         else:
             subprocess.Popen(['xdg-open', folder])
+
+    @staticmethod
+    def read_file_content(path: str) -> str:
+        """
+        通用文件读取逻辑，支持 .docx 和普通文本文件。
+        """
+        if not os.path.exists(path):
+            return ""
+
+        ext = path.lower()
+
+        # 处理 DOCX
+        if ext.endswith('.docx'):
+            try:
+                import docx
+                doc = docx.Document(path)
+                return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            except Exception as e:
+                print(f"Error reading DOCX: {e}")
+                return ""
+
+        elif ext.endswith('.doc'):
+            return ""
+
+        else:
+            try:
+                with open(path, 'rb') as f:
+                    raw_data = f.read()
+                    detected = chardet.detect(raw_data)
+                    encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
+                    return raw_data.decode(encoding, errors='replace').strip()
+            except Exception as e:
+                print(f"Error reading text file: {e}")
+                return ""

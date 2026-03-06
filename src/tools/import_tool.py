@@ -343,8 +343,10 @@ class ImportTool(BaseTool):
             tm = ThemeManager()
             success_color = QColor(tm.color('success'))
             warning_color = QColor(tm.color('warning'))
+            danger_color = QColor(tm.color('danger'))
             text_color = QColor(tm.color('text_main'))
 
+            # 1. 渲染已经存在于知识库中的文件
             for f in files:
                 name = f['name']
                 if name in self.staged_del: continue
@@ -375,6 +377,7 @@ class ImportTool(BaseTool):
                 self.file_table.setItem(row, 1, item_size)
                 self.file_table.setItem(row, 2, item_status)
 
+            # 2. 渲染即将导入（Staged Add）的文件
             for f_path in self.staged_add:
                 row = self.file_table.rowCount()
                 self.file_table.insertRow(row)
@@ -382,11 +385,16 @@ class ImportTool(BaseTool):
                 item_name = QTableWidgetItem(os.path.basename(f_path))
                 item_size = QTableWidgetItem("-")
 
-                item_status = QTableWidgetItem(tm.icon("clock", "warning"), "Pending Save")
-
-                item_name.setForeground(success_color)
-                item_size.setForeground(success_color)
-                item_status.setForeground(success_color)
+                if f_path.lower().endswith('.doc'):
+                    item_status = QTableWidgetItem(tm.icon("alert", "danger"), "Unsupported (.docx required)")
+                    item_name.setForeground(danger_color)
+                    item_size.setForeground(danger_color)
+                    item_status.setForeground(danger_color)
+                else:
+                    item_status = QTableWidgetItem(tm.icon("clock", "warning"), "Pending Save")
+                    item_name.setForeground(success_color)
+                    item_size.setForeground(success_color)
+                    item_status.setForeground(success_color)
 
                 self.file_table.setItem(row, 0, item_name)
                 self.file_table.setItem(row, 1, item_size)
@@ -789,8 +797,12 @@ class ImportTool(BaseTool):
 
     def select_files(self):
         # 允许选择 PDF 和 Markdown
-        files, _ = QFileDialog.getOpenFileNames(self.widget, "Select Documents", "", "Documents (*.pdf *.md *.txt)")
+        files, _ = QFileDialog.getOpenFileNames(self.widget, "Select Documents", "", "Documents (*.pdf *.md *.txt *.doc *.docx)")
         if not files: return
+
+        if any(f.lower().endswith('.doc') for f in files):
+            from src.ui.components.toast import ToastManager
+            ToastManager().show("Legacy .doc format detected. It will be skipped. Please convert to .docx", "warning")
 
         # 阈值警告
         if len(files) > 100:
@@ -1066,7 +1078,6 @@ class ImportTool(BaseTool):
 
                     try:
                         shutil.copy2(source_path, temp_file_path)
-                        # 使用你原有的 FileService 打开带后缀的临时文件
                         FileService.open_file(temp_file_path)
                     except Exception as e:
                         StandardDialog(self.widget, "Error", f"Failed to open file: {e}").exec()

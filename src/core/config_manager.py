@@ -165,7 +165,8 @@ class ConfigManager:
             "is_first_run": True,
             "ncbi_email": "",
             "ncbi_api_key": "",
-            "s2_api_key": ""
+            "s2_api_key": "",
+            "github_token": ""
         }
 
         current_settings = self.load_json(self.SETTINGS_PATH, encrypt=True)
@@ -230,6 +231,7 @@ class ConfigManager:
         os.environ["NCBI_API_EMAIL"] = self.user_settings.get("ncbi_email", "")
         os.environ["NCBI_API_KEY"] = self.user_settings.get("ncbi_api_key", "")
         os.environ["S2_API_KEY"] = self.user_settings.get("s2_api_key", "")
+        os.environ["GITHUB_TOKEN"] = self.user_settings.get("github_token", "")
 
     def toggle_mcp_tag(self, tag: str, is_checked: bool):
         tags = self.mcp_servers.get("deselected_mcp_tags", [])
