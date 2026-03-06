@@ -1,6 +1,6 @@
 
 
-![构架图](https://images.scholarnavis.com/architecture-min.png)
+![构架图](./docs/architecture.png)
 
 ## 一、 系统执行摘要
 
