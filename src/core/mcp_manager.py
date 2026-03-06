@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import threading
 import sys
 import os
 import time
+import secrets
 from contextlib import AsyncExitStack
 
 import anyio
@@ -23,6 +25,31 @@ from src.core.signals import GlobalSignals
 logger = logging.getLogger("MCP.Manager")
 
 
+class MCPLogReceiverProtocol(asyncio.DatagramProtocol):
+    def datagram_received(self, data, addr):
+        try:
+            log_data = json.loads(data.decode('utf-8'))
+            level = log_data.get("level", "INFO")
+            msg = log_data.get("msg", "")
+            server = log_data.get("server", "MCP")
+
+            main_logger = logging.getLogger("MCP.Manager")
+            log_str = f"[{server} Remote] {msg}"
+
+            if level == "DEBUG":
+                main_logger.debug(log_str)
+            elif level == "INFO":
+                main_logger.info(log_str)
+            elif level == "WARNING":
+                main_logger.warning(log_str)
+            elif level == "ERROR":
+                main_logger.error(log_str)
+            elif level == "CRITICAL":
+                main_logger.critical(log_str)
+        except Exception:
+            pass
+
+
 class MCPManager:
     _instance = None
     TOOL_TIMEOUT = 30.0
@@ -40,15 +67,32 @@ class MCPManager:
         self.server_status: Dict[str, str] = {}
         self.server_tasks: Dict[str, object] = {}
         self.server_stops: Dict[str, asyncio.Event] = {}
+        self._port_ready = threading.Event()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._start_loop, daemon=True)
         self._thread.start()
+        self._port_ready.wait(timeout=3.0)
 
     def _start_loop(self):
         asyncio.set_event_loop(self._loop)
+
+        try:
+            # 绑定 UDP 端口
+            coro = self._loop.create_datagram_endpoint(
+                lambda: MCPLogReceiverProtocol(),
+                local_addr=('127.0.0.1', 0)
+            )
+            transport, protocol = self._loop.run_until_complete(coro)
+            self.log_port = transport.get_extra_info('sockname')[1]
+            logger.info(f"MCP UDP Log Receiver started securely on dynamic port: {self.log_port}")
+        except Exception as e:
+            logger.error(f"Failed to start UDP receiver: {e}")
+        finally:
+            self._port_ready.set()
+
         self._loop.run_forever()
 
-    def bootstrap_servers(self, force_all=True):  # <-- 增加 force_all 参数，以防强制重启一切
+    def bootstrap_servers(self, force_all=True):
         config_mgr = ConfigManager()
         servers = config_mgr.mcp_servers.get("mcpServers", {})
         user_cfg = config_mgr.user_settings
@@ -67,6 +111,9 @@ class MCPManager:
         if user_cfg.get("ncbi_email"): builtin_env["NCBI_API_EMAIL"] = user_cfg.get("ncbi_email")
         if user_cfg.get("ncbi_api_key"): builtin_env["NCBI_API_KEY"] = user_cfg.get("ncbi_api_key")
         if user_cfg.get("s2_api_key"): builtin_env["S2_API_KEY"] = user_cfg.get("s2_api_key")
+        if hasattr(self, 'log_port'):
+            builtin_env["MCP_LOG_PORT"] = str(self.log_port)
+            safe_base_env["MCP_LOG_PORT"] = str(self.log_port)
 
         delay_ms = 500
 

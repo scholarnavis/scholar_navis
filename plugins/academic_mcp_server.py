@@ -8,7 +8,6 @@ import sys
 import urllib.parse
 import time
 from functools import wraps
-from logging.handlers import RotatingFileHandler
 
 from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
@@ -27,22 +26,47 @@ def get_app_root():
 
 APP_ROOT = get_app_root()
 
+
+class UdpJsonHandler(logging.Handler):
+    def __init__(self, server_name="Academic.MCP", host='127.0.0.1'):
+        super().__init__()
+        self.server_name = server_name
+        port_str = os.environ.get("MCP_LOG_PORT")
+        self.port = int(port_str) if port_str and port_str.isdigit() else None
+
+        if self.port:
+            self.address = (host, self.port)
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        else:
+            self.sock = None
+
+    def emit(self, record):
+        if not self.sock: return
+        try:
+            raw_msg = self.format(record)
+
+            if len(raw_msg) > 50000:
+                raw_msg = raw_msg[:50000] + "\n...[Log Truncated due to UDP size limit]"
+
+            log_data = {
+                "server": self.server_name,
+                "level": record.levelname,
+                "msg": raw_msg
+            }
+            self.sock.sendto(json.dumps(log_data).encode('utf-8'), self.address)
+        except Exception:
+            pass
+
+
+udp_handler = UdpJsonHandler()
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(udp_handler)
+
 logger = logging.getLogger("Academic.Server")
-logger.setLevel(logging.INFO)
-
-log_dir = os.path.join(APP_ROOT, "logs", "mcp", "academic")
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, "academic_mcp.log")
-
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8')
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
-
 stderr_handler = logging.StreamHandler(sys.stderr)
-stderr_handler.setFormatter(formatter)
-logger.addHandler(stderr_handler)
+root_logger.addHandler(stderr_handler)
 
 ConfigManager()
 setup_global_network_env()
@@ -52,6 +76,19 @@ ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
 s2_api_key = os.environ.get("S2_API_KEY", "").strip()
 github_token = os.environ.get("GITHUB_TOKEN", "").strip()
 
+_EMAIL_VALID_CACHE = None
+def is_ncbi_email_valid():
+    global _EMAIL_VALID_CACHE
+    if _EMAIL_VALID_CACHE is None:
+        if ncbi_email:
+            _EMAIL_VALID_CACHE = verify_email_robust(ncbi_email).get("is_valid", False)
+        else:
+            _EMAIL_VALID_CACHE = False
+
+    if _EMAIL_VALID_CACHE:logger.info(f"{ncbi_email[0:5]} valid")
+    else: logger.error(f"{ncbi_email[0:5]} invalid")
+
+    return _EMAIL_VALID_CACHE
 
 if ncbi_email: logger.info("Using NCBI Email.")
 if ncbi_api_key: logger.info("Using NCBI API Key.")
@@ -119,7 +156,7 @@ def simple_retry(max_attempts=3, delay=2):
 def search_academic_literature(query: str, max_results: int = 5, offset: int = 0, source: str = "auto") -> str:
     logger.info(f"Task: Unified Literature Search | Query: '{query}' | Offset: {offset} | Source: {source}")
 
-    if not verify_email_robust(ncbi_email).get("is_valid"):
+    if not is_ncbi_email_valid():
         logger.error("NCBI has been disabled due to the lack of available email addresses; other tools are still functioning normally.")
 
     try:
@@ -182,7 +219,7 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
             except Exception as e:
                 logger.warning(f"Crossref search failed: {e}")
 
-        if verify_email_robust(ncbi_email).get("is_valid") and source in ["auto", "pubmed"]:
+        if source in ["auto", "pubmed"]:
             search_handle = Entrez.esearch(db="pubmed", term=query, retstart=offset, retmax=max_results)
             ids = Entrez.read(search_handle).get("IdList", [])
             search_handle.close()
@@ -291,7 +328,7 @@ def fetch_open_access_pdf(doi: str) -> str:
 def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5) -> str:
     logger.info(f"Task: Omics Dataset Search | DB: {db_type} | Query: '{query}'")
 
-    if not verify_email_robust(ncbi_email).get("is_valid"):
+    if not is_ncbi_email_valid():
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -340,7 +377,7 @@ def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5
 def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
     logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
 
-    if not verify_email_robust(ncbi_email).get("is_valid"):
+    if not is_ncbi_email_valid():
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -375,7 +412,7 @@ def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
 def fetch_taxonomy_info(organism_name: str) -> str:
     logger.info(f"Task: Taxonomy Fetch | Organism: '{organism_name}'")
 
-    if not verify_email_robust(ncbi_email).get("is_valid"):
+    if not is_ncbi_email_valid():
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -406,7 +443,7 @@ def fetch_taxonomy_info(organism_name: str) -> str:
 def fetch_pubmed_abstract(pmid: str) -> str:
     logger.info(f"Task: Fetch Abstract | PMID: {pmid}")
 
-    if not verify_email_robust(ncbi_email).get("is_valid"):
+    if not is_ncbi_email_valid():
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -443,7 +480,7 @@ def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> s
     logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query}")
 
 
-    if not verify_email_robust(ncbi_email).get("is_valid"):
+    if not is_ncbi_email_valid():
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 

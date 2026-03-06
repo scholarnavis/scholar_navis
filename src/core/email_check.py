@@ -1,3 +1,4 @@
+import difflib
 import logging
 
 from email_validator import validate_email, EmailNotValidError
@@ -24,6 +25,12 @@ BLOCKED_TLDS = {
     "racing", "jetzt", "win", "bid", "trade", "date", "party",
     "review", "science", "cricket", "site", "online", "space", "fun"
 }
+
+POPULAR_DOMAINS = [
+    "gmail.com", "outlook.com", "yahoo.com", "hotmail.com",
+    "qq.com", "163.com", "126.com", "foxmail.com", "icloud.com"
+]
+
 
 def verify_email_robust(email: str, check_mx: bool = True, check_roles: bool = True) -> dict:
     """
@@ -71,16 +78,17 @@ def verify_email_robust(email: str, check_mx: bool = True, check_roles: bool = T
         return result
 
     # 4. 虚拟/一次性邮箱拦截
-    if domain_part in DISPOSABLE_BLOCKLIST:
-        result["error_type"] = "disposable_email"
-        result["error_msg"] = "The system refuses registration using temporary or disposable email addresses. Please use a regular email address."
+    tld = domain_part.split('.')[-1]
+    if tld in BLOCKED_TLDS:
+        result["error_type"] = "blocked_tld"
+        result["error_msg"] = f"Emails from the .{tld} top-level domain are not permitted."
         logger.error(result["error_msg"])
         return result
 
     # 5. 业务自定义黑名单拦截
-    if domain_part in CUSTOM_DOMAIN_BLOCKLIST:
-        result["error_type"] = "custom_blocked_domain"
-        result["error_msg"] = f"The email domain ({domain_part}) is on the restricted list of this system."
+    if domain_part in DISPOSABLE_BLOCKLIST:
+        result["error_type"] = "disposable_email"
+        result["error_msg"] = "The system refuses registration using temporary or disposable email addresses."
         logger.error(result["error_msg"])
         return result
 
@@ -90,6 +98,17 @@ def verify_email_robust(email: str, check_mx: bool = True, check_roles: bool = T
         result["error_msg"] = f"The email domain ({domain_part}) is on the restricted list of this system."
         logger.error(result["error_msg"])
         return result
+
+    # 7. 防手抖/高仿域名拦截
+    if domain_part not in POPULAR_DOMAINS:
+        similar_domains = difflib.get_close_matches(domain_part, POPULAR_DOMAINS, n=1, cutoff=0.8)
+        if similar_domains:
+            suggested_domain = similar_domains[0]
+            result["error_type"] = "typosquatting_suspected"
+            result[
+                "error_msg"] = f"Suspicious domain typo detected. Did you mean {suggested_domain} instead of {domain_part}?"
+            logger.error(result["error_msg"])
+            return result
 
     # 校验全部通过
     result["is_valid"] = True

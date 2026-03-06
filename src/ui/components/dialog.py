@@ -1489,7 +1489,10 @@ class LicenseDialog(BaseDialog):
             ("langdetect", "MIT", "Port of Google's language-detection library."),
             ("MCP", "MIT", "Model Context Protocol Python SDK."),
             ("OpenAI", "Apache 2.0", "OpenAI Python API library."),
-            ("Keyring", "MIT", "Store and access credentials safely.")
+            ("Keyring", "MIT", "Store and access credentials safely."),
+            ("python-docx", "MIT", "Create and update Microsoft Word .docx files."),
+            ("email-validator", "Unlicense", "Robust email syntax and deliverability validation."),
+            ("disposable-email-domains", "MIT", "List of disposable email domains."),
         ]
 
         self.licenses.sort(key=lambda item: item[0].lower())

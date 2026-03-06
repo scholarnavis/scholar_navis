@@ -58,6 +58,38 @@ class FloatingOverlayFilter(QObject):
         return super().eventFilter(obj, event)
 
 
+class EmailVerifyWorker(QObject):
+    sig_finished = Signal(bool, str)
+
+    def __init__(self, email):
+        super().__init__()
+        self.email = email
+
+    def run(self):
+        try:
+            if not self.email:
+                self.sig_finished.emit(True, "")
+                return
+
+            from src.core.email_check import verify_email_robust
+            res = verify_email_robust(self.email)
+
+            if not res.get("is_valid"):
+                detailed_error = res.get("error_msg", "Unknown email validation error.")
+
+                prompt_msg = (
+                    f"Email Validation Failed:\n"
+                    f"{detailed_error}\n\n"
+                    f"Please provide a valid email address or leave it completely empty (which will disable NCBI tools)."
+                )
+                self.sig_finished.emit(False, prompt_msg)
+            else:
+                self.sig_finished.emit(True, "")
+        except Exception as e:
+            self.sig_finished.emit(False, f"Email validation encountered a system error: {e}")
+
+
+
 class SettingsTool(BaseTool):
     def __init__(self):
         super().__init__("Global Settings")
@@ -1869,13 +1901,42 @@ class SettingsTool(BaseTool):
 
         new_email = self.input_ncbi_email.text().strip()
 
-        if new_email and not verify_email_robust(new_email).get("is_valid"):
+        self.save_pd = ProgressDialog(
+            self.widget, "Applying Settings",
+            "Validating settings and email address...",
+            telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
+        )
+        self.save_pd.pbar.setRange(0, 0)
+        self.save_pd.show()
+
+        self.email_thread = QThread()
+        self.email_worker = EmailVerifyWorker(new_email)
+        self.email_worker.moveToThread(self.email_thread)
+
+        self.save_pd.sig_canceled.connect(self.email_thread.quit)
+
+        self.email_thread.started.connect(self.email_worker.run)
+        self.email_worker.sig_finished.connect(self._on_email_verified)
+        self.email_worker.sig_finished.connect(self.email_thread.quit)
+        self.email_worker.sig_finished.connect(self.email_worker.deleteLater)
+        self.email_thread.finished.connect(self.email_thread.deleteLater)
+
+        self.email_thread.start()
+
+    def _on_email_verified(self, success, msg):
+        if not success:
+            if hasattr(self, 'save_pd'):
+                self.save_pd.close_safe()
             StandardDialog(
                 self.widget,
                 "Validation Error",
-                "Invalid Email format.\n\nPlease provide a structurally valid email address (e.g., name@domain.com) or leave it completely empty (which will disable NCBI tools)."
+                msg
             ).exec()
             return
+
+        self.save_pd.update_progress(-1, "Saving configurations...")
+
+        new_email = self.input_ncbi_email.text().strip()
 
         if hasattr(self, '_sync_llm_data'):
             self._sync_llm_data()
@@ -1953,12 +2014,7 @@ class SettingsTool(BaseTool):
 
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
-        self.save_pd = ProgressDialog(
-            self.widget, "Applying Settings",
-            "Initializing background tasks...",
-            telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
-        )
-        self.save_pd.show()
+        self.save_pd.update_progress(-1, "Initializing background tasks...")
 
         if hasattr(self, 'save_task_mgr') and self.save_task_mgr:
             self.save_task_mgr.cancel_task()
