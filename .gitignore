@@ -238,3 +238,6 @@ nuitka-crash-report.xml
 scholar_navis_win*
 scholar_navis_linux*
 scholar_navis_mac*
+
+scholar_navis.exe
+_internal
