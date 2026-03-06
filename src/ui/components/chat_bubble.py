@@ -116,6 +116,7 @@ class ChatBubbleWidget(QWidget):
         # 正文文本框
         self.lbl_text = QLabel()
         self.lbl_text.setWordWrap(True)
+        self.lbl_text.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.lbl_text.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.lbl_text.setOpenExternalLinks(False)
         self.lbl_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
@@ -374,9 +375,18 @@ class ChatBubbleWidget(QWidget):
             html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
 
             self.lbl_text.setText(html)
+            self.lbl_text.adjustSize()
+            self.content_container.adjustSize()
+            self.adjustSize()
+            self.updateGeometry()
+
         except Exception as e:
             self.lbl_text.setText(text)
 
+            self.lbl_text.adjustSize()
+            self.content_container.adjustSize()
+            self.adjustSize()
+            self.updateGeometry()
 
     def clean_up_images(self):
         for path in self.downloaded_images.values():

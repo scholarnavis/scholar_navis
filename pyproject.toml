@@ -27,18 +27,17 @@ dependencies = [
     "keyring>=25.7.0",
     "chardet>=7.0.0",
     "hf-xet>=1.2.0",
+    "optimum-onnx>=0.1.0",
     "onnxruntime-directml>=1.19.0 ; sys_platform == 'win32'",
     "onnxruntime-gpu>=1.19.0 ; sys_platform == 'linux'",
     "onnxruntime>=1.19.0 ; sys_platform == 'darwin'",
-    "optimum-onnx>=0.1.0",
 ]
 
 
 [dependency-groups]
 dev = [
-    "boto3>=1.42.60",
-    "nuitka>=4.0.2",
-    "python-dotenv>=1.2.1",
+    "boto3>=1.42.62",
+    "pyinstaller>=6.19.0",
 ]
 
 

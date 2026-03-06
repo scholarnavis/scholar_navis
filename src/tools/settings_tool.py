@@ -235,8 +235,6 @@ class SettingsTool(BaseTool):
         if hasattr(self, '_update_hardware_html'): self._update_hardware_html()
         if hasattr(self, '_update_ncbi_html'): self._update_ncbi_html()
         if hasattr(self, '_update_vram_html'): self._update_vram_html()
-
-        if hasattr(self, 'check_models_status'): self.check_models_status()
         if hasattr(self, '_refresh_mcp_status'): self._refresh_mcp_status()
 
         if hasattr(self, 'combo_proxy_mode'):
@@ -945,12 +943,14 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'test_dev_pd'):
             self.test_dev_pd.close_safe()
 
-        if result.get("success"):
-            StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
-        else:
-            ToastManager().show("Device Test Failed", "error")
-            StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
+        def _show_result():
+            if result.get("success"):
+                StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
+            else:
+                ToastManager().show("Device Test Failed", "error")
+                StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
 
+        QTimer.singleShot(150, _show_result)
 
 
 
@@ -1566,17 +1566,22 @@ class SettingsTool(BaseTool):
 
     def _on_models_fetched(self, result):
         self.net_pd.close_safe()
-        if result.get("success"):
-            models = result["models"]
-            self.logger.info(f"Successfully fetched {len(models)} models from API.")
-            idx = self.combo_llm_preset.currentIndex()
-            if 0 <= idx < len(self.llm_configs):
-                self.llm_configs[idx]["fetched_models"] = models
-                self._refresh_model_combo(self.llm_configs[idx])
-            StandardDialog(self.widget, "Success", result["msg"]).exec()
-        else:
-            self.logger.warning(f"Failed to fetch models: {result['msg']}")
-            ToastManager().show(f"Fetch Models Failed: {result['msg']}", "error")
+
+        def _show_result():
+            if result.get("success"):
+                models = result["models"]
+                self.logger.info(f"Successfully fetched {len(models)} models from API.")
+                idx = self.combo_llm_preset.currentIndex()
+                if 0 <= idx < len(self.llm_configs):
+                    self.llm_configs[idx]["fetched_models"] = models
+                    self._refresh_model_combo(self.llm_configs[idx])
+                StandardDialog(self.widget, "Success", result["msg"]).exec()
+            else:
+                self.logger.warning(f"Failed to fetch models: {result['msg']}")
+                ToastManager().show(f"Fetch Models Failed: {result['msg']}", "error")
+
+        QTimer.singleShot(150, _show_result)
+
 
     def _start_test_task(self):
         self._sync_llm_data()
@@ -1627,12 +1632,18 @@ class SettingsTool(BaseTool):
         )
 
     def _on_test_finished(self, result):
-        self.net_pd.close_safe()
-        if result.get("success"):
-            StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
-        else:
-            ToastManager().show(f"API Test Failed", "error")
-            StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
+        if hasattr(self, 'net_pd'):
+            self.net_pd.close_safe()
+
+        def _show_result():
+            if result.get("success"):
+                StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
+            else:
+                ToastManager().show(f"API Test Failed", "error")
+                StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
+
+        QTimer.singleShot(150, _show_result)
+
 
     def _add_llm_provider(self):
         new_id = f"custom_{int(time.time())}"
@@ -1882,7 +1893,6 @@ class SettingsTool(BaseTool):
         )
         self.save_pd.show()
 
-        QApplication.processEvents()
 
         if hasattr(self, 'save_task_mgr') and self.save_task_mgr:
             self.save_task_mgr.cancel_task()
@@ -1933,13 +1943,15 @@ class SettingsTool(BaseTool):
 
         QTimer.singleShot(100, _bootstrap_mcp_async)
 
+        def _show_success_dialog():
+            msg = "Settings saved successfully."
+            if result_dict and result_dict.get("to_download"):
+                msg += "\n\nNote: Some selected models are missing locally. Please click 'Download' next to the models to fetch and convert them."
 
-        msg = "Settings saved successfully."
-        if result_dict and result_dict.get("to_download"):
-            msg += "\n\nNote: Some selected models are missing locally. Please click 'Download' next to the models to fetch and convert them."
+            StandardDialog(self.widget, "Settings Saved", msg).exec()
+            self.check_models_status()
 
-        StandardDialog(self.widget, "Settings Saved", msg).exec()
-        self.check_models_status()
+        QTimer.singleShot(150, _show_success_dialog)
 
     def _get_active_llm_id(self):
         idx = self.combo_llm_preset.currentIndex()

@@ -213,22 +213,21 @@ class InternalPDFViewer(QMainWindow):
             print(f"Error opening PDF: {e}")
 
     def eventFilter(self, obj, event):
-        # 监听滚轮事件，实现触底/触顶翻页
         if obj == self.scroll_area.verticalScrollBar() and event.type() == QEvent.Wheel:
             bar = self.scroll_area.verticalScrollBar()
             delta = event.angleDelta().y()
 
             if delta < 0 and bar.value() >= bar.maximum():
-                self.next_page()
-                # 翻到下一页后，滚动条回顶部
-                bar.setValue(0)
-                return True
+                if self.doc and self.current_page < len(self.doc) - 1:
+                    self.next_page()
+                    bar.setValue(0)
+                    return True
             elif delta > 0 and bar.value() <= bar.minimum():
-                self.prev_page()
-                # 翻到上一页后，视觉习惯上滚动条应该在底部
-                QApplication.processEvents()
-                bar.setValue(bar.maximum())
-                return True
+                if self.doc and self.current_page > 0:
+                    self.prev_page()
+                    QApplication.processEvents()
+                    bar.setValue(bar.maximum())
+                    return True
         return super().eventFilter(obj, event)
 
     # --- 缩放与自适应功能 ---
@@ -299,7 +298,13 @@ class InternalPDFViewer(QMainWindow):
     # --- 翻页与渲染 ---
     def goto_page(self, page_num):
         if not self.doc: return
-        self.current_page = max(0, min(page_num, len(self.doc) - 1))
+
+        target_page = max(0, min(page_num, len(self.doc) - 1))
+
+        if target_page == self.current_page and self.lbl_page.pixmap() is not None:
+            return
+
+        self.current_page = target_page
         self.lbl_page.clear_selection()
         self.render_page()
         self.update_title()

@@ -118,7 +118,7 @@ class SplashScreen(QWidget):
 
         tm = ThemeManager()
 
-        icon_path = ThemeManager.get_resource_path("Assets", "ico.svg")
+        icon_path = ThemeManager.get_resource_path("Assets", "icon.ico")
         self.setWindowIcon(QIcon(icon_path))
 
         bg_color = tm.color("bg_main")

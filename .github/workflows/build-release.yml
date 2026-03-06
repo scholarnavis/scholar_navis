@@ -23,7 +23,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y patchelf gcc python3-dev build-essential
+          sudo apt-get install -y libxcb-cursor0  # PySide6 在 Ubuntu 上常缺少的依赖
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -34,17 +34,10 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12.11
 
-      - name: Setup Nuitka Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ runner.os == 'Windows' && '~/.local/share/nuitka' || '~/.cache/nuitka' }}
-          key: ${{ runner.os }}-nuitka-${{ hashFiles('**/uv.lock', 'build_app.py') }}
-          restore-keys: |
-            ${{ runner.os }}-nuitka-
-
       - name: Install Dependencies
-        run: uv sync
+        run: |
+          uv sync
+          uv pip install pyinstaller  # 确保 PyInstaller 安装在当前环境中
 
       - name: Build Application and Upload to R2
         env:
@@ -52,5 +45,4 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-          NUITKA_CACHE_DIR: ${{ runner.os == 'Windows' && '~/.local/share/nuitka' || '~/.cache/nuitka' }}
         run: uv run build_app.py

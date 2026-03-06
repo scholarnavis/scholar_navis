@@ -10,18 +10,15 @@ import os
 import re
 import shutil
 import tempfile
-import traceback
 from urllib.parse import urlparse, parse_qs, quote
 
 import markdown
-import pymupdf4llm
 import torch
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation, QMarginsF
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve
 from PySide6.QtGui import QDesktopServices, QCursor, QAction, QPdfWriter, QTextDocument, QPageSize
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
-                               QScrollArea, QFrame, QFileDialog, QMenu, QDialog,
-                               QAbstractItemView, QListWidget, QListWidgetItem, QDialogButtonBox, QCheckBox,
+                               QScrollArea, QFrame, QFileDialog, QMenu, QCheckBox,
                                QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication, QComboBox)
 from langdetect import detect
 
@@ -161,9 +158,6 @@ class AutoResizingTextEdit(QPlainTextEdit):
             super().keyPressEvent(event)
 
 
-
-
-
 class ChatInputContainer(QFrame):
     sig_send_clicked = Signal(str)
     sig_export_clicked = Signal()
@@ -257,18 +251,18 @@ class ChatInputContainer(QFrame):
 
         self.chk_mcp_enable.toggled.connect(self._on_mcp_enable_toggled)
         self.menu_mcp_guide = QMenu(self)
-        # 设置菜单
+
         prompts = [
-            "Search for the latest literature and abstracts regarding a specific research topic or gene.",
-            "Find the exact metadata and full-text Open Access PDF link for this article title or DOI.",
-            "Trace the citation graph (references and citations) to find related high-impact papers for this DOI.",
-            "Query the functional summary, length, and taxonomic info of a specific gene or protein.",
-            "Find 3D protein structures and experimental resolution details in the RCSB PDB.",
-            "Search for public omics datasets (GEO/SRA) related to specific experimental treatments or phenotypes.",
-            "Fetch the exact sequence in FASTA format for a given nucleotide or protein accession.",
-            "Retrieve plant-specific genomic data, orthologs, or gene families from Phytozome.",
-            "Get the exact scientific name, TaxID, and evolutionary lineage for a specific organism.",
-            "Explain a complex biological mechanism and draw a Mermaid relationship map."
+            "Search for the latest academic literature, preprints, and abstracts regarding a specific research topic.",
+            "Find the exact metadata and full-text Open Access PDF link for a specific article or DOI.",
+            "Trace the citation graph (references and citations) to find related literature for this DOI.",
+            "Query comprehensive functional annotations, sequences, and ID mappings for a specific gene or protein.",
+            "Retrieve protein-protein interaction networks and perform functional enrichment analysis for a set of targets.",
+            "Find 3D protein structures and detailed experimental metadata in the RCSB PDB.",
+            "Search for chemical properties, molecular weights, and drug targets for a specific compound.",
+            "Search for public omics datasets (GEO/SRA) related to specific experimental treatments.",
+            "Search GitHub for open-source repositories, software pipelines, or code related to this analysis.",
+            "Read and summarize the text content of a specific webpage or Wikipedia article."
         ]
 
         for p in prompts:
@@ -340,7 +334,6 @@ class ChatInputContainer(QFrame):
         self.setStyleSheet(
             f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
 
-
         self.text_edit.setStyleSheet(f"""
             QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; font-family: {tm.font_family()}; }}
             QScrollBar:vertical {{ background: transparent; width: 6px; }}
@@ -394,7 +387,6 @@ class ChatInputContainer(QFrame):
                     QPushButton:hover {{ background-color: rgba(255, 107, 107, 0.8); }}
                 """)
 
-
         menu_style = f"""
             QMenu {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
             QMenu::item {{ padding: 6px 12px; margin: 2px 0px; color: {tm.color('text_main')}; border-radius: 4px; }}
@@ -406,13 +398,13 @@ class ChatInputContainer(QFrame):
         if hasattr(self, 'menu_mcp_guide'):
             self.menu_mcp_guide.setStyleSheet(menu_style)
 
-
     def set_uploading(self, is_uploading: bool):
         self.btn_send.setEnabled(not is_uploading)
         self.btn_attach.setEnabled(not is_uploading)
         if is_uploading:
             self.btn_send.setToolTip("Please wait for file upload to complete...")
-            self.btn_send.setStyleSheet(self.btn_send.styleSheet() + "QPushButton:disabled { background-color: #555; color: #888; }")
+            self.btn_send.setStyleSheet(
+                self.btn_send.styleSheet() + "QPushButton:disabled { background-color: #555; color: #888; }")
         else:
             self.btn_send.setToolTip("")
 
@@ -517,13 +509,11 @@ class ChatInputContainer(QFrame):
         except:
             return []
 
-
     def _emit_send(self):
         if not self.btn_send.isEnabled():
             return
         text = self.text_edit.toPlainText().strip()
         if text: self.sig_send_clicked.emit(text)
-
 
     def clear_text(self):
         self.text_edit.clear()
@@ -574,7 +564,6 @@ class ChatWorker(QObject):
         self.use_mcp = use_mcp
         self.db = DatabaseManager()
         self.kb_manager = KBManager()
-        self.reranker = RerankEngine()
         self.full_response_cache = ""
 
         # 实例长连接缓存
@@ -596,7 +585,6 @@ class ChatWorker(QObject):
 
         if self.requires_translation and self.trans_config and not self.trans_llm:
             self.trans_llm = OpenAICompatibleLLM(self.trans_config)
-
 
     def run(self):
         try:
@@ -692,8 +680,11 @@ class ChatWorker(QObject):
                     if candidate_docs:
                         candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
                         final_docs = self._process_rerank(search_query, candidate_docs, domain, 10)
+                        if final_docs is None:
+                            final_docs = candidate_docs[:10]
 
                         current_ref_id = 1
+
                         for doc in final_docs:
                             sources_map[current_ref_id] = {
                                 "path": doc['metadata'].get('file_path', ''),
@@ -725,7 +716,11 @@ class ChatWorker(QObject):
                               "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
 
                 if len(cand_docs) > 5:
-                    cand_docs = self._process_rerank(search_query, cand_docs, "General", 8)
+                    reranked_docs = self._process_rerank(search_query, cand_docs, "General", 8)
+                    if reranked_docs is not None:
+                        cand_docs = reranked_docs
+                    else:
+                        cand_docs = cand_docs[:8]
 
                 files_dict = {}
                 for doc in cand_docs:
@@ -734,7 +729,6 @@ class ChatWorker(QObject):
                     if f_name not in files_dict:
                         files_dict[f_name] = ""
                     files_dict[f_name] += f"\n[Page {page}]\n{doc['content']}"
-
 
                 docs_json = json.dumps(files_dict, ensure_ascii=False)
                 llm_content.append({"type": "text", "text": f"User Uploaded Files (JSON Format):\n{docs_json}\n\n"})
@@ -763,8 +757,6 @@ class ChatWorker(QObject):
             is_low_vram = self.config.user_settings.get("low_vram_mode", False)
             if is_low_vram:
                 self.sig_token.emit("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
-                if hasattr(self, 'reranker') and getattr(self.reranker, 'model', None) is not None:
-                    self.reranker.model = None
                 if hasattr(self, 'db') and self.db:
                     self.db.reload()
 
@@ -808,8 +800,12 @@ class ChatWorker(QObject):
                 "4. If graphics need to be created, use mermaid uniformly.\n\n"
 
                 "### RESPONSE GUIDELINES:\n"
-                "1.GROUNDING (CRITICAL RULE): You MUST append inline citations (e.g., [1], [2]) at the end of every sentence that uses information from the Context. NEVER claim facts without appending the corresponding document number. Failure to cite will result in penalties.\n\n"
-
+                "### GROUNDING RULE (CRITICAL):\n"
+                "1. For Local Documents: Use [1], [2] based on the Context section.\n"
+                "2. For Tool Results: If a result contains an '_mcp_cite_id', you MUST use that ID (e.g., [101]) to cite it.\n"
+                "NEVER claim facts without appending the corresponding bracketed number. This allows users to trace back to the exact webpage or paper.\n\n"
+                
+                
                 "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
                 "At the very end of your response, you MUST output the exact string [FOLLOW_UPS] followed by exactly 6 follow-up questions using this EXACT format:\n"
                 "[FOLLOW_UPS]\n"
@@ -842,7 +838,6 @@ class ChatWorker(QObject):
                             tools=mcp_tools,
                             tool_choice="auto"
                         )
-
 
                         if isinstance(response_msg, dict):
                             tool_calls = response_msg.get('tool_calls')
@@ -878,12 +873,34 @@ class ChatWorker(QObject):
                             tool_name = tool_call['function']['name']
                             try:
                                 raw_args = tool_call['function']['arguments']
-                                # 兼容不同 SDK: 有些返回 string，有些已经 load 成了 dict
                                 tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
 
-                                # 添加交互动画提示
                                 self.sig_token.emit(f"<br><i>📡 Requesting remote tool: <b>{tool_name}</b>...</i><br>")
                                 tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
+
+                                try:
+                                    res_data = json.loads(tool_result)
+                                    if isinstance(res_data, dict) and "results" in res_data:
+                                        for item in res_data["results"]:
+
+                                            source_url = item.get("url") or item.get("pdf_url") or item.get(
+                                                "landing_page_url")
+                                            source_title = item.get("title") or item.get(
+                                                "name") or f"Result from {tool_name}"
+
+                                            if source_url:
+                                                mcp_ref_id = len(sources_map) + 101
+                                                sources_map[mcp_ref_id] = {
+                                                    "path": source_url,  # 对于 Web，这里存 URL
+                                                    "page": 1,
+                                                    "name": f"[Online] {source_title}",
+                                                    "search_text": item.get("abstract", "")[:100]
+                                                }
+                                                item["_mcp_cite_id"] = mcp_ref_id
+
+                                        tool_result = json.dumps(res_data, ensure_ascii=False)
+                                except:
+                                    pass
 
                             except Exception as e:
                                 self.logger.error(f"MCP tool {tool_name} failed: {e}")
@@ -899,7 +916,6 @@ class ChatWorker(QObject):
                                     f"\"{tool_result}\"\n"
                                     f"INSTRUCTION TO AI: Do not assume the user pasted this. You must apologize to the user and explain that the remote ModelScope plugin failed."
                                 )
-
 
                             rag_messages.append({
                                 "role": "tool",
@@ -963,18 +979,6 @@ class ChatWorker(QObject):
             return raw_mcp_tools
 
         try:
-            self.reranker.load_model()
-        except Exception as e:
-            self.logger.warning(
-                f"Failed to load Reranker model for tool selection: {e}. Silently degrading to use all tools.")
-            return raw_mcp_tools
-
-        if not getattr(self.reranker, 'model', None):
-            self.logger.warning(
-                "Reranker model is not installed or unavailable. Silently degrading to use all selected tools.")
-            return raw_mcp_tools
-
-        try:
             candidate_docs = []
             for tool in raw_mcp_tools:
                 func = tool.get("function", {})
@@ -984,23 +988,35 @@ class ChatWorker(QObject):
                     "metadata": {"tool_schema": tool}
                 })
 
-            ranked_docs = self.reranker.rerank(user_query, candidate_docs, domain="Tool Selection", top_k=top_k)
+            rerank_model_id = getattr(self, 'config', ConfigManager()).user_settings.get("rerank_model_id",
+                                                                                         "rerank_auto")
+            self.logger.info(
+                f"Invoking Reranker model [{rerank_model_id}] to evaluate and filter {len(raw_mcp_tools)} MCP tools...")
+
+            ranked_docs = self._process_rerank(user_query, candidate_docs, domain="Tool Selection", top_k=top_k,
+                                               emit_warning=False)
+
+            if ranked_docs is None:
+                self.logger.warning("Tool reranking failed or process terminated. Silently degrading to use all tools.")
+                return raw_mcp_tools
 
             best_tools = [doc["metadata"]["tool_schema"] for doc in ranked_docs]
 
-            web_tool = next((t for t in raw_mcp_tools if t.get("function", {}).get("name") == "search_web"), None)
-            if web_tool and web_tool not in best_tools:
-                best_tools.append(web_tool)
+            # 提取出排名前几的工具名称并在日志中展示
+            top_tool_names = [t.get("function", {}).get("name", "Unknown") for t in best_tools]
+            self.logger.info(f"Reranker successfully selected top tools for this query: {', '.join(top_tool_names)}")
 
-            self.logger.info(f"RAG successfully routed {len(best_tools)} tools out of {len(raw_mcp_tools)}.")
+            self.logger.info(
+                f"Reranker filtering complete: Routed {len(best_tools)} tools out of {len(raw_mcp_tools)}.")
             return best_tools
 
         except Exception as e:
             self.logger.warning(f"Exception during tool reranking: {e}. Silently degrading to use all selected tools.")
             return raw_mcp_tools
 
-    def _process_rerank(self, query, docs, domain, top_k):
-        if not docs: return []
+
+    def _process_rerank(self, query, docs, domain, top_k, emit_warning=True):
+        if not docs: return[]
 
         import multiprocessing as mp
         import queue as q
@@ -1014,7 +1030,7 @@ class ChatWorker(QObject):
         )
         worker.start()
 
-        ranked = docs[:top_k]
+        ranked = None
         while True:
             if getattr(self, '_is_cancelled', False):
                 worker.terminate()
@@ -1024,41 +1040,43 @@ class ChatWorker(QObject):
                 state = data.get("state")
 
                 if state == TaskState.SUCCESS.value:
-                    if data.get("payload"): ranked = data["payload"]
+                    if data.get("payload"):
+                        ranked = data["payload"]
+                    else:
+                        ranked = docs[:top_k]
                     break
                 elif state == TaskState.FAILED.value:
                     error_msg = data.get('msg', 'Unknown execution error')
                     self.logger.error(f"Rerank process failed: {error_msg}")
 
-                    warning_html = (
-                        f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
-                        f"⚠️ <b>Reranker Processing Skipped</b><br><br>"
-                        f"Failed to rerank documents: <i>{error_msg}</i>.<br>"
-                        f"If the model is missing, please go to <b>[Global Settings] -> [Models]</b> to manually download a Reranker model.<br><br>"
-                        f"<i>* Continuing analysis with default document ordering.</i>"
-                        f"</div><br>"
-                    )
-                    self.sig_token.emit(warning_html)
+                    if emit_warning:
+                        warning_html = (
+                            f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
+                            f"⚠️ <b>Reranker Processing Skipped</b><br><br>"
+                            f"Failed to rerank documents: <i>{error_msg}</i>.<br>"
+                            f"If the model is missing, please go to <b>[Global Settings] -> [Models]</b> to manually download a Reranker model.<br><br>"
+                            f"<i>* Continuing analysis with default document ordering.</i>"
+                            f"</div><br>"
+                        )
+                        self.sig_token.emit(warning_html)
                     break
             except q.Empty:
                 if not worker.is_alive():
                     self.logger.error("Rerank process died unexpectedly.")
-                    self.sig_token.emit(
-                        f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
-                        f"⚠️ <b>Reranker Process Terminated</b><br><br>"
-                        f"The background reranking process terminated unexpectedly. This is often caused by missing models or insufficient memory.<br><br>"
-                        f"<i>* Continuing analysis with default document ordering.</i>"
-                        f"</div><br>"
-                    )
+                    if emit_warning:
+                        self.sig_token.emit(
+                            f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
+                            f"⚠️ <b>Reranker Process Terminated</b><br><br>"
+                            f"The background reranking process terminated unexpectedly. This is often caused by missing models or insufficient memory.<br><br>"
+                            f"<i>* Continuing analysis with default document ordering.</i>"
+                            f"</div><br>"
+                        )
                     break
             except Exception:
                 if not worker.is_alive():
                     break
 
         return ranked
-
-
-
 
 
 class ChatTool(BaseTool):
@@ -1075,7 +1093,6 @@ class ChatTool(BaseTool):
         self.user_toggled_thinks = set()
         self.external_context_buffer = ""
         self.external_context_html = ""
-
 
         GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
         GlobalSignals().kb_switched.connect(self.on_global_kb_switched)
@@ -1110,7 +1127,6 @@ class ChatTool(BaseTool):
                                                   model_key="chat_model_name")
         row1_layout.addWidget(self.model_selector, 1)
 
-
         row2_layout = QHBoxLayout()
         self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
                                                   model_key="chat_trans_model_name")
@@ -1123,7 +1139,6 @@ class ChatTool(BaseTool):
         row2_layout.addSpacing(15)
         row2_layout.addWidget(lbl_kb)
         row2_layout.addWidget(self.combo_kb, 1)
-
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
@@ -1143,7 +1158,6 @@ class ChatTool(BaseTool):
         self.chat_layout.setSpacing(12)
         self.chat_layout.setContentsMargins(10, 10, 10, 0)
         self.chat_layout.setAlignment(Qt.AlignTop)
-
 
         self.scroll_area.setWidget(self.chat_container)
         main_layout.addWidget(self.scroll_area, stretch=1)
@@ -1168,7 +1182,10 @@ class ChatTool(BaseTool):
         self.btn_scroll_bottom.setVisible(False)
         self.fade_anim = QPropertyAnimation(self.opacity_effect, b"opacity")
         self.fade_anim.setDuration(250)
-        self.btn_scroll_bottom.clicked.connect(self.scroll_to_bottom)
+        self.scroll_anim = QPropertyAnimation(self.scroll_area.verticalScrollBar(), b"value")
+        self.scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.btn_scroll_bottom.clicked.connect(lambda: self.scroll_to_bottom(smooth=True))
+
         self.overlay_filter = FloatingOverlayFilter(self.scroll_area, self.btn_scroll_bottom)
         self.scroll_area.installEventFilter(self.overlay_filter)
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._check_scroll_position)
@@ -1217,7 +1234,6 @@ class ChatTool(BaseTool):
         if not hasattr(self, 'external_context_html'):
             self.external_context_html = ""
 
-
         file_infos = []
         for item in items:
             if isinstance(item, str):
@@ -1243,11 +1259,9 @@ class ChatTool(BaseTool):
         self.attach_task_mgr.start_task(
             ProcessAttachmentTask,
             task_id="process_attachment",
-            mode=TaskMode.THREAD,
+            mode=TaskMode.PROCESS,
             file_infos=file_infos
         )
-
-
 
     def set_controls_enabled(self, enabled: bool):
         """锁定或解锁对话控制区的关键配置"""
@@ -1279,7 +1293,6 @@ class ChatTool(BaseTool):
             if (sb.maximum() - sb.value()) <= 50:
                 self.scroll_to_bottom()
 
-
     def _on_attachment_state_changed(self, state, msg):
         if state == TaskState.FAILED.value:
             self.input_container.set_uploading(False)
@@ -1304,7 +1317,6 @@ class ChatTool(BaseTool):
                     names.append(c['name'])
 
             display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(names)
-
 
             QTimer.singleShot(100, lambda: self.input_container.show_context_preview(display_text))
 
@@ -1369,7 +1381,6 @@ class ChatTool(BaseTool):
                     .doc-title {{ font-size: 22pt; font-weight: bold; color: {tm.color('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
                     .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
                 """)
-
 
                 def _get_colored_svg_base64(icon_name, color_hex):
                     svg_path = tm.get_resource_path("assets", "icons", f"{icon_name}.svg")
@@ -1442,7 +1453,6 @@ class ChatTool(BaseTool):
             ToastManager().show(f"Failed to export document: {str(e)}", "error")
             self.logger.error(f"Failed to export document: {str(e)}")
 
-
     def clear_follow_up_shelf(self):
         while self.follow_up_shelf_layout.count() > 0:
             item = self.follow_up_shelf_layout.takeAt(0)
@@ -1451,7 +1461,7 @@ class ChatTool(BaseTool):
         self.follow_up_shelf.setVisible(False)
 
     def clear_chat_history(self):
-        self.cancel_generation()  # 这里会触发文本还原
+        self.cancel_generation()
         self.current_ai_bubble = None
         self.history.clear()
         self.clear_layout(self.chat_layout)
@@ -1462,22 +1472,29 @@ class ChatTool(BaseTool):
 
         self.input_container.clear_text()
         self.clear_attached_context()
-
+        self.is_locked = False
         ToastManager().show("Chat history cleared.", "success")
-
 
     def scroll_to_user_message(self, bubble_widget):
         QApplication.processEvents()
 
         target_y = max(0, bubble_widget.y() - 10)
-        self.scroll_area.verticalScrollBar().setValue(target_y)
+        sb = self.scroll_area.verticalScrollBar()
+
+        if hasattr(self, 'scroll_anim'):
+            self.scroll_anim.stop()
+            self.scroll_anim.setDuration(300)
+            self.scroll_anim.setStartValue(sb.value())
+            self.scroll_anim.setEndValue(target_y)
+            self.scroll_anim.start()
+        else:
+            sb.setValue(target_y)
 
     def load_llm_configs(self):
         if hasattr(self, 'model_selector'):
             self.model_selector.load_llm_configs()
         if hasattr(self, 'trans_selector'):
             self.trans_selector.load_llm_configs()
-
 
     def process_send(self, text):
         # 1. 获取并格式化 KB ID
@@ -1584,7 +1601,6 @@ class ChatTool(BaseTool):
             else:
                 self.input_container.hide_context_preview()
 
-
     def add_bubble(self, text, is_user, context_html=None):
         if is_user:
             self.remove_old_follow_ups()
@@ -1611,14 +1627,21 @@ class ChatTool(BaseTool):
             if is_user:
                 QTimer.singleShot(50, lambda: self.scroll_to_user_message(bubble))
             else:
-                QTimer.singleShot(50, self.scroll_to_bottom)
-
+                QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True))
         return bubble
 
-
-    def scroll_to_bottom(self):
+    def scroll_to_bottom(self, smooth=False):
         sb = self.scroll_area.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        target = sb.maximum()
+
+        if smooth and hasattr(self, 'scroll_anim') and sb.value() != target:
+            self.scroll_anim.stop()
+            self.scroll_anim.setDuration(250)  # 250毫秒的平滑过渡
+            self.scroll_anim.setStartValue(sb.value())
+            self.scroll_anim.setEndValue(target)
+            self.scroll_anim.start()
+        else:
+            sb.setValue(target)
 
     def _on_query_translated(self, translated_text):
         for i in range(self.chat_layout.count() - 1, -1, -1):
@@ -1646,7 +1669,10 @@ class ChatTool(BaseTool):
                     old_t, old_w = self.worker_thread, self.worker
                     old_t.quit()
                     self._orphaned_threads.append((old_t, old_w))
-                    old_t.finished.connect(lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self, '_orphaned_threads', []) else None)
+                    old_t.finished.connect(
+                        lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self,
+                                                                                                            '_orphaned_threads',
+                                                                                                            []) else None)
             except RuntimeError:
                 pass
 
@@ -1656,7 +1682,8 @@ class ChatTool(BaseTool):
         # 获取最新的主模型配置与翻译配置
         main_config = self.model_selector.get_current_config()
         trans_config = self.trans_selector.get_current_config()
-        use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container, 'chk_mcp_enable') else False
+        use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container,
+                                                                                   'chk_mcp_enable') else False
         selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
 
         def _clean_model_name(name):
@@ -1664,7 +1691,6 @@ class ChatTool(BaseTool):
             for suffix in [" [Custom]", " [Closed]"]:
                 if name.endswith(suffix): return name[:-len(suffix)]
             return name
-
 
         if main_config:
             main_config = main_config.copy()
@@ -1693,7 +1719,6 @@ class ChatTool(BaseTool):
                 trans_config["model_name"] = ui_trans
                 self.config.user_settings["chat_trans_model_name"] = raw_ui_trans
                 self.config.save_settings()
-
 
         if main_config:
             actual_model = main_config.get("model_name", "").strip()
@@ -1887,7 +1912,6 @@ class ChatTool(BaseTool):
         if hasattr(self, '_restore_last_input'):
             self._restore_last_input()
 
-
         self.logger.info("AI generation cancelled by user.")
         self.scroll_to_bottom()
 
@@ -1902,7 +1926,6 @@ class ChatTool(BaseTool):
             ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
             return
         self.input_container.set_text(text)
-
 
     def _show_slow_connection_warning(self):
         if self.current_ai_bubble and getattr(self, '_is_waiting_llm', False):
@@ -2041,7 +2064,6 @@ class ChatTool(BaseTool):
                     file_infos.append({"path": p, "name": real_name})
                 self.process_attached_files(file_infos)
 
-
     def update_ai_bubble(self, token):
         if not self.current_ai_bubble: return
         sb = self.scroll_area.verticalScrollBar()
@@ -2081,7 +2103,6 @@ class ChatTool(BaseTool):
         self.current_ai_text += token
         self._is_rendering_dirty = True
 
-
     def _format_response(self, text, index):
         if not text:
             return ""
@@ -2104,7 +2125,6 @@ class ChatTool(BaseTool):
                     f"<a href='mermaid://view?hash={code_hash}' style='color:{tm.color('accent')}; text-decoration:none; font-weight:bold;'>"
                     f"Click here to view / edit interactive diagram</a></div><br>")
 
-
             processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
 
             return TextFormatter.format_chat_text(
@@ -2114,7 +2134,6 @@ class ChatTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Error formatting response: {e}")
             return str(text).replace('\n', '<br>')
-
 
     def on_chat_error(self, msg):
         self.logger.error(f"Chat generation encountered an error: {msg}")
@@ -2158,7 +2177,6 @@ class ChatTool(BaseTool):
         # 强制进行最后一次全量渲染，确保不丢掉最后的 token
         if getattr(self, '_is_rendering_dirty', False):
             self._throttled_render()
-
 
         if not self.current_ai_bubble:
             return
@@ -2221,18 +2239,23 @@ class ChatTool(BaseTool):
 
     def on_kb_modified(self, kb_id):
         """当当前关联的知识库在后台发生变更时触发，锁定对话防止上下文错乱"""
+
+        DatabaseManager().reload()
+
+        self.refresh_kb_list()
+
         if not self.history:
             return
 
         curr_data = self.combo_kb.currentData()
         curr_id = curr_data.get("id") if isinstance(curr_data, dict) else curr_data
 
-        # 如果当前正在聊天的库，刚好就是后台被增删改的库
         if curr_id == kb_id:
             self.is_locked = True
             if hasattr(self, 'input_container'):
                 self.input_container.lock_input()
             ToastManager().show("The knowledge base was modified. Chat is currently locked.", "warning")
+
 
 
     def render_follow_up_buttons(self, questions):
@@ -2267,9 +2290,6 @@ class ChatTool(BaseTool):
                 widget.deleteLater()
             elif item.spacerItem():
                 pass
-
-
-
 
     def handle_link_click(self, url_str):
 
@@ -2322,7 +2342,13 @@ class ChatTool(BaseTool):
             parsed = urlparse(url_str)
             params = parse_qs(parsed.query)
             file_path = params.get('path', [''])[0]
-            #page_num = int(params.get('page', ['1'])[0]) - 1
+
+            if file_path.startswith(("http://", "https://")):
+                QDesktopServices.openUrl(QUrl(file_path))
+                ToastManager().show(f"Opening online source...", "success")
+                return
+
+            # page_num = int(params.get('page', ['1'])[0]) - 1
             page_num = 0
             text_snippet = params.get('text', [''])[0]
             source_name = params.get('name', [''])[0]

@@ -411,7 +411,7 @@ class MCPManager:
     def disconnect_server(self, server_name: str):
         if server_name in self.server_stops:
             self._loop.call_soon_threadsafe(self.server_stops[server_name].set)
-            time.sleep(0.1)
+            time.sleep(0.02)
 
         if server_name in self.sessions:
             del self.sessions[server_name]

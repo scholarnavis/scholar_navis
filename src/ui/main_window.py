@@ -41,10 +41,10 @@ def set_window_titlebar_theme(hwnd, is_dark: bool):
             ctypes.windll.user32.RedrawWindow(hwnd_int, None, None, 0x0400 | 0x0100 | 0x0001)
         except Exception:
             pass
+
 def force_taskbar_icon(hwnd, icon_path):
     if sys.platform == "win32" and os.path.exists(icon_path):
         try:
-            # 加载图标 (LR_LOADFROMFILE | LR_TRANSPARENT)
             hicon = ctypes.windll.user32.LoadImageW(
                 0, ctypes.c_wchar_p(icon_path),
                 1, 0, 0, 0x00000010 | 0x00000020
