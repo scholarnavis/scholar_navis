@@ -66,7 +66,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowIcon(ThemeManager().get_app_icon())
         ico_path = os.path.abspath(ThemeManager.get_resource_path("Assets", "icon.ico"))
-        force_taskbar_icon(self.winId(), ico_path)
+        QTimer.singleShot(200, lambda: force_taskbar_icon(self.winId(), ico_path))
 
         ToastManager().set_parent(self)
 
