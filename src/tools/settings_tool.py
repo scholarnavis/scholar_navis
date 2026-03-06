@@ -752,43 +752,50 @@ class SettingsTool(BaseTool):
         action_widget = QWidget()
         al = QHBoxLayout(action_widget)
         al.setContentsMargins(0, 0, 0, 0)
-
         tm = ThemeManager()
-        btn_edit = QPushButton()
-        btn_edit.setIcon(tm.icon("edit", "accent"))
-        btn_edit.setCursor(Qt.PointingHandCursor)
-        btn_edit.setStyleSheet("background: transparent; border: none;")
-        btn_edit.clicked.connect(lambda _, r=row: self._on_edit_mcp_clicked(r))
-        al.addWidget(btn_edit)
 
-        if not always_on and name != "builtin":
-            btn_del = QPushButton()
-            btn_del.setIcon(tm.icon("delete", "danger"))
-            btn_del.setCursor(Qt.PointingHandCursor)
-            btn_del.setStyleSheet("background: transparent; border: none;")
+        if name != "builtin":
+            btn_edit = QPushButton()
+            btn_edit.setIcon(tm.icon("edit", "accent"))
+            btn_edit.setCursor(Qt.PointingHandCursor)
+            btn_edit.setStyleSheet("background: transparent; border: none;")
+            btn_edit.clicked.connect(lambda _, r=row: self._on_edit_mcp_clicked(r))
+            al.addWidget(btn_edit)
 
-            def delete_mcp_row(srv_name):
-                dlg = StandardDialog(
-                    self.widget,
-                    "Confirm Delete",
-                    f"Are you sure you want to delete MCP Server '{srv_name}'?\nThis will disconnect it immediately.",
-                    show_cancel=True
-                )
+            if not always_on:
+                btn_del = QPushButton()
+                btn_del.setIcon(tm.icon("delete", "danger"))
+                btn_del.setCursor(Qt.PointingHandCursor)
+                btn_del.setStyleSheet("background: transparent; border: none;")
 
-                if dlg.exec():
-                    MCPManager.get_instance().disconnect_server(srv_name)
+                def delete_mcp_row(srv_name):
+                    dlg = StandardDialog(
+                        self.widget,
+                        "Confirm Delete",
+                        f"Are you sure you want to delete MCP Server '{srv_name}'?\nThis will disconnect it immediately.",
+                        show_cancel=True
+                    )
 
-                    for i in range(self.table_mcp.rowCount()):
-                        item = self.table_mcp.item(i, 1)
-                        if item and item.text() == srv_name:
-                            self.table_mcp.removeRow(i)
-                            break
+                    if dlg.exec():
+                        MCPManager.get_instance().disconnect_server(srv_name)
 
-                    if hasattr(self, '_mark_unsaved'):
-                        self._mark_unsaved()
+                        for i in range(self.table_mcp.rowCount()):
+                            item = self.table_mcp.item(i, 1)
+                            if item and item.text() == srv_name:
+                                self.table_mcp.removeRow(i)
+                                break
 
-            btn_del.clicked.connect(lambda _, n=name: delete_mcp_row(n))
-            al.addWidget(btn_del)
+                        if hasattr(self, '_mark_unsaved'):
+                            self._mark_unsaved()
+
+                btn_del.clicked.connect(lambda _, n=name: delete_mcp_row(n))
+                al.addWidget(btn_del)
+        else:
+            lbl_lock = QLabel()
+            lbl_lock.setPixmap(tm.icon("lock", "text_muted").pixmap(16, 16))
+            lbl_lock.setAlignment(Qt.AlignCenter)
+            lbl_lock.setToolTip("Core system service (Read-only)")
+            al.addWidget(lbl_lock)
 
         self.table_mcp.setCellWidget(row, 6, action_widget)
 
