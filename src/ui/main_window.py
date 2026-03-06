@@ -65,7 +65,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
 
         self.setWindowIcon(ThemeManager().get_app_icon())
-        ico_path = os.path.abspath(ThemeManager.get_resource_path("Assets", "ico.ico"))
+        ico_path = os.path.abspath(ThemeManager.get_resource_path("Assets", "icon.ico"))
         force_taskbar_icon(self.winId(), ico_path)
 
         ToastManager().set_parent(self)
