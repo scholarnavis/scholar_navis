@@ -95,7 +95,7 @@ def build_app():
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--onedir",
-        #"--windowed",
+        "--windowed",
         f"--name={app_name_safe}",
     ]
 

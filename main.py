@@ -213,6 +213,12 @@ class AppController(QObject):
 
 
 if __name__ == "__main__":
+
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+
+
     from src.core.logger import setup_logger
 
     global_logger = setup_logger()
