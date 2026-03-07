@@ -251,7 +251,7 @@ class StandardDialog(BaseDialog):
         self.add_button("OK", self.accept, is_primary=True)
 
         self._apply_theme()
-        
+
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
@@ -1608,7 +1608,7 @@ POSSIBILITY OF SUCH DAMAGE.
             ("PyMuPDF / 4LLM", "AGPL v3", "High-performance PDF & Document parsing."),
             ("ChromaDB", "Apache 2.0", "AI-native open-source vector database."),
             ("LangChain / Splitters", "MIT", "Advanced text chunking and LLM framework."),
-            ("PyTorch", "Click name for details", "Tensors and Dynamic neural networks."),
+            ("PyTorch", "BSD 3-Clause License", "Tensors and Dynamic neural networks."),
             ("ONNX Runtime", "MIT", "Cross-platform AI model accelerator."),
             ("Optimum / ONNX", "Apache 2.0", "Hardware-specific AI model optimization."),
             ("Scikit-learn", "BSD-3-Clause", "Machine learning and data mining tools."),
