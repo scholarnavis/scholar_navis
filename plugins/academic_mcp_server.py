@@ -477,10 +477,16 @@ def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein
     safe_id = accession_id.strip()
     safe_db = db_type.strip().lower()
 
-    if safe_db in ["uniprot", "uniprotkb", "swiss-prot", "trembl"]:
+    if safe_db in["uniprot", "uniprotkb", "swiss-prot", "trembl"]:
         safe_db = "protein"
     elif safe_db in ["nucleotide", "dna", "rna"]:
         safe_db = "nuccore"
+
+    upper_id = safe_id.upper()
+    if upper_id.startswith(("NM_", "NR_", "XM_", "XR_", "NC_", "NG_", "LC_", "MN_", "MT_", "OR_", "PP_", "PQ_")):
+        safe_db = "nuccore"
+    elif upper_id.startswith(("NP_", "XP_", "WP_", "AP_")):
+        safe_db = "protein"
 
     try:
         fetch_handle = Entrez.efetch(db=safe_db, id=safe_id, rettype="fasta", retmode="text")
@@ -800,6 +806,14 @@ def search_github_repos(query: str, max_results: int = 5) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
+@mcp.tool(
+    name="fetch_ensembl_gene",
+    description=(
+        "[Tags: Genomics] Lookup a gene in Ensembl to get its location, biotype, and description. "
+        "CRITICAL: The 'symbol' MUST be a canonical gene symbol (e.g., 'BRCA1', 'Trp53'). "
+        "Do NOT use NCBI RefSeq accessions (like 'NM_100001.5') or protein IDs here."
+    )
+)
 @simple_retry(max_attempts=2, delay=1)
 def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> str:
     logger.info(f"Task: Ensembl Gene Fetch | Symbol: '{symbol}' | Species: '{species}'")
@@ -824,22 +838,39 @@ def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> st
 @mcp.tool(
     name="search_kegg_pathway",
     description=(
-    "[Tags: Pathways] Search KEGG database for pathways. Use organism codes like 'ath' (Arabidopsis), 'hsa' (Human), or 'map'.")
+    "[Tags: Pathways] Search KEGG database for pathways. Use organism codes like 'ath' (Arabidopsis), 'hsa' (Human), or 'map'. "
+    "Note: KEGG only contains strict biochemical pathways (e.g., 'glycolysis', 'MAPK'), not broad physiological stress terms (like 'drought stress')."
+    )
 )
 @simple_retry(max_attempts=2, delay=1)
 def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
     logger.info(f"Task: KEGG Pathway Search | Query: '{query}' | Organism: '{organism_code}'")
     try:
-        url = f"https://rest.kegg.jp/find/pathway/{query}"
+        safe_query = urllib.parse.quote(query.strip())
+        url = f"https://rest.kegg.jp/find/pathway/{safe_query}"
         res = mcp_request("GET", url, timeout=15)
+
+        if res.status_code == 400 or not res.text.strip():
+            return json.dumps({
+                "status": "success",
+                "message": f"0 results found for '{query}'. KEGG database only maps specific biochemical and signaling pathways. General physiological conditions (like 'drought stress') are not pathway names."
+            }, ensure_ascii=False)
+
         res.raise_for_status()
+
         results = []
         for line in res.text.strip().split('\n'):
             if not line: continue
             parts = line.split('\t', 1)
             if len(parts) == 2 and (parts[0].startswith(f"path:{organism_code}") or parts[0].startswith("path:map")):
                 results.append({"pathway_id": parts[0], "description": parts[1]})
-        if not results: return json.dumps({"status": "success", "message": "No pathways found matching the query."})
+
+        if not results:
+            return json.dumps({
+                "status": "success",
+                "message": f"0 results found for '{query}'. KEGG database only maps specific biochemical and signaling pathways. General physiological conditions (like 'drought stress') are not pathway names."
+            })
+
         return json.dumps({"status": "success", "organism": organism_code, "results": results[:10]}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
