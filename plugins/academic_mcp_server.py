@@ -468,7 +468,7 @@ def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", ma
 @mcp.tool(
     name="fetch_sequence_fasta",
     description=(
-        "[Tags: Genomics, Protein] Download raw FASTA sequences for nucleotides or proteins. "
+        "[Tags: Genomics, Proteomics] Download raw FASTA sequences for nucleotides or proteins. "
         "CRITICAL: The 'db_type' parameter MUST strictly be either 'nuccore' (for DNA/RNA sequences) "
         "or 'protein' (for amino acid sequences). Do NOT use 'uniprotkb', 'swiss-prot', or any other names. "
         "Automatically saves to local workspace if massive."
@@ -806,27 +806,44 @@ def search_github_repos(query: str, max_results: int = 5) -> str:
 @mcp.tool(
     name="fetch_ensembl_gene",
     description=(
-        "[Tags: Genomics] Lookup a gene in Ensembl to get its location, biotype, and description. "
-        "CRITICAL: The 'symbol' MUST be a canonical gene symbol (e.g., 'BRCA1', 'Trp53'). "
-        "Do NOT use NCBI RefSeq accessions (like 'NM_100001.5') or protein IDs here."
+            "[Tags: Genomics] Lookup a gene in Ensembl to get its location, biotype, and description. "
+            "CRITICAL WARNING: The default species is 'arabidopsis_thaliana'. If querying other species, "
+            "you MUST explicitly provide the correct species name (e.g., 'homo_sapiens', 'mus_musculus', 'oryza_sativa'). "
+            "The 'symbol' MUST be a canonical gene symbol (e.g., 'BRCA1', 'Trp53'). "
+            "Do NOT use NCBI RefSeq accessions (like 'NM_100001.5')."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
 def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> str:
-    logger.info(f"Task: Ensembl Gene Fetch | Symbol: '{symbol}' | Species: '{species}'")
+    # 自动清洗大模型可能传入的错误物种格式 (如 "Homo Sapiens" -> "homo_sapiens")
+    safe_species = species.strip().lower().replace(" ", "_")
+    logger.info(f"Task: Ensembl Gene Fetch | Symbol: '{symbol}' | Species: '{safe_species}'")
+
     try:
-        url = f"https://rest.ensembl.org/lookup/symbol/{species}/{symbol}?expand=1"
+        url = f"https://rest.ensembl.org/lookup/symbol/{safe_species}/{symbol}?expand=1"
         res = mcp_request("GET", url, headers={"Content-Type": "application/json"}, timeout=15)
+
         if res.status_code == 400:
-            return json.dumps({"status": "error", "message": f"HTTP 400: Gene '{symbol}' not found in '{species}'. Ensembl requires EXACT canonical symbols (e.g., 'Trp53' instead of 'Tp53' for mice) and strict lowercase_underscore species names (e.g., 'mus_musculus')."})
+            return json.dumps({
+                "status": "error",
+                "message": f"HTTP 400: Gene '{symbol}' not found in '{safe_species}'. "
+                           f"Ensembl requires EXACT canonical symbols (e.g., 'Trp53' instead of 'Tp53' for mice) "
+                           f"and strict lowercase_underscore species names. Ensure the species exists in Ensembl."
+            })
         res.raise_for_status()
+
         data = res.json()
-        result = {"id": data.get("id"), "display_name": data.get("display_name"), "species": data.get("species"),
-                  "biotype": data.get("biotype"), "description": data.get("description"),
-                  "assembly_name": data.get("assembly_name"),
-                  "location": f"{data.get('seq_region_name')}:{data.get('start')}-{data.get('end')} ({'forward' if data.get('strand') == 1 else 'reverse'})",
-                  "transcript_count": len(data.get("Transcript",[])),
-                  "url": f"https://uswest.ensembl.org/{species}/Gene/Summary?g={data.get('id')}"}
+        result = {
+            "id": data.get("id"),
+            "display_name": data.get("display_name"),
+            "species": data.get("species"),
+            "biotype": data.get("biotype"),
+            "description": data.get("description"),
+            "assembly_name": data.get("assembly_name"),
+            "location": f"{data.get('seq_region_name')}:{data.get('start')}-{data.get('end')} ({'forward' if data.get('strand') == 1 else 'reverse'})",
+            "transcript_count": len(data.get("Transcript", [])),
+            "url": f"https://uswest.ensembl.org/{safe_species}/Gene/Summary?g={data.get('id')}"
+        }
         return json.dumps({"status": "success", "results": [result]}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -835,13 +852,18 @@ def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> st
 @mcp.tool(
     name="search_kegg_pathway",
     description=(
-    "[Tags: Pathways] Search KEGG database for pathways. Use organism codes like 'ath' (Arabidopsis), 'hsa' (Human), or 'map'. "
-    "Note: KEGG only contains strict biochemical pathways (e.g., 'glycolysis', 'MAPK'), not broad physiological stress terms (like 'drought stress')."
+            "[Tags: Pathways] Search KEGG database for pathways. "
+            "CRITICAL WARNING: The default 'organism_code' is 'ath' (Arabidopsis thaliana). "
+            "For other species, you MUST change it to the exact 3-4 letter KEGG code! "
+            "Examples: 'hsa' (Human), 'mmu' (Mouse), 'dosa' (Oryza sativa/Rice), 'sly' (Tomato), or 'map' (Global reference). "
+            "Note: KEGG only contains strict biochemical pathways (e.g., 'glycolysis', 'MAPK'), not broad terms like 'drought stress'."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
 def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
-    logger.info(f"Task: KEGG Pathway Search | Query: '{query}' | Organism: '{organism_code}'")
+    safe_org_code = organism_code.strip().lower()
+    logger.info(f"Task: KEGG Pathway Search | Query: '{query}' | Organism: '{safe_org_code}'")
+
     try:
         safe_query = urllib.parse.quote(query.strip())
         url = f"https://rest.kegg.jp/find/pathway/{safe_query}"
@@ -850,7 +872,8 @@ def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
         if res.status_code == 400 or not res.text.strip():
             return json.dumps({
                 "status": "success",
-                "message": f"0 results found for '{query}'. KEGG database only maps specific biochemical and signaling pathways. General physiological conditions (like 'drought stress') are not pathway names."
+                "message": f"0 results found for '{query}'. KEGG database only maps specific biochemical pathways. "
+                           f"Also, verify if you used the correct organism code (you used: '{safe_org_code}')."
             }, ensure_ascii=False)
 
         res.raise_for_status()
@@ -859,16 +882,18 @@ def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
         for line in res.text.strip().split('\n'):
             if not line: continue
             parts = line.split('\t', 1)
-            if len(parts) == 2 and (parts[0].startswith(f"path:{organism_code}") or parts[0].startswith("path:map")):
+            # 严格匹配当前生物体前缀或全局 map 前缀
+            if len(parts) == 2 and (parts[0].startswith(f"path:{safe_org_code}") or parts[0].startswith("path:map")):
                 results.append({"pathway_id": parts[0], "description": parts[1]})
 
         if not results:
             return json.dumps({
                 "status": "success",
-                "message": f"0 results found for '{query}'. KEGG database only maps specific biochemical and signaling pathways. General physiological conditions (like 'drought stress') are not pathway names."
+                "message": f"Results found for '{query}' globally, but NONE specific to organism '{safe_org_code}'. "
+                           f"Are you sure you used the correct 3-4 letter KEGG code?"
             })
 
-        return json.dumps({"status": "success", "organism": organism_code, "results": results[:10]}, ensure_ascii=False)
+        return json.dumps({"status": "success", "organism": safe_org_code, "results": results[:10]}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
@@ -976,66 +1001,90 @@ def uniprot_id_mapping(from_db: str, to_db: str, ids: str) -> str:
     name="query_uniprot_database",
     description=(
             "[Tags: Genomics, Proteomics] A unified tool to search UniProt sub-databases. "
-            "You MUST select a valid 'db_type': "
-            "'uniprotkb' (Detailed protein entries, search by gene/name/ID), "
-            "'proteomes' (Species-level reference proteomes), "
-            "'genecentric' (Canonical proteins grouped under a gene), "
-            "'uniref' (Clustered sets), 'uniparc' (Non-redundant sequences), or 'unirule'/'arba'."
+            "CRITICAL SEARCH SYNTAX: The UniProt API is very strict! "
+            "If searching by gene and species, you MUST use 'organism_name' and wrap multi-word species in quotes! "
+            "To strictly retrieve the canonical, non-obsolete protein, you MUST append AND (reviewed:true) to your query! "
+            "Example: (gene:AMS) AND (organism_name:\"Arabidopsis thaliana\") AND (reviewed:true) "
+            "Do NOT use 'organism:Arabidopsis thaliana' (it will cause HTTP 400). "
+            "CRITICAL FOR EXTRACTION: To find exact amino acid sequence length, subcellular localization, "
+            "and cross-referenced NCBI Gene IDs, you MUST use 'uniprotkb'."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def query_uniprot_database(query: str, db_type: Literal["uniprotkb", "proteomes", "genecentric", "uniref", "uniparc", "unirule", "arba"] = "uniprotkb", max_results: int = 5) -> str:
+def query_uniprot_database(query: str, db_type: Literal[
+    "uniprotkb", "proteomes", "genecentric", "uniref", "uniparc", "unirule", "arba"] = "uniprotkb",
+                           max_results: int = 5) -> str:
     db_type = db_type.lower()
     logger.info(f"Task: Unified UniProt Search | DB: '{db_type}' | Query: '{query}'")
     try:
         # Branch 1: UniProtKB
         if db_type == "uniprotkb":
-            if re.match(r"^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z]([0-9][A-Z][A-Z0-9]{2}){1,2}[0-9])(-\d+)?$",
-                        query.upper()):
+            is_accession = re.match(r"^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z]([0-9][A-Z][A-Z0-9]{2}){1,2}[0-9])(-\d+)?$",
+                                    query.upper())
+
+            if is_accession:
                 res = mcp_request("GET", f"https://rest.uniprot.org/uniprotkb/{query.upper()}", timeout=15)
                 res.raise_for_status()
-                data = res.json()
-                gene_name = data["genes"][0]["geneName"].get("value", "Unknown") if data.get("genes") and data["genes"][
-                    0].get("geneName") else "Unknown"
-                return json.dumps({"status": "success", "results": [{
-                    "accession": data.get("primaryAccession"), "proteinExistence": data.get("proteinExistence"),
-                    "proteinName": data.get("proteinDescription", {}).get("recommendedName", {}).get("fullName",
-                                                                                                     {}).get("value",
-                                                                                                             "Unknown"),
-                    "gene": gene_name, "organism": data.get("organism", {}).get("scientificName", ""),
-                    "sequence_length": data.get("sequence", {}).get("length", 0)
-                }]}, ensure_ascii=False)
+                data_list = [res.json()]
+            else:
+                res = mcp_request("GET", "https://rest.uniprot.org/uniprotkb/search",
+                                  params={"query": query, "size": max_results}, timeout=15)
+                # 核心修复：捕获 400 错误，并把 UniProt 的官方报错提示直接扔给大模型，逼它重试
+                if res.status_code == 400:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"HTTP 400 Bad Request: UniProt rejected your query '{query}'. "
+                                   f"Syntax Error! You MUST wrap species names with spaces in quotes. "
+                                   f"Example: (gene:FLC) AND (organism_name:\"Arabidopsis thaliana\"). "
+                                   f"API Response: {res.text}"
+                    })
+                res.raise_for_status()
+                data_list = res.json().get("results", [])
 
-            res = mcp_request("GET", "https://rest.uniprot.org/uniprotkb/search",
-                              params={"query": query, "size": max_results}, timeout=15)
-            res.raise_for_status()
             results = []
-            for item in res.json().get("results", []):
+            for item in data_list:
                 rec_name = item.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get(
                     "value", "")
                 if not rec_name:
                     subs = item.get("proteinDescription", {}).get("submissionNames", [])
                     rec_name = subs[0].get("fullName", {}).get("value", "Unknown") if subs else "Unknown"
-                gene_name = item["genes"][0]["geneName"].get("value", "Unknown") if item.get("genes") and item["genes"][
-                    0].get("geneName") else "Unknown"
-                results.append(
-                    {"accession": item.get("primaryAccession", ""), "proteinName": rec_name, "gene": gene_name,
-                     "organism": item.get("organism", {}).get("scientificName", ""),
-                     "sequence_length": item.get("sequence", {}).get("length", 0)})
+
+                gene_name = "Unknown"
+                if item.get("genes") and len(item["genes"]) > 0:
+                    gene_name = item["genes"][0].get("geneName", {}).get("value", "Unknown")
+
+                ncbi_gene_ids = []
+                for xref in item.get("uniProtKBCrossReferences", []):
+                    if xref.get("database") == "GeneID":
+                        ncbi_gene_ids.append(xref.get("id"))
+                ncbi_id_str = ", ".join(ncbi_gene_ids) if ncbi_gene_ids else "Not Found"
+
+                subcellular_locations = []
+                for comment in item.get("comments", []):
+                    if comment.get("commentType") == "SUBCELLULAR LOCATION":
+                        for loc in comment.get("subcellularLocations", []):
+                            loc_val = loc.get("location", {}).get("value")
+                            if loc_val and loc_val not in subcellular_locations:
+                                subcellular_locations.append(loc_val)
+                sub_loc_str = ", ".join(subcellular_locations) if subcellular_locations else "Not specified"
+
+                results.append({
+                    "accession": item.get("primaryAccession", ""),
+                    "proteinName": rec_name,
+                    "geneSymbol": gene_name,
+                    "ncbi_gene_id": ncbi_id_str,
+                    "organism": item.get("organism", {}).get("scientificName", ""),
+                    "sequence_length": item.get("sequence", {}).get("length", 0),
+                    "subcellular_localization": sub_loc_str
+                })
             return json.dumps({"status": "success", "db": "uniprotkb", "results": results}, ensure_ascii=False)
 
         # Branch 2: Proteomes
         elif db_type == "proteomes":
-            if re.match(r"^UP[0-9]{9}$", query.upper()):
-                res = mcp_request("GET", f"https://rest.uniprot.org/proteomes/{query.upper()}", timeout=15)
-                res.raise_for_status()
-                p = res.json()
-                return json.dumps({"status": "success", "results": [
-                    {"id": p.get("id"), "taxonomy": p.get("taxonomy", {}).get("scientificName"),
-                     "proteomeType": p.get("proteomeType"), "proteinCount": p.get("proteinCount")}]},
-                                  ensure_ascii=False)
             res = mcp_request("GET", "https://rest.uniprot.org/proteomes/search",
                               params={"query": query, "size": max_results}, timeout=15)
+            if res.status_code == 400: return json.dumps(
+                {"status": "error", "message": f"HTTP 400: Invalid syntax for '{query}'"})
             res.raise_for_status()
             results = [{"id": p.get("id", ""), "taxonomy": p.get("taxonomy", {}).get("scientificName", ""),
                         "proteomeType": p.get("proteomeType", ""), "proteinCount": p.get("proteinCount", 0)} for p in
@@ -1046,6 +1095,8 @@ def query_uniprot_database(query: str, db_type: Literal["uniprotkb", "proteomes"
         elif db_type == "genecentric":
             res = mcp_request("GET", "https://rest.uniprot.org/genecentric/search",
                               params={"query": query, "size": max_results}, timeout=15)
+            if res.status_code == 400: return json.dumps(
+                {"status": "error", "message": f"HTTP 400: Invalid syntax for '{query}'"})
             res.raise_for_status()
             results = [{"proteomeId": item.get("proteomeId", ""),
                         "canonical_accession": item.get("canonicalProtein", {}).get("id", ""),
@@ -1057,17 +1108,10 @@ def query_uniprot_database(query: str, db_type: Literal["uniprotkb", "proteomes"
 
         # Branch 4: UniRef
         elif db_type == "uniref":
-            if re.match(r"^UniRef(100|90|50)_[A-Z0-9]+$", query):
-                res = mcp_request("GET", f"https://rest.uniprot.org/uniref/{query}", timeout=15)
-                res.raise_for_status()
-                data = res.json()
-                return json.dumps({"status": "success", "results": [
-                    {"id": data.get("id"), "name": data.get("name"), "memberCount": data.get("memberCount"),
-                     "commonTaxon": data.get("commonTaxon", {}).get("scientificName"),
-                     "representative_accession": data.get("representativeMember", {}).get("memberId")}]},
-                                  ensure_ascii=False)
             res = mcp_request("GET", "https://rest.uniprot.org/uniref/search",
                               params={"query": query, "size": max_results}, timeout=15)
+            if res.status_code == 400: return json.dumps(
+                {"status": "error", "message": f"HTTP 400: Invalid syntax for '{query}'"})
             res.raise_for_status()
             results = [
                 {"id": item.get("id", ""), "name": item.get("name", ""), "memberCount": item.get("memberCount", 0),
@@ -1078,15 +1122,10 @@ def query_uniprot_database(query: str, db_type: Literal["uniprotkb", "proteomes"
 
         # Branch 5: UniParc
         elif db_type == "uniparc":
-            if re.match(r"^UPI[A-F0-9]{10}$", query.upper()):
-                res = mcp_request("GET", f"https://rest.uniprot.org/uniparc/{query.upper()}", timeout=15)
-                res.raise_for_status()
-                data = res.json()
-                return json.dumps({"status": "success", "results": [
-                    {"upi": data.get("uniParcId"), "sequence_length": data.get("sequence", {}).get("length"),
-                     "most_recent_cross_ref": data.get("mostRecentCrossRefUpdated")}]}, ensure_ascii=False)
             res = mcp_request("GET", "https://rest.uniprot.org/uniparc/search",
                               params={"query": query, "size": max_results}, timeout=15)
+            if res.status_code == 400: return json.dumps(
+                {"status": "error", "message": f"HTTP 400: Invalid syntax for '{query}'"})
             res.raise_for_status()
             results = [{"upi": item.get("uniParcId", ""), "sequence_length": item.get("sequence", {}).get("length", 0),
                         "most_recent_cross_ref": item.get("mostRecentCrossRefUpdated", "")} for item in
@@ -1097,6 +1136,8 @@ def query_uniprot_database(query: str, db_type: Literal["uniprotkb", "proteomes"
         elif db_type in ["unirule", "arba"]:
             res = mcp_request("GET", f"https://rest.uniprot.org/{db_type}/search",
                               params={"query": query, "size": max_results}, timeout=15)
+            if res.status_code == 400: return json.dumps(
+                {"status": "error", "message": f"HTTP 400: Invalid syntax for '{query}'"})
             res.raise_for_status()
             results = [{"ruleId": item.get("uniRuleId", ""),
                         "reviewedProteinCount": item.get("statistics", {}).get("reviewedProteinCount", 0),
@@ -1111,6 +1152,7 @@ def query_uniprot_database(query: str, db_type: Literal["uniprotkb", "proteomes"
     except Exception as e:
         logger.error(f"Unified UniProt Search failed: {e}")
         return json.dumps({"status": "error", "message": str(e)})
+
 
 
 @mcp.tool(
@@ -1192,13 +1234,16 @@ def query_pdb_structure(query: str, action: Literal["search", "details"] = "sear
     name="analyze_string_network",
     description=(
             "[Tags: Protein-Protein Interaction] Analyze protein networks via STRING DB. "
-            "action='interactions' retrieves interacting partners and connection scores. "
-            "action='enrichment' fetches functional enrichment (may be restricted by API, fallback to 'interactions' if it fails). "
-            "Identifiers MUST be comma-separated (e.g., 'TP53,BRCA1'). 'species' MUST be a valid NCBI taxonomy ID (e.g., 9606 for Human, 10090 for Mouse)."
+            "CRITICAL WARNING: The default 'species' parameter is 9606 (Human). "
+            "If you are querying plant genes (e.g., Arabidopsis, Rice) or other non-human animals, "
+            "you MUST MUST MUST first use 'fetch_taxonomy_info' to find the correct NCBI Taxonomy ID "
+            "(e.g., 3702 for Arabidopsis) and pass it explicitly to the 'species' parameter! "
+            "action='interactions' retrieves interacting partners. action='enrichment' fetches functional enrichment."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def analyze_string_network(identifiers: str, action: Literal["interactions", "enrichment"] = "interactions", species: int = 9606, limit: int = 15) -> str:
+def analyze_string_network(identifiers: str, action: Literal["interactions", "enrichment"] = "interactions",
+                           species: int = 9606, limit: int = 15) -> str:
     logger.info(
         f"Task: Unified STRING DB | Action: '{action}' | Identifiers: '{identifiers[:30]}' | Species: {species}")
     try:
@@ -1207,49 +1252,55 @@ def analyze_string_network(identifiers: str, action: Literal["interactions", "en
             payload = {"identifiers": identifiers.strip(), "species": species, "limit": limit,
                        "caller_identity": "ScholarNavis"}
             res = mcp_request("POST", url, data=payload, timeout=15)
+
             if res.status_code in [400, 404]:
-                return json.dumps({"status": "error",
-                                   "message": f"HTTP {res.status_code}. The STRING database could not find interactions for '{identifiers}' in species '{species}'. Ensure valid protein names/IDs and correct NCBI taxonomy ID."})
+                return json.dumps({
+                    "status": "error",
+                    "message": f"HTTP {res.status_code}. STRING DB failed to find interactions for '{identifiers}'. "
+                               f"Did you use the wrong species ID? You used '{species}'. If this is a plant/non-human gene, "
+                               f"you MUST look up the correct NCBI TaxID using fetch_taxonomy_info first!"
+                })
+
             res.raise_for_status()
             results = [{"protein_A": item.get("preferredName_A", ""), "protein_B": item.get("preferredName_B", ""),
                         "score": item.get("score", 0), "annotation_A": item.get("annotation_A", ""),
                         "annotation_B": item.get("annotation_B", "")} for item in res.json()]
-            if not results: return json.dumps(
-                {"status": "success", "message": "No interactions found. Check identifiers and species ID."})
+
+            if not results:
+                return json.dumps(
+                    {"status": "success", "message": "No interactions found. Check identifiers and species ID."})
+
             results = sorted(results, key=lambda x: x["score"], reverse=True)
             return json.dumps({"status": "success", "action": "interactions", "species": species, "results": results},
                               ensure_ascii=False)
 
-
         elif action == "enrichment":
-
             url = "https://string-db.org/api/json/enrichment"
-
             payload = {"identifiers": identifiers.strip(), "species": species, "caller_identity": "ScholarNavis"}
-
             res = mcp_request("POST", url, data=payload, timeout=20)
 
             if res.status_code in [404, 400]:
                 return json.dumps({
-
                     "status": "error",
-
-                    "message": f"HTTP {res.status_code}. The STRING database REST API does not expose the full functional enrichment backend via this endpoint, or the identifiers provided were not recognized. Please use 'interactions' action instead."
-
+                    "message": f"HTTP {res.status_code}. Enrichment failed. You used species ID '{species}'. Ensure this is correct for your organism. Also note STRING API may restrict enrichment endpoints for some queries."
                 })
+
             res.raise_for_status()
             data = res.json()
-            if not data: return json.dumps(
-                {"status": "success", "message": "No enrichment found for the provided network."})
+            if not data:
+                return json.dumps({"status": "success", "message": "No enrichment found for the provided network."})
+
             results = [{"category": item.get("category", ""), "term": item.get("term", ""),
                         "description": item.get("description", ""), "number_of_genes": item.get("number_of_genes", 0),
                         "fdr": item.get("fdr", 1.0)} for item in data if item.get("fdr", 1.0) <= 0.05]
+
             results = sorted(results, key=lambda x: x["fdr"])[:limit]
             return json.dumps(
                 {"status": "success", "action": "enrichment", "species": species, "enriched_terms": results},
                 ensure_ascii=False)
         else:
             return json.dumps({"status": "error", "message": "Invalid action. Must be 'interactions' or 'enrichment'."})
+
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 

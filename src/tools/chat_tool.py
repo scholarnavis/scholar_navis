@@ -800,9 +800,20 @@ class ChatWorker(QObject):
                     mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=4)
                     self.sig_token.emit("[CLEAR_SEARCH]")
 
+            dynamic_tool_prompt = ""
+            if mcp_tools:
+                tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
+                dynamic_tool_prompt = (
+                    f"### CRITICAL TOOL UTILIZATION RULE:\n"
+                    f"The Reranker engine has exclusively selected the following tools for this specific query: {', '.join(tool_names)}.\n"
+                    f"You MUST read the user's prompt carefully. If the user asks for multi-dimensional data (e.g., metadata AND protein interactions), you MUST use multiple tools to fulfill ALL parts of the request. DO NOT skip required tools. DO NOT answer partially.\n\n"
+                )
+
             system_prompt = (
                 f"You are a Senior Research Scientist specializing in {domain}. "
                 "Your goal is to provide high-density, evidence-based academic responses.\n\n"
+
+                f"{dynamic_tool_prompt}\n\n"
 
                 "### TOOL USE PROTOCOL (STRICT):\n"
                 "1. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"

@@ -101,22 +101,21 @@ def build_app():
 
     packages_to_collect = [
         "optimum", "transformers", "onnxruntime", "tokenizers",
-        "sklearn", "scipy", "chardet",
-
         "chromadb",
-        "pydantic",
+    ]
 
-        "langchain_text_splitters",
-        "pymupdf4llm",
+    data_to_collect = [
         "docx",
-        "markdown"
     ]
 
     for pkg in packages_to_collect:
         cmd.extend(["--collect-all", pkg])
+    for pkg in data_to_collect:
+        cmd.extend(["--collect-data", pkg])
 
     cmd.extend(["--copy-metadata", "transformers"])
     cmd.extend(["--copy-metadata", "tqdm"])
+    cmd.extend(["--copy-metadata", "regex"])
 
     path_sep = ";" if sys_os == "Windows" else ":"
     cmd.append(f"--add-data=Assets{path_sep}Assets")
@@ -124,7 +123,7 @@ def build_app():
     excludes = [
         "tkinter", "matplotlib", "seaborn", "jupyter", "notebook",
         "IPython", "plotly", "pygame", "setuptools", "wheel",
-        "torchvision"
+        "torchvision","nvidia", "triton", "torchaudio"
     ]
     for ex in excludes:
         cmd.append(f"--exclude-module={ex}")
