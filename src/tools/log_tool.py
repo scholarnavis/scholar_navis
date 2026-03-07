@@ -262,10 +262,10 @@ class LogTool(BaseTool):
         self.btn_find_next.setStyleSheet(small_btn_style)
         self.btn_close_search.setStyleSheet(small_btn_style)
 
-        self.btn_find_prev.setIcon(tm.icon("arrow_up", "text_main") or tm.icon("keyboard_arrow_up", "text_main"))
+        self.btn_find_prev.setIcon(tm.icon("chevron-up", "text_main"))
         self.btn_find_prev.setText("▲" if self.btn_find_prev.icon().isNull() else "")
 
-        self.btn_find_next.setIcon(tm.icon("arrow_down", "text_main") or tm.icon("keyboard_arrow_down", "text_main"))
+        self.btn_find_next.setIcon(tm.icon("achevron-down", "text_main"))
         self.btn_find_next.setText("▼" if self.btn_find_next.icon().isNull() else "")
 
         self.btn_close_search.setIcon(tm.icon("close", "text_main"))

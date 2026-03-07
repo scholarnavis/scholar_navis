@@ -119,7 +119,7 @@ class TextFormatter:
 
         if main_text:
             main_text = re.sub(r'\[FINAL_ANSWER\]\s*', '', main_text, flags=re.IGNORECASE)
-            main_text = re.sub(r'\[FOLLOW_UPS\]\s*', '', main_text, flags=re.IGNORECASE)
+            main_text = re.sub(r'\[\s*FOLLOW[_-]?\s*UPS?\s*\]\s*', '', main_text, flags=re.IGNORECASE)
             final_html += f"\n\n{main_text}"
 
         return final_html
@@ -200,7 +200,7 @@ class TextFormatter:
         else:
             text = re.sub(r'<think>.*?(?:</think>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
 
-        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[FOLLOW_UPS\]", "", text)
+        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[\s*FOLLOW[_-]?\s*UPS?\s*\]", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\[AI is reasoning in the background\.\.\.\]", "", text, flags=re.IGNORECASE)
 
         if include_citations and "<b>📚 Cited Sources:</b>" in text:

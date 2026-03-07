@@ -361,12 +361,19 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
             if work_res.status_code == 404:
                 return json.dumps({"status": "success", "results": [], "message": f"DOI '{clean_doi}' not found."})
             work_res.raise_for_status()
+
             ref_ids = work_res.json().get("referenced_works", [])[:max_results]
-            if not ref_ids: return json.dumps({"status": "success", "results": []})
+
+            if not ref_ids:
+                return json.dumps({"status": "success", "results": []})
+
             filter_str = "|".join([r.split("/")[-1] for r in ref_ids])
-            url = f"https://api.openalex.org/works?filter=openalex:{filter_str}&mailto={ncbi_email}"
+            safe_filter = urllib.parse.quote(f"ids.openalex:{filter_str}")
+            url = f"https://api.openalex.org/works?filter={safe_filter}&mailto={ncbi_email}"
         else:
-            url = f"https://api.openalex.org/works?filter=cites:https://doi.org/{clean_doi}&per-page={max_results}&mailto={ncbi_email}"
+            safe_filter = urllib.parse.quote(f"cites:https://doi.org/{clean_doi}")
+            url = f"https://api.openalex.org/works?filter={safe_filter}&per-page={max_results}&mailto={ncbi_email}"
+
 
         res = mcp_request("GET", url, timeout=15)
         res.raise_for_status()
@@ -652,16 +659,6 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
         elif "404" in err_str or "Not Found" in err_str:
             err_str += " (Not Found: The page does not exist.)"
         return json.dumps({"status": "error", "message": err_str})
-
-
-@mcp.tool(
-    name="search_web",
-    description=(
-            "[Tags: Web] Search the web for general information, news, or current events. "
-            "CRITICAL INSTRUCTION: You MUST use the provided '_mcp_cite_id' (e.g., [101], [102]) inline to cite your claims. "
-            "You MUST also append a 'References' list at the very end of your response containing the exact URLs."
-    )
-)
 
 
 @mcp.tool(

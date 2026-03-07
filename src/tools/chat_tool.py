@@ -20,12 +20,13 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QCheckBox,
                                QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication, QComboBox)
-from langdetect import detect
+from langdetect import detect_langs
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode, TaskState
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
+from src.core.lang_detect import detect_primary_language
 from src.core.llm_impl import OpenAICompatibleLLM
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
@@ -1544,13 +1545,7 @@ class ChatTool(BaseTool):
             trans_config = trans_config.copy()
             trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
 
-        is_english = True
-        try:
-            detected_lang = detect(text)
-            is_english = (detected_lang == 'en')
-        except Exception:
-            is_english = True
-
+        is_english = detect_primary_language(text) == 'en'
         requires_translation = (not is_english) and (trans_config is not None)
 
         if not is_english and trans_config is None:
@@ -1872,13 +1867,7 @@ class ChatTool(BaseTool):
             trans_config = trans_config.copy()
             trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
 
-        is_english = True
-        try:
-            detected_lang = detect(new_text)
-            is_english = (detected_lang == 'en')
-        except Exception:
-            is_english = True
-
+        is_english = detect_primary_language(new_text) == 'en'
         requires_translation = (not is_english) and (trans_config is not None)
 
         if not is_english and trans_config is None:
@@ -2228,19 +2217,22 @@ class ChatTool(BaseTool):
             cites_html = full_text[cite_match.start():]
             full_text = full_text[:cite_match.start()]
 
-        match = re.search(r'(?:^|\n)(?:\[FOLLOW_UPS\]|\*?\*?(?:💡\s*)?Suggested\s*Follow[- ]?ups?:?\*?\*?)\s*(.*)',
-                          full_text, flags=re.IGNORECASE | re.DOTALL)
+        match = re.search(
+            r'(?:\[\s*FOLLOW[_-]?\s*UPS?\s*\]|(?:^|\n|<br>|<br/>)\s*\*?\*?(?:💡\s*)?Suggested\s*Follow[- ]?ups?(?:\s*questions?)?:?\*?\*?)\s*(.*)',
+            full_text, flags=re.IGNORECASE | re.DOTALL)
         questions = []
 
         if match:
-            follow_up_block = match.group(1)
+            follow_up_block = match.group(1).replace('<br>', '\n').replace('<br/>', '\n')
             clean_text = full_text[:match.start()].strip()
             self.current_ai_text = clean_text + cites_html
 
             for line in follow_up_block.split('\n'):
                 line = line.strip()
+                line = re.sub(r'^>\s*', '', line)
                 if re.match(r'^([-*]|\d+\.)', line):
                     q = re.sub(r'^([-*\s]+|\d+\.\s*)', '', line).strip()
+                    q = q.replace('**', '').strip()
                     if q:
                         tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
                         if tag_match:

@@ -1,10 +1,13 @@
 import logging
 import os
+import signal
 import sys
 import traceback
 import subprocess
 import multiprocessing as mp
 from enum import Enum
+
+import psutil
 from PySide6.QtCore import QObject, Signal, QThread
 
 
@@ -196,11 +199,24 @@ class TaskManager(QObject):
     def kill_process_tree(pid: int):
         try:
             if sys.platform == "win32":
-                subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+                subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                os.kill(pid, 9)
-        except:
+                try:
+                    parent = psutil.Process(pid)
+                    children = parent.children(recursive=True)
+                    # 先杀子进程
+                    for child in children:
+                        child.kill()
+                    # 再杀父进程
+                    parent.kill()
+                except ImportError:
+                    subprocess.run(['pkill', '-9', '-P', str(pid)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
+        except Exception:
             pass
 
 

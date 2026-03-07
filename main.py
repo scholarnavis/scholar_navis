@@ -237,6 +237,35 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
 
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    from PySide6.QtWidgets import QMessageBox
+
+    unique_server_name = "ScholarNavis_SingleInstance_Lock"
+    socket = QLocalSocket()
+    socket.connectToServer(unique_server_name)
+
+    # 如果能连上服务器，说明已经有一个实例在运行
+    if socket.waitForConnected(500):
+        global_logger.warning("Application is already running. Exiting...")
+
+        # 调用原生提示弹窗
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("Notice")
+        msg_box.setText("Scholar Navis is already running.")
+        msg_box.setInformativeText(
+            "The application is running in the background or system tray. Please do not open multiple instances.")
+        msg_box.setStandardButtons(QMessageBox.Ok)
+
+        msg_box.exec()
+
+        sys.exit(0)
+
+    # 如果没有运行，则在本进程创建一个本地服务器
+    local_server = QLocalServer()
+    QLocalServer.removeServer(unique_server_name)
+    local_server.listen(unique_server_name)
+
     from src.core.theme_manager import ThemeManager
     from src.core.config_manager import ConfigManager
     import qdarktheme
