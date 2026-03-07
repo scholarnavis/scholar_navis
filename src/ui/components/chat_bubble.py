@@ -16,16 +16,15 @@ from src.ui.components.toast import ToastManager
 from src.core.network_worker import LightNetworkWorker
 
 
-
-
 def hex_to_rgba(hex_color, alpha):
     hex_color = hex_color.lstrip('#')
     if len(hex_color) == 3:
-        hex_color = ''.join([c*2 for c in hex_color])
+        hex_color = ''.join([c * 2 for c in hex_color])
     r = int(hex_color[0:2], 16)
     g = int(hex_color[2:4], 16)
     b = int(hex_color[4:6], 16)
     return f"rgba({r}, {g}, {b}, {alpha})"
+
 
 class ChatBubbleWidget(QWidget):
     sig_edit_confirmed = Signal(int, str)
@@ -81,36 +80,29 @@ class ChatBubbleWidget(QWidget):
 
         font_family = tm.font_family()
 
-        # 附件上下文框
-        if self.is_user and self.context_html:
+        # 附件上下文框 (现在支持 AI 和 User 双方)
+        if self.context_html:
             self.ctx_frame = QFrame()
-            self.ctx_frame.setStyleSheet("""
-                        QFrame { background-color: rgba(0, 0, 0, 0.2); border-left: 3px solid #05B8CC; border-radius: 4px; }
-                    """)
+            self.ctx_frame.setObjectName("ContextFrame")
             ctx_layout = QVBoxLayout(self.ctx_frame)
             ctx_layout.setContentsMargins(10, 8, 10, 8)
             ctx_layout.setSpacing(4)
 
-            ctx_header = QLabel("📎 Attached Context (Click to View)")
-            ctx_header.setStyleSheet(
-                f"color: #05B8CC; font-size: 11px; font-weight: bold; border: none; background: transparent; font-family: {font_family};")
+            self.ctx_header = QLabel("📎 Attached Context (Click to View)")
 
-            ctx_content = QLabel()
-            ctx_content.setTextFormat(Qt.RichText)
-            ctx_content.setTextInteractionFlags(Qt.TextBrowserInteraction)
-            ctx_content.setOpenExternalLinks(False)
-            ctx_content.linkActivated.connect(self.sig_link_clicked.emit)
-            ctx_content.setText(self.context_html)
-            ctx_content.setWordWrap(True)
+            self.ctx_content = QLabel()
+            self.ctx_content.setTextFormat(Qt.RichText)
+            self.ctx_content.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            self.ctx_content.setOpenExternalLinks(False)
+            self.ctx_content.linkActivated.connect(self.sig_link_clicked.emit)
+            self.ctx_content.setText(self.context_html)
+            self.ctx_content.setWordWrap(True)
 
             self.ctx_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-            ctx_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            self.ctx_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-            ctx_content.setStyleSheet(
-                f"color: #aaa; font-size: 12px; border: none; background: transparent; font-family: {font_family}; margin: 0px; padding: 0px;")
-
-            ctx_layout.addWidget(ctx_header)
-            ctx_layout.addWidget(ctx_content)
+            ctx_layout.addWidget(self.ctx_header)
+            ctx_layout.addWidget(self.ctx_content)
             self.content_layout.addWidget(self.ctx_frame)
 
         # 正文文本框
@@ -119,6 +111,7 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.lbl_text.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.lbl_text.setOpenExternalLinks(False)
+        self.lbl_text.linkActivated.connect(self.sig_link_clicked.emit)
         self.lbl_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.lbl_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
@@ -248,7 +241,6 @@ class ChatBubbleWidget(QWidget):
 
         self.set_content(self.original_text)
 
-
     def show_context_menu(self, pos):
         tm = ThemeManager()
         menu = QMenu(self)
@@ -295,12 +287,12 @@ class ChatBubbleWidget(QWidget):
         """)
 
         self.lbl_text.setStyleSheet(f"""
-            QLabel {{
-                background-color: transparent; color: {tm.color('text_main')};
-                border: none; padding: 0px; 
-                font-size: 14px; font-family: {font_family}; line-height: 1.5;
-            }}
-        """)
+                   QLabel {{
+                       background-color: transparent; color: {tm.color('text_main')};
+                       border: none; padding: 0px; 
+                       font-size: 14px; font-family: {font_family};
+                   }}
+               """)
 
         self.edit_input.setStyleSheet(f"""
             QTextEdit {{ 
@@ -314,6 +306,15 @@ class ChatBubbleWidget(QWidget):
         if hasattr(self, 'btn_edit'): self.btn_edit.setStyleSheet(btn_style)
         if hasattr(self, 'btn_cancel'): self.btn_cancel.setStyleSheet(btn_style)
 
+        # 动态更新附件的 Theme (支持日夜间模式)
+        if hasattr(self, 'ctx_frame'):
+            self.ctx_frame.setStyleSheet(f"""
+                QFrame#ContextFrame {{ background-color: {hex_to_rgba(tm.color('bg_input'), 0.5)}; border-left: 3px solid {tm.color('accent')}; border-radius: 4px; }}
+            """)
+            self.ctx_header.setStyleSheet(
+                f"color: {tm.color('accent')}; font-size: 11px; font-weight: bold; border: none; background: transparent; font-family: {font_family};")
+            self.ctx_content.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 12px; border: none; background: transparent; font-family: {font_family}; margin: 0px; padding: 0px;")
 
     def set_loading(self, loading: bool):
         self.is_loading = loading
@@ -331,7 +332,6 @@ class ChatBubbleWidget(QWidget):
         self.loading_dots = (self.loading_dots + 1) % 4
         self.lbl_text.setText("Thinking" + "." * self.loading_dots)
 
-
     def set_content(self, text):
         self.original_text = text
         if self.is_loading: return
@@ -342,6 +342,10 @@ class ChatBubbleWidget(QWidget):
             def repl_img(match):
                 raw_src_url = match.group(1)
                 src_url = raw_src_url.replace("&amp;", "&")
+
+                if src_url.startswith("file://") or src_url.startswith("data:image"):
+                    new_img_tag = f'<img width="420" style="border-radius: 8px; margin-top: 5px;" src="{src_url}" />'
+                    return f'<a href="{src_url}">{new_img_tag}</a>'
 
                 if src_url.startswith("http"):
                     if src_url in self.downloaded_images:
@@ -361,10 +365,9 @@ class ChatBubbleWidget(QWidget):
                     else:
                         if src_url not in self.downloading_urls:
                             self.downloading_urls.add(src_url)
-                            self.download_timeouts[src_url] = time.time() + 30  # 🌟 设置 30 秒超时
+                            self.download_timeouts[src_url] = time.time() + 30
                             self._start_image_download(src_url)
 
-                            # 启动动画计时器
                             if not self.image_loading_timer.isActive():
                                 self.image_loading_timer.start(500)
 
@@ -372,6 +375,7 @@ class ChatBubbleWidget(QWidget):
                         return f'<div style="color:#05B8CC; padding: 20px; border: 2px dashed #05B8CC; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">Downloading image to local cache, please wait. {dots}</span></div>'
 
                 return match.group(0)
+
             html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
 
             self.lbl_text.setText(html)
@@ -472,18 +476,17 @@ class ChatBubbleWidget(QWidget):
             text_color = tm.color('text_muted')
 
         self.lbl_trans.setStyleSheet(f"""
-            QLabel {{
-                color: {text_color};
-                background-color: {bg};
-                border: 1px solid {border};
-                border-left: 3px solid {tm.color('accent')};
-                border-radius: 6px;
-                padding: 8px 10px;
-                font-size: 12px;
-                font-family: {font_family};
-                line-height: 1.5;
-            }}
-        """)
+                   QLabel {{
+                       color: {text_color};
+                       background-color: {bg};
+                       border: 1px solid {border};
+                       border-left: 3px solid {tm.color('accent')};
+                       border-radius: 6px;
+                       padding: 8px 10px;
+                       font-size: 12px;
+                       font-family: {font_family};
+                   }}
+               """)
 
     def _start_image_download(self, url):
         ext = url.split("?")[0].split(".")[-1]
@@ -560,7 +563,6 @@ class ChatBubbleWidget(QWidget):
         else:
             self.cancel_edit()
 
-
     def cancel_edit(self):
         self.is_editing = False
         self.edit_input.setVisible(False)
@@ -572,7 +574,6 @@ class ChatBubbleWidget(QWidget):
 
         self.lbl_text.setVisible(True)
         self.btn_widget.setVisible(True)
-
 
     def eventFilter(self, obj, event):
         if obj == self.edit_input and event.type() == QEvent.KeyPress:

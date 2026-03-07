@@ -99,7 +99,20 @@ def build_app():
         f"--name={app_name_safe}",
     ]
 
-    for pkg in ["optimum", "transformers", "onnxruntime", "tokenizers", "sklearn", "scipy", "chardet"]:
+    packages_to_collect = [
+        "optimum", "transformers", "onnxruntime", "tokenizers",
+        "sklearn", "scipy", "chardet",
+
+        "chromadb",
+        "pydantic",
+
+        "langchain_text_splitters",
+        "pymupdf4llm",
+        "docx",
+        "markdown"
+    ]
+
+    for pkg in packages_to_collect:
         cmd.extend(["--collect-all", pkg])
 
     cmd.extend(["--copy-metadata", "transformers"])

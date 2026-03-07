@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
-                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea)
+                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea,
+                               QAbstractScrollArea)
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QRegularExpressionValidator
 
@@ -224,21 +225,68 @@ class BaseDialog(QDialog):
 class StandardDialog(BaseDialog):
     def __init__(self, parent=None, title="Notification", message="", show_cancel=False):
         super().__init__(parent, title=title, width=420)
+
+        self.is_long_text = len(message) > 300 or message.count('\n') > 8
+
         self.msg_label = QLabel(message)
         self.msg_label.setWordWrap(True)
-        self.content_layout.addWidget(self.msg_label)
+        self.msg_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.msg_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+
+        if self.is_long_text:
+            self.scroll_area = QScrollArea()
+            self.scroll_area.setWidgetResizable(True)
+            self.scroll_area.setFrameShape(QFrame.NoFrame)
+            self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+            self.scroll_area.setWidget(self.msg_label)
+            self.scroll_area.setMaximumHeight(350)
+            self.scroll_area.setMinimumHeight(200)
+            self.content_layout.addWidget(self.scroll_area)
+        else:
+            self.content_layout.addWidget(self.msg_label)
 
         if show_cancel:
             self.add_button("Cancel", self.reject)
         self.add_button("OK", self.accept, is_primary=True)
 
         self._apply_theme()
-        self.adjustSize()
-
+        
     def _apply_theme(self):
         super()._apply_theme()
+        tm = self.tm
         self.msg_label.setStyleSheet(
-            f"color: {self.tm.color('text_main')}; font-size: 14px; padding: 5px; border: none;")
+            f"color: {tm.color('text_main')}; background-color: transparent; font-size: 14px; padding: 5px; border: none;"
+        )
+
+        if self.is_long_text:
+            self.scroll_area.setStyleSheet(f"""
+                QScrollArea {{ 
+                    background-color: transparent; 
+                    border: none; 
+                }}
+                QScrollBar:vertical {{ 
+                    border: none;
+                    background-color: transparent;
+                    width: 6px;
+                    margin: 0px;
+                }}
+                QScrollBar::handle:vertical {{ 
+                    background-color: {tm.color('border')};
+                    border-radius: 3px;
+                    min-height: 20px;
+                }}
+                QScrollBar::handle:vertical:hover {{
+                    background-color: {tm.color('text_muted')};
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height: 0px; border: none; background: none;
+                }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                    background: none;
+                }}
+            """)
+            self.scroll_area.viewport().setStyleSheet("background-color: transparent;")
 
 
 try:
@@ -1466,33 +1514,124 @@ class LicenseDialog(BaseDialog):
         super().__init__(parent, title="Open Source Licenses", width=800)
         self.setMinimumHeight(600)
 
+        self.PYTORCH_FULL_TEXT =\
+        """
+From PyTorch:
+
+Copyright (c) 2016-     Facebook, Inc            (Adam Paszke)
+Copyright (c) 2014-     Facebook, Inc            (Soumith Chintala)
+Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+
+From Caffe2:
+
+Copyright (c) 2016-present, Facebook Inc. All rights reserved.
+
+All contributions by Facebook:
+Copyright (c) 2016 Facebook Inc.
+
+All contributions by Google:
+Copyright (c) 2015 Google Inc.
+All rights reserved.
+
+All contributions by Yangqing Jia:
+Copyright (c) 2015 Yangqing Jia
+All rights reserved.
+
+All contributions by Kakao Brain:
+Copyright 2019-2020 Kakao Brain
+
+All contributions by Cruise LLC:
+Copyright (c) 2022 Cruise LLC.
+All rights reserved.
+
+All contributions by Tri Dao:
+Copyright (c) 2024 Tri Dao.
+All rights reserved.
+
+All contributions by Arm:
+Copyright (c) 2021, 2023-2025 Arm Limited and/or its affiliates
+
+All contributions from Caffe:
+Copyright(c) 2013, 2014, 2015, the respective contributors
+All rights reserved.
+
+All other contributions:
+Copyright(c) 2015, 2016 the respective contributors
+All rights reserved.
+
+Caffe2 uses a copyright model similar to Caffe: each contributor holds
+copyright over their contributions to Caffe2. The project versioning records
+all such contribution and copyright details. If a contributor wants to further
+mark their specific copyright on a particular contribution, they should
+indicate their copyright solely in the commit message of the change when it is
+committed.
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+3. Neither the names of Facebook, Deepmind Technologies, NYU, NEC Laboratories America
+   and IDIAP Research Institute nor the names of its contributors may be
+   used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+        """
+
+
         self.licenses = [
             ("PySide6", "LGPL v3", "Official Python bindings for Qt."),
-            ("Mermaid.js", "MIT", "Generation of diagrams and flowcharts."),
             ("PyMuPDF / 4LLM", "AGPL v3", "High-performance PDF & Document parsing."),
             ("ChromaDB", "Apache 2.0", "AI-native open-source vector database."),
-            ("LangChain", "MIT", "Framework for developing LLM applications."),
-            ("PyTorch", "BSD", "Tensors and Dynamic neural networks."),
-            ("BioPython", "Biopython", "Tools for biological computation."),
+            ("LangChain / Splitters", "MIT", "Advanced text chunking and LLM framework."),
+            ("PyTorch", "Click name for details", "Tensors and Dynamic neural networks."),
             ("ONNX Runtime", "MIT", "Cross-platform AI model accelerator."),
-            ("Scikit-learn", "BSD", "Machine learning and data mining tools."),
-            ("NetworkX", "BSD", "Study of complex networks and graphs."),
-            ("Optimum", "Apache 2.0", "Optimization for Transformer models."),
+            ("Optimum / ONNX", "Apache 2.0", "Hardware-specific AI model optimization."),
+            ("Scikit-learn", "BSD-3-Clause", "Machine learning and data mining tools."),
+            ("BioPython", "Biopython", "Tools for biological computation."),
+            ("NetworkX", "BSD-3-Clause", "Study of complex networks and graphs."),
+            ("BeautifulSoup4", "MIT", "Screen-scraping library for HTML/XML."),
+            ("DuckDuckGo Search", "MIT", "Search engine integration without tracking."),
             ("Curl-cffi", "MIT", "Python binding for curl-impersonate."),
-            ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
-            ("Psutil", "BSD", "Cross-platform process and system utilities."),
-            ("Chardet", "LGPL v2.1", "Universal character encoding detector."),
-            ("hf_xet", "MIT", "Efficient large-file storage and transfer for Hugging Face."),
-            ("Markdown", "BSD", "Python implementation of Markdown."),
-            ("PyQtDarkTheme", "MIT", "Flat dark theme for PySide/PyQt."),
-            ("nvidia-ml-py", "BSD", "Python bindings for the NVIDIA Management Library."),
-            ("langdetect", "MIT", "Port of Google's language-detection library."),
-            ("MCP", "MIT", "Model Context Protocol Python SDK."),
             ("OpenAI", "Apache 2.0", "OpenAI Python API library."),
+            ("MCP SDK", "MIT", "Model Context Protocol Python SDK."),
+            ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
+            ("Psutil", "BSD-3-Clause", "Cross-platform process and system utilities."),
+            ("NVIDIA-ML-PY", "BSD-3-Clause", "Python bindings for NVIDIA Management Library."),
             ("Keyring", "MIT", "Store and access credentials safely."),
-            ("python-docx", "MIT", "Create and update Microsoft Word .docx files."),
-            ("email-validator", "Unlicense", "Robust email syntax and deliverability validation."),
-            ("disposable-email-domains", "MIT", "List of disposable email domains."),
+            ("Python-docx", "MIT", "Create and update Microsoft Word .docx files."),
+            ("Email-validator", "public domain", "Robust email syntax and deliverability validation."),
+            ("Ddisposable-email-domains", "MIT", "List of disposable email domains."),
+            ("Langdetect", "MIT", "Language detection library port."),
+            ("Markdown", "BSD-3-Clause", "Python implementation of Markdown."),
+            ("PyQtDarkTheme", "MIT", "Flat dark theme for PySide/PyQt."),
+            ("Chardet", "MIT", "Universal character encoding detector."),
+            ("hf_xet", "Apache Software License", "Efficient large-file storage for Hugging Face."),
+            ("Mermaid.js", "MIT", "Generation of diagrams and flowcharts."),
         ]
 
         self.licenses.sort(key=lambda item: item[0].lower())
@@ -1514,10 +1653,23 @@ class LicenseDialog(BaseDialog):
         self.table.setAlternatingRowColors(True)
 
         for i, (pkg, lic, desc) in enumerate(self.licenses):
-            pkg_item = QTableWidgetItem(pkg)
-            pkg_item.setForeground(QColor(self.tm.color('accent')))
+            if pkg == "PyTorch":
+                link_label = QLabel(
+                    f'<a href="#pytorch" style="color: {self.tm.color("accent")}; text-decoration: underline;">{pkg}</a>')
+                link_label.setOpenExternalLinks(False)  # 禁止外部浏览器打开
+                link_label.setCursor(Qt.PointingHandCursor)
+                link_label.linkActivated.connect(self._show_pytorch_license)
 
-            self.table.setItem(i, 0, pkg_item)
+                container = QWidget()
+                cell_layout = QHBoxLayout(container)
+                cell_layout.setContentsMargins(12, 0, 0, 0)
+                cell_layout.addWidget(link_label)
+                self.table.setCellWidget(i, 0, container)
+            else:
+                pkg_item = QTableWidgetItem(pkg)
+                pkg_item.setForeground(QColor(self.tm.color('accent')))
+                self.table.setItem(i, 0, pkg_item)
+
             self.table.setItem(i, 1, QTableWidgetItem(lic))
             self.table.setItem(i, 2, QTableWidgetItem(desc))
 
@@ -1531,6 +1683,16 @@ class LicenseDialog(BaseDialog):
 
         self.add_button("Close", self.accept, is_primary=True)
         self._apply_theme()
+
+    def _show_pytorch_license(self):
+        dlg = StandardDialog(
+            self,
+            title="PyTorch / Caffe2 License",
+            message=self.PYTORCH_FULL_TEXT
+        )
+
+        dlg.setFixedWidth(600)
+        dlg.exec()
 
     def _apply_theme(self):
         super()._apply_theme()

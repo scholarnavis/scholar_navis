@@ -22,6 +22,35 @@ class TextFormatter:
         text = re.sub(r'\$(.*?)\$', replacer, text)
         return text
 
+    @staticmethod
+    def _render_chemistry(text):
+        """识别并格式化化学分子式（自动下标）与SMILES（代码块高亮）"""
+
+        def formula_replacer(match):
+            prefix = match.group(1)
+            formula = match.group(2)
+            subscripted = re.sub(r'(?<=[A-Za-z\)\]])(\d+)', r'<sub>\1</sub>', formula)
+            return f"{prefix}{subscripted}"
+
+        text = re.sub(
+            r'(?i)((?:Molecular|Chemical|Empirical)[\s\*_]*formula[\s\*_:]*)([A-Za-z0-9\(\)\[\]]+)',
+            formula_replacer,
+            text
+        )
+
+        def smiles_replacer(match):
+            prefix = match.group(1)
+            smiles = match.group(2)
+            return f'{prefix}<code style="color: #05B8CC; word-break: break-all; background-color: transparent;">{smiles}</code>'
+
+        text = re.sub(
+            r'(?i)((?:Canonical\s*|Isomeric\s*)?SMILES[\s\*_:]*)([A-Za-z0-9@+\-=\#\(\)\[\]\.\/\\]+)',
+            smiles_replacer,
+            text
+        )
+
+        return text
+
 
     @staticmethod
     def format_chat_text(text, index, expanded_indices, user_toggled_thinks):
@@ -35,7 +64,6 @@ class TextFormatter:
         main_text = text
         is_closed = True
 
-        # 兼容旧版本可能残留的 [FINAL_ANSWER] 标签
         final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
 
         if final_answer_match:
@@ -46,20 +74,16 @@ class TextFormatter:
             main_text = re.sub(r'</?think\s*>', '', raw_main, flags=re.IGNORECASE).strip()
             is_closed = True
         else:
-            # 标准化标签
             text = re.sub(r'<\s*think\s*>', '<think>', text, flags=re.IGNORECASE)
             text = re.sub(r'<\s*/\s*think\s*>', '</think>', text, flags=re.IGNORECASE)
 
-            # 1. 尝试匹配已闭合的完整思考块
             think_match = re.search(r'<think>(.*?)</think>', text, flags=re.DOTALL | re.IGNORECASE)
 
             if think_match:
                 think_content = think_match.group(1).strip()
-                # 从原文中剔除思考块，剩下的就是正文
                 main_text = text.replace(think_match.group(0), "").strip()
                 is_closed = True
             elif "<think>" in text:
-                # 2. 未闭合状态 (流式生成中)：<think> 之后的所有内容绝对都是思考内容
                 parts = text.split("<think>", 1)
                 main_text = parts[0].strip()
                 think_content = parts[1].strip()
@@ -67,7 +91,6 @@ class TextFormatter:
 
         final_html = ""
 
-        # --- 渲染思考块 ---
         if think_content or not is_closed:
             if index in user_toggled_thinks:
                 is_expanded = index in expanded_indices
@@ -94,9 +117,7 @@ class TextFormatter:
                     f"margin: 10px 0; border-radius: 4px; font-size: 13px; color: {text_muted};'>"
                     f"{link}<br><br><div style='color:{text_muted};'>{safe_content}{suffix}</div></div>")
 
-        # --- 渲染主文本 ---
         if main_text:
-            # 清理可能的杂乱系统尾缀
             main_text = re.sub(r'\[FINAL_ANSWER\]\s*', '', main_text, flags=re.IGNORECASE)
             main_text = re.sub(r'\[FOLLOW_UPS\]\s*', '', main_text, flags=re.IGNORECASE)
             final_html += f"\n\n{main_text}"
@@ -104,19 +125,70 @@ class TextFormatter:
         return final_html
 
     @staticmethod
+    @staticmethod
     def markdown_to_html(text):
         tm = ThemeManager()
         processed_text = text
         processed_text = TextFormatter._render_simple_latex(processed_text)
-        processed_text = re.sub(r'(?<![="\'/])\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b',
-                                r'<a href="https://doi.org/\1">\1</a>', processed_text)
-        processed_text = re.sub(r'(?<![="\'/\[\(])\b(https?://[^\s<>\)\]]+)\b', r'<a href="\1">\1</a>',
-                                processed_text)
+        processed_text = TextFormatter._render_chemistry(processed_text)
 
         html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
 
+        skip_pattern = r'(?si)(<a\b[^>]*>.*?</a>|<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>)'
+
+        url_pattern = skip_pattern + r'|(?<![="\'/])\b((?:https?|ftp|file)://[^\s<>\)\]"\'，。？！；：“”‘’\n]+(?<![.,?!;:：]))'
+
+        def url_repl(match):
+            if match.group(1): return match.group(1)  # 返回原样 (因被 Skip 保护)
+            return f'<a href="{match.group(2)}">{match.group(2)}</a>'
+
+        html = re.sub(url_pattern, url_repl, html)
+
+        # 3. 匹配常见科研数据库/论文 ID 及其它标识，自动挂载官方解析链接
+        replacements = [
+            # DOI
+            (r'\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)(?<![.,?!;:：])', r'<a href="https://doi.org/\1">\1</a>'),
+            # TaxID
+            (r'\b(?:taxid|taxonomy\s*id)\s*:?\s*(\d+)\b',
+             r'<a href="https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?id=\1">TaxID: \1</a>'),
+            # BioProject
+            (r'\b(PRJN[A-Z]\d+)\b', r'<a href="https://www.ncbi.nlm.nih.gov/bioproject/\1">\1</a>'),
+            # NCBI Assembly (GCF / GCA)
+            (r'\b(GC[FA]_\d{9}(?:\.\d+)?)\b', r'<a href="https://www.ncbi.nlm.nih.gov/datasets/genome/\1/">\1</a>'),
+            # NCBI RefSeq / GenBank / Accessions
+            (r'\b((?:NM|NP|NR|NC|NG|XM|XP|XR|WP|YP|AP)_\d{4,10}(?:\.\d+)?)\b',
+             r'<a href="https://www.ncbi.nlm.nih.gov/search/all/?term=\1">\1</a>'),
+            # UniProt
+            (r'\b([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\b',
+             r'<a href="https://www.uniprot.org/uniprotkb/\1/entry">\1</a>'),
+            # Ensembl
+            (r'\b(ENS[GTPER]\d{11})\b', r'<a href="https://www.ensembl.org/id/\1">\1</a>'),
+            # E.C. 酶编号
+            (r'\b(?:EC\s+|E\.C\.\s*)(\d+\.\d+\.\d+\.(?:\d+|-))\b',
+             r'<a href="https://enzyme.expasy.org/EC/\1">EC \1</a>'),
+            # PubChem CID
+            (r'\b(?:CID|PubChem\s*CID)\s*:?\s*(\d+)\b',
+             r'<a href="https://pubchem.ncbi.nlm.nih.gov/compound/\1">CID \1</a>'),
+            # PDB 晶体结构
+            (r'\bPDB\s*(?:ID\s*)?:?\s*([1-9][A-Z0-9]{3})\b', r'<a href="https://www.rcsb.org/structure/\1">PDB \1</a>'),
+            # STRING DB 蛋白互作网络
+            (r'\b(\d+\.ENSP\d{11})\b', r'<a href="https://string-db.org/network/\1">\1</a>'),
+        ]
+
+        for pat, template in replacements:
+            combined_pat = re.compile(skip_pattern + r'|' + pat)
+
+            def get_replacer(tmpl):
+                def replacer_func(match):
+                    if match.group(1): return match.group(1)
+                    return tmpl.replace(r'\1', match.group(2))
+
+                return replacer_func
+
+            html = combined_pat.sub(get_replacer(template), html)
+
         html = html.replace("<a href=", "<a style='color: #4daafc; text-decoration: none; font-weight: bold;' href=")
-        final_html = f"<div style='font-family: {tm.font_family()}; line-height: 1.5;'>{html}</div>"
+        final_html = f"<div style='font-family: {tm.font_family()};'>{html}</div>"
 
         return final_html
 

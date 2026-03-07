@@ -309,8 +309,7 @@ class QuickTranslatorWindow(QWidget):
 
         clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
         if checked:
-            import markdown
-            html_str = markdown.markdown(clean_text, extensions=['extra', 'nl2br'])
+            html_str = TextFormatter.markdown_to_html(clean_text)
             self.output_box.setHtml(html_str)
         else:
             self.output_box.setHtml(clean_text.replace('\n', '<br>'))
@@ -516,8 +515,7 @@ class QuickTranslatorWindow(QWidget):
         clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
 
         if getattr(self, 'chk_markdown', None) and self.chk_markdown.isChecked():
-            import markdown
-            html = markdown.markdown(clean_text, extensions=['extra', 'nl2br'])
+            html = TextFormatter.markdown_to_html(clean_text)
             self.output_box.setHtml(html)
         else:
             self.output_box.setHtml(clean_text.replace('\n', '<br>'))

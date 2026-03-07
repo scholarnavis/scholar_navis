@@ -895,11 +895,13 @@ class ChatWorker(QObject):
 
                                             source_url = item.get("url") or item.get("pdf_url") or item.get(
                                                 "landing_page_url")
-                                            source_title = item.get("title") or item.get(
-                                                "name") or f"Result from {tool_name}"
+                                            source_title = item.get("title") or item.get("name") or item.get(
+                                                "pref_name") or item.get("display_name") or item.get(
+                                                "scientific_name") or f"Result from {tool_name}"
 
                                             if source_url:
                                                 mcp_ref_id = len(sources_map) + 101
+
                                                 sources_map[mcp_ref_id] = {
                                                     "path": source_url,  # 对于 Web，这里存 URL
                                                     "page": 1,
@@ -1431,10 +1433,7 @@ class ChatTool(BaseTool):
                 for msg in self.history:
                     is_user = (msg['role'] == "user")
                     clean_content = TextFormatter.clean_text_for_export(msg['content'])
-                    rendered_html = markdown.markdown(
-                        clean_content,
-                        extensions=['extra', 'nl2br', 'tables', 'fenced_code']
-                    )
+                    rendered_html = TextFormatter.markdown_to_html(clean_content)
 
                     if is_user:
                         header = f"<div class='header-user'><img src='{user_icon_b64}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
@@ -2229,7 +2228,8 @@ class ChatTool(BaseTool):
             cites_html = full_text[cite_match.start():]
             full_text = full_text[:cite_match.start()]
 
-        match = re.search(r'\[FOLLOW_UPS\]\s*(.*)', full_text, flags=re.IGNORECASE | re.DOTALL)
+        match = re.search(r'(?:^|\n)(?:\[FOLLOW_UPS\]|\*?\*?(?:💡\s*)?Suggested\s*Follow[- ]?ups?:?\*?\*?)\s*(.*)',
+                          full_text, flags=re.IGNORECASE | re.DOTALL)
         questions = []
 
         if match:
@@ -2239,9 +2239,9 @@ class ChatTool(BaseTool):
 
             for line in follow_up_block.split('\n'):
                 line = line.strip()
-                if line.startswith('-') or line.startswith('*'):
-                    q = line.lstrip('-* ').strip()
-                    if q and q.startswith('['):
+                if re.match(r'^([-*]|\d+\.)', line):
+                    q = re.sub(r'^([-*\s]+|\d+\.\s*)', '', line).strip()
+                    if q:
                         tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
                         if tag_match:
                             tag, text = tag_match.groups()

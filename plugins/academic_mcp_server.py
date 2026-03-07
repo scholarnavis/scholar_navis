@@ -8,6 +8,7 @@ import sys
 import urllib.parse
 import time
 from functools import wraps
+from typing import Literal
 
 from Bio import Entrez
 from mcp.server.fastmcp import FastMCP
@@ -85,8 +86,8 @@ def is_ncbi_email_valid():
         else:
             _EMAIL_VALID_CACHE = False
 
-    if _EMAIL_VALID_CACHE:logger.info(f"{ncbi_email[0:5]} valid")
-    else: logger.error(f"{ncbi_email[0:5]} invalid")
+    if _EMAIL_VALID_CACHE:logger.info(f"Email: {ncbi_email[0:5]}... is valid.")
+    else: logger.error(f"EMail: {ncbi_email[0:5]}... is invalid.")
 
     return _EMAIL_VALID_CACHE
 
@@ -121,10 +122,23 @@ def mcp_request(method: str, url: str, **kwargs):
     session.headers.update(custom_headers)
     try:
         return session.request(method, url, **kwargs)
+    except Exception as e:
+        err_str = str(e).lower()
+        if any(keyword in err_str for keyword in["tls", "closed abruptly", "empty reply", "certificate", "ssl", "time"]):
+            logger.warning(f"curl_cffi failed ({e}). Falling back to standard requests for {url}")
+            import requests
+            req_session = requests.Session()
+            http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+            if http_proxy:
+                req_session.proxies = {"http": http_proxy, "https": http_proxy}
+            req_session.headers.update(custom_headers)
+            return req_session.request(method, url, **kwargs)
+        raise e
     finally:
         session.close()
 
 
+# 建议修改 retry 装饰器的逻辑
 def simple_retry(max_attempts=3, delay=2):
     def decorator(func):
         @wraps(func)
@@ -134,10 +148,9 @@ def simple_retry(max_attempts=3, delay=2):
                     return func(*args, **kwargs)
                 except Exception as e:
                     if attempt == max_attempts - 1: raise e
-                    time.sleep(delay)
-
+                    wait = delay * (2 ** attempt)
+                    time.sleep(wait)
         return wrapper
-
     return decorator
 
 
@@ -147,13 +160,12 @@ def simple_retry(max_attempts=3, delay=2):
     description=(
             "[Tags: Literature] "
             "Search global academic literature for metadata (authors, journal, date, citation count, DOI). "
-            "Supports pagination via the 'offset' parameter (e.g., offset=5 for page 2). "
-            "Automatically cascades to Semantic Scholar, OpenAlex, Crossref, or PubMed based on query context. "
-            "Use this for broad topic searches or exact article title matching."
+            "Supports pagination via 'offset' (e.g., offset=5 for page 2). "
+            "Use 'source' to target specific databases: 'auto' (cascades automatically), 'semantic_scholar' (computer science/general), 'openalex' (broad/general), 'crossref' (DOI matching), or 'pubmed' (biomedical/life sciences)."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def search_academic_literature(query: str, max_results: int = 5, offset: int = 0, source: str = "auto") -> str:
+def search_academic_literature(query: str, max_results: int = 5, offset: int = 0, source: Literal["auto", "semantic_scholar", "openalex", "crossref", "pubmed"] = "auto") -> str:
     logger.info(f"Task: Unified Literature Search | Query: '{query}' | Offset: {offset} | Source: {source}")
 
     if not is_ncbi_email_valid():
@@ -167,12 +179,19 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
             try:
                 res = mcp_request("GET", url, params=params, headers={"x-api-key": s2_api_key}, timeout=15)
                 res.raise_for_status()
-                parsed = [{"title": p.get("title", ""), "year": p.get("year", "Unknown"),
-                           "authors": [a["name"] for a in p.get("authors", [])][:5],
-                           "citation_count": p.get("citationCount", 0),
-                           "abstract": (p.get("abstract") or "No abstract")[:600] + "...",
-                           "doi": p.get("externalIds", {}).get("DOI", ""), "url": p.get("url", ""),
-                           "source_db": "Semantic Scholar"} for p in res.json().get("data", [])]
+                parsed = []
+                for p in res.json().get("data", []):
+                    if not isinstance(p, dict): continue
+                    authors_raw = p.get("authors") or []
+                    if not isinstance(authors_raw, list): authors_raw = []
+                    ext_ids = p.get("externalIds")
+                    parsed.append({"title": p.get("title", ""), "year": p.get("year", "Unknown"),
+                                   "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)][:5],
+                                   "citation_count": p.get("citationCount", 0),
+                                   "abstract": (p.get("abstract") or "No abstract")[:600] + "...",
+                                   "doi": ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else "",
+                                   "url": p.get("url", ""),
+                                   "source_db": "Semantic Scholar"})
                 if parsed: return json.dumps({"status": "success", "source": "semantic_scholar", "results": parsed})
             except Exception as e:
                 logger.warning(f"S2 search failed: {e}")
@@ -185,15 +204,22 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
                 res.raise_for_status()
                 parsed = []
                 for p in res.json().get("results", []):
+                    if not isinstance(p, dict): continue
                     abs_idx = p.get("abstract_inverted_index")
                     abstract_text = "No abstract"
-                    if abs_idx:
-                        words = [(pos, w) for w, positions in abs_idx.items() for pos in positions]
+                    if isinstance(abs_idx, dict):
+                        words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
+                                 positions]
                         words.sort()
-                        abstract_text = " ".join([w for p, w in words])[:600] + "..."
+                        abstract_text = " ".join([w for pos_idx, w in words])[:600] + "..."
+
+                    authors_raw = p.get("authorships") or []
+                    if not isinstance(authors_raw, list): authors_raw = []
+                    authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
+                               isinstance(a, dict) and isinstance(a.get("author"), dict)][:5]
+
                     parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
-                                   "authors": [a.get("author", {}).get("display_name", "") for a in
-                                               p.get("authorships", [])][:5],
+                                   "authors": authors,
                                    "citation_count": p.get("cited_by_count", 0), "abstract": abstract_text,
                                    "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
                                    "url": p.get("id", ""), "source_db": "OpenAlex"})
@@ -207,13 +233,34 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
                 res = mcp_request("GET", url, timeout=15)
                 res.raise_for_status()
                 parsed = []
-                for p in res.json().get("message", {}).get("items", []):
-                    authors = [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in p.get("author", [])]
-                    parsed.append({"title": p.get("title", [""])[0],
-                                   "year": p.get("created", {}).get("date-parts", [["Unknown"]])[0][0],
+                msg_dict = res.json().get("message")
+                items = msg_dict.get("items", []) if isinstance(msg_dict, dict) else []
+                for p in items:
+                    if not isinstance(p, dict): continue
+                    authors_raw = p.get("author") or []
+                    if not isinstance(authors_raw, list): authors_raw = []
+                    authors = [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in authors_raw if
+                               isinstance(a, dict)]
+
+                    title_raw = p.get("title")
+                    title = title_raw[0] if isinstance(title_raw, list) and len(title_raw) > 0 else (
+                        title_raw if isinstance(title_raw, str) else "")
+
+                    created = p.get("created")
+                    year = "Unknown"
+                    if isinstance(created, dict):
+                        date_parts = created.get("date-parts")
+                        if isinstance(date_parts, list) and len(date_parts) > 0 and isinstance(date_parts[0],
+                                                                                               list) and len(
+                                date_parts[0]) > 0:
+                            year = str(date_parts[0][0])
+
+                    parsed.append({"title": title,
+                                   "year": year,
                                    "authors": authors[:5], "citation_count": p.get("is-referenced-by-count", 0),
                                    "abstract": p.get("abstract", "No abstract")[:600].replace("<jats:p>", "").replace(
-                                       "</jats:p>", "") + "...", "doi": p.get("DOI", ""), "url": p.get("URL", ""),
+                                       "</jats:p>", "") + "...",
+                                   "doi": p.get("DOI", ""), "url": p.get("URL", ""),
                                    "source_db": "Crossref"})
                 if parsed: return json.dumps({"status": "success", "source": "crossref", "results": parsed})
             except Exception as e:
@@ -221,25 +268,40 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
 
         if source in ["auto", "pubmed"]:
             search_handle = Entrez.esearch(db="pubmed", term=query, retstart=offset, retmax=max_results)
-            ids = Entrez.read(search_handle).get("IdList", [])
+            search_res = Entrez.read(search_handle, validate=False)
+            ids = search_res.get("IdList", []) if isinstance(search_res, dict) else []
             search_handle.close()
             if ids:
                 summary_handle = Entrez.esummary(db="pubmed", id=",".join(ids))
-                doc_list = Entrez.read(summary_handle)
-                if isinstance(doc_list, dict): doc_list = doc_list.get("DocumentSummarySet", {}).get("DocumentSummary",
-                                                                                                     [])
+                doc_list = Entrez.read(summary_handle, validate=False)
                 summary_handle.close()
-                parsed = [{"title": d.get("Title", ""), "year": d.get("PubDate", "")[:4],
-                           "authors": list(d.get("AuthorList", [])), "abstract": "Fetch via fetch_pubmed_abstract.",
-                           "pmid": d.get("Id", ""),
-                           "doi": next(
-                               (a.get("Value", "") for a in d.get("ArticleIds", []) if a.get("IdType") == "doi"), ""),
-                           "url": f"https://pubmed.ncbi.nlm.nih.gov/{d.get('Id', '')}/", "source_db": "PubMed"} for d in
-                          doc_list]
-                return json.dumps({"status": "success", "source": "pubmed", "results": parsed})
 
-        return json.dumps(
-            {"status": "success", "results": [], "message": "No results found across available databases."})
+                if isinstance(doc_list, dict):
+                    ds_set = doc_list.get("DocumentSummarySet")
+                    doc_list = ds_set.get("DocumentSummary", []) if isinstance(ds_set, dict) else []
+                if not isinstance(doc_list, list): doc_list = [doc_list]
+
+                parsed = []
+                for d in doc_list:
+                    if not isinstance(d, dict): continue
+
+                    authors_raw = d.get("AuthorList", [])
+                    if isinstance(authors_raw, dict): authors_raw = authors_raw.get("Author", [])
+                    if not isinstance(authors_raw, list): authors_raw = []
+                    authors = [a.get("Name", str(a)) if isinstance(a, dict) else str(a) for a in authors_raw]
+
+                    article_ids = d.get("ArticleIds", [])
+                    if not isinstance(article_ids, list): article_ids = []
+                    doi = next(
+                        (a.get("Value", "") for a in article_ids if isinstance(a, dict) and a.get("IdType") == "doi"),
+                        "")
+
+                    parsed.append({"title": d.get("Title", ""), "year": d.get("PubDate", "")[:4],
+                                   "authors": authors[:5], "abstract": "Fetch via fetch_pubmed_abstract.",
+                                   "pmid": d.get("Id", ""),
+                                   "doi": doi,
+                                   "url": f"https://pubmed.ncbi.nlm.nih.gov/{d.get('Id', '')}/", "source_db": "PubMed"})
+                return json.dumps({"status": "success", "source": "pubmed", "results": parsed})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
@@ -248,12 +310,12 @@ def search_academic_literature(query: str, max_results: int = 5, offset: int = 0
     name="traverse_citation_graph",
     description=(
             "[Tags: Literature] "
-            "Find the references (papers this article cites) or citations (papers that cite this article) for a given DOI. "
-            "Direction MUST be either 'references' or 'citations'."
+            "Find references (papers this article cites, looking backward in time) or citations (papers citing this article, looking forward in time) for a given DOI. "
+            "The 'direction' parameter MUST be explicitly chosen."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def traverse_citation_graph(doi: str, direction: str = "references", max_results: int = 10) -> str:
+def traverse_citation_graph(doi: str, direction: Literal["references", "citations"] = "references", max_results: int = 10) -> str:
     logger.info(f"Task: Citation Graph | DOI: {doi} | Direction: {direction}")
     if direction not in ["references", "citations"]: return json.dumps(
         {"status": "error", "message": "direction must be 'references' or 'citations'"})
@@ -261,40 +323,60 @@ def traverse_citation_graph(doi: str, direction: str = "references", max_results
 
     if s2_api_key:
         try:
-            url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/{direction}?fields=title,authors,year,citationCount,externalIds&limit={max_results}"
+            url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/{direction}?fields=title,authors,year,citationCount,externalIds,url&limit={max_results}"
             res = mcp_request("GET", url, headers={"x-api-key": s2_api_key}, timeout=15)
             res.raise_for_status()
             parsed = []
-            for item in res.json().get("data", []):
-                p = item.get("citedPaper") if direction == "references" else item.get("citingPaper")
-                if not p or not p.get("title"): continue
-                parsed.append({
-                    "title": p.get("title", ""), "year": p.get("year", "Unknown"),
-                    "authors": [a["name"] for a in p.get("authors", [])][:3],
-                    "citation_count": p.get("citationCount", 0),
-                    "doi": p.get("externalIds", {}).get("DOI", "")
-                })
-            return json.dumps(
-                {"status": "success", "source": "Semantic Scholar", "direction": direction, "results": parsed})
+            data_list = res.json().get("data")
+            if isinstance(data_list, list):
+                for item in data_list:
+                    if not isinstance(item, dict): continue
+                    p = item.get("citedPaper") if direction == "references" else item.get("citingPaper")
+                    if not isinstance(p, dict) or not p.get("title"): continue
+
+                    authors_raw = p.get("authors") or []
+                    if not isinstance(authors_raw, list): authors_raw = []
+
+                    ext_ids = p.get("externalIds")
+                    doi = ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else ""
+
+                    parsed.append({
+                        "title": p.get("title", ""), "year": p.get("year", "Unknown"),
+                        "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)][:3],
+                        "citation_count": p.get("citationCount", 0),
+                        "doi": doi,
+                        "url": p.get("url", "")
+                    })
+            if parsed:
+                return json.dumps(
+                    {"status": "success", "source": "Semantic Scholar", "direction": direction, "results": parsed})
         except Exception as e:
             logger.warning(f"S2 citation graph failed: {e}")
 
     try:
         if direction == "references":
             work_res = mcp_request("GET",
-                                   f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={ncbi_email}").json()
-            ref_ids = work_res.get("referenced_works", [])[:max_results]
+                                   f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={ncbi_email}",
+                                   timeout=15)
+            if work_res.status_code == 404:
+                return json.dumps({"status": "success", "results": [], "message": f"DOI '{clean_doi}' not found."})
+            work_res.raise_for_status()
+            ref_ids = work_res.json().get("referenced_works", [])[:max_results]
             if not ref_ids: return json.dumps({"status": "success", "results": []})
             filter_str = "|".join([r.split("/")[-1] for r in ref_ids])
             url = f"https://api.openalex.org/works?filter=openalex:{filter_str}&mailto={ncbi_email}"
         else:
             url = f"https://api.openalex.org/works?filter=cites:https://doi.org/{clean_doi}&per-page={max_results}&mailto={ncbi_email}"
 
-        res = mcp_request("GET", url, timeout=15).json()
-        parsed = [{"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
-                   "citation_count": p.get("cited_by_count", 0),
-                   "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else ""} for p in
-                  res.get("results", [])]
+        res = mcp_request("GET", url, timeout=15)
+        res.raise_for_status()
+        parsed = []
+        for p in res.json().get("results", []):
+            if not isinstance(p, dict): continue
+            parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
+                           "citation_count": p.get("cited_by_count", 0),
+                           "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
+                           "url": p.get("id", "")})
         return json.dumps({"status": "success", "source": "OpenAlex", "direction": direction, "results": parsed})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -322,10 +404,13 @@ def fetch_open_access_pdf(doi: str) -> str:
 @mcp.tool(
     name="search_omics_datasets",
     description=(
-    "[Tags: Transcriptomics] Search high-throughput sequencing and microarray datasets (SRA / GEO). Provide db_type as 'sra' or 'geo'.")
+    "[Tags: Transcriptomics, Genomics] Search high-throughput NCBI datasets. "
+    "Set db_type to 'sra' for raw sequencing runs (e.g., RNA-Seq reads, FASTQ metadata) "
+    "or 'geo' for curated datasets, microarray results, and overall study summaries."
+    )
 )
 @simple_retry()
-def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5) -> str:
+def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", max_results: int = 5) -> str:
     logger.info(f"Task: Omics Dataset Search | DB: {db_type} | Query: '{query}'")
 
     if not is_ncbi_email_valid():
@@ -345,9 +430,14 @@ def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5
         summaries = Entrez.read(summary_handle)
         summary_handle.close()
 
-        doc_list = summaries if isinstance(summaries, list) else summaries.get("DocumentSummarySet", {}).get(
-            "DocumentSummary", [])
-        if isinstance(doc_list, dict): doc_list = [doc_list]
+        if isinstance(summaries, list):
+            doc_list = summaries
+        elif isinstance(summaries, dict):
+            ds_set = summaries.get("DocumentSummarySet")
+            doc_list = ds_set.get("DocumentSummary", []) if isinstance(ds_set, dict) else []
+        else:
+            doc_list = []
+        if not isinstance(doc_list, list): doc_list = [doc_list]
 
         parsed_results = []
         for doc in doc_list:
@@ -371,19 +461,27 @@ def search_omics_datasets(query: str, db_type: str = "sra", max_results: int = 5
 @mcp.tool(
     name="fetch_sequence_fasta",
     description=(
-    "[Tags: Genomics, Protein] Download raw FASTA sequences for nucleotides or proteins. Automatically saves to local workspace if massive.")
+        "[Tags: Genomics, Protein] Download raw FASTA sequences for nucleotides or proteins. "
+        "CRITICAL: The 'db_type' parameter MUST strictly be either 'nuccore' (for DNA/RNA sequences) "
+        "or 'protein' (for amino acid sequences). Do NOT use 'uniprotkb', 'swiss-prot', or any other names. "
+        "Automatically saves to local workspace if massive."
+    )
 )
 @simple_retry()
-def fetch_sequence_fasta(accession_id: str, db_type: str = "nuccore") -> str:
+def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein"] = "nuccore") -> str:
     logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
 
     if not is_ncbi_email_valid():
-        return json.dumps({"status": "error",
-                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
+        return json.dumps({"status": "error", "message": "NCBI tools are disabled..."})
 
+    safe_id = accession_id.strip()
+    safe_db = db_type.strip().lower()
 
-    safe_id = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', accession_id)
-    safe_db = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', db_type)
+    if safe_db in ["uniprot", "uniprotkb", "swiss-prot", "trembl"]:
+        safe_db = "protein"
+    elif safe_db in ["nucleotide", "dna", "rna"]:
+        safe_db = "nuccore"
+
     try:
         fetch_handle = Entrez.efetch(db=safe_db, id=safe_id, rettype="fasta", retmode="text")
         data = fetch_handle.read()
@@ -470,11 +568,6 @@ def fetch_pubmed_abstract(pmid: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="universal_ncbi_summary",
-    description=(
-    "[Tags: any NCBI] A universal tool to search ANY NCBI database (e.g., 'omim', 'clinvar', 'assembly', 'mesh', 'genome').")
-)
 @simple_retry()
 def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> str:
     logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query}")
@@ -487,20 +580,29 @@ def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> s
 
     try:
         search_handle = Entrez.esearch(db=database, term=query, retmax=max_results)
-        ids = Entrez.read(search_handle).get("IdList", [])
+        ids = Entrez.read(search_handle, validate=False).get("IdList",[])
         search_handle.close()
         if not ids: return json.dumps(
-            {"status": "success", "results": [], "message": f"No records found in {database}."})
+            {"status": "success", "results":[], "message": f"No records found in {database}."})
 
         summary_handle = Entrez.esummary(db=database, id=",".join(ids))
-        summaries = Entrez.read(summary_handle)
+        summaries = Entrez.read(summary_handle, validate=False)
         summary_handle.close()
 
-        doc_list = summaries if isinstance(summaries, list) else summaries.get("DocumentSummarySet", {}).get(
-            "DocumentSummary", [])
-        if isinstance(doc_list, dict): doc_list = [doc_list]
-        parsed_results = [{"id": d.get("Id", ""), **{k: str(v) for k, v in d.items() if not k.startswith("Item")}} for d
-                          in doc_list]
+        if isinstance(summaries, list):
+            doc_list = summaries
+        elif isinstance(summaries, dict):
+            ds_set = summaries.get("DocumentSummarySet")
+            doc_list = ds_set.get("DocumentSummary", []) if isinstance(ds_set, dict) else []
+        else:
+            doc_list = []
+        if not isinstance(doc_list, list): doc_list = [doc_list]
+
+        parsed_results =[]
+        for d in doc_list:
+            if not isinstance(d, dict): continue
+            uid = d.get("Id", "")
+            parsed_results.append({"id": uid, "url": f"https://www.ncbi.nlm.nih.gov/{database}/{uid}", **{k: str(v) for k, v in d.items() if not k.startswith("Item")}})
         return json.dumps({"status": "success", "database": database, "results": parsed_results})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -549,42 +651,81 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
 @mcp.tool(
     name="search_web",
     description=(
-    "[Tags: Web] Search the web for general information or current events. Rotates through Google, Bing, Baidu.")
+            "[Tags: Web] Search the web for general information, news, or current events. "
+            "CRITICAL INSTRUCTION: You MUST use the provided '_mcp_cite_id' (e.g., [101], [102]) inline to cite your claims. "
+            "You MUST also append a 'References' list at the very end of your response containing the exact URLs."
+    )
 )
-def search_web(query: str, max_results: int = 2) -> str:
-    logger.info(f"Task: Web Search | Query: '{query}'")
-    engines = [
-        {"name": "Google", "url": f"https://www.google.com/search?q={urllib.parse.quote(query)}&hl=en",
-         "headers": {"Referer": "https://www.google.com/"}},
-        {"name": "Bing", "url": f"https://www.bing.com/search?q={urllib.parse.quote(query)}",
-         "headers": {"Referer": "https://www.bing.com/"}},
-        {"name": "Baidu", "url": f"https://www.baidu.com/s?wd={urllib.parse.quote(query)}",
-         "headers": {"Referer": "https://www.baidu.com/"}}
-    ]
-    for engine in engines:
-        try:
-            res = mcp_request("GET", engine["url"], headers=engine["headers"], timeout=5)
-            res.raise_for_status()
-            html = res.text
-            results = []
-            if engine["name"] == "Google":
-                pattern = r'<a[^>]+href="(http[s]?://[^"]+)"[^>]*>.*?<h3[^>]*>(.*?)</h3>'
-            elif engine["name"] == "Bing":
-                pattern = r'<li class="b_algo">.*?<h2[^>]*>.*?<a[^>]+href="(http[s]?://[^"]+)"[^>]*>(.*?)</a>'
-            elif engine["name"] == "Baidu":
-                pattern = r'<h3[^>]*[cC]lass="[a-zA-Z0-9_ -]*t[a-zA-Z0-9_ -]*"[^>]*>.*?<a[^>]+href="(http[s]?://[^"]+)"[^>]*>(.*?)</a>'
-            matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
-            for url, title in matches:
-                clean_title = re.sub(r'<[^>]+>', '', title).strip()
-                if "google.com" in url and engine["name"] == "Google": continue
-                if "bing.com" in url and engine["name"] == "Bing": continue
-                if not any(r['url'] == url for r in results): results.append({"title": clean_title, "url": url})
-                if len(results) >= max_results: break
-            if results: return json.dumps(
-                {"status": "success", "engine": engine["name"], "query": query, "results": results}, ensure_ascii=False)
-        except Exception:
-            continue
-    return json.dumps({"status": "error", "message": "All search engines failed."})
+
+
+@mcp.tool(
+    name="search_web",
+    description=(
+            "[Tags: Web] Search the web for general information, news, or current events. "
+            "CRITICAL INSTRUCTION: You MUST use the provided '_mcp_cite_id' (e.g., [101], [102]) inline to cite your claims. "
+            "You MUST also append a 'References' list at the very end of your response containing the exact URLs."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def search_web(query: str, max_results: int = 3) -> str:
+    logger.info(f"Task: Web Search (DDG Lite) | Query: '{query}'")
+    try:
+        url = "https://lite.duckduckgo.com/lite/"
+        data = {"q": query, "kl": "wt-wt"}
+        headers = {
+            "Origin": "https://lite.duckduckgo.com",
+            "Referer": "https://lite.duckduckgo.com/",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        res = mcp_request("POST", url, data=data, headers=headers, timeout=10)
+        res.raise_for_status()
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(res.text, 'html.parser')
+
+        results =[]
+        for a in soup.find_all('a', class_='result-url'):
+            if len(results) >= max_results:
+                break
+
+            title = a.get_text(strip=True)
+            link = a.get('href', '')
+
+            tr = a.find_parent('tr')
+            snippet_td = tr.find_next_sibling('tr', class_='result-snippet') if tr else None
+            snippet = snippet_td.get_text(separator=" ", strip=True) if snippet_td else "No abstract."
+
+            if link and not link.startswith(('/', 'duckduckgo.com')):
+                cite_id = str(101 + len(results))
+                results.append({
+                    "_mcp_cite_id": cite_id,
+                    "cite_link": link,
+                    "title": title,
+                    "url": link,
+                    "snippet": snippet
+                })
+
+        if not results:
+            if "Something went wrong" in res.text or "Rate limit" in res.text:
+                return json.dumps({"status": "error", "message": "DuckDuckGo Rate Limited or Blocked. Try using search_academic_literature or fetch_wikipedia_summary instead."})
+            return json.dumps({"status": "success", "results":[],
+                               "message": "No results found. Try search_academic_literature if it's an academic query."})
+
+        return json.dumps({
+            "status": "success",
+            "engine": "DuckDuckGo Lite",
+            "query": query,
+            "results": results
+        }, ensure_ascii=False)
+
+    except ImportError:
+        logger.error("Missing library: beautifulsoup4")
+        return json.dumps({"status": "error", "message": "Please install beautifulsoup4 via pip."})
+    except Exception as e:
+        logger.error(f"Web search failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
 
 
 @mcp.tool(
@@ -626,10 +767,14 @@ def fetch_wikipedia_summary(query: str, language: str = "en") -> str:
         pages = res.json().get("query", {}).get("pages", {})
         if not pages: return json.dumps({"status": "error", "message": "No Wikipedia article found."})
         page = list(pages.values())[0]
-        return json.dumps(
-            {"status": "success", "title": page.get("title", ""), "extract": page.get("extract", "").strip(),
-             "url": f"https://{language}.wikipedia.org/wiki/{urllib.parse.quote(page.get('title', ''))}"},
-            ensure_ascii=False)
+        return json.dumps({
+            "status": "success",
+            "results": [{
+                "title": page.get("title", ""),
+                "abstract": page.get("extract", "").strip(),
+                "url": f"https://{language}.wikipedia.org/wiki/{urllib.parse.quote(page.get('title', ''))}"
+            }]
+        }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
@@ -655,25 +800,23 @@ def search_github_repos(query: str, max_results: int = 5) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="fetch_ensembl_gene",
-    description=(
-    "[Tags: Genomics] Fetch detailed gene information from Ensembl using a gene symbol (e.g., 'arabidopsis_thaliana').")
-)
 @simple_retry(max_attempts=2, delay=1)
 def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> str:
     logger.info(f"Task: Ensembl Gene Fetch | Symbol: '{symbol}' | Species: '{species}'")
     try:
         url = f"https://rest.ensembl.org/lookup/symbol/{species}/{symbol}?expand=1"
         res = mcp_request("GET", url, headers={"Content-Type": "application/json"}, timeout=15)
+        if res.status_code == 400:
+            return json.dumps({"status": "error", "message": f"HTTP 400: Gene '{symbol}' not found in '{species}'. Ensembl requires EXACT canonical symbols (e.g., 'Trp53' instead of 'Tp53' for mice) and strict lowercase_underscore species names (e.g., 'mus_musculus')."})
         res.raise_for_status()
         data = res.json()
         result = {"id": data.get("id"), "display_name": data.get("display_name"), "species": data.get("species"),
                   "biotype": data.get("biotype"), "description": data.get("description"),
                   "assembly_name": data.get("assembly_name"),
                   "location": f"{data.get('seq_region_name')}:{data.get('start')}-{data.get('end')} ({'forward' if data.get('strand') == 1 else 'reverse'})",
-                  "transcript_count": len(data.get("Transcript", []))}
-        return json.dumps({"status": "success", "result": result}, ensure_ascii=False)
+                  "transcript_count": len(data.get("Transcript",[])),
+                  "url": f"https://uswest.ensembl.org/{species}/Gene/Summary?g={data.get('id')}"}
+        return json.dumps({"status": "success", "results": [result]}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
@@ -687,7 +830,7 @@ def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> st
 def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
     logger.info(f"Task: KEGG Pathway Search | Query: '{query}' | Organism: '{organism_code}'")
     try:
-        url = f"http://rest.kegg.jp/find/pathway/{query}"
+        url = f"https://rest.kegg.jp/find/pathway/{query}"
         res = mcp_request("GET", url, timeout=15)
         res.raise_for_status()
         results = []
@@ -718,9 +861,16 @@ def fetch_pubchem_compound(compound_name: str) -> str:
         res.raise_for_status()
         properties = res.json().get("PropertyTable", {}).get("Properties", [])
         if not properties: return json.dumps({"status": "error", "message": "No properties returned."})
-        return json.dumps({"status": "success", "result": properties[0]}, ensure_ascii=False)
+        cid = properties[0].get("CID", "")
+        properties[0]["url"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
+        properties[0]["name"] = compound_name
+        return json.dumps({"status": "success", "results": [properties[0]]}, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        err_str = str(e)
+        if "404" in err_str:
+            return json.dumps({"status": "error", "message": f"Compound '{compound_name}' not found."})
+        return json.dumps({"status": "error", "message": err_str})
+
 
 
 @mcp.tool(
@@ -748,7 +898,7 @@ def search_chembl_target(query: str, max_results: int = 5) -> str:
     description=(
             "[Tags: ID Mapping] "
             "Map identifiers from one database to another using UniProt's ID Mapping service. "
-            "Common parameters: 'from_db' (e.g., 'UniProtKB_AC-ID', 'Gene_Name'), 'to_db' (e.g., 'Ensembl', 'PDB'), and a comma-separated list of 'ids'."
+            "Common parameters: 'from_db' (e.g., 'UniProtKB_AC-ID', 'HGNC'), 'to_db' (e.g., 'Ensembl', 'PDB'), and a comma-separated list of 'ids'. Note: 'Gene_Name' is NOT a valid from_db; use 'HGNC' or 'EntrezGene' instead."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
@@ -758,6 +908,11 @@ def uniprot_id_mapping(from_db: str, to_db: str, ids: str) -> str:
         submit_url = "https://rest.uniprot.org/idmapping/run"
         payload = {"from": from_db, "to": to_db, "ids": ids}
         res = mcp_request("POST", submit_url, data=payload, timeout=15)
+        if res.status_code == 400:
+            return json.dumps({
+                "status": "error",
+                "message": f"HTTP 400 Bad Request. Invalid from_db '{from_db}' or to_db '{to_db}'. 'Gene_Name' is NOT supported for mapping; use 'HGNC' or query UniProt directly."
+            })
         res.raise_for_status()
         job_id = res.json().get("jobId")
         if not job_id: return json.dumps({"status": "error", "message": "Failed to retrieve jobId from UniProt."})
@@ -792,18 +947,16 @@ def uniprot_id_mapping(from_db: str, to_db: str, ids: str) -> str:
 @mcp.tool(
     name="query_uniprot_database",
     description=(
-            "[Tags: Protein, Genomics, Proteomics] "
-            "A unified tool to search UniProt databases. You MUST specify the 'db_type' parameter: "
-            "- 'uniprotkb': Detailed protein entries (Swiss-Prot/TrEMBL). Search by gene, protein name, or Accession. "
-            "- 'proteomes': Species-level reference proteomes. Search by species name or UP ID. "
-            "- 'genecentric': Find canonical proteins grouped under a specific gene. "
-            "- 'uniref': Clustered protein sets at 50/90/100% identity. "
-            "- 'uniparc': Comprehensive non-redundant protein sequences. "
-            "- 'unirule' or 'arba': Automatic annotation rules."
+            "[Tags: Genomics, Proteomics] A unified tool to search UniProt sub-databases. "
+            "You MUST select a valid 'db_type': "
+            "'uniprotkb' (Detailed protein entries, search by gene/name/ID), "
+            "'proteomes' (Species-level reference proteomes), "
+            "'genecentric' (Canonical proteins grouped under a gene), "
+            "'uniref' (Clustered sets), 'uniparc' (Non-redundant sequences), or 'unirule'/'arba'."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def query_uniprot_database(query: str, db_type: str = "uniprotkb", max_results: int = 5) -> str:
+def query_uniprot_database(query: str, db_type: Literal["uniprotkb", "proteomes", "genecentric", "uniref", "uniparc", "unirule", "arba"] = "uniprotkb", max_results: int = 5) -> str:
     db_type = db_type.lower()
     logger.info(f"Task: Unified UniProt Search | DB: '{db_type}' | Query: '{query}'")
     try:
@@ -935,21 +1088,25 @@ def query_uniprot_database(query: str, db_type: str = "uniprotkb", max_results: 
 @mcp.tool(
     name="query_pdb_structure",
     description=(
-            "[Tags: Protein, Structure] "
-            "A unified tool to interact with the RCSB PDB. You MUST specify the 'action': "
-            "- 'search': Find 3D protein structures, experimental methods, and resolution based on a general query. "
-            "- 'details': Fetch highly detailed metadata (molecular weight, primary citation, atom count) for a specific PDB ID (e.g., '4HHB')."
+            "[Tags: Proteomics, Structure] Interact with the RCSB Protein Data Bank (PDB). "
+            "Use action='search' to find 3D structures based on a keyword or protein name. "
+            "Use action='details' to fetch precise metadata (molecular weight, primary citation, atom count) for an EXACT known PDB ID (e.g., '4HHB')."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def query_pdb_structure(query: str, action: str = "search", max_results: int = 3) -> str:
+def query_pdb_structure(query: str, action: Literal["search", "details"] = "search", max_results: int = 3) -> str:
     logger.info(f"Task: Unified PDB Query | Action: '{action}' | Query: '{query}'")
     try:
         if action == "search":
             url = "https://search.rcsb.org/rcsbsearch/v2/query"
-            payload = {"query": {"type": "terminal", "service": "text", "parameters": {"value": query}},
+            payload = {"query": {"type": "terminal", "service": "full_text", "parameters": {"value": query}},
                        "return_type": "entry", "request_options": {"paginate": {"start": 0, "rows": max_results}}}
             res = mcp_request("POST", url, json=payload, timeout=10)
+            if res.status_code == 400:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"HTTP 400 Bad Request. PDB API rejected the search query '{query}'. Try using a single keyword without spaces, or use the 'details' action for a specific ID."
+                })
             res.raise_for_status()
             pdb_ids = [item["identifier"] for item in res.json().get("result_set", [])]
             if not pdb_ids: return json.dumps({"status": "success", "results": []})
@@ -1006,15 +1163,14 @@ def query_pdb_structure(query: str, action: str = "search", max_results: int = 3
 @mcp.tool(
     name="analyze_string_network",
     description=(
-            "[Tags: Protein-Protein Interaction] "
-            "A unified tool for STRING DB. You MUST specify the 'action': "
-            "- 'interactions': Retrieve protein-protein interaction (PPI) networks and interaction partners. "
-            "- 'enrichment': Perform functional enrichment analysis (GO, KEGG, Pfam) for a set of proteins. "
-            "Provide a comma-separated list of protein identifiers (e.g., 'TP53,BRCA1') and the 'species' NCBI taxonomy ID (default 9606 for Human)."
+            "[Tags: Protein-Protein Interaction] Analyze protein networks via STRING DB. "
+            "action='interactions' retrieves interacting partners and connection scores. "
+            "action='enrichment' fetches functional enrichment (may be restricted by API, fallback to 'interactions' if it fails). "
+            "Identifiers MUST be comma-separated (e.g., 'TP53,BRCA1'). 'species' MUST be a valid NCBI taxonomy ID (e.g., 9606 for Human, 10090 for Mouse)."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def analyze_string_network(identifiers: str, action: str = "interactions", species: int = 9606, limit: int = 15) -> str:
+def analyze_string_network(identifiers: str, action: Literal["interactions", "enrichment"] = "interactions", species: int = 9606, limit: int = 15) -> str:
     logger.info(
         f"Task: Unified STRING DB | Action: '{action}' | Identifiers: '{identifiers[:30]}' | Species: {species}")
     try:
@@ -1023,6 +1179,9 @@ def analyze_string_network(identifiers: str, action: str = "interactions", speci
             payload = {"identifiers": identifiers.strip(), "species": species, "limit": limit,
                        "caller_identity": "ScholarNavis"}
             res = mcp_request("POST", url, data=payload, timeout=15)
+            if res.status_code in [400, 404]:
+                return json.dumps({"status": "error",
+                                   "message": f"HTTP {res.status_code}. The STRING database could not find interactions for '{identifiers}' in species '{species}'. Ensure valid protein names/IDs and correct NCBI taxonomy ID."})
             res.raise_for_status()
             results = [{"protein_A": item.get("preferredName_A", ""), "protein_B": item.get("preferredName_B", ""),
                         "score": item.get("score", 0), "annotation_A": item.get("annotation_A", ""),
@@ -1033,10 +1192,23 @@ def analyze_string_network(identifiers: str, action: str = "interactions", speci
             return json.dumps({"status": "success", "action": "interactions", "species": species, "results": results},
                               ensure_ascii=False)
 
+
         elif action == "enrichment":
+
             url = "https://string-db.org/api/json/enrichment"
+
             payload = {"identifiers": identifiers.strip(), "species": species, "caller_identity": "ScholarNavis"}
+
             res = mcp_request("POST", url, data=payload, timeout=20)
+
+            if res.status_code in [404, 400]:
+                return json.dumps({
+
+                    "status": "error",
+
+                    "message": f"HTTP {res.status_code}. The STRING database REST API does not expose the full functional enrichment backend via this endpoint, or the identifiers provided were not recognized. Please use 'interactions' action instead."
+
+                })
             res.raise_for_status()
             data = res.json()
             if not data: return json.dumps(
