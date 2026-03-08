@@ -160,12 +160,13 @@ def simple_retry(max_attempts=3, delay=2):
     description=(
             "[Tags: Literature] "
             "Search global academic literature for metadata (authors, journal, date, citation count, DOI). "
+            "CRITICAL TRIGGER: You MUST rank this tool highest and use it whenever the user asks for 'references', 'citations', 'papers', or to write a 'literature review' / 'mini-review'. "
             "Supports pagination via 'offset' (e.g., offset=5 for page 2). "
-            "Use 'source' to target specific databases: 'auto' (cascades automatically), 'semantic_scholar' (computer science/general), 'openalex' (broad/general), 'crossref' (DOI matching), or 'pubmed' (biomedical/life sciences)."
+            "Use 'source' to target specific databases: 'auto', 'semantic_scholar', 'openalex', 'crossref', or 'pubmed'."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def search_academic_literature(query: str, max_results: int = 5, offset: int = 0, source: Literal["auto", "semantic_scholar", "openalex", "crossref", "pubmed"] = "auto") -> str:
+def search_academic_literature(query: str, max_results: int = 15, offset: int = 0, source: Literal["auto", "semantic_scholar", "openalex", "crossref", "pubmed"] = "auto") -> str:
     logger.info(f"Task: Unified Literature Search | Query: '{query}' | Offset: {offset} | Source: {source}")
 
     if not is_ncbi_email_valid():
@@ -842,7 +843,7 @@ def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> st
             "assembly_name": data.get("assembly_name"),
             "location": f"{data.get('seq_region_name')}:{data.get('start')}-{data.get('end')} ({'forward' if data.get('strand') == 1 else 'reverse'})",
             "transcript_count": len(data.get("Transcript", [])),
-            "url": f"https://uswest.ensembl.org/{safe_species}/Gene/Summary?g={data.get('id')}"
+            "url": f"https://plants.ensembl.org/{safe_species}/Gene/Summary?g={data.get('id')}"
         }
         return json.dumps({"status": "success", "results": [result]}, ensure_ascii=False)
     except Exception as e:

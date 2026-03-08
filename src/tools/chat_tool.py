@@ -610,7 +610,7 @@ class ChatWorker(QObject):
 
             # Phase 1: Query Extraction & Translation (Cache Accelerated)
             if self.requires_translation:
-                self.sig_token.emit("<i>Translating your query to academic English for precise retrieval...</i>\n\n")
+                self.sig_token.emit("<i>🌐 Translating your query to academic English for precise retrieval...</i>\n\n")
                 try:
                     trans_kwargs = {
                         "is_translation": True,
@@ -623,12 +623,13 @@ class ChatWorker(QObject):
                         f"Translation model request failed. Please check your translation API configuration.\nDetails: {e}")
                     return
 
-            self.sig_token.emit("[CLEAR_SEARCH]")
 
             # ==========================================
             # Phase 2: Vector Retrieval & Reranking (Local KB)
             # ==========================================
             if self.kb_id and self.kb_id != "none":
+                self.sig_token.emit("[CLEAR_SEARCH]")
+                self.sig_token.emit("<i>📚 Searching local knowledge base and reranking documents...</i>\n\n")
 
                 kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
 
@@ -797,11 +798,14 @@ class ChatWorker(QObject):
                 # 2. RAG 动态路由：从候选池中挑出最匹配的 Top-K 给大模型
                 if raw_mcp_tools:
                     self.sig_token.emit("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
-                    mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=4)
+                    mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=6)
                     self.sig_token.emit("[CLEAR_SEARCH]")
 
             dynamic_tool_prompt = ""
             if mcp_tools:
+                self.sig_token.emit("[CLEAR_SEARCH]")
+                self.sig_token.emit("<i>⚙️ Analyzing query intent and filtering optimal MCP tools...</i>\n\n")
+
                 tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
                 dynamic_tool_prompt = (
                     f"### CRITICAL TOOL UTILIZATION RULE:\n"
@@ -815,17 +819,17 @@ class ChatWorker(QObject):
 
                 f"{dynamic_tool_prompt}\n\n"
 
-                "### TOOL USE PROTOCOL (STRICT):\n"
-                "1. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
-                "2. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n"
-                "3. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
-                "4. If graphics need to be created, use mermaid uniformly.\n\n"
+               "### TOOL USE PROTOCOL (STRICT):\n"
+                "1. CRITICAL FOR CITATIONS: If the user's prompt asks for literature, references, citations, or a review, you MUST explicitly invoke academic search tools (like search_academic_literature) BEFORE generating your response. NEVER rely on your internal training data to generate citations, DOIs, or author lists.\n"
+                "2. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
+                "3. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n"
+                "4. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
+                "5. If graphics need to be created, use mermaid uniformly.\n\n"
 
-                "### RESPONSE GUIDELINES:\n"
-                "### GROUNDING RULE (CRITICAL):\n"
-                "1. For Local Documents: Use [1], [2] based on the Context section.\n"
-                "2. For Tool Results: If a result contains an '_mcp_cite_id', you MUST use that ID (e.g., [101]) to cite it.\n"
-                "NEVER claim facts without appending the corresponding bracketed number. This allows users to trace back to the exact webpage or paper.\n\n"
+"### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
+                "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. This automatically generates a UI 'Cited Sources' block. NEVER claim facts without these bracketed numbers.\n"
+                "2. FORMAL BIBLIOGRAPHY (For the User): If the user explicitly requests 'references', 'citations', or a 'review', you MUST ALSO generate a standalone 'References' section at the very end of your main text (but BEFORE the [FOLLOW_UPS] section). \n"
+                "3. STRICT FORMATTING: The standalone 'References' section must strictly follow academic formatting (e.g., APA/Nature style: Authors. (Year). Title. Journal. DOI). DO NOT include conversational fluff like 'Cited for the role of...' in this formal list. List purely the bibliographic data.\n\n"
                 
                 
                 "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
@@ -964,9 +968,10 @@ class ChatWorker(QObject):
                     "and provide your insights based on what you already know or retrieved successfully."
                 )
                 rag_messages.append({"role": "user", "content": silence_prompt})
-                self.sig_token.emit("[CLEAR_SEARCH]")
 
-            # --- LLM Output Streaming ---
+            self.sig_token.emit("[CLEAR_SEARCH]")
+            self.sig_token.emit("[START_LLM_NETWORK]")
+
             for token in self.main_llm.stream_chat(rag_messages):
                 self.full_response_cache += token
                 self.sig_token.emit(token)

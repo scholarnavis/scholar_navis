@@ -320,21 +320,40 @@ class ChatBubbleWidget(QWidget):
         self.is_loading = loading
         if loading:
             self.loading_dots = 0
-            self.lbl_text.setText("Thinking")
-            self.loading_timer.start(500)
-            self.btn_widget.hide()
+            self.btn_widget.hide()  # 隐藏底部按钮（复制、编辑等）
+
+            # 只有在没有任何文本时，才启动默认的 Thinking 动画
+            if not self.original_text.strip():
+                self.lbl_text.setText("Thinking")
+                self.loading_timer.start(500)
+            else:
+                self.set_content(self.original_text)
         else:
             self.loading_timer.stop()
             self.btn_widget.show()
             self.set_content(self.original_text)
 
     def _animate_loading(self):
+        if self.original_text.strip():
+            self.loading_timer.stop()
+            return
+
         self.loading_dots = (self.loading_dots + 1) % 4
         self.lbl_text.setText("Thinking" + "." * self.loading_dots)
 
     def set_content(self, text):
         self.original_text = text
-        if self.is_loading: return
+
+        if self.is_loading:
+            if not text.strip():
+                if not self.loading_timer.isActive():
+                    self.loading_dots = 0
+                    self.lbl_text.setText("Thinking")
+                    self.loading_timer.start(500)
+                return
+            else:
+                if self.loading_timer.isActive():
+                    self.loading_timer.stop()
 
         try:
             html = TextFormatter.markdown_to_html(text)

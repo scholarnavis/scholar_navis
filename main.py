@@ -8,12 +8,6 @@ from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar
-
-from src.core.device_manager import DeviceManager
-from src.core.mcp_manager import MCPManager
-from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, ensure_onnx_model
-from src.core.network_worker import setup_global_network_env
-from src.ui.main_window import MainWindow
 from src.version import __version__
 
 # 拦截来自 MCPManager 的子进程唤起请求，防止主 UI 被无限循环启动
@@ -46,6 +40,14 @@ class StartupWorker(QThread):
 
     def run(self):
         try:
+            self.sig_progress.emit(5, "Loading core engine modules...")
+            time.sleep(0.1)
+            from src.core.device_manager import DeviceManager
+            from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, \
+                ensure_onnx_model
+            from src.core.network_worker import setup_global_network_env
+            from src.core.config_manager import ConfigManager
+            from src.core.theme_manager import ThemeManager
             self.sig_progress.emit(10, "Loading system configuration & network profiles...")
             time.sleep(0.1)
             cfg_mgr = ConfigManager()
@@ -202,13 +204,16 @@ class AppController(QObject):
         self.splash.progress.setValue(100)
         self.splash.lbl_status.setText("Ready.")
 
-        self.main_window = MainWindow()
+        from src.ui.main_window import MainWindow
+        from src.core.mcp_manager import MCPManager
 
+        self.main_window = MainWindow()
         self.worker.deleteLater()
 
         self.main_window.show()
         self.splash.close()
 
+        from PySide6.QtCore import QTimer
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
 
 
@@ -217,11 +222,12 @@ if __name__ == "__main__":
     import multiprocessing
 
     multiprocessing.freeze_support()
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    from PySide6.QtWidgets import QMessageBox
 
 
     from src.core.logger import setup_logger
 
-    global_logger = setup_logger()
 
     if sys.platform == "win32":
         try:
@@ -237,8 +243,7 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
 
-    from PySide6.QtNetwork import QLocalServer, QLocalSocket
-    from PySide6.QtWidgets import QMessageBox
+
 
     unique_server_name = "ScholarNavis_SingleInstance_Lock"
     socket = QLocalSocket()
@@ -246,34 +251,30 @@ if __name__ == "__main__":
 
     # 如果能连上服务器，说明已经有一个实例在运行
     if socket.waitForConnected(500):
-        global_logger.warning("Application is already running. Exiting...")
-
-        # 调用原生提示弹窗
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Warning)
         msg_box.setWindowTitle("Notice")
         msg_box.setText("Scholar Navis is already running.")
         msg_box.setInformativeText(
-            "The application is running in the background or system tray. Please do not open multiple instances.")
+            "The application is running in the background. Please do not open multiple instances.")
         msg_box.setStandardButtons(QMessageBox.Ok)
-
         msg_box.exec()
-
         sys.exit(0)
 
-    # 如果没有运行，则在本进程创建一个本地服务器
     local_server = QLocalServer()
     QLocalServer.removeServer(unique_server_name)
     local_server.listen(unique_server_name)
+
+    from src.core.logger import setup_logger
+
+    global_logger = setup_logger()
 
     from src.core.theme_manager import ThemeManager
     from src.core.config_manager import ConfigManager
     import qdarktheme
 
     tm = ThemeManager()
-
     global_icon = tm.get_app_icon()
-
     app.setWindowIcon(global_icon)
 
     app.processEvents()
