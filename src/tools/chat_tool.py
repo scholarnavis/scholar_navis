@@ -732,8 +732,11 @@ class ChatWorker(QObject):
                 vision_model_name = self.main_config.get("vision_model_name", "auto")
                 main_model_name = self.main_config.get("model_name", "").lower()
 
-                vision_keywords = [ 'image','vl', 'vision', 'llava','pixtral']
+                vision_keywords = ['image', 'vl', 'vision', 'llava', 'pixtral', 'gpt-4o', 'gpt-4-turbo', 'gemini-1.5',
+                                   'gemini-2.0', 'claude-3', 'qwen-vl']
                 main_supports_vision = any(kw in main_model_name for kw in vision_keywords)
+                if "deepseek" in main_model_name:
+                    main_supports_vision = False
 
                 need_pre_caption = False
                 active_vision_model = None
@@ -894,13 +897,14 @@ class ChatWorker(QObject):
 
                 f"{dynamic_tool_prompt}\n\n"
 
-               "### TOOL USE PROTOCOL (STRICT):\n"
+                "### TOOL USE PROTOCOL (STRICT):\n"
                 "1. CRITICAL FOR CITATIONS: If the user's prompt asks for literature, references, citations, or a review, you MUST explicitly invoke academic search tools (like search_academic_literature) BEFORE generating your response. NEVER rely on your internal training data to generate citations, DOIs, or author lists.\n"
                 "2. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
-                "3. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n"
-                "4. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
-                "5. If graphics need to be created, use mermaid uniformly.\n\n"
-
+                "3. SILENT EXECUTION: Never output your reasoning process for choosing a tool. YOU MUST USE THE NATIVE TOOL CALLING API FORMAT.\n"
+                "4. FALLBACK TOOL CALLING (CRITICAL FOR REASONING MODELS): If your native function calling API is disabled (e.g., DeepSeek-R1), you MUST invoke tools manually by outputting exactly this XML block in your response text: <｜DSML｜invoke name=\"tool_name\"><｜DSML｜parameter name=\"arg_name\">value</｜DSML｜parameter></｜DSML｜invoke>\n"
+                "5. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
+                "6. If graphics need to be created, use mermaid uniformly.\n\n"
+                
                 "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
                 "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. This automatically generates a UI 'Cited Sources' block. NEVER claim facts without these bracketed numbers.\n"
                 "2. FORMAL BIBLIOGRAPHY (For the User): If the user explicitly requests 'references', 'citations', or a 'review', you MUST ALSO generate a standalone 'References' section at the very end of your main text (but BEFORE the [FOLLOW_UPS] section). \n"
@@ -984,6 +988,54 @@ class ChatWorker(QObject):
 
                         if reasoning:
                             self.sig_token.emit(f"<think>\n{reasoning}\n</think>\n\n")
+
+                        if not tool_calls and "<｜DSML｜invoke" in content:
+                            dsml_matches = re.findall(r'<｜DSML｜invoke name=["\'](.*?)["\'](?:>(.*?)</｜DSML｜invoke>| />)',
+                                                      content, re.DOTALL)
+                            if dsml_matches:
+                                tool_calls = []
+                                for m_name, m_args_raw in dsml_matches:
+                                    arg_dict = {}
+                                    if m_args_raw:
+                                        p_matches = re.findall(
+                                            r'<｜DSML｜parameter name=["\'](.*?)["\'][^>]*>(.*?)</｜DSML｜parameter>', m_args_raw,
+                                            re.DOTALL)
+                                        for p_name, p_val in p_matches:
+                                            p_val = p_val.strip()
+                                            if p_val.lower() == "true":
+                                                p_val = True
+                                            elif p_val.lower() == "false":
+                                                p_val = False
+                                            arg_dict[p_name] = p_val
+
+                                    tool_calls.append({
+                                        "id": f"call_{uuid.uuid4().hex[:12]}",
+                                        "type": "function",
+                                        "function": {
+                                            "name": m_name,
+                                            "arguments": json.dumps(arg_dict, ensure_ascii=False)
+                                        }
+                                    })
+                                content = re.sub(r'<｜DSML｜.*?>', '', content, flags=re.DOTALL).strip()
+
+                        if not tool_calls and "```json" in content:
+                            json_blocks = re.findall(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
+                            for jb in json_blocks:
+                                try:
+                                    j_data = json.loads(jb)
+                                    if isinstance(j_data, dict) and "name" in j_data and "arguments" in j_data:
+                                        tool_calls = [{
+                                            "id": f"call_{uuid.uuid4().hex[:12]}",
+                                            "type": "function",
+                                            "function": {
+                                                "name": j_data["name"],
+                                                "arguments": json.dumps(j_data["arguments"], ensure_ascii=False) if isinstance(j_data["arguments"], dict) else j_data["arguments"]
+                                            }
+                                        }]
+                                        content = content.replace(f"```json\n{jb}\n```", "").strip()
+                                        break
+                                except:
+                                    pass
 
                         if not tool_calls:
                             if content:

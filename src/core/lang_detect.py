@@ -22,8 +22,9 @@ def detect_primary_language(text):
         # 去除数字、常见标点符号和特殊字符，减少噪音
         text_to_detect = re.sub(r'[0-9\.\-\/\(\)（），。！？:;""'']+', ' ', text).strip()
 
+        # 去除完了啥都没有那就是英语
         if not text_to_detect:
-            return "unknown"
+            return "en"
 
         detected_langs = detect_langs(text_to_detect)
         top_lang = detected_langs[0]

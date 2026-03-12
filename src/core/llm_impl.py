@@ -190,16 +190,35 @@ class OpenAICompatibleLLM:
         kwargs = {
             "model": self.model_name,
             "api_key": self.api_key,
-            "api_base": self.base_url,
             "stream": stream,
             "messages": messages,
             "timeout": self.custom_timeout,
             **payload
         }
 
-        # 智能路由：如果没指定厂商前缀（如 'anthropic/'），且 base_url 不是官方的，强制按 OpenAI 格式发送给中转站/本地模型
-        if "/" not in self.model_name and self.base_url and "api.openai.com" not in self.base_url:
+        # 绝对服从用户配置：确保传入配置项里的 API URL
+        if self.base_url:
+            kwargs["api_base"] = self.base_url
+
+        base = self.base_url.lower() if self.base_url else ""
+
+        # 智能路由 1：处理几个规矩特殊、需要走原生协议的官方 API
+        if "api.anthropic.com" in base:
+            kwargs["custom_llm_provider"] = "anthropic"
+            if not self.model_name.startswith("anthropic/"):
+                kwargs["model"] = f"anthropic/{self.model_name}"
+        elif "api.deepseek.com" in base:
+            kwargs["custom_llm_provider"] = "deepseek"
+            if not self.model_name.startswith("deepseek/"):
+                kwargs["model"] = f"deepseek/{self.model_name}"
+        elif "generativelanguage" in base and "openai" not in base:
+            kwargs["custom_llm_provider"] = "gemini"
+            if not self.model_name.startswith("gemini/"):
+                kwargs["model"] = f"gemini/{self.model_name}"
+        else:
             kwargs["custom_llm_provider"] = "openai"
+            if not self.model_name.startswith("openai/"):
+                kwargs["model"] = f"openai/{self.model_name}"
 
         return kwargs
 
@@ -258,6 +277,7 @@ class OpenAICompatibleLLM:
         self._log_params(payload)
 
         is_thinking = False
+        native_reasoning_mode = False
 
         try:
             litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=stream)
@@ -279,7 +299,7 @@ class OpenAICompatibleLLM:
 
                 delta = chunk.choices[0].delta
 
-                # 统一抽象抽象不同模型的“思考”过程输出
+                # 提取思考内容
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if not reasoning and hasattr(delta, 'model_extra') and delta.model_extra:
                     reasoning = delta.model_extra.get('reasoning_content')
@@ -288,28 +308,30 @@ class OpenAICompatibleLLM:
                     if not is_thinking:
                         yield "<think>\n"
                         is_thinking = True
+                        native_reasoning_mode = True
                     yield reasoning
 
+                # 提取正文内容
                 content = getattr(delta, 'content', None)
                 if content:
-                    # 兼容 Ollama / VLLM：某些直接在正文里输出 <think> 标签的模型
                     if "<think>" in content and not is_thinking:
                         is_thinking = True
+                        native_reasoning_mode = False
+
                     if "</think>" in content and is_thinking:
-                        yield content  # 包含标签一同输出
+                        yield content
                         is_thinking = False
                         continue
 
-                    if is_thinking and not reasoning:
-                        # 模型正文里混杂着思考内容
-                        yield content
-                    elif not is_thinking:
-                        # 正常文本
-                        yield content
-                    elif is_thinking and reasoning:
-                        # 异常切换：reasoning 结束突然接 content
-                        yield "\n</think>\n\n"
-                        is_thinking = False
+                    if is_thinking:
+                        if native_reasoning_mode:
+                            yield "\n</think>\n\n"
+                            is_thinking = False
+                            native_reasoning_mode = False
+                            yield content
+                        else:
+                            yield content
+                    else:
                         yield content
 
             if is_thinking:
