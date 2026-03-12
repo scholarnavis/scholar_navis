@@ -24,7 +24,7 @@ class TextFormatter:
 
     @staticmethod
     def _render_chemistry(text):
-        """识别并格式化化学分子式（自动下标）与SMILES（代码块高亮）"""
+        """识别并格式化化学分子式，同时给SMILES强行插入零宽空格防截断喵"""
 
         def formula_replacer(match):
             prefix = match.group(1)
@@ -41,14 +41,14 @@ class TextFormatter:
         def smiles_replacer(match):
             prefix = match.group(1)
             smiles = match.group(2)
-            return f'{prefix}<code style="color: #05B8CC; word-break: break-all; background-color: transparent;">{smiles}</code>'
+            breakable_smiles = '&#8203;'.join(list(smiles))
+            return f'{prefix}{breakable_smiles}'
 
         text = re.sub(
             r'(?i)((?:Canonical\s*|Isomeric\s*)?SMILES[\s\*_:]*)([A-Za-z0-9@+\-=\#\(\)\[\]\.\/\\]+)',
             smiles_replacer,
             text
         )
-
         return text
 
     @staticmethod
