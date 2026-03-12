@@ -13,6 +13,46 @@ from src.core.network_worker import _get_explicit_proxy_kwargs
 
 
 
+_TRANSLATION_CACHE = {}
+def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs):
+    if not llm_instance: return text
+
+    # 使用方向和文本的哈希作为唯一键，彻底与 llm_instance 实例解耦
+    cache_key = f"{direction}_{hash(text)}"
+    if cache_key in _TRANSLATION_CACHE:
+        return _TRANSLATION_CACHE[cache_key]
+
+    if direction == "to_en":
+        prompt = (
+            "You are an expert bioinformatician and translator. "
+            "Translate the following user query into precise academic English. "
+            "CRITICAL: DO NOT translate or alter any Latin taxonomic names (e.g., Gossypium, Arabidopsis) "
+            "or scientific abbreviations (e.g., scRNA-seq, qPCR). "
+            "Output ONLY the translated English text, nothing else."
+        )
+    else:
+        prompt = (
+            "You are an expert academic translator. Translate the following English text "
+            "into the language of the user's original query. \n"
+            "CRITICAL RULES:\n"
+            "1. KEEP ALL CITATION TAGS INTACT (e.g., [1], [2]).\n"
+            "2. DO NOT translate Latin taxonomic names.\n"
+            "3. PRESERVE all Markdown formatting.\n"
+        )
+
+    response = llm_instance.chat([
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": text}
+    ], **kwargs)
+
+    res_text = response.get("content", "").strip() if isinstance(response, dict) else str(response).strip()
+
+    if res_text:
+        _TRANSLATION_CACHE[cache_key] = res_text
+
+    return res_text
+
+
 litellm.drop_params = True
 
 

@@ -1,7 +1,6 @@
 import base64
 import csv
 import datetime
-import functools
 import gc
 import hashlib
 import json
@@ -10,6 +9,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from urllib.parse import urlparse, parse_qs, quote
 
 import markdown
@@ -27,7 +27,7 @@ from src.core.core_task import TaskManager, TaskMode, TaskState
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.lang_detect import detect_primary_language
-from src.core.llm_impl import OpenAICompatibleLLM
+from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
 from src.core.rerank_engine import RerankEngine
@@ -48,36 +48,6 @@ from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
 
-@functools.lru_cache(maxsize=128)
-def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs):
-    if not llm_instance: return text
-
-    if direction == "to_en":
-        prompt = (
-            "You are an expert bioinformatician and translator. "
-            "Translate the following user query into precise academic English. "
-            "CRITICAL: DO NOT translate or alter any Latin taxonomic names (e.g., Gossypium, Arabidopsis) "
-            "or scientific abbreviations (e.g., scRNA-seq, qPCR). "
-            "Output ONLY the translated English text, nothing else."
-        )
-    else:
-        prompt = (
-            "You are an expert academic translator. Translate the following English text "
-            "into the language of the user's original query. \n"
-            "CRITICAL RULES:\n"
-            "1. KEEP ALL CITATION TAGS INTACT (e.g., [1], [2]).\n"
-            "2. DO NOT translate Latin taxonomic names (e.g., Gossypium) or scientific abbreviations.\n"
-            "3. PRESERVE all Markdown formatting, bolding, and structure.\n"
-        )
-
-    response = llm_instance.chat([
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": text}
-    ], **kwargs)
-
-    if isinstance(response, dict):
-        return response.get("content", "").strip()
-    return str(response).strip()
 
 
 class ChatDropTargetWidget(QWidget):
@@ -604,6 +574,9 @@ class ChatWorker(QObject):
             self.trans_llm = OpenAICompatibleLLM(self.trans_config)
 
     def run(self):
+
+        time.sleep(0.1)
+
         try:
             self.config = ConfigManager()
 
@@ -636,6 +609,8 @@ class ChatWorker(QObject):
             if self.kb_id and self.kb_id != "none":
                 self.sig_token.emit("[CLEAR_SEARCH]")
                 self.sig_token.emit("<i>📚 Searching local knowledge base and reranking documents...</i>\n\n")
+
+                time.sleep(0.05)
 
                 kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
 
@@ -865,6 +840,7 @@ class ChatWorker(QObject):
                 # 2. RAG 动态路由：从候选池中挑出最匹配的 Top-K 给大模型
                 if raw_mcp_tools:
                     self.sig_token.emit("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
+                    time.sleep(0.05)
                     mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=6)
                     self.sig_token.emit("[CLEAR_SEARCH]")
 
@@ -902,7 +878,8 @@ class ChatWorker(QObject):
             dynamic_tool_prompt = ""
             if mcp_tools:
                 self.sig_token.emit("[CLEAR_SEARCH]")
-                self.sig_token.emit("<i>⚙️ Analyzing query intent and filtering optimal MCP tools...</i>\n\n")
+                self.sig_token.emit(
+                    "<mcp_process>⚙️ Analyzing query intent and filtering optimal MCP tools...</mcp_process>")
 
                 tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
                 dynamic_tool_prompt = (
@@ -958,7 +935,6 @@ class ChatWorker(QObject):
                 try:
                     import re
                     import uuid
-                    import time
 
                     MAX_ITERATIONS = 5
                     for iteration in range(MAX_ITERATIONS):
@@ -1012,8 +988,13 @@ class ChatWorker(QObject):
                         if not tool_calls:
                             if content:
                                 self.sig_token.emit("[CLEAR_SEARCH]")
-                                self.full_response_cache += content
-                                self.sig_token.emit(content)
+                                chunk_size = 5
+                                for i in range(0, len(content), chunk_size):
+                                    if getattr(self, '_is_cancelled', False): break
+                                    chunk = content[i:i + chunk_size]
+                                    self.full_response_cache += chunk
+                                    self.sig_token.emit(chunk)
+                                    time.sleep(0.015)
                                 final_response_obtained = True
                             break
 
@@ -1041,12 +1022,10 @@ class ChatWorker(QObject):
                                 if tool_name == "generate_image":
                                     prompt_text = tool_args.get("prompt", "")
                                     self.sig_token.emit(
-                                        f"<br><i>🎨 Generating image (Prompt: {prompt_text[:30]}...)...</i><br>")
+                                        f"<mcp_process>🎨 Generating image (Prompt: {prompt_text[:30]}...)</mcp_process>\n")
 
                                     try:
-                                        # 调用 llm_impl.py 中新增的 generate_image 方法
                                         img_url = self.main_llm.generate_image(prompt=prompt_text)
-                                        # 直接向前端气泡抛出 HTML 格式的图片，实现所见即所得
                                         self.sig_token.emit(
                                             f"<br><img src='{img_url}' style='max-width: 100%; border-radius: 8px; border: 1px solid #444;' alt='Generated Image'/><br>\n\n")
                                         tool_result = f"Image generated successfully. URL: {img_url}"
@@ -1055,8 +1034,15 @@ class ChatWorker(QObject):
                                         tool_result = f"Image generation failed: {str(img_e)}"
 
                                 else:
+                                    tool_args_str = json.dumps(tool_args, ensure_ascii=False)
+                                    short_args = tool_args_str if len(tool_args_str) < 120 else tool_args_str[
+                                                                                                    :120] + "..."
+
                                     self.sig_token.emit(
-                                        f"<br><i>📡 Requesting remote tool: <b>{tool_name}</b>...</i><br>")
+                                        f"<mcp_process>📡 Requesting remote tool: <b>{tool_name}</b><br>"
+                                        f"<span style='font-size:12px; color:#888;'>Args: {short_args}</span></mcp_process>\n"
+                                    )
+
                                     tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
 
                                     try:
@@ -1214,6 +1200,9 @@ class ChatWorker(QObject):
 
         import multiprocessing as mp
         import queue as q
+
+        time.sleep(0.05)
+
         from src.core.core_task import TaskState, RunnerProcess
         from src.task.kb_tasks import RerankTask
 
@@ -1609,7 +1598,9 @@ class ChatTool(BaseTool):
 
                 for msg in self.history:
                     is_user = (msg['role'] == "user")
-                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                    raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
+                                         flags=re.DOTALL | re.IGNORECASE)
+                    clean_content = TextFormatter.clean_text_for_export(raw_content)
                     rendered_html = TextFormatter.markdown_to_html(clean_content)
 
                     if is_user:
@@ -1632,7 +1623,10 @@ class ChatTool(BaseTool):
                 txt = f"================ SCHOLAR NAVIS REPORT ================\nGenerated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 for msg in self.history:
                     role = "User Inquiry" if msg['role'] == "user" else "AI Analysis"
-                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                    raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
+                                         flags=re.DOTALL | re.IGNORECASE)
+                    clean_content = TextFormatter.clean_text_for_export(raw_content)
+
                     txt += f"[{role}]:\n{clean_content}\n\n{'-' * 60}\n\n"
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(txt)
@@ -1642,7 +1636,9 @@ class ChatTool(BaseTool):
                     writer = csv.writer(f)
                     writer.writerow(["Role", "Content"])
                     for msg in self.history:
-                        clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                        raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
+                                             flags=re.DOTALL | re.IGNORECASE)
+                        clean_content = TextFormatter.clean_text_for_export(raw_content)
                         writer.writerow(["User" if msg['role'] == 'user' else "AI", clean_content])
 
             ToastManager().show(f"Document successfully exported to: {os.path.basename(path)}", "success")
@@ -2268,11 +2264,9 @@ class ChatTool(BaseTool):
         is_at_bottom = (sb.maximum() - sb.value()) <= 15
         idx = getattr(self.current_ai_bubble, 'index', -1)
 
-        # 1. Handle clearing of status prompts via Regex
         if token == "[CLEAR_SEARCH]":
             self.current_ai_text = re.sub(
-                # 这里加上了 ⚙️ 符号，确保能够精准捕捉并消除 MCP 的提示
-                r'(?:<br>\s*)*<i>(?:Translating|Loading|Filtering|\[Low VRAM|📡|⚙️|🎨).*?</i>\s*(?:<br>\s*)*(?:\n)*',
+                r'(?:<br>\s*)*<i>(?:Translating|Loading|Filtering|\[Low VRAM).*?</i>\s*(?:<br>\s*)*(?:\n)*',
                 '',
                 self.current_ai_text,
                 flags=re.DOTALL | re.IGNORECASE

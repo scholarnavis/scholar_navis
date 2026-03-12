@@ -51,7 +51,6 @@ class TextFormatter:
 
         return text
 
-
     @staticmethod
     def format_chat_text(text, index, expanded_indices, user_toggled_thinks):
         tm = ThemeManager()
@@ -60,38 +59,65 @@ class TextFormatter:
         border_color = tm.color('border')
         text_muted = tm.color('text_muted')
 
-        think_content = ""
-        main_text = text
+        think_contents = []
+        mcp_contents = []
         is_closed = True
 
         final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
 
+        # 统一规范化标签
+        text = re.sub(r'<\s*think\s*>', '<think>', text, flags=re.IGNORECASE)
+        text = re.sub(r'<\s*/\s*think\s*>', '</think>', text, flags=re.IGNORECASE)
+        text = re.sub(r'<\s*mcp_process\s*>', '<mcp_process>', text, flags=re.IGNORECASE)
+        text = re.sub(r'<\s*/\s*mcp_process\s*>', '</mcp_process>', text, flags=re.IGNORECASE)
+
         if final_answer_match:
-            raw_think = text[:final_answer_match.start()]
-            raw_main = text[final_answer_match.end():]
-
-            think_content = re.sub(r'</?think\s*>', '', raw_think, flags=re.IGNORECASE).strip()
-            main_text = re.sub(r'</?think\s*>', '', raw_main, flags=re.IGNORECASE).strip()
+            raw_hidden = text[:final_answer_match.start()]
+            main_text = text[final_answer_match.end():].strip()
             is_closed = True
+
+            # 提取已闭合的所有标签内容
+            for t_match in re.finditer(r'<think>(.*?)</think>', raw_hidden, flags=re.DOTALL | re.IGNORECASE):
+                think_contents.append(t_match.group(1).strip())
+            for m_match in re.finditer(r'<mcp_process>(.*?)</mcp_process>', raw_hidden,
+                                       flags=re.DOTALL | re.IGNORECASE):
+                mcp_contents.append(m_match.group(1).strip())
         else:
-            text = re.sub(r'<\s*think\s*>', '<think>', text, flags=re.IGNORECASE)
-            text = re.sub(r'<\s*/\s*think\s*>', '</think>', text, flags=re.IGNORECASE)
+            def think_repl(match):
+                think_contents.append(match.group(1).strip())
+                return ""
 
-            think_match = re.search(r'<think>(.*?)</think>', text, flags=re.DOTALL | re.IGNORECASE)
+            main_text = re.sub(r'<think>(.*?)</think>', think_repl, text, flags=re.DOTALL | re.IGNORECASE)
 
-            if think_match:
-                think_content = think_match.group(1).strip()
-                main_text = text.replace(think_match.group(0), "").strip()
-                is_closed = True
-            elif "<think>" in text:
-                parts = text.split("<think>", 1)
-                main_text = parts[0].strip()
-                think_content = parts[1].strip()
+            def mcp_repl(match):
+                mcp_contents.append(match.group(1).strip())
+                return ""
+
+            main_text = re.sub(r'<mcp_process>(.*?)</mcp_process>', mcp_repl, main_text,
+                               flags=re.DOTALL | re.IGNORECASE)
+
+            unclosed_think = re.search(r'<think>(.*)$', main_text, flags=re.DOTALL | re.IGNORECASE)
+            if unclosed_think:
+                think_contents.append(unclosed_think.group(1).strip())
+                main_text = main_text[:unclosed_think.start()].strip()
                 is_closed = False
 
+            unclosed_mcp = re.search(r'<mcp_process>(.*)$', main_text, flags=re.DOTALL | re.IGNORECASE)
+            if unclosed_mcp:
+                mcp_contents.append(unclosed_mcp.group(1).strip())
+                main_text = main_text[:unclosed_mcp.start()].strip()
+                is_closed = False
+
+        hidden_blocks = []
+        if think_contents:
+            hidden_blocks.append("<b>🧠 AI Reasoning:</b><br>" + "<br><br>".join(filter(None, think_contents)))
+        if mcp_contents:
+            hidden_blocks.append("<b>🛠️ MCP Tool Execution:</b><br>" + "<br><br>".join(filter(None, mcp_contents)))
+
+        hidden_content = "<br><br>".join(hidden_blocks)
         final_html = ""
 
-        if think_content or not is_closed:
+        if hidden_content or not is_closed:
             if index in user_toggled_thinks:
                 is_expanded = index in expanded_indices
             else:
@@ -100,17 +126,23 @@ class TextFormatter:
             action = "collapse" if is_expanded else "expand"
             icon_name = "chevron-down" if is_expanded else "chevron-right"
             icon_html = f"<img src='assets/icons/{icon_name}.svg' width='14' height='14' style='vertical-align: middle;' />"
-            status = "AI Reasoning (Completed)" if is_closed else "AI is thinking..."
 
-            link = f"<a href='think://{action}?index={index}' style='color:{accent_color}; text-decoration:none;'><nobr>{icon_html} <b>{status}</b></nobr></a>"
+            # 根据内容智能显示折叠面板标题
+            if mcp_contents and not think_contents:
+                status_title = "Tool Execution (Completed)" if is_closed else "Executing Tools..."
+            elif mcp_contents and think_contents:
+                status_title = "Reasoning & Tool Execution (Completed)" if is_closed else "AI is Analyzing & Working..."
+            else:
+                status_title = "AI Reasoning (Completed)" if is_closed else "AI is thinking..."
+
+            link = f"<a href='think://{action}?index={index}' style='color:{accent_color}; text-decoration:none;'><nobr>{icon_html} <b>{status_title}</b></nobr></a>"
 
             if not is_expanded:
                 final_html += f"<div style='background:{bg_color}; border-left: 3px solid {border_color}; padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px;'>{link}</div>"
             else:
-                safe_content = think_content.replace('\n', '<br>')
+                safe_content = hidden_content.replace('\n', '<br>')
                 safe_content = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', safe_content)
                 safe_content = re.sub(r'\*(.*?)\*', r'<i>\1</i>', safe_content)
-
                 suffix = "" if is_closed else f" <span style='color:{accent_color};'><i>...</i></span>"
                 final_html += (
                     f"<div style='background:{bg_color}; border-left: 3px solid {accent_color}; padding: 8px 12px; "
@@ -198,9 +230,10 @@ class TextFormatter:
         if final_match:
             text = text[final_match.end():]
         else:
-            text = re.sub(r'<think>.*?(?:</think>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
-
-        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[\s*FOLLOW[_-]?\s*UPS?\s*\]", "", text, flags=re.IGNORECASE)
+            text = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
+            
+        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[\s*FOLLOW[_-]?\s*UPS?\s*\]", "", text,
+                      flags=re.IGNORECASE)
         text = re.sub(r"\[AI is reasoning in the background\.\.\.\]", "", text, flags=re.IGNORECASE)
 
         if include_citations and "<b>📚 Cited Sources:</b>" in text:
@@ -224,14 +257,16 @@ class TextFormatter:
         final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
         if final_answer_match:
             cleaned = text[final_answer_match.end():]
-            return re.sub(r'</?think\s*>', '', cleaned, flags=re.IGNORECASE).strip()
+            return re.sub(r'</?(think|mcp_process)\s*>', '', cleaned, flags=re.IGNORECASE).strip()
 
-        cleaned = re.sub(r'<think>.*?(?:</think>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
-        if '<think>' in text and not cleaned.strip():
+        # 修改为匹配两种标签
+        cleaned = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+        if ('<think>' in text or '<mcp_process>' in text) and not cleaned.strip():
             if for_display:
                 from src.core.theme_manager import ThemeManager
                 tm = ThemeManager()
-                return f"<span style='color:{tm.color('text_muted')}; font-style:italic;'>[AI is reasoning in the background...]</span>"
+                return f"<span style='color:{tm.color('text_muted')}; font-style:italic;'>[AI is working in the background...]</span>"
             return ""
         return cleaned.lstrip()
 

@@ -65,6 +65,14 @@ class TranslatorWorker(QObject):
                 self.sig_error.emit("No valid model selected.")
                 return
 
+            from src.core.llm_impl import _TRANSLATION_CACHE
+            cache_key = f"{self.target_lang}_{hash(self.text)}"
+
+            if cache_key in _TRANSLATION_CACHE:
+                self.sig_token.emit(_TRANSLATION_CACHE[cache_key])
+                self.sig_finished.emit()
+                return
+
             cfg = self.llm_config.copy()
             cfg["timeout"] = 15.0
             self.llm = OpenAICompatibleLLM(cfg)
@@ -93,9 +101,14 @@ class TranslatorWorker(QObject):
             kwargs = {
                 "is_translation": True,
             }
+            full_result = ""
             for token in self.llm.stream_chat(messages, **kwargs):
                 if self._is_cancelled: break
+                full_result += token  # 收集流式 token
                 self.sig_token.emit(token)
+
+            if full_result and not self._is_cancelled:
+                _TRANSLATION_CACHE[cache_key] = full_result
 
         except Exception as e:
             if "timeout" in str(e).lower() or "connect" in str(e).lower():
