@@ -179,7 +179,7 @@ class QuickTranslatorWindow(QWidget):
         self.lbl_trans_icon.setFixedWidth(24)
         model_bar.addWidget(self.lbl_trans_icon)
 
-        self.model_selector = ModelSelectorWidget(label_text="Translator:", config_key="quick_trans_llm_id",
+        self.model_selector = ModelSelectorWidget(label_text="Translator:", config_key="quick_trans_llm_id",enable_vision=False,
                                                   model_key="quick_trans_model_name")
         model_bar.addWidget(self.model_selector, stretch=1)
         frame_layout.addLayout(model_bar)

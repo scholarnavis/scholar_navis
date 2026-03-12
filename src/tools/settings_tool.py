@@ -32,6 +32,7 @@ from src.task.hf_download_task import RealTimeHFDownloadTask
 from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask
 from src.task.common_task import VerifyModelsTask
 from src.tools.base_tool import BaseTool
+from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, AddModelDialog
 from src.ui.components.param_editor import ParamEditorWidget
@@ -376,18 +377,15 @@ class SettingsTool(BaseTool):
         self.input_ncbi_email.setPlaceholderText("Required for NCBI Tools: e.g. user@university.edu")
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
 
-        self.input_ncbi_api_key = QLineEdit()
-        self.input_ncbi_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_ncbi_api_key = HoverRevealLineEdit()
         self.input_ncbi_api_key.setPlaceholderText("NCBI API Key (Optional but recommended)")
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
 
-        self.input_s2_api_key = QLineEdit()
-        self.input_s2_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_s2_api_key = HoverRevealLineEdit()
         self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
 
-        self.input_github_token = QLineEdit()
-        self.input_github_token.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_github_token = HoverRevealLineEdit()
         self.input_github_token.setPlaceholderText("GitHub Personal Access Token (Prevents rate limiting)")
         self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
 
@@ -1142,7 +1140,7 @@ class SettingsTool(BaseTool):
         self.input_llm_name = QLineEdit()
         self.input_llm_url = QLineEdit()
         self.input_llm_key = QLineEdit()
-        self.input_llm_key.setEchoMode(QLineEdit.Password)
+        self.input_llm_key = HoverRevealLineEdit()
 
         self.editor_provider_params = ParamEditorWidget()
         self.btn_add_provider_param = QPushButton(" Add Provider Parameter")

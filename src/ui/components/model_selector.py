@@ -9,20 +9,19 @@ class ModelSelectorWidget(QWidget):
     sig_model_changed = Signal()
 
     def __init__(self, parent=None, label_text="Main Model:", config_key="active_llm_id", model_key="model_name",
-                 vision_key="vision_model_name"):
+                 vision_key="vision_model_name", enable_vision=True):
         super().__init__(parent)
         self.config_key = config_key
         self.model_key = model_key
-        self.vision_key = vision_key  # 新增视觉模型 key
+        self.vision_key = vision_key
+        self.enable_vision = enable_vision
         self.config_manager = ConfigManager()
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        # 改用垂直布局嵌套水平布局，防止太拥挤
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(4)
 
-        # 第一行：服务商与主模型
         row1 = QHBoxLayout()
         row1.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(8)
@@ -35,30 +34,30 @@ class ModelSelectorWidget(QWidget):
         self.combo_model = BaseComboBox(min_width=180, max_width=2000)
         row1.addWidget(self.combo_provider, 1)
         row1.addWidget(self.combo_model, 3)
-
-        # 第二行：视觉模型选择
-        row2 = QHBoxLayout()
-        row2.setContentsMargins(0, 0, 0, 0)
-        row2.setSpacing(8)
-
-        lbl_vision = QLabel("Vision:")
-        lbl_vision.setFixedWidth(85)
-        lbl_vision.setToolTip("Select a vision model for image parsing (Optional. Useful if main model is text-only)")
-        row2.addWidget(lbl_vision)
-
-        self.combo_vision = BaseComboBox(min_width=180, max_width=2000)
-        row2.addWidget(self.combo_vision, 4)
-
         main_layout.addLayout(row1)
-        main_layout.addLayout(row2)
+
+        self.combo_vision = None
+        if self.enable_vision:
+            row2 = QHBoxLayout()
+            row2.setContentsMargins(0, 0, 0, 0)
+            row2.setSpacing(8)
+
+            lbl_vision = QLabel("Vision:")
+            lbl_vision.setFixedWidth(85)
+            lbl_vision.setToolTip("Select a vision model for image parsing (Optional. Useful if main model is text-only)")
+            row2.addWidget(lbl_vision)
+
+            self.combo_vision = BaseComboBox(min_width=180, max_width=2000)
+            row2.addWidget(self.combo_vision, 4)
+            main_layout.addLayout(row2)
+
+            self.combo_vision.currentIndexChanged.connect(self._on_vision_changed)
+            self.combo_vision.currentTextChanged.connect(self.combo_vision.setToolTip)
 
         self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
         self.combo_model.currentIndexChanged.connect(self._on_model_changed)
-        self.combo_vision.currentIndexChanged.connect(self._on_vision_changed)
-
         self.combo_provider.currentTextChanged.connect(self.combo_provider.setToolTip)
         self.combo_model.currentTextChanged.connect(self.combo_model.setToolTip)
-        self.combo_vision.currentTextChanged.connect(self.combo_vision.setToolTip)
 
         self.configs = []
         self.load_llm_configs()
@@ -93,11 +92,18 @@ class ModelSelectorWidget(QWidget):
     def _on_provider_changed(self):
         cfg = self.combo_provider.currentData()
         self.combo_model.blockSignals(True)
-        self.combo_vision.blockSignals(True)
+
+        # 定义一个标识，判断当前是否启用了视觉模型选择框
+        has_vision = getattr(self, 'combo_vision', None) is not None
+
+        if has_vision:
+            self.combo_vision.blockSignals(True)
 
         self.combo_model.clear()
-        self.combo_vision.clear()
-        self.combo_vision.addItem("Auto (Use Main Model)", "auto")
+
+        if has_vision:
+            self.combo_vision.clear()
+            self.combo_vision.addItem("Auto (Use Main Model)", "auto")
 
         if cfg:
             self.config_manager.user_settings[self.config_key] = cfg.get("id")
@@ -112,26 +118,29 @@ class ModelSelectorWidget(QWidget):
                 items.insert(0, current_model)
 
             self.combo_model.addItems(items)
-            self.combo_vision.addItems(items)
-
             for i, model_item in enumerate(items):
                 self.combo_model.setItemData(i, model_item, Qt.ToolTipRole)
-                self.combo_vision.setItemData(i + 1, model_item, Qt.ToolTipRole)
-
             self.combo_model.setCurrentText(current_model)
 
-            # 设置视觉模型的回显
-            idx = self.combo_vision.findText(current_vision)
-            if idx >= 0:
-                self.combo_vision.setCurrentIndex(idx)
-            else:
-                self.combo_vision.setCurrentIndex(0)
+            if has_vision:
+                self.combo_vision.addItems(items)
+                for i, model_item in enumerate(items):
+                    self.combo_vision.setItemData(i + 1, model_item, Qt.ToolTipRole)
+
+                idx = self.combo_vision.findText(current_vision)
+                if idx >= 0:
+                    self.combo_vision.setCurrentIndex(idx)
+                else:
+                    self.combo_vision.setCurrentIndex(0)
         else:
             self.config_manager.user_settings[self.config_key] = None
             self.config_manager.save_settings()
 
         self.combo_model.blockSignals(False)
-        self.combo_vision.blockSignals(False)
+
+        if has_vision:
+            self.combo_vision.blockSignals(False)
+
         self.sig_model_changed.emit()
 
     def _on_model_changed(self):

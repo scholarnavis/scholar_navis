@@ -357,7 +357,16 @@ class ChatBubbleWidget(QWidget):
 
         try:
             html = TextFormatter.markdown_to_html(text)
+            tm = ThemeManager()
+            border_color = tm.color('border')
+            bg_header = hex_to_rgba(tm.color('bg_input'), 0.5) if tm.current_theme == 'dark' else '#f5f5f5'
 
+            html = html.replace('<table>',
+                                f'<table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; border-color: {border_color}; margin-top: 10px; margin-bottom: 10px; width: 100%;">')
+            html = html.replace('<th>',
+                                f'<th style="background-color: {bg_header}; font-weight: bold; text-align: left;">')
+
+            # ---------------------------------------------
             def repl_img(match):
                 raw_src_url = match.group(1)
                 src_url = raw_src_url.replace("&amp;", "&")
@@ -581,7 +590,24 @@ class ChatBubbleWidget(QWidget):
 
     def copy_text(self):
         clipboard = QGuiApplication.clipboard()
-        text_to_copy = TextFormatter.clean_text_for_export(self.original_text, include_citations=not self.is_user)
+
+        # 1. 过滤掉 <think>...</think> 标签及其内部的思考过程
+        raw_text = re.sub(r'<think>.*?</think>', '', self.original_text, flags=re.DOTALL | re.IGNORECASE)
+
+        # 2. 过滤掉可能残留的 MCP 工具执行日志 (<i>...</i>)
+        raw_text = re.sub(r'<i>.*?</i>', '', raw_text, flags=re.DOTALL | re.IGNORECASE)
+
+        # 3. 使用原有的 TextFormatter 格式化基础内容
+        text_to_copy = TextFormatter.clean_text_for_export(raw_text.strip(), include_citations=not self.is_user)
+
+        # 4. 把挂载在末尾的 HTML 格式的 Cited Sources 转换为纯文本
+        text_to_copy = re.sub(r'<br\s*/?>', '\n', text_to_copy, flags=re.IGNORECASE)  # 转换换行符
+        text_to_copy = re.sub(r'<hr[^>]*>', '\n---\n', text_to_copy, flags=re.IGNORECASE)  # 转换分割线
+        text_to_copy = re.sub(r'<[^>]+>', '', text_to_copy)  # 去除所有剩余 HTML 标签，仅保留纯文本 (如 [1] Name)
+
+        # 5. 清理多出的空行
+        text_to_copy = re.sub(r'\n{3,}', '\n\n', text_to_copy).strip()
+
         clipboard.setText(text_to_copy)
         ToastManager().show("Copied to clipboard.", "success")
 

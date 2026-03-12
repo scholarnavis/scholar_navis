@@ -849,7 +849,8 @@ class ChatWorker(QObject):
             self.sig_token.emit("[START_LLM_NETWORK]")
 
             mcp_mgr = MCPManager.get_instance()
-            mcp_tools = None
+            mcp_tools = []
+            dynamic_tool_prompt = ""
 
             if self.use_mcp:
                 selected_tags = getattr(self, 'selected_mcp_tags', None)
@@ -867,9 +868,19 @@ class ChatWorker(QObject):
                     mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=6)
                     self.sig_token.emit("[CLEAR_SEARCH]")
 
-            if mcp_tools is None:
-                mcp_tools = []
+                # 3. 仅当真正启用了 MCP 且筛选出了工具时，才向模型发送系统提示和 UI 状态
+                if mcp_tools:
+                    self.sig_token.emit(
+                        "<i>⚙️ Analyzing query intent and filtering optimal MCP tools...</i>\n\n")
 
+                    tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
+                    dynamic_tool_prompt = (
+                        f"### CRITICAL TOOL UTILIZATION RULE:\n"
+                        f"The Reranker engine has exclusively selected the following tools for this specific query: {', '.join(tool_names)}.\n"
+                        f"You MUST read the user's prompt carefully. If the user asks for multi-dimensional data (e.g., metadata AND protein interactions), you MUST use multiple tools to fulfill ALL parts of the request. DO NOT skip required tools. DO NOT answer partially.\n\n"
+                    )
+
+            # 无论 MCP 是否开启，均挂载内置的基础画图工具（不属于外部 MCP 范畴）
             mcp_tools.append({
                 "type": "function",
                 "function": {
@@ -2260,7 +2271,8 @@ class ChatTool(BaseTool):
         # 1. Handle clearing of status prompts via Regex
         if token == "[CLEAR_SEARCH]":
             self.current_ai_text = re.sub(
-                r'(?:<br>\s*)*<i>(?:Translating|Loading|Filtering|\[Low VRAM|📡).*?</i>\s*(?:<br>\s*)*(?:\n)*',
+                # 这里加上了 ⚙️ 符号，确保能够精准捕捉并消除 MCP 的提示
+                r'(?:<br>\s*)*<i>(?:Translating|Loading|Filtering|\[Low VRAM|📡|⚙️|🎨).*?</i>\s*(?:<br>\s*)*(?:\n)*',
                 '',
                 self.current_ai_text,
                 flags=re.DOTALL | re.IGNORECASE
@@ -2268,6 +2280,7 @@ class ChatTool(BaseTool):
             self.current_ai_text = self.current_ai_text.lstrip()
             self._is_rendering_dirty = True
             return
+
 
         # 2. Handle LLM connection start
         if token == "[START_LLM_NETWORK]":
