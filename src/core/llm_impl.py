@@ -142,10 +142,12 @@ class OpenAICompatibleLLM:
         """
         processed_msgs = []
         for m in messages:
+            msg_dict = m.copy()
+
             role = m.get("role", "user")
             content = m.get("content", "")
 
-            msg_dict = {"role": role}
+            msg_dict["role"] = role
 
             if isinstance(content, list):
                 valid_parts = []
@@ -158,13 +160,6 @@ class OpenAICompatibleLLM:
                 msg_dict["content"] = valid_parts
             else:
                 msg_dict["content"] = str(content) if content is not None else ""
-
-            if "tool_calls" in m:
-                msg_dict["tool_calls"] = m["tool_calls"]
-            if "tool_call_id" in m:
-                msg_dict["tool_call_id"] = m["tool_call_id"]
-            if "name" in m:
-                msg_dict["name"] = m["name"]
 
             processed_msgs.append(msg_dict)
 
@@ -194,15 +189,24 @@ class OpenAICompatibleLLM:
         )
         choice = response.choices[0]
 
+        reasoning = getattr(choice.message, 'reasoning_content', None)
+        if not reasoning and hasattr(choice.message, 'model_extra') and choice.message.model_extra:
+            reasoning = choice.message.model_extra.get('reasoning_content')
         if choice.message.tool_calls:
-            return {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{"id": t.id, "type": "function",
-                                "function": {"name": t.function.name, "arguments": t.function.arguments}} for t in
-                               choice.message.tool_calls]
-            }
-        return choice.message.content or ""
+            try:
+                msg_dump = choice.message.model_dump(exclude_none=True)
+            except AttributeError:
+                msg_dump = json.loads(choice.message.json(exclude_none=True))
+            msg_dump["reasoning_content"] = reasoning or ""
+            if not msg_dump.get("content"):
+                msg_dump["content"] = ""
+            return msg_dump
+
+        return {
+            "content": choice.message.content or "",
+            "reasoning_content": reasoning or "",
+            "role": "assistant"
+        }
 
     def stream_chat(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[str, None, None]:
 

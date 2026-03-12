@@ -826,7 +826,7 @@ class ChatWorker(QObject):
                 "4. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
                 "5. If graphics need to be created, use mermaid uniformly.\n\n"
 
-"### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
+                "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
                 "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. This automatically generates a UI 'Cited Sources' block. NEVER claim facts without these bracketed numbers.\n"
                 "2. FORMAL BIBLIOGRAPHY (For the User): If the user explicitly requests 'references', 'citations', or a 'review', you MUST ALSO generate a standalone 'References' section at the very end of your main text (but BEFORE the [FOLLOW_UPS] section). \n"
                 "3. STRICT FORMATTING: The standalone 'References' section must strictly follow academic formatting (e.g., APA/Nature style: Authors. (Year). Title. Journal. DOI). DO NOT include conversational fluff like 'Cited for the role of...' in this formal list. List purely the bibliographic data.\n\n"
@@ -853,49 +853,88 @@ class ChatWorker(QObject):
             rag_messages.append({"role": "user", "content": llm_content})
 
             tool_executed = False
+            final_response_obtained = False
 
             # MCP 循环
             if mcp_tools:
                 try:
+                    import re
+                    import uuid
+                    import time
+
                     MAX_ITERATIONS = 5
                     for iteration in range(MAX_ITERATIONS):
+                        if getattr(self, '_is_cancelled', False):
+                            self.sig_token.emit("\n\n[⛔ Generation halted by user.]")
+                            break
+
                         response_msg = self.main_llm.chat(
                             messages=rag_messages,
                             tools=mcp_tools,
                             tool_choice="auto"
                         )
 
-                        if isinstance(response_msg, dict):
-                            tool_calls = response_msg.get('tool_calls')
-                            response_msg.pop("tools", None)
-                            if response_msg.get("content") is None:
-                                response_msg["content"] = ""
-                        else:
-                            tool_calls = getattr(response_msg, 'tool_calls', None)
-                            response_msg = {
-                                "role": getattr(response_msg, "role", "assistant") or "assistant",
-                                "content": getattr(response_msg, "content", "") or "",
-                                "tool_calls": [
-                                    {
-                                        "id": tc.id,
-                                        "type": tc.type,
+                        # --- 1. 解析模型返回结果 ---
+                        tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
+                        content = response_msg.get("content", "") if isinstance(response_msg, dict) else ""
+                        reasoning = response_msg.get("reasoning_content", "") if isinstance(response_msg, dict) else ""
+
+                        if not tool_calls and "<｜DSML｜function_calls>" in content:
+                            dsml_matches = re.findall(r'<｜DSML｜invoke name="(.*?)"(?:>(.*?)</｜DSML｜invoke>| />)',
+                                                      content, re.DOTALL)
+                            if dsml_matches:
+                                tool_calls = []
+                                for m_name, m_args_raw in dsml_matches:
+                                    arg_dict = {}
+                                    if m_args_raw:
+                                        p_matches = re.findall(
+                                            r'<｜DSML｜parameter name="(.*?)"[^>]*>(.*?)</｜DSML｜parameter>', m_args_raw,
+                                            re.DOTALL)
+                                        for p_name, p_val in p_matches:
+                                            p_val = p_val.strip()
+                                            if p_val.lower() == "true":
+                                                p_val = True
+                                            elif p_val.lower() == "false":
+                                                p_val = False
+                                            arg_dict[p_name] = p_val
+
+                                    tool_calls.append({
+                                        "id": f"call_{uuid.uuid4().hex[:12]}",
+                                        "type": "function",
                                         "function": {
-                                            "name": tc.function.name,
-                                            "arguments": tc.function.arguments if isinstance(tc.function.arguments,
-                                                                                             str) else json.dumps(
-                                                tc.function.arguments)
+                                            "name": m_name,
+                                            "arguments": json.dumps(arg_dict, ensure_ascii=False)
                                         }
-                                    } for tc in tool_calls
-                                ] if tool_calls else None
-                            }
+                                    })
+                                content = re.sub(r'<｜DSML｜.*?>', '', content, flags=re.DOTALL).strip()
+
+                        if reasoning:
+                            self.sig_token.emit(f"<think>\n{reasoning}\n</think>\n\n")
 
                         if not tool_calls:
+                            if content:
+                                self.sig_token.emit("[CLEAR_SEARCH]")
+                                self.full_response_cache += content
+                                self.sig_token.emit(content)
+                                final_response_obtained = True
                             break
 
                         tool_executed = True
-                        rag_messages.append(response_msg)
 
+                        # --- 4. 构造助手消息追加到历史 ---
+                        assistant_msg = {
+                            "role": "assistant",
+                            "content": content or "",
+                            "tool_calls": tool_calls
+                        }
+                        if reasoning:
+                            assistant_msg["reasoning_content"] = reasoning
+
+                        rag_messages.append(assistant_msg)
+
+                        # --- 5. 执行 MCP 工具 ---
                         for tool_call in tool_calls:
+                            if getattr(self, '_is_cancelled', False): break
                             tool_name = tool_call['function']['name']
                             try:
                                 raw_args = tool_call['function']['arguments']
@@ -958,23 +997,31 @@ class ChatWorker(QObject):
                 except Exception as e:
                     self.logger.warning(f"Tool calling loop failed: {e}")
 
-            if tool_executed:
-                silence_prompt = (
-                    "System Notification: Tool execution is complete. "
-                    "Please analyze the tool results and answer the user's original query.\n"
-                    "CRITICAL ANTI-HALLUCINATION RULE: If ANY tool returned an error (such as HTTP 403 Forbidden, 400 Bad Request, or connection failure), "
-                    "DO NOT pretend the requested target (like a paper, protein, or webpage) is fake or missing. "
-                    "Explicitly state that platform restrictions (like Elsevier/Cell Press paywalls) or API limitations prevented data retrieval, "
-                    "and provide your insights based on what you already know or retrieved successfully."
-                )
-                rag_messages.append({"role": "user", "content": silence_prompt})
 
-            self.sig_token.emit("[CLEAR_SEARCH]")
-            self.sig_token.emit("[START_LLM_NETWORK]")
+            if not final_response_obtained:
+                if tool_executed:
+                    silence_prompt = (
+                        "System Notification: Tool execution is complete. "
+                        "Please analyze the tool results and answer the user's original query.\n"
+                        "CRITICAL ANTI-HALLUCINATION RULE: If ANY tool returned an error (such as HTTP 403 Forbidden, 400 Bad Request, or connection failure), "
+                        "DO NOT pretend the requested target (like a paper, protein, or webpage) is fake or missing. "
+                        "Explicitly state that platform restrictions (like Elsevier/Cell Press paywalls) or API limitations prevented data retrieval, "
+                        "and provide your insights based on what you already know or retrieved successfully."
+                    )
 
-            for token in self.main_llm.stream_chat(rag_messages):
-                self.full_response_cache += token
-                self.sig_token.emit(token)
+                    rag_messages.append({"role": "user", "content": silence_prompt})
+                self.sig_token.emit("[CLEAR_SEARCH]")
+                self.sig_token.emit("[START_LLM_NETWORK]")
+
+                stream_kwargs = {}
+
+                #if mcp_tools:
+                #    stream_kwargs["tools"] = mcp_tools
+
+                for token in self.main_llm.stream_chat(rag_messages, **stream_kwargs):
+                    self.full_response_cache += token
+                    self.sig_token.emit(token)
+
 
             # ==========================================
             # Phase 6: Dynamic Citation Mounting
@@ -1695,6 +1742,9 @@ class ChatTool(BaseTool):
                     self.worker.cancel()
                     try:
                         self.worker.sig_token.disconnect()
+                        self.worker.sig_finished.disconnect()
+                        self.worker.sig_error.disconnect()
+                        self.worker.sig_translated.disconnect()
                     except Exception:
                         pass
                 if self.worker_thread.isRunning():
@@ -1899,8 +1949,16 @@ class ChatTool(BaseTool):
     def cancel_generation(self):
         if hasattr(self, 'worker') and self.worker:
             self.worker.cancel()
+
+            # llm 关闭HTTP连接
+            if hasattr(self.worker, 'main_llm') and self.worker.main_llm:
+                self.worker.main_llm.cancel()
+
             try:
                 self.worker.sig_token.disconnect()
+                self.worker.sig_finished.disconnect()
+                self.worker.sig_error.disconnect()
+                self.worker.sig_translated.disconnect()
             except Exception:
                 pass
 

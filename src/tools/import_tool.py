@@ -7,7 +7,7 @@ import tempfile
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFileDialog, QGroupBox, QTableWidget,
-                               QHeaderView, QAbstractItemView, QMenu, QLineEdit, QTableWidgetItem)
+                               QHeaderView, QAbstractItemView, QMenu, QLineEdit, QTableWidgetItem, QApplication)
 from PySide6.QtGui import QAction, QCursor, QColor, QIcon
 from PySide6.QtCore import Qt
 from src.core.core_task import TaskState, TaskManager
@@ -650,6 +650,12 @@ class ImportTool(BaseTool):
             self._on_del_done(TaskState.SUCCESS.value, "")  # 直接跳到导入/重建环节
 
     def _on_rename_done(self, state, msg):
+
+        try:
+            self.task_mgr.sig_state_changed.disconnect()
+        except Exception:
+            pass
+
         if state == TaskState.FAILED.value: return self._on_error(msg)
         if state == TaskState.SUCCESS.value:
             if self.staged_del:
@@ -663,6 +669,13 @@ class ImportTool(BaseTool):
                 self._on_del_done(TaskState.SUCCESS.value, "")
 
     def _on_del_done(self, state, msg):
+
+        try:
+            self.task_mgr.sig_state_changed.disconnect()
+        except Exception:
+            pass
+
+
         if state == TaskState.FAILED.value: return self._on_error(msg)
         if state == TaskState.SUCCESS.value:
             try:
@@ -745,6 +758,7 @@ class ImportTool(BaseTool):
             except:
                 pass
 
+        self._clear_staging_state()
         self.refresh_kb_list()
 
     def create_new_kb(self):
@@ -843,6 +857,7 @@ class ImportTool(BaseTool):
             pd.show()
 
         for i, incoming_path in enumerate(files):
+            QApplication.processEvents()
             if pd: pd.update_progress(int((i / len(files)) * 100), f"Checking {os.path.basename(incoming_path)}...")
 
             incoming_size = os.path.getsize(incoming_path)
@@ -1072,10 +1087,9 @@ class ImportTool(BaseTool):
                 source_path = os.path.join(self.kb_manager.WORKSPACE_DIR, self.current_kb_id, "documents",
                                            obfuscated_name)
                 if os.path.exists(source_path):
-                    # 将无后缀文件复制到系统的临时目录，并挂上其真实名字（带 .pdf）
-                    temp_dir = tempfile.gettempdir()
+                    temp_dir = os.path.join(tempfile.gettempdir(), "ScholarNavis_View")
+                    os.makedirs(temp_dir, exist_ok=True)
                     temp_file_path = os.path.join(temp_dir, real_name)
-
                     try:
                         shutil.copy2(source_path, temp_file_path)
                         FileService.open_file(temp_file_path)

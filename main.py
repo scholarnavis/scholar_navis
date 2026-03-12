@@ -40,11 +40,15 @@ class StartupWorker(QThread):
 
     def run(self):
         try:
-            self.sig_progress.emit(5, "Loading core engine modules...")
+            self.sig_progress.emit(5, "检测硬件信息...")
             time.sleep(0.1)
             from src.core.device_manager import DeviceManager
+            self.sig_progress.emit(6, "获取模型配置...")
+            time.sleep(0.1)
             from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, \
                 ensure_onnx_model
+            self.sig_progress.emit(7, "读取用户配置...")
+            time.sleep(0.1)
             from src.core.network_worker import setup_global_network_env
             from src.core.config_manager import ConfigManager
             from src.core.theme_manager import ThemeManager

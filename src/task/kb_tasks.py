@@ -17,7 +17,6 @@ from src.core.models_registry import get_model_conf, ensure_onnx_model
 from src.core.rerank_engine import RerankEngine
 
 logger = logging.getLogger("Task.kb")
-_embed_fn_cache: dict = {}
 
 def _setup_worker_env():
     import os
@@ -47,46 +46,29 @@ def _setup_worker_env():
     return base_dir
 
 
+# --- kb_tasks.py ---
+
 def _worker_load_model(kb_id, config):
     logger = logging.getLogger("Worker.ModelLoader")
-
     kb_mgr = KBManager()
     dev_mgr = DeviceManager()
-
     kb_data = kb_mgr.get_kb_by_id(kb_id)
     if not kb_data:
         raise RuntimeError(f"Metadata not found for KB ID: {kb_id}")
-
-    model_id = kb_data.get('model_id', 'embed_auto')
-    conf = get_model_conf(model_id, "embedding")
-
     user_device = config.user_settings.get("inference_device", "auto")
     device_str = dev_mgr.parse_device_string(user_device)
-
-    logger.info(f"User selected inference_device: {user_device}")
-    logger.info(f"Parsed device string for ONNX: {device_str}")
-
+    model_id = kb_data.get('model_id', 'embed_auto')
+    conf = get_model_conf(model_id, "embedding")
     repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
-
     try:
         onnx_dir = ensure_onnx_model(repo_id, "embedding")
 
-        cache_key = (onnx_dir, str(device_str))
-        if cache_key in _embed_fn_cache:
-            logger.info(f"Embedding model cache hit: {cache_key}")
-            return _embed_fn_cache[cache_key]
+        logger.info(f"Loading Embedding Model: {repo_id} on {device_str}")
 
-        logger.info(f"Loading cached ONNX model from: {onnx_dir}")
-        embed_fn = ONNXEmbeddingFunction(onnx_dir, device=device_str)
-
-        # ✅ 存入缓存
-        _embed_fn_cache[cache_key] = embed_fn
-        return embed_fn
-
+        return ONNXEmbeddingFunction(onnx_dir, device=device_str)
     except Exception as e:
-        error_info = f"Model {repo_id} load failed. Check ONNX conversion or cache."
-        logger.error(f"{error_info} | {e}")
-        raise RuntimeError(error_info)
+        logger.error(f"Failed to load model: {e}")
+        raise RuntimeError(f"Model Load Failed: {str(e)}")
 
 
 class ONNXEmbeddingFunction(EmbeddingFunction):
@@ -311,6 +293,11 @@ class ImportFilesTask(BackgroundTask):
 
         # 5. 核心循环解析
         for i, (read_path, source_name) in enumerate(process_tasks):
+
+            if self.is_cancelled():
+                self.send_log("WARNING", "Task cancelled by user, safely aborting...")
+                break
+
             if not os.path.exists(read_path): continue
             pct = int((i / total) * 100)
             self.update_progress(pct, f"Indexing: {source_name}")
@@ -337,6 +324,13 @@ class ImportFilesTask(BackgroundTask):
                         else:
                             self.send_log("WARNING", f"{source_name} extracted 0 characters.")
                     finally:
+
+                        if getattr(db_mgr, 'client', None):
+                            try:
+                                db_mgr.client._system.stop()
+                            except Exception:
+                                pass
+
                         # 清理替身
                         if os.path.exists(temp_pdf_path):
                             os.remove(temp_pdf_path)
@@ -379,17 +373,27 @@ class ImportFilesTask(BackgroundTask):
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
         self.send_log("INFO", f"Indexing complete. Processed {success_count}/{total} files.")
 
-        if getattr(db_mgr, 'client', None):
-            try:
-                db_mgr.client._system.stop()
-            except Exception:
-                pass
+        if 'embed_fn' in locals():
+            self.send_log("INFO", "Releasing model memory...")
+            # 1. 停止 ChromaDB 客户端，确保文件解锁
+            if getattr(db_mgr, 'client', None):
+                try:
+                    db_mgr.client._system.stop()
+                except:
+                    pass
 
-        # 释放模型显存
-        del embed_fn
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # 2. 删除模型实例引用
+            del embed_fn
+            import gc
+            gc.collect()
+
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    self.send_log("INFO", "CUDA cache cleared.")
+            except:
+                pass
 
 
 class DeleteFilesTask(BackgroundTask):
@@ -415,22 +419,19 @@ class DeleteFilesTask(BackgroundTask):
         kb_mgr._update_meta_field(kb_id, "file_map", file_map)
 
         # 3. 清理向量库中的数据
-        embed_fn = _worker_load_model(kb_id, self.config)
-        if db_mgr.switch_kb(kb_id, embedding_function=embed_fn):
+        if db_mgr.switch_kb(kb_id, embedding_function=None):
             total = len(file_names)
             for i, fname in enumerate(file_names):
                 self.update_progress(int((i / total) * 100), f"Deleting vectors for {fname}...")
+                # ChromaDB 删除操作不触发 Embedding 计算
                 db_mgr.delete_by_source(fname)
-
-            #4. 强制落盘保险
             if getattr(db_mgr, 'client', None):
                 try:
                     db_mgr.client._system.stop()
                 except Exception:
                     pass
-
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
-        self.send_log("INFO", f"Successfully deleted {len(file_names)} files.")
+        self.send_log("INFO", f"Successfully deleted {len(file_names)} files (No model loaded).")
 
 
 class RenameFilesTask(BackgroundTask):
@@ -450,21 +451,21 @@ class RenameFilesTask(BackgroundTask):
         kb_mgr._update_meta_field(kb_id, "file_map", file_map)
 
         # 2. 更新向量库中的 metadata
-        embed_fn = _worker_load_model(kb_id, self.config)
-        if db_mgr.switch_kb(kb_id, embedding_function=embed_fn) and db_mgr.collection:
+        if db_mgr.switch_kb(kb_id, embedding_function=None) and db_mgr.collection:
             total = len(renames)
             for i, (old_name, new_name) in enumerate(renames.items()):
                 self.update_progress(int((i / total) * 100), f"Updating index: {old_name} -> {new_name}")
                 try:
-                    existing = db_mgr.collection.get(where={"source": old_name})
+                    # 获取旧数据（仅获取 ID 和 Metadata）
+                    existing = db_mgr.collection.get(where={"source": old_name}, include=['metadatas'])
                     if existing and existing['ids']:
                         new_metadatas = existing['metadatas']
-                        for m in new_metadatas: m['source'] = new_name
+                        for m in new_metadatas:
+                            m['source'] = new_name
+                        # 更新操作：只要不传 documents 字段，Chroma 就不会触发 embedding_function
                         db_mgr.collection.update(ids=existing['ids'], metadatas=new_metadatas)
                 except Exception as e:
-                    self.send_log("WARNING", f"Vector metadata update failed for {old_name}: {e}")
-
-            #  3. 强制落盘保险
+                    self.send_log("WARNING", f"Vector update failed: {e}")
             if getattr(db_mgr, 'client', None):
                 try:
                     db_mgr.client._system.stop()

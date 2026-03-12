@@ -32,7 +32,7 @@ class BackgroundTask:
         self.queue = queue
         self.kwargs = kwargs or {}
         self.logger = logging.getLogger("BackgroundTask")
-        self._is_cancelled = False
+        self._cancel_event = mp.Event()
 
     def run(self):
         # 局部导入！
@@ -64,7 +64,10 @@ class BackgroundTask:
         raise NotImplementedError()
 
     def cancel(self):
-        self._is_cancelled = True
+        self._cancel_event.set()
+
+    def is_cancelled(self):
+        return self._cancel_event.is_set()
 
 # --- 物理包装器 ---
 class RunnerProcess(mp.Process):
