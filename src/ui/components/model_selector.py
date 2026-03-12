@@ -147,8 +147,8 @@ class ModelSelectorWidget(QWidget):
         cfg = self.combo_provider.currentData()
         model_name = self.combo_model.currentText()
         if cfg and model_name:
-            cfg[self.model_key] = model_name
-            self._save_to_file(cfg, self.model_key, model_name)
+            self.config_manager.user_settings[self.model_key] = model_name
+            self.config_manager.save_settings()
         self.sig_model_changed.emit()
 
     def _on_vision_changed(self):
@@ -158,8 +158,9 @@ class ModelSelectorWidget(QWidget):
             vision_name = "auto"
 
         if cfg:
-            cfg[self.vision_key] = vision_name
-            self._save_to_file(cfg, self.vision_key, vision_name)
+            self.config_manager.user_settings[self.vision_key] = vision_name
+            self.config_manager.save_settings()
+
 
     def _save_to_file(self, current_cfg, key, value):
         file_configs = self.config_manager.load_llm_configs()
@@ -170,4 +171,14 @@ class ModelSelectorWidget(QWidget):
         self.config_manager.save_llm_configs(file_configs)
 
     def get_current_config(self):
-        return self.combo_provider.currentData()
+        cfg = self.combo_provider.currentData()
+        if cfg:
+            cfg_copy = cfg.copy()
+            saved_model = self.config_manager.user_settings.get(self.model_key)
+            saved_vision = self.config_manager.user_settings.get(self.vision_key)
+            if saved_model:
+                cfg_copy["model_name"] = saved_model
+            if saved_vision and self.enable_vision:
+                cfg_copy["vision_model_name"] = saved_vision
+            return cfg_copy
+        return None

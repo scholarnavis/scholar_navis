@@ -138,7 +138,6 @@ def mcp_request(method: str, url: str, **kwargs):
         session.close()
 
 
-# 建议修改 retry 装饰器的逻辑
 def simple_retry(max_attempts=3, delay=2):
     def decorator(func):
         @wraps(func)
@@ -147,12 +146,22 @@ def simple_retry(max_attempts=3, delay=2):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    if attempt == max_attempts - 1: raise e
+                    err_str = str(e).lower()
+
+                    if any(code in err_str for code in ["400", "401", "403", "404", "not found", "bad request"]):
+                        logger.warning(f"Client error detected ({err_str}), skipping retry for '{func.__name__}' 喵.")
+                        if attempt == max_attempts - 1:
+                            raise e
+                        else:
+                            raise e
+
+                    if attempt == max_attempts - 1:
+                        raise e
                     wait = delay * (2 ** attempt)
+                    logger.warning(f"Attempt {attempt + 1} for '{func.__name__}' failed: {e}. Retrying in {wait}s...")
                     time.sleep(wait)
         return wrapper
     return decorator
-
 
 
 @mcp.tool(
@@ -187,9 +196,9 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
                     if not isinstance(authors_raw, list): authors_raw = []
                     ext_ids = p.get("externalIds")
                     parsed.append({"title": p.get("title", ""), "year": p.get("year", "Unknown"),
-                                   "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)][:5],
+                                   "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
                                    "citation_count": p.get("citationCount", 0),
-                                   "abstract": (p.get("abstract") or "No abstract")[:600] + "...",
+                                   "abstract": p.get("abstract") or "No abstract",
                                    "doi": ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else "",
                                    "url": p.get("url", ""),
                                    "source_db": "Semantic Scholar"})
@@ -212,12 +221,12 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
                         words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
                                  positions]
                         words.sort()
-                        abstract_text = " ".join([w for pos_idx, w in words])[:600] + "..."
+                        abstract_text = " ".join([w for pos_idx, w in words])
 
                     authors_raw = p.get("authorships") or []
                     if not isinstance(authors_raw, list): authors_raw = []
                     authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
-                               isinstance(a, dict) and isinstance(a.get("author"), dict)][:5]
+                               isinstance(a, dict) and isinstance(a.get("author"), dict)]
 
                     parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
                                    "authors": authors,
@@ -258,9 +267,9 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
 
                     parsed.append({"title": title,
                                    "year": year,
-                                   "authors": authors[:5], "citation_count": p.get("is-referenced-by-count", 0),
-                                   "abstract": p.get("abstract", "No abstract")[:600].replace("<jats:p>", "").replace(
-                                       "</jats:p>", "") + "...",
+                                   "authors": authors, "citation_count": p.get("is-referenced-by-count", 0),
+                                   "abstract": p.get("abstract", "No abstract").replace("<jats:p>", "").replace(
+                                       "</jats:p>", ""),
                                    "doi": p.get("DOI", ""), "url": p.get("URL", ""),
                                    "source_db": "Crossref"})
                 if parsed: return json.dumps({"status": "success", "source": "crossref", "results": parsed})
@@ -298,14 +307,13 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
                         "")
 
                     parsed.append({"title": d.get("Title", ""), "year": d.get("PubDate", "")[:4],
-                                   "authors": authors[:5], "abstract": "Fetch via fetch_pubmed_abstract.",
+                                   "authors": authors, "abstract": "Fetch via fetch_pubmed_abstract.",
                                    "pmid": d.get("Id", ""),
                                    "doi": doi,
                                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{d.get('Id', '')}/", "source_db": "PubMed"})
                 return json.dumps({"status": "success", "source": "pubmed", "results": parsed})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
-
 
 @mcp.tool(
     name="traverse_citation_graph",
@@ -316,7 +324,8 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def traverse_citation_graph(doi: str, direction: Literal["references", "citations"] = "references", max_results: int = 10) -> str:
+def traverse_citation_graph(doi: str, direction: Literal["references", "citations"] = "references",
+                            max_results: int = 10) -> str:
     logger.info(f"Task: Citation Graph | DOI: {doi} | Direction: {direction}")
     if direction not in ["references", "citations"]: return json.dumps(
         {"status": "error", "message": "direction must be 'references' or 'citations'"})
@@ -324,7 +333,7 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
 
     if s2_api_key:
         try:
-            url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/{direction}?fields=title,authors,year,citationCount,externalIds,url&limit={max_results}"
+            url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/{direction}?fields=title,authors,year,abstract,citationCount,externalIds,url&limit={max_results}"
             res = mcp_request("GET", url, headers={"x-api-key": s2_api_key}, timeout=15)
             res.raise_for_status()
             parsed = []
@@ -339,13 +348,15 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
                     if not isinstance(authors_raw, list): authors_raw = []
 
                     ext_ids = p.get("externalIds")
-                    doi = ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else ""
+                    doi_str = ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else ""
 
+                    # 喵：去掉了作者 [:3] 的限制，并加上了 abstract 解析
                     parsed.append({
                         "title": p.get("title", ""), "year": p.get("year", "Unknown"),
-                        "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)][:3],
+                        "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
                         "citation_count": p.get("citationCount", 0),
-                        "doi": doi,
+                        "abstract": p.get("abstract") or "No abstract",
+                        "doi": doi_str,
                         "url": p.get("url", "")
                     })
             if parsed:
@@ -375,14 +386,29 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
             safe_filter = urllib.parse.quote(f"cites:https://doi.org/{clean_doi}")
             url = f"https://api.openalex.org/works?filter={safe_filter}&per-page={max_results}&mailto={ncbi_email}"
 
-
         res = mcp_request("GET", url, timeout=15)
         res.raise_for_status()
         parsed = []
         for p in res.json().get("results", []):
             if not isinstance(p, dict): continue
+
+            abs_idx = p.get("abstract_inverted_index")
+            abstract_text = "No abstract"
+            if isinstance(abs_idx, dict):
+                words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
+                         positions]
+                words.sort()
+                abstract_text = " ".join([w for pos_idx, w in words])
+
+            authors_raw = p.get("authorships") or []
+            if not isinstance(authors_raw, list): authors_raw = []
+            authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
+                       isinstance(a, dict) and isinstance(a.get("author"), dict)]
+
             parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
+                           "authors": authors,
                            "citation_count": p.get("cited_by_count", 0),
+                           "abstract": abstract_text,
                            "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
                            "url": p.get("id", "")})
         return json.dumps({"status": "success", "source": "OpenAlex", "direction": direction, "results": parsed})
@@ -467,9 +493,40 @@ def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", ma
 
 
 @mcp.tool(
+    name="read_local_sequence_file",
+    description=(
+        "[Tags: Sequence] Read the contents of a local file downloaded to the workspace. "
+        "Use this tool when another tool (like fetch_sequence_fasta) saves a massive file locally and returns a 'local_path'. "
+        "Only pass the filename or the path provided by the previous tool."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def read_local_sequence_file(file_path: str, max_chars: int = 50000) -> str:
+    logger.info(f"Task: Read Workspace File | Path: '{file_path}'")
+    try:
+        clean_name = os.path.basename(file_path.strip().replace("\\", "/"))
+        target_path = os.path.abspath(os.path.join(WORKSPACE_DIR, clean_name))
+
+        if not target_path.startswith(os.path.abspath(WORKSPACE_DIR)):
+            return json.dumps({"status": "error", "message": "Security Error: Path traversal detected!"})
+
+        if not os.path.exists(target_path):
+            return json.dumps({"status": "error", "message": f"File '{clean_name}' not found in the local workspace."})
+
+        with open(target_path, 'r', encoding='utf-8') as f:
+            content = f.read(max_chars)
+            if len(content) == max_chars:
+                content += "\n\n...[Content truncated due to length limits. Ask user to download manually if more is needed.]"
+
+        return json.dumps({"status": "success", "file": clean_name, "content": content}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
     name="fetch_sequence_fasta",
     description=(
-        "[Tags: Genomics, Proteomics] Download raw FASTA sequences for nucleotides or proteins. "
+        "[Tags: Sequence] Download raw FASTA sequences for nucleotides or proteins. "
         "CRITICAL: The 'db_type' parameter MUST strictly be either 'nuccore' (for DNA/RNA sequences) "
         "or 'protein' (for amino acid sequences). Do NOT use 'uniprotkb', 'swiss-prot', or any other names. "
         "Automatically saves to local workspace if massive."
@@ -582,7 +639,16 @@ def fetch_pubmed_abstract(pmid: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@simple_retry()
+@mcp.tool(
+    name="universal_ncbi_summary",
+    description=(
+            "A universal search tool for ANY NCBI database. "
+            "Use this to query specialized NCBI databases like 'gene', 'protein', 'nuccore', 'clinvar', 'omim', 'biosample', etc. "
+            "It returns structured metadata and summary records. "
+            "CRITICAL WARNING: 'database' MUST be a valid, exact NCBI database name in lowercase (e.g., 'gene', not 'Gene')."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
 def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> str:
     logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query}")
 
@@ -647,12 +713,19 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
         res = mcp_request("GET", url, timeout=timeout)
         res.raise_for_status()
         html_content = res.text
-        text_content = re.sub(r'<script.*?>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-        text_content = re.sub(r'<style.*?>.*?</style>', '', text_content, flags=re.DOTALL | re.IGNORECASE)
-        text_content = re.sub(r'<[^>]+>', ' ', text_content)
-        text_content = re.sub(r'\s+', ' ', text_content).strip()
-        if len(text_content) > 30000: text_content = text_content[:30000] + "\n...[Content truncated]"
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        for script_or_style in soup(["script", "style", "noscript", "header", "footer", "nav", "aside"]):
+            script_or_style.decompose()
+
+        text_content = soup.get_text(separator=' ', strip=True)
+
+        if len(text_content) > 30000:
+            text_content = text_content[:30000] + "\n...[Content truncated]"
+
         return json.dumps({"status": "success", "url": url, "content": text_content}, ensure_ascii=False)
+
     except Exception as e:
         err_str = str(e)
         if "403" in err_str or "Forbidden" in err_str:
@@ -747,7 +820,7 @@ def search_preprints(query: str, max_results: int = 5) -> str:
         results = [
             {"title": p.get("title", ""), "year": p.get("pubYear", "Unknown"), "authors": p.get("authorString", ""),
              "doi": p.get("doi", ""), "source": p.get("bookOrReportDetails", {}).get("publisher", "Preprint Server"),
-             "abstract": p.get("abstractText", "No abstract")[:600] + "...",
+             "abstract": p.get("abstractText", "No abstract"),
              "url": f"https://doi.org/{p.get('doi')}" if p.get("doi") else ""} for p in
             res.json().get("resultList", {}).get("result", [])]
         return json.dumps({"status": "success", "results": results}, ensure_ascii=False)
@@ -793,7 +866,9 @@ def search_github_repos(query: str, max_results: int = 5) -> str:
     try:
         url = "https://api.github.com/search/repositories"
         params = {"q": query, "sort": "stars", "order": "desc", "per_page": max_results}
-        res = mcp_request("GET", url, params=params, headers={"Accept": "application/vnd.github.v3+json"}, timeout=10)
+        headers = {"Accept": "application/vnd.github.v3+json",
+                   "Authorization": f"Bearer {github_token}" if github_token else ""}
+        res = mcp_request("GET", url, params=params, headers=headers, timeout=10)
         res.raise_for_status()
         results = [{"name": r.get("full_name", ""), "description": r.get("description", "No description"),
                     "url": r.get("html_url", ""), "stars": r.get("stargazers_count", 0),
@@ -834,9 +909,14 @@ def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> st
         res.raise_for_status()
 
         data = res.json()
+
+        synonyms = data.get("synonyms", [])
+        synonyms_str = ", ".join(synonyms) if synonyms else "None"
+
         result = {
             "id": data.get("id"),
             "display_name": data.get("display_name"),
+            "synonyms": synonyms_str,
             "species": data.get("species"),
             "biotype": data.get("biotype"),
             "description": data.get("description"),
@@ -901,24 +981,34 @@ def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
 
 @mcp.tool(
     name="fetch_pubchem_compound",
-    description=("[Tags: Small Molecules] Fetch chemical properties of a molecule from PubChem using its common name.")
+    description=("[Tags: PubChem] Fetch chemical properties of a molecule from PubChem using its common name.")
 )
 @simple_retry(max_attempts=2, delay=1)
 def fetch_pubchem_compound(compound_name: str) -> str:
     logger.info(f"Task: PubChem Compound Fetch | Name: '{compound_name}'")
     try:
         safe_name = urllib.parse.quote(compound_name.strip())
-        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{safe_name}/property/MolecularWeight,MolecularFormula,CanonicalSMILES/JSON"
+
+        properties = "MolecularWeight,MolecularFormula,CanonicalSMILES,IsomericSMILES,IUPACName,XLogP,ExactMass,TPSA,Complexity,Charge,HBondDonorCount,HBondAcceptorCount"
+        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{safe_name}/property/{properties}/JSON"
+
         res = mcp_request("GET", url, timeout=15)
-        if res.status_code == 404: return json.dumps(
-            {"status": "error", "message": f"Compound '{compound_name}' not found."})
+
+        if res.status_code == 404:
+            return json.dumps({"status": "error", "message": f"Compound '{compound_name}' not found."})
+
         res.raise_for_status()
-        properties = res.json().get("PropertyTable", {}).get("Properties", [])
-        if not properties: return json.dumps({"status": "error", "message": "No properties returned."})
-        cid = properties[0].get("CID", "")
-        properties[0]["url"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
-        properties[0]["name"] = compound_name
-        return json.dumps({"status": "success", "results": [properties[0]]}, ensure_ascii=False)
+
+        props = res.json().get("PropertyTable", {}).get("Properties", [])
+        if not props:
+            return json.dumps({"status": "error", "message": "No properties returned."})
+
+        cid = props[0].get("CID", "")
+        props[0]["url"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
+        props[0]["name"] = compound_name
+
+        return json.dumps({"status": "success", "results": [props[0]]}, ensure_ascii=False)
+
     except Exception as e:
         err_str = str(e)
         if "404" in err_str:
@@ -929,7 +1019,7 @@ def fetch_pubchem_compound(compound_name: str) -> str:
 
 @mcp.tool(
     name="search_chembl_target",
-    description=("[Tags: Pharmacology] Search the ChEMBL database for protein targets.")
+    description=("[Tags: PubChem] Search the ChEMBL database for protein targets.")
 )
 @simple_retry(max_attempts=2, delay=1)
 def search_chembl_target(query: str, max_results: int = 5) -> str:
@@ -1001,7 +1091,7 @@ def uniprot_id_mapping(from_db: str, to_db: str, ids: str) -> str:
 @mcp.tool(
     name="query_uniprot_database",
     description=(
-            "[Tags: Genomics, Proteomics] A unified tool to search UniProt sub-databases. "
+            "[Tags: Proteomics] A unified tool to search UniProt sub-databases. "
             "CRITICAL SEARCH SYNTAX: The UniProt API is very strict! "
             "If searching by gene and species, you MUST use 'organism_name' and wrap multi-word species in quotes! "
             "To strictly retrieve the canonical, non-obsolete protein, you MUST append AND (reviewed:true) to your query! "
@@ -1030,7 +1120,6 @@ def query_uniprot_database(query: str, db_type: Literal[
             else:
                 res = mcp_request("GET", "https://rest.uniprot.org/uniprotkb/search",
                                   params={"query": query, "size": max_results}, timeout=15)
-                # 核心修复：捕获 400 错误，并把 UniProt 的官方报错提示直接扔给大模型，逼它重试
                 if res.status_code == 400:
                     return json.dumps({
                         "status": "error",
@@ -1061,13 +1150,21 @@ def query_uniprot_database(query: str, db_type: Literal[
                 ncbi_id_str = ", ".join(ncbi_gene_ids) if ncbi_gene_ids else "Not Found"
 
                 subcellular_locations = []
+                function_texts = []
                 for comment in item.get("comments", []):
                     if comment.get("commentType") == "SUBCELLULAR LOCATION":
                         for loc in comment.get("subcellularLocations", []):
                             loc_val = loc.get("location", {}).get("value")
                             if loc_val and loc_val not in subcellular_locations:
                                 subcellular_locations.append(loc_val)
+                    elif comment.get("commentType") == "FUNCTION":
+                        for text_item in comment.get("texts", []):
+                            function_texts.append(text_item.get("value", ""))
+
                 sub_loc_str = ", ".join(subcellular_locations) if subcellular_locations else "Not specified"
+                function_str = " ".join(function_texts) if function_texts else "Not specified"
+
+                sequence_str = item.get("sequence", {}).get("value", "")
 
                 results.append({
                     "accession": item.get("primaryAccession", ""),
@@ -1076,7 +1173,9 @@ def query_uniprot_database(query: str, db_type: Literal[
                     "ncbi_gene_id": ncbi_id_str,
                     "organism": item.get("organism", {}).get("scientificName", ""),
                     "sequence_length": item.get("sequence", {}).get("length", 0),
-                    "subcellular_localization": sub_loc_str
+                    "subcellular_localization": sub_loc_str,
+                    "function_description": function_str,  # 新增
+                    "sequence": sequence_str  # 新增
                 })
             return json.dumps({"status": "success", "db": "uniprotkb", "results": results}, ensure_ascii=False)
 
@@ -1133,7 +1232,7 @@ def query_uniprot_database(query: str, db_type: Literal[
                        res.json().get("results", [])]
             return json.dumps({"status": "success", "db": "uniparc", "results": results}, ensure_ascii=False)
 
-        # Branch 6: Annotations (unirule/arba)
+        # Branch 6: Annotations
         elif db_type in ["unirule", "arba"]:
             res = mcp_request("GET", f"https://rest.uniprot.org/{db_type}/search",
                               params={"query": query, "size": max_results}, timeout=15)
@@ -1155,13 +1254,13 @@ def query_uniprot_database(query: str, db_type: Literal[
         return json.dumps({"status": "error", "message": str(e)})
 
 
-
 @mcp.tool(
     name="query_pdb_structure",
     description=(
-            "[Tags: Proteomics, Structure] Interact with the RCSB Protein Data Bank (PDB). "
-            "Use action='search' to find 3D structures based on a keyword or protein name. "
-            "Use action='details' to fetch precise metadata (molecular weight, primary citation, atom count) for an EXACT known PDB ID (e.g., '4HHB')."
+            "[Tags: Structure] Interact with the RCSB Protein Data Bank (PDB). "
+            "CRITICAL EXPLANATION: This tool DOES NOT require DOIs! You CAN and MUST search using protein names (like 'CRY1' or 'Hemoglobin') by using action='search'. Do NOT hallucinate that PDB requires DOIs! "
+            "Use action='search' to find 3D structures based on a single keyword or protein name (keep it simple). "
+            "Use action='details' to fetch precise metadata (molecular weight, primary citation, macromolecules, ligands, resolution) for an EXACT known PDB ID (e.g., '1U3C' or '4HHB')."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
@@ -1170,35 +1269,48 @@ def query_pdb_structure(query: str, action: Literal["search", "details"] = "sear
     try:
         if action == "search":
             url = "https://search.rcsb.org/rcsbsearch/v2/query"
-            payload = {"query": {"type": "terminal", "service": "full_text", "parameters": {"value": query}},
+
+            clean_query = query.replace('"', '').strip()
+            payload = {"query": {"type": "terminal", "service": "full_text", "parameters": {"value": clean_query}},
                        "return_type": "entry", "request_options": {"paginate": {"start": 0, "rows": max_results}}}
             res = mcp_request("POST", url, json=payload, timeout=10)
+
             if res.status_code == 400:
                 return json.dumps({
                     "status": "error",
-                    "message": f"HTTP 400 Bad Request. PDB API rejected the search query '{query}'. Try using a single keyword without spaces, or use the 'details' action for a specific ID."
+                    "message": f"HTTP 400 Bad Request. PDB API rejected the search query '{clean_query}'. Try using a SIMPLER single keyword without spaces (e.g., 'CRY1' instead of 'Arabidopsis thaliana CRY1')."
                 })
             res.raise_for_status()
+
             pdb_ids = [item["identifier"] for item in res.json().get("result_set", [])]
-            if not pdb_ids: return json.dumps({"status": "success", "results": []})
+            if not pdb_ids:
+                return json.dumps({"status": "success", "results": [],
+                                   "message": f"0 results found for '{clean_query}'. Try a different keyword."})
+
             results = []
             for pid in pdb_ids:
                 det_res = mcp_request("GET", f"https://data.rcsb.org/rest/v1/core/entry/{pid}", timeout=5)
                 if det_res.status_code == 200:
                     d = det_res.json()
-                    results.append({"pdb_id": pid, "title": d.get("struct", {}).get("title", ""),
-                                    "method": d.get("exptl", [{}])[0].get("method", "Unknown"),
-                                    "resolution": d.get("rcsb_entry_info", {}).get("resolution_estimated_by_xray",
-                                                                                   "N/A"),
-                                    "organism": d.get("rcsb_entity_source_organism", [{}])[0].get(
-                                        "ncbi_scientific_name", "Unknown")})
+                    entry_info = d.get("rcsb_entry_info", {})
+
+                    res_val = entry_info.get("resolution_estimated_by_xray")
+                    if not res_val:
+                        res_val = entry_info.get("resolution_combined", [None])[0]
+                    if not res_val:
+                        res_val = "N/A (Please check manually)"
+
+                    results.append({
+                        "pdb_id": pid,
+                        "title": d.get("struct", {}).get("title", ""),
+                        "method": d.get("exptl", [{}])[0].get("method", "Unknown"),
+                        "resolution": res_val,
+                        "organism": d.get("rcsb_entity_source_organism", [{}])[0].get("ncbi_scientific_name", "Unknown")
+                    })
             return json.dumps({"status": "success", "action": "search", "results": results})
 
-
         elif action == "details":
-
             url = f"https://data.rcsb.org/rest/v1/core/entry/{query.upper()}"
-
             res = mcp_request("GET", url, timeout=15)
 
             if res.status_code == 404:
@@ -1206,35 +1318,61 @@ def query_pdb_structure(query: str, action: Literal["search", "details"] = "sear
                     {"status": "error", "message": f"PDB ID '{query.upper()}' not found. Please verify the ID."})
 
             res.raise_for_status()
-
             data = res.json()
 
             entry_info = data.get("rcsb_entry_info", {})
             citation_data = data.get("citation", [{}])[0]
             exptl_data = data.get("exptl", [{}])[0]
+
+            res_val = entry_info.get("resolution_estimated_by_xray")
+            if not res_val:
+                res_val = entry_info.get("resolution_combined", [None])[0]
+            if not res_val:
+                res_val = "N/A (Please check manually)"
+
+            macromolecules = []
+            for poly in data.get("polymer_entity", []):
+                desc = poly.get("rcsb_polymer_entity", {}).get("pdbx_description", "")
+                if desc and desc not in macromolecules:
+                    macromolecules.append(desc)
+
+            ligands = []
+            for nonpoly in data.get("nonpolymer_entity", []):
+                comp_id = nonpoly.get("pdbx_entity_nonpoly", {}).get("comp_id", "")
+                name = nonpoly.get("pdbx_entity_nonpoly", {}).get("name", "")
+                if comp_id and name:
+                    ligands.append(f"{name} ({comp_id})")
+
             results = {
                 "pdb_id": data.get("entry", {}).get("id", query.upper()),
                 "title": data.get("struct", {}).get("title", ""),
                 "method": exptl_data.get("method", "Unknown"),
-                "resolution": entry_info.get("resolution_estimated_by_xray"),
+                "resolution": res_val,
                 "molecular_weight_kDa": entry_info.get("molecular_weight", 0),
                 "atom_count": entry_info.get("deposited_atom_count", 0),
-                "primary_citation": {"title": citation_data.get("title", ""),
-                                     "journal": citation_data.get("journal_abbrev", ""),
-                                     "year": citation_data.get("year", ""),
-                                     "pmid": citation_data.get("pdbx_database_id_PubMed", "")}
+                "macromolecules": macromolecules,
+                "ligands": ligands,
+                "primary_citation": {
+                    "title": citation_data.get("title", ""),
+                    "journal": citation_data.get("journal_abbrev", ""),
+                    "year": citation_data.get("year", ""),
+                    "pmid": citation_data.get("pdbx_database_id_PubMed", "")
+                }
             }
             return json.dumps({"status": "success", "action": "details", "results": results}, ensure_ascii=False)
+
         else:
             return json.dumps({"status": "error", "message": "Invalid action. Must be 'search' or 'details'."})
+
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
 
 @mcp.tool(
-    name="analyze_string_network",
+    name="query_string_database",
     description=(
-            "[Tags: Protein-Protein Interaction] Analyze protein networks via STRING DB. "
+            "[Tags: Interaction] Analyze protein networks(interaction) via STRING DB. "
+            "interacting protein!!!!! interacting protein!!!!! interacting protein!!!!!"
             "CRITICAL WARNING: The default 'species' parameter is 9606 (Human). "
             "If you are querying plant genes (e.g., Arabidopsis, Rice) or other non-human animals, "
             "you MUST MUST MUST first use 'fetch_taxonomy_info' to find the correct NCBI Taxonomy ID "
@@ -1243,14 +1381,17 @@ def query_pdb_structure(query: str, action: Literal["search", "details"] = "sear
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def analyze_string_network(identifiers: str, action: Literal["interactions", "enrichment"] = "interactions",
+def query_string_database(identifiers: str, action: Literal["interactions", "enrichment"] = "interactions",
                            species: int = 9606, limit: int = 15) -> str:
     logger.info(
         f"Task: Unified STRING DB | Action: '{action}' | Identifiers: '{identifiers[:30]}' | Species: {species}")
     try:
+        # 喵：自动清理多余的空格，防止 STRING API 不认
+        clean_identifiers = "\r".join([x.strip() for x in identifiers.split(",") if x.strip()])
+
         if action == "interactions":
             url = "https://string-db.org/api/json/interaction_partners"
-            payload = {"identifiers": identifiers.strip(), "species": species, "limit": limit,
+            payload = {"identifiers": clean_identifiers, "species": species, "limit": limit,
                        "caller_identity": "ScholarNavis"}
             res = mcp_request("POST", url, data=payload, timeout=15)
 
@@ -1258,8 +1399,7 @@ def analyze_string_network(identifiers: str, action: Literal["interactions", "en
                 return json.dumps({
                     "status": "error",
                     "message": f"HTTP {res.status_code}. STRING DB failed to find interactions for '{identifiers}'. "
-                               f"Did you use the wrong species ID? You used '{species}'. If this is a plant/non-human gene, "
-                               f"you MUST look up the correct NCBI TaxID using fetch_taxonomy_info first!"
+                               f"Did you use the wrong species ID? You used '{species}'. For Arabidopsis thaliana, you MUST use 3702!"
                 })
 
             res.raise_for_status()
@@ -1277,19 +1417,19 @@ def analyze_string_network(identifiers: str, action: Literal["interactions", "en
 
         elif action == "enrichment":
             url = "https://string-db.org/api/json/enrichment"
-            payload = {"identifiers": identifiers.strip(), "species": species, "caller_identity": "ScholarNavis"}
+            payload = {"identifiers": clean_identifiers, "species": species, "caller_identity": "ScholarNavis"}
             res = mcp_request("POST", url, data=payload, timeout=20)
 
             if res.status_code in [404, 400]:
                 return json.dumps({
                     "status": "error",
-                    "message": f"HTTP {res.status_code}. Enrichment failed. You used species ID '{species}'. Ensure this is correct for your organism. Also note STRING API may restrict enrichment endpoints for some queries."
+                    "message": f"HTTP {res.status_code}. Enrichment failed. You used species ID '{species}'. Ensure this is correct for your organism."
                 })
 
             res.raise_for_status()
             data = res.json()
-            if not data:
-                return json.dumps({"status": "success", "message": "No enrichment found for the provided network."})
+            if not data: return json.dumps(
+                {"status": "success", "message": "No enrichment found for the provided network."})
 
             results = [{"category": item.get("category", ""), "term": item.get("term", ""),
                         "description": item.get("description", ""), "number_of_genes": item.get("number_of_genes", 0),
@@ -1299,6 +1439,7 @@ def analyze_string_network(identifiers: str, action: Literal["interactions", "en
             return json.dumps(
                 {"status": "success", "action": "enrichment", "species": species, "enriched_terms": results},
                 ensure_ascii=False)
+
         else:
             return json.dumps({"status": "error", "message": "Invalid action. Must be 'interactions' or 'enrichment'."})
 

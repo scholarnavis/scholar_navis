@@ -12,15 +12,14 @@ import tempfile
 import time
 from urllib.parse import urlparse, parse_qs, quote
 
-import markdown
 import torch
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve, \
+    QEvent
 from PySide6.QtGui import QDesktopServices, QCursor, QAction, QPdfWriter, QTextDocument, QPageSize
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QCheckBox,
                                QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication, QComboBox)
-from langdetect import detect_langs
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode, TaskState
@@ -30,24 +29,21 @@ from src.core.lang_detect import detect_primary_language
 from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
-from src.core.rerank_engine import RerankEngine
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
 from src.task.chat_tasks import ProcessAttachmentTask
 from src.task.kb_tasks import _worker_load_model
 from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
-from src.ui.components.chat_bubble import ChatBubbleWidget
+from src.ui.components.chat_bubble import ChatBubbleWidget, hex_to_rgba
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import StandardDialog, SelectKBFileDialog
 from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
-from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
+from src.ui.components.pdf_viewer import InternalPDFViewer
 from src.ui.components.pill_button import FollowUpGroupWidget
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
-
-
 
 
 class ChatDropTargetWidget(QWidget):
@@ -320,11 +316,31 @@ class ChatInputContainer(QFrame):
             f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
 
         self.text_edit.setStyleSheet(f"""
-            QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; font-family: {tm.font_family()}; }}
-            QScrollBar:vertical {{ background: transparent; width: 6px; }}
-            QScrollBar::handle:vertical {{ background: rgba(150, 150, 150, 0.35); border-radius: 3px; }}
-            QScrollBar::handle:vertical:hover {{ background: rgba(150, 150, 150, 0.65); }}
-        """)
+                    QPlainTextEdit {{ 
+                        background-color: transparent; 
+                        color: {tm.color('text_main')}; 
+                        border: none; 
+                        font-size: 14px; 
+                        font-family: {tm.font_family()}; 
+                    }}
+                    QScrollBar:vertical {{ 
+                        background: transparent; 
+                        width: 6px; 
+                        margin: 0px;
+                    }}
+                    QScrollBar::handle:vertical {{ 
+                        background: {hex_to_rgba(tm.color('text_muted'), 0.4) if 'hex_to_rgba' in globals() else 'rgba(150, 150, 150, 0.35)'}; 
+                        border-radius: 3px; 
+                        min-height: 20px;
+                    }}
+                    QScrollBar::handle:vertical:hover {{ 
+                        background: {tm.color('accent')}; 
+                    }}
+                    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                        height: 0px; 
+                    }}
+                """)
+
 
         tool_btn_style = f"""
                      QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: {tm.font_family()}; font-size: 13px; text-align: left; }}
@@ -348,8 +364,11 @@ class ChatInputContainer(QFrame):
             self.lbl_context_info.setStyleSheet(f"color: {tm.color('accent')}; font-size: 12px; border: none;")
 
         self.btn_clear_context.setIcon(tm.icon("close", "danger"))
-        self.btn_clear_context.setStyleSheet(
-            "QPushButton { border: none; background: transparent; padding: 2px; } QPushButton:hover { background: rgba(255, 107, 107, 0.2); border-radius: 4px; }")
+        self.btn_clear_context.setToolTip("Clear all attached contexts")
+        self.btn_clear_context.setStyleSheet(f"""
+                    QPushButton {{ border: none; background: transparent; padding: 4px; border-radius: 4px; }} 
+                    QPushButton:hover {{ background: {hex_to_rgba(tm.color('danger'), 0.2)}; }}
+                """)
 
         btn_mcp_style = f"""
             QPushButton {{ color: {tm.color('text_muted')}; background: transparent; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
@@ -834,17 +853,32 @@ class ChatWorker(QObject):
                 selected_tags = getattr(self, 'selected_mcp_tags', None)
 
                 # 1. 获取用户在 UI 层面允许的所有候选工具
+                all_raw_tools = mcp_mgr.get_all_tools_schema() or []
                 raw_mcp_tools = []
+
                 if selected_tags is not None:
-                    raw_mcp_tools = mcp_mgr.get_tools_schema_by_tags(selected_tags)
+                    import re
+                    for tool in all_raw_tools:
+                        desc = tool.get("function", {}).get("description", "")
+
+                        # 利用正则提取工具描述里的 [Tags: XXX, YYY]
+                        tags_match = re.search(r'\[Tags?:\s*(.*?)\]', desc, re.IGNORECASE)
+
+                        if tags_match:
+                            tool_tags = [t.strip() for t in tags_match.group(1).split(',')]
+                            if any(tt in selected_tags for tt in tool_tags):
+                                raw_mcp_tools.append(tool)
+                        else:
+                            # 对于没有打 Tag 标签的隐形基础工具，默认放行
+                            raw_mcp_tools.append(tool)
                 else:
-                    raw_mcp_tools = mcp_mgr.get_all_tools_schema()
+                    raw_mcp_tools = all_raw_tools
 
                 # 2. RAG 动态路由：从候选池中挑出最匹配的 Top-K 给大模型
                 if raw_mcp_tools:
                     self.sig_token.emit("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
                     time.sleep(0.05)
-                    mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=6)
+                    mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=8)
                     self.sig_token.emit("[CLEAR_SEARCH]")
 
                 # 3. 仅当真正启用了 MCP 且筛选出了工具时，才向模型发送系统提示和 UI 状态
@@ -957,16 +991,19 @@ class ChatWorker(QObject):
                         content = response_msg.get("content", "") if isinstance(response_msg, dict) else ""
                         reasoning = response_msg.get("reasoning_content", "") if isinstance(response_msg, dict) else ""
 
+                        # 处理 DeepSeek 的 <｜DSML｜function_calls> 标准格式
                         if not tool_calls and "<｜DSML｜function_calls>" in content:
-                            dsml_matches = re.findall(r'<｜DSML｜invoke name="(.*?)"(?:>(.*?)</｜DSML｜invoke>| />)',
-                                                      content, re.DOTALL)
+                            dsml_matches = re.findall(
+                                r'<｜DSML｜invoke name=["\'](.*?)["\'](?:>(.*?)</｜DSML｜invoke>| />)',
+                                content, re.DOTALL)
                             if dsml_matches:
                                 tool_calls = []
                                 for m_name, m_args_raw in dsml_matches:
                                     arg_dict = {}
                                     if m_args_raw:
                                         p_matches = re.findall(
-                                            r'<｜DSML｜parameter name="(.*?)"[^>]*>(.*?)</｜DSML｜parameter>', m_args_raw,
+                                            r'<｜DSML｜parameter name=["\'](.*?)["\'][^>]*>(.*?)</｜DSML｜parameter>',
+                                            m_args_raw,
                                             re.DOTALL)
                                         for p_name, p_val in p_matches:
                                             p_val = p_val.strip()
@@ -984,21 +1021,26 @@ class ChatWorker(QObject):
                                             "arguments": json.dumps(arg_dict, ensure_ascii=False)
                                         }
                                     })
-                                content = re.sub(r'<｜DSML｜.*?>', '', content, flags=re.DOTALL).strip()
+                                # 修复核心：抹除整个 function_calls 块，绝对不能只删尖括号标签喵！
+                                content = re.sub(r'<｜DSML｜function_calls>.*?(?:</｜DSML｜function_calls>|$)', '', content,
+                                                 flags=re.DOTALL).strip()
 
                         if reasoning:
                             self.sig_token.emit(f"<think>\n{reasoning}\n</think>\n\n")
 
+                        # 处理 DeepSeek 的裸 <｜DSML｜invoke> 格式（容错机制）
                         if not tool_calls and "<｜DSML｜invoke" in content:
-                            dsml_matches = re.findall(r'<｜DSML｜invoke name=["\'](.*?)["\'](?:>(.*?)</｜DSML｜invoke>| />)',
-                                                      content, re.DOTALL)
+                            dsml_matches = re.findall(
+                                r'<｜DSML｜invoke name=["\'](.*?)["\'](?:>(.*?)</｜DSML｜invoke>| />)',
+                                content, re.DOTALL)
                             if dsml_matches:
                                 tool_calls = []
                                 for m_name, m_args_raw in dsml_matches:
                                     arg_dict = {}
                                     if m_args_raw:
                                         p_matches = re.findall(
-                                            r'<｜DSML｜parameter name=["\'](.*?)["\'][^>]*>(.*?)</｜DSML｜parameter>', m_args_raw,
+                                            r'<｜DSML｜parameter name=["\'](.*?)["\'][^>]*>(.*?)</｜DSML｜parameter>',
+                                            m_args_raw,
                                             re.DOTALL)
                                         for p_name, p_val in p_matches:
                                             p_val = p_val.strip()
@@ -1016,8 +1058,11 @@ class ChatWorker(QObject):
                                             "arguments": json.dumps(arg_dict, ensure_ascii=False)
                                         }
                                     })
-                                content = re.sub(r'<｜DSML｜.*?>', '', content, flags=re.DOTALL).strip()
+                                # 修复核心：同样抹除所有的裸 invoke 块喵！
+                                content = re.sub(r'<｜DSML｜invoke.*?(?:</｜DSML｜invoke>|$)', '', content,
+                                                 flags=re.DOTALL).strip()
 
+                        # 处理通用 JSON 格式的 fallback...
                         if not tool_calls and "```json" in content:
                             json_blocks = re.findall(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
                             for jb in json_blocks:
@@ -1092,7 +1137,7 @@ class ChatWorker(QObject):
 
                                     self.sig_token.emit(
                                         f"<mcp_process>📡 Requesting remote tool: <b>{tool_name}</b><br>"
-                                        f"<span style='font-size:12px; color:#888;'>Args: {short_args}</span></mcp_process>\n"
+                                        f"<span style='font-size:12px; color:#888;'>[Status: Executing] Args: {short_args}</span></mcp_process>\n"
                                     )
 
                                     tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
@@ -1160,7 +1205,8 @@ class ChatWorker(QObject):
                         "CRITICAL ANTI-HALLUCINATION RULE: If ANY tool returned an error (such as HTTP 403 Forbidden, 400 Bad Request, or connection failure), "
                         "DO NOT pretend the requested target (like a paper, protein, or webpage) is fake or missing. "
                         "Explicitly state that platform restrictions (like Elsevier/Cell Press paywalls) or API limitations prevented data retrieval, "
-                        "and provide your insights based on what you already know or retrieved successfully."
+                        "and provide your insights based on what you already know or retrieved successfully.\n"
+                        "FINAL OUTPUT RULE: YOU MUST NOT INVOKE ANY MORE TOOLS. DO NOT OUTPUT <｜DSML｜invoke> OR ANY XML TAGS. Output your final response directly in plain Markdown."
                     )
 
                     rag_messages.append({"role": "user", "content": silence_prompt})
@@ -1202,10 +1248,10 @@ class ChatWorker(QObject):
         finally:
             self.sig_finished.emit()
 
-    def filter_tools_by_rag(self, user_query, raw_mcp_tools, top_k=4):
+    def filter_tools_by_rag(self, user_query, raw_mcp_tools, top_k=8):
         """
         根据用户查询，使用 Reranker 对工具进行打分排序，仅提取 Top-K 工具。
-        如果模型不可用，静默降级并返回所有工具。
+        加入了历史上下文，提升意图识别准确率。如果模型不可用，静默降级并返回所有工具。
         """
         if not raw_mcp_tools or len(raw_mcp_tools) <= top_k:
             return raw_mcp_tools
@@ -1220,12 +1266,18 @@ class ChatWorker(QObject):
                     "metadata": {"tool_schema": tool}
                 })
 
+            history_context = ""
+            if len(self.messages) >= 2:
+                history_context = f" Previous Context: {self.messages[-2].get('content', '')[:200]}"
+
+            rerank_query = f"User Intent: {user_query}.{history_context} Find the most appropriate API tools to fulfill this request."
+
             rerank_model_id = getattr(self, 'config', ConfigManager()).user_settings.get("rerank_model_id",
                                                                                          "rerank_auto")
             self.logger.info(
-                f"Invoking Reranker model [{rerank_model_id}] to evaluate and filter {len(raw_mcp_tools)} MCP tools...")
+                f"Invoking Reranker model [{rerank_model_id}] with query context. Filtering {len(raw_mcp_tools)} MCP tools...")
 
-            ranked_docs = self._process_rerank(user_query, candidate_docs, domain="Tool Selection", top_k=top_k,
+            ranked_docs = self._process_rerank(rerank_query, candidate_docs, domain="Tool Selection", top_k=top_k,
                                                emit_warning=False)
 
             if ranked_docs is None:
@@ -1234,12 +1286,9 @@ class ChatWorker(QObject):
 
             best_tools = [doc["metadata"]["tool_schema"] for doc in ranked_docs]
 
-            # 提取出排名前几的工具名称并在日志中展示
             top_tool_names = [t.get("function", {}).get("name", "Unknown") for t in best_tools]
             self.logger.info(f"Reranker successfully selected top tools for this query: {', '.join(top_tool_names)}")
 
-            self.logger.info(
-                f"Reranker filtering complete: Routed {len(best_tools)} tools out of {len(raw_mcp_tools)}.")
             return best_tools
 
         except Exception as e:
@@ -1345,7 +1394,7 @@ class ChatTool(BaseTool):
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
 
-        # 1. 主容器与全局布局
+        # 1. Main Container & Global Layout
         self.widget = ChatDropTargetWidget()
         self.widget.sig_files_dropped.connect(self.process_attached_files)
 
@@ -1353,33 +1402,85 @@ class ChatTool(BaseTool):
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        top_bar = QVBoxLayout()
+        # --- Ribbon UI Implementation ---
+        self.top_bar_wrapper = QWidget()
+        self.top_bar_wrapper.setObjectName("TopBarWrapper")
+        top_bar = QVBoxLayout(self.top_bar_wrapper)
         top_bar.setSpacing(8)
         top_bar.setContentsMargins(0, 0, 0, 10)
 
         row1_layout = QHBoxLayout()
         self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
-                                                  model_key="chat_model_name")
+                                                  model_key="chat_model_name", vision_key="chat_vision_model_name")
+
+        self.collapsed_placeholder = QLabel(" ")
+        self.collapsed_placeholder.setVisible(False)
+
         row1_layout.addWidget(self.model_selector, 1)
+        row1_layout.addWidget(self.collapsed_placeholder, 1)
+
+        # Pin/Toggle Button for Ribbon State
+        tm = ThemeManager()
+        self.btn_ribbon_state = QPushButton(" Pinned")
+        self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
+        self.btn_ribbon_state.setCursor(Qt.PointingHandCursor)
+        self.btn_ribbon_state.setFixedWidth(90)
+        self.btn_ribbon_state.setStyleSheet("""
+                            QPushButton { background: transparent; border: 1px solid #555; border-radius: 4px; color: #aaa; font-size: 11px; padding: 2px 6px; text-align: left;}
+                            QPushButton:hover { background: #333; color: #fff; }
+                        """)
+        row1_layout.addWidget(self.btn_ribbon_state)
 
         row2_layout = QHBoxLayout()
         self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
-                                                  model_key="chat_trans_model_name")
+                                                  model_key="chat_trans_model_name", enable_vision=False)
 
-        lbl_kb = QLabel(" Knowledge Base:")
+        self.lbl_kb = QLabel(" Knowledge Base:")
         self.combo_kb = BaseComboBox(max_width=400)
         self.refresh_kb_list()
 
         row2_layout.addWidget(self.trans_selector)
         row2_layout.addSpacing(15)
-        row2_layout.addWidget(lbl_kb)
+        row2_layout.addWidget(self.lbl_kb)
         row2_layout.addWidget(self.combo_kb, 1)
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
-        main_layout.addLayout(top_bar)
+        main_layout.addWidget(self.top_bar_wrapper)
 
-        # 加载配置
+        # Ribbon State Logic
+        self.ribbon_state = "Pinned"
+
+        def set_ribbon_visible(visible):
+            self.model_selector.setVisible(visible)
+            self.collapsed_placeholder.setVisible(not visible)
+            self.trans_selector.setVisible(visible)
+            self.lbl_kb.setVisible(visible)
+            self.combo_kb.setVisible(visible)
+
+        def toggle_ribbon_state():
+            if self.ribbon_state == "Pinned":
+                self.ribbon_state = "Hover"
+                self.btn_ribbon_state.setText(" Hover")
+                self.btn_ribbon_state.setIcon(tm.icon("menu", "text_muted"))
+                set_ribbon_visible(False)
+            elif self.ribbon_state == "Hover":
+                self.ribbon_state = "Collapsed"
+                self.btn_ribbon_state.setText(" Collapsed")
+                self.btn_ribbon_state.setIcon(tm.icon("down", "text_muted"))
+                set_ribbon_visible(False)
+            else:
+                self.ribbon_state = "Pinned"
+                self.btn_ribbon_state.setText(" Pinned")
+                self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
+                set_ribbon_visible(True)
+
+        self.btn_ribbon_state.clicked.connect(toggle_ribbon_state)
+
+        # Install event filter for Hover mechanics
+        self.top_bar_wrapper.installEventFilter(self)
+
+        # Load configurations
         self.load_llm_configs()
 
         # 3. 对话展示滚动区 (仅存放消息气泡)
@@ -1462,6 +1563,24 @@ class ChatTool(BaseTool):
         )
         if not paths: return
         self.process_attached_files(paths)
+
+    def eventFilter(self, obj, event):
+        if obj == self.top_bar_wrapper:
+            if self.ribbon_state == "Hover":
+                if event.type() == QEvent.Enter:
+                    self.model_selector.setVisible(True)
+                    self.collapsed_placeholder.setVisible(False)
+                    self.trans_selector.setVisible(True)
+                    self.lbl_kb.setVisible(True)
+                    self.combo_kb.setVisible(True)
+                elif event.type() == QEvent.Leave:
+                    if not self.top_bar_wrapper.geometry().contains(self.widget.mapFromGlobal(QCursor.pos())):
+                        self.model_selector.setVisible(False)
+                        self.collapsed_placeholder.setVisible(True)
+                        self.trans_selector.setVisible(False)
+                        self.lbl_kb.setVisible(False)
+                        self.combo_kb.setVisible(False)
+        return super().eventFilter(obj, event)
 
     def process_attached_files(self, items):
         if not hasattr(self, 'external_chunks'):
@@ -1586,20 +1705,53 @@ class ChatTool(BaseTool):
             self.input_container.hide_context_preview()
 
     def export_chat_history(self):
-
         if not self.history:
             ToastManager().show("There are currently no chat records to export.", "warning")
             self.logger.warning("Attempted to export empty chat history.")
             return
 
-        path, ext = QFileDialog.getSaveFileName(
-            self.widget, "导出学术记录 (Export Academic Log)", "Scholar_Navis_Log",
-            "PDF Document (*.pdf);;Text File (*.txt);;CSV Data (*.csv)"
+        tm = ThemeManager()
+        menu = QMenu(self.widget)
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px;}} 
+            QMenu::item {{ padding: 6px 20px; border-radius: 4px;}}
+            QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
+        """)
+
+        # 使用 theme_manager 里的图标喵
+        act_pdf = menu.addAction(tm.icon("article", "text_main"), "Export as PDF")
+        act_txt = menu.addAction(tm.icon("file-text", "text_main"), "Export as TXT")
+        act_csv = menu.addAction(tm.icon("table", "text_main"), "Export as CSV")
+
+        # 在鼠标位置弹出菜单
+        action = menu.exec(QCursor.pos())
+        if not action:
+            return
+
+        # 根据选择设置后缀和过滤条件
+        if action == act_pdf:
+            filter_str = "PDF Document (*.pdf)"
+            default_ext = ".pdf"
+        elif action == act_txt:
+            filter_str = "Text File (*.txt)"
+            default_ext = ".txt"
+        else:
+            filter_str = "CSV Data (*.csv)"
+            default_ext = ".csv"
+
+        # 弹出系统保存对话框
+        path, _ = QFileDialog.getSaveFileName(
+            self.widget, "Export Log", f"Navis_Log{default_ext}", filter_str
         )
-        if not path: return
+
+        if not path:
+            return
+
+        # 如果你手滑忘记打后缀，咱们自动帮你补上喵
+        if not path.endswith(default_ext):
+            path += default_ext
 
         try:
-            tm = ThemeManager()
             font_family = tm.font_family()
 
             if path.endswith(".pdf"):
@@ -1607,23 +1759,23 @@ class ChatTool(BaseTool):
                 date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 doc.setDefaultStyleSheet(f"""
-                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
-                    h1, h2, h3 {{ color: {tm.color('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
-                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
-                    .header-user {{ color: {tm.color('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                    .header-ai {{ color: {tm.color('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                    .content {{ margin-top: 5px; }}
-                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
-                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
-                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
-                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
-                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
-                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }}
-                    th {{ background-color: #f6f8fa; font-weight: bold; }}
-                    .doc-header {{ text-align: center; border-bottom: 2px solid {tm.color('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
-                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {tm.color('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
-                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
-                """)
+                                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
+                                    h1, h2, h3 {{ color: {tm.color('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
+                                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
+                                    .header-user {{ color: {tm.color('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                                    .header-ai {{ color: {tm.color('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                                    .content {{ margin-top: 5px; }}
+                                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
+                                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
+                                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
+                                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
+                                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
+                                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
+                                    th {{ background-color: #f6f8fa; font-weight: bold; }}
+                                    .doc-header {{ text-align: center; border-bottom: 2px solid {tm.color('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
+                                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {tm.color('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
+                                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
+                                """)
 
                 def _get_colored_svg_base64(icon_name, color_hex):
                     svg_path = tm.get_resource_path("assets", "icons", f"{icon_name}.svg")
@@ -1671,17 +1823,28 @@ class ChatTool(BaseTool):
                 writer.setResolution(300)
                 doc.print_(writer)
 
+
             elif path.endswith(".txt"):
-                txt = f"================ SCHOLAR NAVIS REPORT ================\nGenerated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                txt_lines = [
+                    "================ SCHOLAR NAVIS ACADEMIC REPORT ================",
+                    f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "===============================================================\n\n"
+                ]
                 for msg in self.history:
-                    role = "User Inquiry" if msg['role'] == "user" else "AI Analysis"
+                    role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
+
                     raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
                                          flags=re.DOTALL | re.IGNORECASE)
-                    clean_content = TextFormatter.clean_text_for_export(raw_content)
 
-                    txt += f"[{role}]:\n{clean_content}\n\n{'-' * 60}\n\n"
+                    clean_content = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', raw_content).strip()
+
+                    txt_lines.append(f"[{role}]")
+                    txt_lines.append(clean_content)
+                    txt_lines.append(f"\n{'-' * 70}\n")
+
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(txt)
+                    f.write("\n".join(txt_lines))
+
 
             elif path.endswith(".csv"):
                 with open(path, "w", encoding="utf-8-sig", newline="") as f:
@@ -2425,7 +2588,6 @@ class ChatTool(BaseTool):
         if hasattr(self, '_render_timer'): self._render_timer.stop()
         self.set_controls_enabled(True)
 
-        # 强制进行最后一次全量渲染，确保不丢掉最后的 token
         if getattr(self, '_is_rendering_dirty', False):
             self._throttled_render()
 
@@ -2452,36 +2614,46 @@ class ChatTool(BaseTool):
             cites_html = full_text[cite_match.start():]
             full_text = full_text[:cite_match.start()]
 
-        match = re.search(
-            r'(?:\[\s*FOLLOW[_-]?\s*UPS?\s*\]|(?:^|\n|<br>|<br/>)\s*\*?\*?(?:💡\s*)?Suggested\s*Follow[- ]?ups?(?:\s*questions?)?:?\*?\*?)\s*(.*)',
-            full_text, flags=re.IGNORECASE | re.DOTALL)
+        pattern = r'(?:\[\s*FOLLOW[_-]?\s*UPS?\s*\]|(?:^|\n|<br>|<br/>)\s*\*?\*?(?:💡\s*)?Suggested\s*Follow[- ]?ups?(?:\s*questions?)?:?\*?\*?)\s*'
+        matches = list(re.finditer(pattern, full_text, flags=re.IGNORECASE))
         questions = []
 
-        if match:
-            follow_up_block = match.group(1).replace('<br>', '\n').replace('<br/>', '\n')
-            clean_text = full_text[:match.start()].strip()
-            self.current_ai_text = clean_text + cites_html
+        if matches:
+            last_match = matches[-1]
+            follow_up_block = full_text[last_match.end():].replace('<br>', '\n').replace('<br/>', '\n')
 
-            for line in follow_up_block.split('\n'):
-                line = line.strip()
-                line = re.sub(r'^>\s*', '', line)
-                if re.match(r'^([-*]|\d+\.)', line):
-                    q = re.sub(r'^([-*\s]+|\d+\.\s*)', '', line).strip()
-                    q = q.replace('**', '').strip()
-                    if q:
-                        tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
-                        if tag_match:
-                            tag, text = tag_match.groups()
-                            questions.append({"tag": tag.strip(), "text": text.strip()})
-                        else:
-                            questions.append({"tag": "General", "text": q})
+            if len(follow_up_block) < 1500:
+                clean_text = full_text[:last_match.start()].strip()
+                self.current_ai_text = clean_text + cites_html
 
-            idx = getattr(self.current_ai_bubble, 'index', -1)
-            final_html = self._format_response(self.current_ai_text, idx)
-            self.current_ai_bubble.set_content(final_html)
+                for line in follow_up_block.split('\n'):
+                    line = line.strip()
+                    line = re.sub(r'^>\s*', '', line)
+                    if re.match(r'^([-*]|\d+\.)', line):
+                        q = re.sub(r'^([-*\s]+|\d+\.\s*)', '', line).strip()
+                        q = q.replace('**', '').strip()
+                        if q and len(q) > 4:  # 防止空行或者过短的字符
+                            tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
+                            if tag_match:
+                                tag, text = tag_match.groups()
+                                questions.append({"tag": tag.strip(), "text": text.strip()})
+                            else:
+                                questions.append({"tag": "General", "text": q})
 
-            if questions:
-                self.render_follow_up_buttons(questions)
+                # 更新气泡内容
+                idx = getattr(self.current_ai_bubble, 'index', -1)
+                final_html = self._format_response(self.current_ai_text, idx)
+                self.current_ai_bubble.set_content(final_html)
+
+                # 渲染追问按钮
+                if questions:
+                    self.render_follow_up_buttons(questions)
+            else:
+                self.current_ai_text = full_text + cites_html
+                idx = getattr(self.current_ai_bubble, 'index', -1)
+                final_html = self._format_response(self.current_ai_text,
+                                                   idx) if self.current_ai_text else "No response."
+                self.current_ai_bubble.set_content(final_html)
         else:
             self.current_ai_text = full_text + cites_html
             idx = getattr(self.current_ai_bubble, 'index', -1)

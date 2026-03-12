@@ -1,19 +1,18 @@
+import hashlib
 import os
 import re
-import hashlib
 import tempfile
 import time
 
-import markdown
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QThread
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QTextBrowser, QScrollArea)
-from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer, QThread, QUrl
-from PySide6.QtGui import QClipboard, QGuiApplication, QCursor
+                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea)
 
+from src.core.network_worker import LightNetworkWorker
 from src.core.theme_manager import ThemeManager
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
-from src.core.network_worker import LightNetworkWorker
 
 
 def hex_to_rgba(hex_color, alpha):
@@ -209,6 +208,7 @@ class ChatBubbleWidget(QWidget):
             if hasattr(self, 'edit_input'):
                 self.edit_input.setMaximumWidth(max_w)
 
+
     def adjust_edit_height(self):
         doc_h = int(self.edit_input.document().size().height())
         new_h = doc_h + 14
@@ -362,7 +362,8 @@ class ChatBubbleWidget(QWidget):
             bg_header = hex_to_rgba(tm.color('bg_input'), 0.5) if tm.current_theme == 'dark' else '#f5f5f5'
 
             html = html.replace('<table>',
-                                f'<table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; border-color: {border_color}; margin-top: 10px; margin-bottom: 10px; width: 100%;">')
+                                f'<table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; border-color: {border_color}; margin-top: 10px; margin-bottom: 10px; width: 100%; table-layout: fixed; word-break: break-all;">')
+
             html = html.replace('<th>',
                                 f'<th style="background-color: {bg_header}; font-weight: bold; text-align: left;">')
 
@@ -591,25 +592,20 @@ class ChatBubbleWidget(QWidget):
     def copy_text(self):
         clipboard = QGuiApplication.clipboard()
 
-        # 1. 过滤掉 <think>...</think> 标签及其内部的思考过程
         raw_text = re.sub(r'<think>.*?</think>', '', self.original_text, flags=re.DOTALL | re.IGNORECASE)
+        raw_text = re.sub(r'<mcp_process>.*?</mcp_process>', '', raw_text, flags=re.DOTALL | re.IGNORECASE)
 
-        # 2. 过滤掉可能残留的 MCP 工具执行日志 (<i>...</i>)
-        raw_text = re.sub(r'<i>.*?</i>', '', raw_text, flags=re.DOTALL | re.IGNORECASE)
+        raw_text = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', raw_text)
 
-        # 3. 使用原有的 TextFormatter 格式化基础内容
-        text_to_copy = TextFormatter.clean_text_for_export(raw_text.strip(), include_citations=not self.is_user)
+        if "<br><hr style='border:0; height:1px;" in raw_text:
+            raw_text = re.split(
+                r'<br><hr style=\'border:0; height:1px; background:#444; margin:15px 0;\'><b>.*?Cited Sources:</b><br>',
+                raw_text)[0]
 
-        # 4. 把挂载在末尾的 HTML 格式的 Cited Sources 转换为纯文本
-        text_to_copy = re.sub(r'<br\s*/?>', '\n', text_to_copy, flags=re.IGNORECASE)  # 转换换行符
-        text_to_copy = re.sub(r'<hr[^>]*>', '\n---\n', text_to_copy, flags=re.IGNORECASE)  # 转换分割线
-        text_to_copy = re.sub(r'<[^>]+>', '', text_to_copy)  # 去除所有剩余 HTML 标签，仅保留纯文本 (如 [1] Name)
-
-        # 5. 清理多出的空行
-        text_to_copy = re.sub(r'\n{3,}', '\n\n', text_to_copy).strip()
+        text_to_copy = re.sub(r'\n{3,}', '\n\n', raw_text).strip()
 
         clipboard.setText(text_to_copy)
-        ToastManager().show("Copied to clipboard.", "success")
+        ToastManager().show("Markdown successfully copied to clipboard.", "success")
 
     def toggle_edit(self):
         if not self.is_editing:
