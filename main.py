@@ -40,18 +40,21 @@ class StartupWorker(QThread):
 
     def run(self):
         try:
-            self.sig_progress.emit(5, "检测硬件信息...")
+            self.sig_progress.emit(5, "Detecting hardware info...")
             time.sleep(0.1)
             from src.core.device_manager import DeviceManager
-            self.sig_progress.emit(6, "获取模型配置...")
+
+            self.sig_progress.emit(6, "Loading model registry framework...")
             time.sleep(0.1)
             from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, \
                 ensure_onnx_model
-            self.sig_progress.emit(7, "读取用户配置...")
+
+            self.sig_progress.emit(7, "Loading user settings...")
             time.sleep(0.1)
             from src.core.network_worker import setup_global_network_env
             from src.core.config_manager import ConfigManager
             from src.core.theme_manager import ThemeManager
+
             self.sig_progress.emit(10, "Loading system configuration & network profiles...")
             time.sleep(0.1)
             cfg_mgr = ConfigManager()
@@ -69,36 +72,69 @@ class StartupWorker(QThread):
             tm = ThemeManager()
             _ = tm.color('bg_main')
 
-            self.sig_progress.emit(55, "Connecting to local knowledge base & logs...")
-            time.sleep(0.1)
-
-            self.sig_progress.emit(70, "Loading MCP Subsystem metadata...")
+            self.sig_progress.emit(60, "Loading MCP Subsystem metadata...")
             time.sleep(0.1)
             cfg_mgr.load_mcp_servers()
 
-            self.sig_progress.emit(85, "Checking AI models & local cache integrity...")
+            self.sig_progress.emit(80, "Verifying AI Models (ONNX)...")
             time.sleep(0.1)
-            embed_id = cfg_mgr.user_settings.get("current_model_id", "embed_auto")
-            rerank_id = cfg_mgr.user_settings.get("rerank_model_id", "rerank_auto")
+            missing_models = []
 
-            if embed_id == "embed_auto":
-                embed_id = resolve_auto_model("embedding", dev_str)
-            if rerank_id == "rerank_auto":
-                rerank_id = resolve_auto_model("reranker", dev_str)
+            try:
+                from src.task.common_task import VerifyModelsTask
+                from src.core.config_manager import ConfigManager
 
-            for mid, mtype in[(embed_id, "embedding"), (rerank_id, "reranker")]:
-                conf = get_model_conf(mid, mtype)
-                if conf and not conf.get('is_network', False):
-                    repo_id = conf.get('hf_repo_id')
-                    if repo_id and check_model_exists(repo_id):
-                        ensure_onnx_model(repo_id, mtype)
+                cfg = ConfigManager()
+                embed_id = cfg.user_settings.get("current_model_id", "embed_auto")
+                rerank_id = cfg.user_settings.get("rerank_model_id", "rerank_auto")
+
+                # 定义一个空的队列，用来静默吸收 Task 内部发出的进度和日志信息
+                class NullQueue:
+                    def put(self, item, block=True, timeout=None): pass
+
+                task_kwargs = {
+                    "embed_id": embed_id,
+                    "rerank_id": rerank_id
+                }
+
+                verify_task = VerifyModelsTask(
+                    task_id="startup_integrity_check",
+                    task_queue=NullQueue(),
+                    kwargs=task_kwargs
+                )
+
+
+                result = verify_task._execute()
+                missing_models = result.get("to_download", [])
+
+                if missing_models:
+                    self.logger.info(f"Models to prepare: {missing_models}")
+
+            except Exception as e:
+                self.logger.error(f"Failed to verify ONNX models during startup: {e}")
+
+
+            self.sig_progress.emit(85, f"Verifying Embedding model ({embed_id})...")
+            time.sleep(0.5)
+            e_conf = get_model_conf(embed_id, "embedding")
+            if e_conf and not e_conf.get('is_network', False):
+                repo_id = e_conf.get('hf_repo_id')
+                if repo_id:
+                    ensure_onnx_model(repo_id, "embedding")
+
+            self.sig_progress.emit(90, f"Verifying Reranker model ({rerank_id})...")
+            time.sleep(0.5)
+            r_conf = get_model_conf(rerank_id, "reranker")
+            if r_conf and not r_conf.get('is_network', False):
+                repo_id = r_conf.get('hf_repo_id')
+                if repo_id:
+                    ensure_onnx_model(repo_id, "reranker")
 
             self.sig_progress.emit(95, "Building Main User Interface...")
             time.sleep(0.1)
 
-            self.sig_progress.emit(100, "Ready.")
+            self.sig_progress.emit(100, "Ready. Building workspace...")
             time.sleep(0.1)
-
             self.sig_finished.emit()
 
         except Exception as e:
@@ -205,9 +241,13 @@ class AppController(QObject):
 
     @Slot()
     def on_startup_finished(self):
+        # 1. 设置 100% 状态
         self.splash.progress.setValue(100)
-        self.splash.lbl_status.setText("Ready.")
+        self.splash.lbl_status.setText("Ready. Initializing workspace...")
+        QApplication.processEvents()
+        QTimer.singleShot(50, self._build_and_show_main_window)
 
+    def _build_and_show_main_window(self):
         from src.ui.main_window import MainWindow
         from src.core.mcp_manager import MCPManager
 
@@ -217,9 +257,8 @@ class AppController(QObject):
         self.main_window.show()
         self.splash.close()
 
-        from PySide6.QtCore import QTimer
+        QTimer.singleShot(300, self.main_window.perform_startup_checks)
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
-
 
 if __name__ == "__main__":
 

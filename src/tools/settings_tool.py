@@ -1069,7 +1069,9 @@ class SettingsTool(BaseTool):
              "model_name": "", "api_key": ""},
             {"id": "siliconflow", "name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1",
              "model_name": "", "api_key": ""},
-            {"id": "custom", "name": "Local Custom (Ollama)", "base_url": "http://localhost:11434/v1",
+            {"id": "lmstudio", "name": "LM Studio", "base_url": "http://localhost:1234/v1", "model_name": "",
+             "api_key": "lm-studio"},
+            {"id": "local", "name": "Local Custom", "base_url": "http://localhost:11434/v1",
              "model_name": "", "api_key": "ollama"}
         ]
 
@@ -1576,7 +1578,7 @@ class SettingsTool(BaseTool):
         self.input_llm_key.blockSignals(False)
         self.combo_model_param_strategy.blockSignals(False)
 
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "lmstudio","local"]
         self.btn_del_llm.setEnabled(conf.get("id") not in default_ids)
 
         self.btn_fetch_models.setToolTip("")
@@ -1759,7 +1761,7 @@ class SettingsTool(BaseTool):
         idx = self.combo_llm_preset.currentIndex()
         if idx < 0: return
         conf = self.llm_configs[idx]
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow","lmstudio",  "local"]
         if conf.get("id") in default_ids:
             StandardDialog(
                 self.widget,

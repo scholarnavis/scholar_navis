@@ -25,8 +25,11 @@ class GlobalSignals(QObject):
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(GlobalSignals, cls).__new__(cls)
-            super(GlobalSignals, cls._instance).__init__()
+            QObject.__init__(cls._instance)
         return cls._instance
 
     def __init__(self):
         pass
+
+
+global_signals = GlobalSignals()

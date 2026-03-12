@@ -6,10 +6,6 @@ import sys
 import json
 import warnings
 
-from huggingface_hub import scan_cache_dir, snapshot_download, constants
-from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
-from transformers import AutoTokenizer
-
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
@@ -271,7 +267,10 @@ def register_external_model(model_info, model_type="embedding"):
 
 load_external_models()
 
-def _get_hf_home(): return os.environ.get("HF_HOME", constants.HF_HOME)
+def _get_hf_home():
+    from huggingface_hub import constants
+    return os.environ.get("HF_HOME", constants.HF_HOME)
+
 def _is_file_valid(path):
     if not os.path.exists(path): return False
     try:
@@ -281,6 +280,7 @@ def _is_file_valid(path):
 
 def _official_check(repo_id):
     try:
+        from huggingface_hub import scan_cache_dir
         info = scan_cache_dir(_get_hf_home())
         for repo in info.repos:
             if repo.repo_id == repo_id and repo.revisions: return True
@@ -302,6 +302,7 @@ def _repair_model_links(repo_id):
     repo_dir = os.path.join(_get_hf_home(), "hub", "models--" + repo_id.replace("/", "--"))
     if not os.path.exists(repo_dir): return False
     try:
+        from huggingface_hub import snapshot_download
         for folder in ["snapshots", "refs"]:
             p = os.path.join(repo_dir, folder)
             if os.path.exists(p): shutil.rmtree(p, ignore_errors=True)
@@ -373,6 +374,10 @@ def ensure_onnx_model(repo_id, model_type=None):
                 return onnx_dir
 
     logger.info("Local ONNX cache miss, preparing for download and conversion...")
+    logger.info("Loading heavy AI frameworks (Transformers/Optimum) into memory...")
+    from huggingface_hub import snapshot_download
+    from transformers import AutoTokenizer
+    from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
     model_path = snapshot_download(repo_id=repo_id)
 
     source_has_onnx = False
@@ -435,6 +440,13 @@ def ensure_onnx_model(repo_id, model_type=None):
         if 'model' in locals(): del model
         if 'tokenizer' in locals(): del tokenizer
         gc.collect()
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
     folder_name = "models--" + repo_id.replace("/", "--")
     hf_model_dir = os.path.join(hf_home, "hub", folder_name)

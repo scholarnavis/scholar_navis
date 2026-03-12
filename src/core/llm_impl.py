@@ -1,11 +1,19 @@
 import json
 import logging
+import re
 from typing import Generator, List, Dict, Optional
 
 import httpx
-from openai import OpenAI, APIStatusError
+import litellm
+from litellm import completion, image_generation
+from litellm.exceptions import APIError, APIConnectionError, ContextWindowExceededError, RateLimitError, Timeout
+
 from src.core.config_manager import ConfigManager
 from src.core.network_worker import _get_explicit_proxy_kwargs
+
+
+
+litellm.drop_params = True
 
 
 class OpenAICompatibleLLM:
@@ -15,13 +23,7 @@ class OpenAICompatibleLLM:
         self.config_data = config or {}
 
         sys_cfg = ConfigManager().user_settings
-        custom_timeout = config.get("timeout", 60.0) if config else 60.0
-
-        httpx_kwargs = {"timeout": custom_timeout}
-        proxy_cfg = _get_explicit_proxy_kwargs()
-        httpx_kwargs.update(proxy_cfg)
-
-        self.http_client = httpx.Client(**httpx_kwargs)
+        self.custom_timeout = config.get("timeout", 60.0) if config else 60.0
 
         if not config:
             self.provider_id = sys_cfg.get("active_llm_id", "custom")
@@ -34,7 +36,6 @@ class OpenAICompatibleLLM:
             self.base_url = config.get("base_url", "http://localhost:11434/v1")
             self.model_name = config.get("model_name", "llama3")
 
-
         self._missing_api_key = False
         if not raw_api_key or str(raw_api_key).strip() == "":
             if "localhost" not in self.base_url and "127.0.0.1" not in self.base_url:
@@ -43,9 +44,15 @@ class OpenAICompatibleLLM:
         else:
             self.api_key = str(raw_api_key).strip()
 
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url, http_client=self.http_client)
+        # 配置代理环境供 LiteLLM 内部的 HTTP 请求使用
+        proxy_cfg = _get_explicit_proxy_kwargs()
+        if "proxy" in proxy_cfg:
+            # LiteLLM 支持环境变量，通常 network_worker 已设置。这里显式配置增加健壮性
+            import os
+            os.environ["HTTP_PROXY"] = proxy_cfg["proxy"]
+            os.environ["HTTPS_PROXY"] = proxy_cfg["proxy"]
 
-        self.logger.info(f"Initialized Pure OpenAI-Compatible LLM: [{self.model_name}] @ {self.base_url}")
+        self.logger.info(f"Initialized Unified LLM Provider via LiteLLM: [{self.model_name}] @ {self.base_url}")
 
         applied_params = self._get_payload_kwargs()
         if applied_params:
@@ -63,12 +70,8 @@ class OpenAICompatibleLLM:
         self.logger.info(f"[{self.model_name}] Request Parameters: {safe_payload}")
 
     def cancel(self):
+        # LiteLLM 对流的打断可以通过停止迭代来实现，无需手动 close client
         self._is_cancelled = True
-        try:
-            if self.client and hasattr(self.client, "close"):
-                self.client.close()
-        except Exception:
-            pass
 
     def _parse_custom_params(self, params_list: List[Dict]) -> Dict:
         res = {}
@@ -114,36 +117,13 @@ class OpenAICompatibleLLM:
 
         return {k: v for k, v in custom_params.items() if k not in ["messages", "model", "stream", "tools"]}
 
-    def _split_openai_payload(self, payload: Dict) -> Dict:
-        standard_keys = {
-            "temperature", "top_p", "n", "stop", "max_tokens", "presence_penalty",
-            "frequency_penalty", "logit_bias", "user", "response_format", "seed",
-            "tools", "tool_choice", "parallel_tool_calls", "logprobs", "top_logprobs"
-        }
-
-        standard_payload = {}
-        extra_payload = {}
-
-        for k, v in payload.items():
-            if k in standard_keys:
-                standard_payload[k] = v
-            else:
-                extra_payload[k] = v
-
-        if extra_payload:
-            standard_payload["extra_body"] = extra_payload
-
-        return standard_payload
-
     def _process_messages(self, messages: List[Dict]) -> List[Dict]:
         """
-        支持多模态消息：
-        如果上层 UI 传入了包含 image_url 的复杂 content 结构，予以保留。
+        支持多模态消息：LiteLLM 会将符合 OpenAI 规范的 image_url 自动转译给 Anthropic/Gemini 等
         """
         processed_msgs = []
         for m in messages:
             msg_dict = m.copy()
-
             role = m.get("role", "user")
             content = m.get("content", "")
 
@@ -165,53 +145,26 @@ class OpenAICompatibleLLM:
 
         return processed_msgs
 
-    def chat(self, messages: List[Dict], is_translation=False, **kwargs):
-
-        if getattr(self, '_missing_api_key', False):
-            raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
-
-        payload = self._get_payload_kwargs()
-        payload.update(kwargs)
-
-        if is_translation:
-            for k in ['tools', 'tool_choice', 'response_format', 'image_generation']:
-                payload.pop(k, None)
-
-        processed_messages = self._process_messages(messages)
-        safe_payload = self._split_openai_payload(payload)
-
-        self._log_params(safe_payload)
-
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=processed_messages,
-            **safe_payload
-        )
-        choice = response.choices[0]
-
-        reasoning = getattr(choice.message, 'reasoning_content', None)
-        if not reasoning and hasattr(choice.message, 'model_extra') and choice.message.model_extra:
-            reasoning = choice.message.model_extra.get('reasoning_content')
-        if choice.message.tool_calls:
-            try:
-                msg_dump = choice.message.model_dump(exclude_none=True)
-            except AttributeError:
-                msg_dump = json.loads(choice.message.json(exclude_none=True))
-            msg_dump["reasoning_content"] = reasoning or ""
-            if not msg_dump.get("content"):
-                msg_dump["content"] = ""
-            return msg_dump
-
-        return {
-            "content": choice.message.content or "",
-            "reasoning_content": reasoning or "",
-            "role": "assistant"
+    def _build_litellm_kwargs(self, payload: Dict, messages: List[Dict], stream: bool = False) -> Dict:
+        """构建底层路由参数：决定是当做中转站处理，还是按原生厂商协议处理"""
+        kwargs = {
+            "model": self.model_name,
+            "api_key": self.api_key,
+            "api_base": self.base_url,
+            "stream": stream,
+            "messages": messages,
+            "timeout": self.custom_timeout,
+            **payload
         }
 
-    def stream_chat(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[str, None, None]:
+        # 智能路由：如果没指定厂商前缀（如 'anthropic/'），且 base_url 不是官方的，强制按 OpenAI 格式发送给中转站/本地模型
+        if "/" not in self.model_name and self.base_url and "api.openai.com" not in self.base_url:
+            kwargs["custom_llm_provider"] = "openai"
 
+        return kwargs
+
+    def chat(self, messages: List[Dict], is_translation=False, **kwargs):
         if getattr(self, '_missing_api_key', False):
-            # [修改] 抛出异常阻断对话
             raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
 
         payload = self._get_payload_kwargs()
@@ -224,18 +177,51 @@ class OpenAICompatibleLLM:
         processed_messages = self._process_messages(messages)
         self._log_params(payload)
 
+        try:
+            litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=False)
+            response = completion(**litellm_kwargs)
+            choice = response.choices[0]
+
+            reasoning = getattr(choice.message, 'reasoning_content', None)
+            if not reasoning and hasattr(choice.message, 'model_extra') and choice.message.model_extra:
+                reasoning = choice.message.model_extra.get('reasoning_content')
+
+            if getattr(choice.message, 'tool_calls', None):
+                msg_dump = choice.message.model_dump(exclude_none=True)
+                msg_dump["reasoning_content"] = reasoning or ""
+                if not msg_dump.get("content"):
+                    msg_dump["content"] = ""
+                return msg_dump
+
+            return {
+                "content": choice.message.content or "",
+                "reasoning_content": reasoning or "",
+                "role": "assistant"
+            }
+        except Exception as e:
+            self.logger.error(f"Chat completion error: {str(e)}")
+            raise e
+
+    def stream_chat(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[str, None, None]:
+        if getattr(self, '_missing_api_key', False):
+            raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
+
+        payload = self._get_payload_kwargs()
+        payload.update(kwargs)
+
+        if is_translation:
+            for k in ['tools', 'tool_choice', 'response_format', 'image_generation']:
+                payload.pop(k, None)
+
+        processed_messages = self._process_messages(messages)
         stream = payload.pop("stream", True)
-        safe_payload = self._split_openai_payload(payload)
+        self._log_params(payload)
 
         is_thinking = False
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=processed_messages,
-                stream=stream,
-                **safe_payload
-            )
+            litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=stream)
+            response = completion(**litellm_kwargs)
 
             if not stream:
                 yield response.choices[0].message.content or ""
@@ -248,9 +234,12 @@ class OpenAICompatibleLLM:
                     yield "\n\n[⛔ Generation halted by user.]"
                     break
 
-                if not chunk.choices: continue
+                if not getattr(chunk, 'choices', None) or not chunk.choices:
+                    continue
+
                 delta = chunk.choices[0].delta
 
+                # 统一抽象抽象不同模型的“思考”过程输出
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if not reasoning and hasattr(delta, 'model_extra') and delta.model_extra:
                     reasoning = delta.model_extra.get('reasoning_content')
@@ -263,21 +252,75 @@ class OpenAICompatibleLLM:
 
                 content = getattr(delta, 'content', None)
                 if content:
-                    if is_thinking:
+                    # 兼容 Ollama / VLLM：某些直接在正文里输出 <think> 标签的模型
+                    if "<think>" in content and not is_thinking:
+                        is_thinking = True
+                    if "</think>" in content and is_thinking:
+                        yield content  # 包含标签一同输出
+                        is_thinking = False
+                        continue
+
+                    if is_thinking and not reasoning:
+                        # 模型正文里混杂着思考内容
+                        yield content
+                    elif not is_thinking:
+                        # 正常文本
+                        yield content
+                    elif is_thinking and reasoning:
+                        # 异常切换：reasoning 结束突然接 content
                         yield "\n</think>\n\n"
                         is_thinking = False
-                    yield content
+                        yield content
 
             if is_thinking:
                 yield "\n</think>\n"
 
-        except APIStatusError as e:
+        except ContextWindowExceededError as e:
+            self.logger.error(f"Context window exceeded: {e}")
+            yield f"\n\n[Context Exceeded Error]\nThe input text or document is too long for this model. Please clear history or use a model with a larger context window.\n"
+
+        except RateLimitError as e:
+            self.logger.error(f"Rate limit hit: {e}")
+            yield f"\n\n[Rate Limit Error]\nToo many requests or insufficient quota. Please try again later.\n"
+        except Timeout as e:
+            self.logger.error(f"Request timeout: {e}")
+            yield f"\n\n[Timeout Error]\nThe model took too long to respond. Please check your network or try a different provider.\n"
+        except APIError as e:
+            self.logger.error(f"API Error ({e.status_code}): {e.message}")
             friendly_msg = ""
             if e.status_code == 400:
-                friendly_msg = "\n\n💡 <b>System Tip:</b> Request rejected. Make sure context limits aren't exceeded or parameters are valid."
-            yield f"\n\n[API Request Error: HTTP {e.status_code}]\n{str(e)}{friendly_msg}\n"
+                # 400 错误通常是因为参数不支持，比如传了图片但模型是纯文本的
+                friendly_msg = "\n💡 Tip: This might happen if you sent an image to a text-only model. Try selecting a specific Vision Model in the settings."
+            yield f"\n\n[API Request Error: HTTP {e.status_code}]\n{e.message}{friendly_msg}\n"
         except Exception as e:
-            if self._is_cancelled or "closed" in str(e).lower():
+            if self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
                 yield "\n\n[⛔ Generation halted by user.]"
             else:
+                self.logger.error(f"Unexpected system error: {e}")
                 yield f"\n\n[System Error: {str(e)}]\n"
+
+
+    def generate_image(self, prompt: str, **kwargs) -> str:
+        """
+        补全的多模态：统一的图像生成接口。
+        支持 DALL-E, Midjourney (需要对应的代理 API), 或兼容的模型。
+        """
+        if getattr(self, '_missing_api_key', False):
+            raise ValueError("API Key is missing. Please configure your API key.")
+
+        self.logger.info(f"Generating image with prompt: {prompt[:50]}...")
+
+        try:
+            # LiteLLM 的图像生成接口
+            res = image_generation(
+                prompt=prompt,
+                model=self.model_name,
+                api_key=self.api_key,
+                api_base=self.base_url,
+                **kwargs
+            )
+            # 提取生成的图像 URL
+            return res.data[0].url
+        except Exception as e:
+            self.logger.error(f"Image generation failed: {str(e)}")
+            raise e

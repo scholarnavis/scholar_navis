@@ -21,7 +21,7 @@ class ProcessAttachmentTask(BackgroundTask):
         total = len(file_infos)
 
         for i, info in enumerate(file_infos):
-            if self._is_cancelled:
+            if self.is_cancelled():
                 self.send_log("INFO", "Attachment processing cancelled by user.")
                 break
 
@@ -114,5 +114,16 @@ class ProcessAttachmentTask(BackgroundTask):
                 self.send_log("ERROR", f"Failed to process {f_name}: {e}")
                 raise e
 
-        self.update_progress(100, "")
-        return {"chunks": chunks, "html": html}
+        self.update_progress(100, "Finalizing...")
+
+        import json
+        import tempfile
+        import uuid
+
+        result_dict = {"chunks": chunks, "html": html}
+        temp_file_path = os.path.join(tempfile.gettempdir(), f"task_payload_{uuid.uuid4().hex}.json")
+
+        with open(temp_file_path, 'w', encoding='utf-8') as f:
+            json.dump(result_dict, f, ensure_ascii=False)
+
+        return {"_is_temp_file": True, "path": temp_file_path}

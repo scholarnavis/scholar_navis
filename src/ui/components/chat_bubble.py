@@ -362,10 +362,37 @@ class ChatBubbleWidget(QWidget):
                 raw_src_url = match.group(1)
                 src_url = raw_src_url.replace("&amp;", "&")
 
-                if src_url.startswith("file://") or src_url.startswith("data:image"):
-                    new_img_tag = f'<img width="420" style="border-radius: 8px; margin-top: 5px;" src="{src_url}" />'
+                if src_url.startswith("data:image"):
+                    try:
+                        header, encoded = src_url.split(",", 1)
+                        ext = header.split(";")[0].split("/")[1] if "/" in header else "png"
+                        import base64
+                        img_data = base64.b64decode(encoded)
+
+                        # 生成唯一临时文件名
+                        file_name = f"navis_base64_{hashlib.md5(img_data).hexdigest()[:12]}.{ext}"
+                        local_path = os.path.join(tempfile.gettempdir(), file_name)
+
+                        if not os.path.exists(local_path):
+                            with open(local_path, "wb") as f:
+                                f.write(img_data)
+
+                        self.downloaded_images[src_url] = local_path
+
+                        # 转换为操作系统友好的本地 URI
+                        local_uri = f"file:///{local_path.replace(os.sep, '/')}"
+                        new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{local_uri}" title="Click to view full image" />'
+                        return f'<a href="{local_uri}">{new_img_tag}</a>'
+
+                    except Exception as e:
+                        print(f"Base64 image decode failed: {e}")
+                        return f'<img width="420" style="max-width: 100%;" src="{src_url}" />'
+
+                if src_url.startswith("file://"):
+                    new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{src_url}" title="Click to view full image" />'
                     return f'<a href="{src_url}">{new_img_tag}</a>'
 
+                # 处理网络链接
                 if src_url.startswith("http"):
                     if src_url in self.downloaded_images:
                         local_path = self.downloaded_images[src_url].replace('\\', '/')
@@ -374,7 +401,7 @@ class ChatBubbleWidget(QWidget):
                         else:
                             local_uri = f"file://{local_path}"
 
-                        new_img_tag = f'<img width="420" style="border-radius: 8px; margin-top: 5px;" src="{local_uri}" />'
+                        new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{local_uri}" title="Click to view full image" />'
                         return f'<a href="{local_uri}">{new_img_tag}</a>'
 
                     elif src_url in getattr(self, 'download_failed_urls', {}):

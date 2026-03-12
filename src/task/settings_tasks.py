@@ -1,9 +1,4 @@
-import os
-import tempfile
-import traceback
-
 import httpx
-import numpy as np
 
 from src.core.core_task import BackgroundTask
 
@@ -16,7 +11,8 @@ class FetchModelsTask(BackgroundTask):
         api_key = self.kwargs.get("api_key", "")
 
         self.update_progress(20, "Connecting to API endpoint...")
-        proxy_url = self.config.user_settings.get("proxy_url", "").strip()
+        from src.core.config_manager import ConfigManager
+        proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
 
         url = f"{base_url.rstrip('/')}/models"
         httpx_kwargs = {"timeout": 10.0}
@@ -127,7 +123,8 @@ class TestApiTask(BackgroundTask):
         custom_params = self.kwargs.get("custom_params", {})
 
         self.update_progress(30, f"Sending test prompt to {model_name}...")
-        proxy_url = self.config.user_settings.get("proxy_url", "").strip()
+        from src.core.config_manager import ConfigManager
+        proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         httpx_kwargs = {"timeout": 15.0}

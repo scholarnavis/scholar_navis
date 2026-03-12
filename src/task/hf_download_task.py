@@ -165,6 +165,9 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 })
 
                 def patched_update(tqdm_instance, n=1):
+                    if self.is_cancelled():
+                        raise InterruptedError("Download task was manually cancelled by user.")
+
                     res = _original_update(tqdm_instance, n)
                     unit = getattr(tqdm_instance, 'unit', '').lower()
 

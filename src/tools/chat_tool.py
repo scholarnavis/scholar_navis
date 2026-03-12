@@ -70,10 +70,14 @@ def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs)
             "3. PRESERVE all Markdown formatting, bolding, and structure.\n"
         )
 
-    return llm_instance.chat([
+    response = llm_instance.chat([
         {"role": "system", "content": prompt},
         {"role": "user", "content": text}
-    ], **kwargs).strip()
+    ], **kwargs)
+
+    if isinstance(response, dict):
+        return response.get("content", "").strip()
+    return str(response).strip()
 
 
 class ChatDropTargetWidget(QWidget):
@@ -118,7 +122,7 @@ class ChatDropTargetWidget(QWidget):
     def dropEvent(self, event):
         self.overlay.hide()
 
-        supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx')
+        supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
         paths = [
             url.toLocalFile() for url in event.mimeData().urls()
             if url.isLocalFile() and url.toLocalFile().lower().endswith(supported_exts)
@@ -580,11 +584,13 @@ class ChatWorker(QObject):
         # 实例长连接缓存
         self.main_llm = None
         self.trans_llm = None
+        self.vision_llm = None
 
     def cancel(self):
         self._is_cancelled = True
         if self.main_llm: self.main_llm.cancel()
         if self.trans_llm: self.trans_llm.cancel()
+        if self.vision_llm: self.vision_llm.cancel()
 
     def _init_llms(self):
         """初始化主模型与翻译模型池"""
@@ -745,24 +751,84 @@ class ChatWorker(QObject):
                 docs_json = json.dumps(files_dict, ensure_ascii=False)
                 llm_content.append({"type": "text", "text": f"User Uploaded Files (JSON Format):\n{docs_json}\n\n"})
 
-            # 3.2 正常用户文字输入
-            llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
 
             # 3.3 处理多图顺序挂载
-            for img in images:
-                # 兼容不同来源的 base64 key
-                img_data = img.get("base64_url") or img.get("content")
-                if img_data:
-                    # 确保前缀符合 OpenAI 视觉标准
-                    if not img_data.startswith("data:image"):
-                        ext = str(img.get("path", ".jpeg")).split('.')[-1]
-                        img_data = f"data:image/{ext};base64,{img_data}"
+            if images:
+                vision_model_name = self.main_config.get("vision_model_name", "auto")
+                main_model_name = self.main_config.get("model_name", "").lower()
 
-                    llm_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": img_data}
-                    })
+                vision_keywords = [ 'image','vl', 'vision', 'llava','pixtral']
+                main_supports_vision = any(kw in main_model_name for kw in vision_keywords)
 
+                need_pre_caption = False
+                active_vision_model = None
+
+                if vision_model_name != "auto":
+                    need_pre_caption = True
+                    active_vision_model = vision_model_name
+                elif not main_supports_vision:
+                    self.logger.info("Main model might not support vision, attempting pre-captioning fallback.")
+                    need_pre_caption = True
+                    active_vision_model = main_model_name
+
+                if need_pre_caption:
+                    self.sig_token.emit("<i>Extracting image contexts via vision model...</i>\n\n")
+                    try:
+                        vision_cfg = self.main_config.copy()
+                        vision_cfg["model_name"] = active_vision_model
+                        vision_cfg.pop("tools", None)
+                        self.vision_llm = OpenAICompatibleLLM(vision_cfg)
+
+                        image_descriptions = []
+                        for img in images:
+                            if getattr(self, '_is_cancelled', False): break
+
+                            img_data = img.get("base64_url") or img.get("content")
+                            if not img_data.startswith("data:image"):
+                                ext = str(img.get("path", ".jpeg")).split('.')[-1]
+                                img_data = f"data:image/{ext};base64,{img_data}"
+
+                            vision_prompt = [{"role": "user", "content": [
+                                {"type": "text",
+                                 "text": "Please deeply analyze this image, extract all text (OCR), describe the charts/data, and detail its core contents. Output in pure text."},
+                                {"type": "image_url", "image_url": {"url": img_data}}
+                            ]}]
+
+                            desc_res = self.vision_llm.chat(vision_prompt)
+                            desc_content = desc_res.get('content', '') if isinstance(desc_res, dict) else str(desc_res)
+
+                            image_descriptions.append(
+                                f"[Image: {img.get('name', 'Unknown')}] Description:\n{desc_content}")
+
+                        # 解析成功，将图片化为纯文本喂给主模型
+                        if image_descriptions:
+                            llm_content.append({"type": "text",
+                                                "text": "The user uploaded images. Here are their detailed textual descriptions analyzed by the vision model:\n" + "\n".join(
+                                                    image_descriptions)})
+
+                    except Exception as e:
+                        self.logger.warning(f"Vision pre-captioning failed: {e}")
+                        self.sig_token.emit(
+                            "<div style='color:#e6a23c;'>⚠️ Image parsing failed. The current model configuration might not support vision. Images will be ignored.</div><br>")
+                        llm_content.append({"type": "text",
+                                            "text": f"[System Warning: User uploaded an image, but the vision parser failed to read it.]"})
+                    finally:
+                        self.vision_llm = None
+
+                else:
+                    self.logger.info(f"Mounting images natively for vision-capable main model: [{main_model_name}]")
+                    for img in images:
+                        img_data = img.get("base64_url") or img.get("content")
+                        if img_data:
+                            if not img_data.startswith("data:image"):
+                                ext = str(img.get("path", ".jpeg")).split('.')[-1]
+                                img_data = f"data:image/{ext};base64,{img_data}"
+                            llm_content.append({
+                                "type": "image_url",
+                                "image_url": {"url": img_data}
+                            })
+
+            llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
             self.sig_token.emit("[CLEAR_SEARCH]")
 
             # Phase 4: Low VRAM Release
@@ -800,6 +866,27 @@ class ChatWorker(QObject):
                     self.sig_token.emit("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
                     mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=6)
                     self.sig_token.emit("[CLEAR_SEARCH]")
+
+            if mcp_tools is None:
+                mcp_tools = []
+
+            mcp_tools.append({
+                "type": "function",
+                "function": {
+                    "name": "generate_image",
+                    "description": "Generates an image based on a text prompt. Use this tool ONLY when the user explicitly asks to draw, create, or generate a picture/image.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {
+                                "type": "string",
+                                "description": "A highly detailed English prompt describing the image to be generated."
+                            }
+                        },
+                        "required": ["prompt"]
+                    }
+                }
+            })
 
             dynamic_tool_prompt = ""
             if mcp_tools:
@@ -940,34 +1027,52 @@ class ChatWorker(QObject):
                                 raw_args = tool_call['function']['arguments']
                                 tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
 
-                                self.sig_token.emit(f"<br><i>📡 Requesting remote tool: <b>{tool_name}</b>...</i><br>")
-                                tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
+                                if tool_name == "generate_image":
+                                    prompt_text = tool_args.get("prompt", "")
+                                    self.sig_token.emit(
+                                        f"<br><i>🎨 Generating image (Prompt: {prompt_text[:30]}...)...</i><br>")
 
-                                try:
-                                    res_data = json.loads(tool_result)
-                                    if isinstance(res_data, dict) and "results" in res_data:
-                                        for item in res_data["results"]:
+                                    try:
+                                        # 调用 llm_impl.py 中新增的 generate_image 方法
+                                        img_url = self.main_llm.generate_image(prompt=prompt_text)
+                                        # 直接向前端气泡抛出 HTML 格式的图片，实现所见即所得
+                                        self.sig_token.emit(
+                                            f"<br><img src='{img_url}' style='max-width: 100%; border-radius: 8px; border: 1px solid #444;' alt='Generated Image'/><br>\n\n")
+                                        tool_result = f"Image generated successfully. URL: {img_url}"
+                                    except Exception as img_e:
+                                        self.logger.error(f"Internal Image Tool failed: {img_e}")
+                                        tool_result = f"Image generation failed: {str(img_e)}"
 
-                                            source_url = item.get("url") or item.get("pdf_url") or item.get(
-                                                "landing_page_url")
-                                            source_title = item.get("title") or item.get("name") or item.get(
-                                                "pref_name") or item.get("display_name") or item.get(
-                                                "scientific_name") or f"Result from {tool_name}"
+                                else:
+                                    self.sig_token.emit(
+                                        f"<br><i>📡 Requesting remote tool: <b>{tool_name}</b>...</i><br>")
+                                    tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
 
-                                            if source_url:
-                                                mcp_ref_id = len(sources_map) + 101
+                                    try:
+                                        res_data = json.loads(tool_result)
+                                        if isinstance(res_data, dict) and "results" in res_data:
+                                            for item in res_data["results"]:
 
-                                                sources_map[mcp_ref_id] = {
-                                                    "path": source_url,  # 对于 Web，这里存 URL
-                                                    "page": 1,
-                                                    "name": f"[Online] {source_title}",
-                                                    "search_text": item.get("abstract", "")[:100]
-                                                }
-                                                item["_mcp_cite_id"] = mcp_ref_id
+                                                source_url = item.get("url") or item.get("pdf_url") or item.get(
+                                                    "landing_page_url")
+                                                source_title = item.get("title") or item.get("name") or item.get(
+                                                    "pref_name") or item.get("display_name") or item.get(
+                                                    "scientific_name") or f"Result from {tool_name}"
 
-                                        tool_result = json.dumps(res_data, ensure_ascii=False)
-                                except:
-                                    pass
+                                                if source_url:
+                                                    mcp_ref_id = len(sources_map) + 101
+
+                                                    sources_map[mcp_ref_id] = {
+                                                        "path": source_url,  # 对于 Web，这里存 URL
+                                                        "page": 1,
+                                                        "name": f"[Online] {source_title}",
+                                                        "search_text": item.get("abstract", "")[:100]
+                                                    }
+                                                    item["_mcp_cite_id"] = mcp_ref_id
+
+                                            tool_result = json.dumps(res_data, ensure_ascii=False)
+                                    except:
+                                        pass
 
                             except Exception as e:
                                 self.logger.error(f"MCP tool {tool_name} failed: {e}")
@@ -1014,9 +1119,6 @@ class ChatWorker(QObject):
                 self.sig_token.emit("[START_LLM_NETWORK]")
 
                 stream_kwargs = {}
-
-                #if mcp_tools:
-                #    stream_kwargs["tools"] = mcp_tools
 
                 for token in self.main_llm.stream_chat(rag_messages, **stream_kwargs):
                     self.full_response_cache += token
@@ -1301,10 +1403,10 @@ class ChatTool(BaseTool):
     def attach_from_local(self):
         """按钮点击触发的文件选择器"""
         paths, _ = QFileDialog.getOpenFileNames(
-            self.widget, "Select Document(s)", "",
-            #"All Supported (*.pdf *.md *.txt *.csv *.py *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
-           # "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
-            "Documents (*.pdf *.md *.txt *.csv *docx)"
+            self.widget, "Select Document(s) or Image(s)", "",
+            "Supported Files (*.pdf *.md *.txt *.csv *.docx *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "Documents (*.pdf *.md *.txt *.csv *.docx)"
         )
         if not paths: return
         self.process_attached_files(paths)

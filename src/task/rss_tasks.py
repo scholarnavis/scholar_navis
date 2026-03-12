@@ -1,17 +1,14 @@
 import concurrent
-import os
 import json
+import os
 import random
+import re
 import time
 import xml.etree.ElementTree as ET
-import requests
-import re
 from datetime import datetime
-import urllib.parse
 
 from src.core.core_task import BackgroundTask
 from src.core.network_worker import create_robust_session
-from src.core.oa import OAFetcher
 
 
 def _setup_worker_env():
@@ -60,7 +57,7 @@ class FetchRSSTask(BackgroundTask):
                       f"Starting multi-threaded synchronization of {total} feeds with automated OA full-text sniffing...")
 
         def process_single_feed(feed):
-            if self._is_cancelled:
+            if self.is_cancelled():
                 return None
 
             session = create_robust_session()
@@ -119,7 +116,7 @@ class FetchRSSTask(BackgroundTask):
             future_to_feed = [executor.submit(process_single_feed, f) for f in feeds]
 
             for future in concurrent.futures.as_completed(future_to_feed):
-                if self._is_cancelled:
+                if self.is_cancelled():
                     self.send_log("WARNING", "⚠️ Task cancelled by user. Terminating fetch pool.")
                     break
 
@@ -142,7 +139,7 @@ class FetchRSSTask(BackgroundTask):
         with open(save_path, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
-        if self._is_cancelled:
+        if self.is_cancelled():
             self.send_log("INFO", "Sync interrupted by user; partial data saved.")
         else:
             self.update_progress(100, f"Sync complete. Success: {success_count}/{total}")
@@ -211,7 +208,7 @@ class FetchRSSTask(BackgroundTask):
 
         # Internal multi-threading to detect OA full-text status
         def _detect_oa_for_article(article):
-            if self._is_cancelled:
+            if self.is_cancelled():
                 return article
 
             # Add 0.2 ~ 0.8s random jitter to avoid triggering rate limits (429) on scholarly APIs
@@ -274,7 +271,7 @@ class FetchRSSTask(BackgroundTask):
             return []
 
         def _detect_oa_for_article(article):
-            if self._is_cancelled:
+            if self.is_cancelled():
                 return article
 
             time.sleep(random.uniform(0.2, 0.8))

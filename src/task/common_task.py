@@ -5,7 +5,7 @@ import platform
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
-from src.core.models_registry import resolve_auto_model, get_model_conf, check_model_exists
+from src.core.models_registry import resolve_auto_model, get_model_conf
 from src.core.network_worker import create_robust_session
 from src.version import __latest__
 

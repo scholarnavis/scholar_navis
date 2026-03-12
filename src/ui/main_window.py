@@ -6,7 +6,8 @@ from PySide6.QtCore import Qt, QSize, QTimer, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
-                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem)
+                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem,
+                               QApplication)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
@@ -157,16 +158,25 @@ class MainWindow(QMainWindow):
 
         # 注册所有工具
         self.add_tool(ImportTool())
-        self.add_tool(ChatTool())
-        self.add_tool(RSSTool())
-        self.add_tool(SettingsTool())
-        self.add_tool(LogTool())
-        self.add_tool(AboutTool())
+        QApplication.processEvents()
 
+        self.add_tool(ChatTool())
+        QApplication.processEvents()
+
+        self.add_tool(RSSTool())
+        QApplication.processEvents()
+
+        self.add_tool(SettingsTool())
+        QApplication.processEvents()
+
+        self.add_tool(LogTool())
+        QApplication.processEvents()
+
+        self.add_tool(AboutTool())
         self.sidebar.setCurrentRow(0)
-        self.perform_startup_checks()
         self.clean_old_logs()
         self._setup_mcp_status_bar()
+        QTimer.singleShot(300, self.perform_startup_checks)
 
         self.translator_dialog = QuickTranslatorWindow(None)
         self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
@@ -395,8 +405,8 @@ class MainWindow(QMainWindow):
             self._jump_to_settings()
 
     def _jump_to_settings(self):
-        self.switch_tool(6)
-        self.sidebar.setCurrentRow(6)
+        self.switch_tool(3)
+        self.sidebar.setCurrentRow(3)
 
     def check_first_run(self):
         cfg = ConfigManager()
@@ -472,3 +482,5 @@ class MainWindow(QMainWindow):
                 })
                 cfg.save_settings()
                 self._jump_to_settings()
+            return True
+        return False
