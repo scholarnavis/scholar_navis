@@ -974,7 +974,7 @@ class ChatWorker(QObject):
                     import re
                     import uuid
 
-                    MAX_ITERATIONS = 5
+                    MAX_ITERATIONS = 12
                     for iteration in range(MAX_ITERATIONS):
                         if getattr(self, '_is_cancelled', False):
                             self.sig_token.emit("\n\n[⛔ Generation halted by user.]")
@@ -1196,25 +1196,26 @@ class ChatWorker(QObject):
                 except Exception as e:
                     self.logger.warning(f"Tool calling loop failed: {e}")
 
-
             if not final_response_obtained:
                 if tool_executed:
                     silence_prompt = (
-                        "System Notification: Tool execution is complete. "
-                        "Please analyze the tool results and answer the user's original query.\n"
-                        "CRITICAL ANTI-HALLUCINATION RULE: If ANY tool returned an error (such as HTTP 403 Forbidden, 400 Bad Request, or connection failure), "
-                        "DO NOT pretend the requested target (like a paper, protein, or webpage) is fake or missing. "
-                        "Explicitly state that platform restrictions (like Elsevier/Cell Press paywalls) or API limitations prevented data retrieval, "
-                        "and provide your insights based on what you already know or retrieved successfully.\n"
-                        "FINAL OUTPUT RULE: YOU MUST NOT INVOKE ANY MORE TOOLS. DO NOT OUTPUT <｜DSML｜invoke> OR ANY XML TAGS. Output your final response directly in plain Markdown."
+                        "\n\n[System Notification: Tool execution limit reached. "
+                        "Please analyze the tool results above and answer the user's original query.\n"
+                        "FINAL OUTPUT RULE: YOU MUST NOT INVOKE ANY MORE TOOLS. Output your final response directly in plain Markdown.]"
                     )
 
-                    rag_messages.append({"role": "user", "content": silence_prompt})
+
+                    if rag_messages and rag_messages[-1]["role"] == "tool":
+                        rag_messages[-1]["content"] += silence_prompt
+                    else:
+                        rag_messages.append({"role": "user", "content": silence_prompt})
+
                 self.sig_token.emit("[CLEAR_SEARCH]")
                 self.sig_token.emit("[START_LLM_NETWORK]")
 
                 stream_kwargs = {}
-
+                if mcp_tools:
+                    stream_kwargs["tools"] = mcp_tools
                 for token in self.main_llm.stream_chat(rag_messages, **stream_kwargs):
                     self.full_response_cache += token
                     self.sig_token.emit(token)
@@ -1254,6 +1255,8 @@ class ChatWorker(QObject):
         加入了历史上下文，提升意图识别准确率。如果模型不可用，静默降级并返回所有工具。
         """
         if not raw_mcp_tools or len(raw_mcp_tools) <= top_k:
+            self.logger.info(
+                f"Bypassing Reranker: Tool count ({len(raw_mcp_tools) if raw_mcp_tools else 0}) is <= top_k ({top_k}). Using all available tools.")
             return raw_mcp_tools
 
         try:

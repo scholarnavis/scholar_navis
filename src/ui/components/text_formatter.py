@@ -24,7 +24,7 @@ class TextFormatter:
 
     @staticmethod
     def _render_chemistry(text):
-        """识别并格式化化学分子式，同时给SMILES强行插入零宽空格防截断喵"""
+        """识别并格式化化学分子式"""
 
         def formula_replacer(match):
             prefix = match.group(1)
@@ -38,17 +38,6 @@ class TextFormatter:
             text
         )
 
-        def smiles_replacer(match):
-            prefix = match.group(1)
-            smiles = match.group(2)
-            breakable_smiles = '&#8203;'.join(list(smiles))
-            return f'{prefix}{breakable_smiles}'
-
-        text = re.sub(
-            r'(?i)((?:Canonical\s*|Isomeric\s*)?SMILES[\s\*_:]*)([A-Za-z0-9@+\-=\#\(\)\[\]\.\/\\]+)',
-            smiles_replacer,
-            text
-        )
         return text
 
     @staticmethod
@@ -220,6 +209,16 @@ class TextFormatter:
             html = combined_pat.sub(get_replacer(template), html)
 
         html = html.replace("<a href=", "<a style='color: #4daafc; text-decoration: none; font-weight: bold;' href=")
+        parts = re.split(r'(<[^>]+>)', html)
+        for i in range(0, len(parts), 2):
+            if parts[i]:
+                parts[i] = re.sub(
+                    r'[^\s&;]{8,}',
+                    lambda m: '\u200b'.join(list(m.group(0))),
+                    parts[i]
+                )
+        html = ''.join(parts)
+
         final_html = f"<div style='font-family: {tm.font_family()};'>{html}</div>"
 
         return final_html
