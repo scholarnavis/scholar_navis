@@ -69,17 +69,21 @@ class VerifyModelsTask(BackgroundTask):
 
         to_download = []
 
+        # 修改点：在检查嵌入模型前更新进度条状态
+        self.update_progress(30, f"Checking Embedding model: {real_embed}...")
         e_conf = get_model_conf(real_embed, "embedding")
         if e_conf and not e_conf.get('is_network', False):
             if not self._check_local_onnx_exists(e_conf.get('hf_repo_id')):
                 to_download.append(e_conf['hf_repo_id'])
 
+        # 修改点：在检查重排序模型前更新进度条状态
+        self.update_progress(60, f"Checking Reranker model: {real_rerank}...")
         r_conf = get_model_conf(real_rerank, "reranker")
         if r_conf and not r_conf.get('is_network', False):
             if not self._check_local_onnx_exists(r_conf.get('hf_repo_id')):
                 to_download.append(r_conf['hf_repo_id'])
 
-        self.update_progress(90, "Verification complete.")
+        self.update_progress(100, "Verification complete.")
 
         return {
             "to_download": to_download,

@@ -88,9 +88,18 @@ class StartupWorker(QThread):
                 embed_id = cfg.user_settings.get("current_model_id", "embed_auto")
                 rerank_id = cfg.user_settings.get("rerank_model_id", "rerank_auto")
 
-                # 定义一个空的队列，用来静默吸收 Task 内部发出的进度和日志信息
-                class NullQueue:
-                    def put(self, item, block=True, timeout=None): pass
+                class SplashProgressQueue:
+                    def __init__(self, worker):
+                        self.worker = worker
+
+                    def put(self, item, block=True, timeout=None):
+                        if isinstance(item, dict) and item.get("type") == "state":
+                            prog = item.get("progress", -1)
+                            msg = item.get("msg", "Verifying models...")
+                            if 0 <= prog <= 100:
+                                # 将任务的 0-100% 进度映射到启动页的 80-95%
+                                mapped_prog = 80 + int(prog * 0.15)
+                                self.worker.sig_progress.emit(mapped_prog, msg)
 
                 task_kwargs = {
                     "embed_id": embed_id,
@@ -99,10 +108,9 @@ class StartupWorker(QThread):
 
                 verify_task = VerifyModelsTask(
                     task_id="startup_integrity_check",
-                    task_queue=NullQueue(),
+                    task_queue=SplashProgressQueue(self),
                     kwargs=task_kwargs
                 )
-
 
                 result = verify_task._execute()
                 missing_models = result.get("to_download", [])
@@ -113,25 +121,10 @@ class StartupWorker(QThread):
             except Exception as e:
                 self.logger.error(f"Failed to verify ONNX models during startup: {e}")
 
-
-            self.sig_progress.emit(85, f"Verifying Embedding model ({embed_id})...")
-            time.sleep(0.5)
-            e_conf = get_model_conf(embed_id, "embedding")
-            if e_conf and not e_conf.get('is_network', False):
-                repo_id = e_conf.get('hf_repo_id')
-                if repo_id:
-                    ensure_onnx_model(repo_id, "embedding")
-
-            self.sig_progress.emit(90, f"Verifying Reranker model ({rerank_id})...")
-            time.sleep(0.5)
-            r_conf = get_model_conf(rerank_id, "reranker")
-            if r_conf and not r_conf.get('is_network', False):
-                repo_id = r_conf.get('hf_repo_id')
-                if repo_id:
-                    ensure_onnx_model(repo_id, "reranker")
-
-            self.sig_progress.emit(95, "Building Main User Interface...")
+            self.sig_progress.emit(95, "Pre-loading UI components & ML libraries...")
             time.sleep(0.1)
+            from src.ui.main_window import MainWindow
+            from src.core.mcp_manager import MCPManager
 
             self.sig_progress.emit(100, "Ready. Building workspace...")
             time.sleep(0.1)

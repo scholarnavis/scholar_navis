@@ -304,3 +304,67 @@ class FetchRSSTask(BackgroundTask):
             final_articles = list(executor.map(_detect_oa_for_article, raw_articles))
 
         return final_articles
+
+
+class SearchArticlesTask(BackgroundTask):
+    def _execute(self):
+        query = self.kwargs.get('query', '').lower().strip()
+        cache_file = self.kwargs.get('cache_file', 'scholar_workspace/rss_cache.json')
+
+        if not query:
+            return []
+
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            self.send_log("ERROR", f"Search failed: Unable to read cache. {e}")
+            return []
+
+        data.pop("_meta", None)
+        all_articles = []
+        for url, articles in data.items():
+            all_articles.extend(articles)
+
+        total_articles = len(all_articles)
+        self.send_log("INFO", f"Starting search across {total_articles} cached articles...")
+
+        query_terms = [t for t in re.split(r'\W+', query) if len(t) > 1]
+        results = []
+
+        for i, article in enumerate(all_articles):
+            if self.is_cancelled():
+                break
+
+            if i % max(1, (total_articles // 20)) == 0:
+                self.update_progress(int((i / total_articles) * 100), f"Analyzing {i}/{total_articles}...")
+
+            title = article.get('title', '').lower()
+            summary = article.get('summary', '').lower()
+
+            score = 0
+
+            if query in title:
+                score += 50
+            if query in summary:
+                score += 20
+
+            for term in query_terms:
+                title_hits = title.count(term)
+                summary_hits = summary.count(term)
+
+                if title_hits > 0 or summary_hits > 0:
+                    score += (title_hits * 10) + (summary_hits * 2)
+
+            if score > 0:
+                res_art = article.copy()
+                res_art['_search_score'] = score
+                results.append(res_art)
+
+        results.sort(key=lambda x: x['_search_score'], reverse=True)
+
+        top_results = results[:150]
+        self.update_progress(100, "Search complete.")
+
+
+        return top_results

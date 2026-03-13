@@ -153,6 +153,13 @@ class TaskManager(QObject):
             self._real_start(task_class, task_id, mode, kwargs)
 
     def _real_start(self, task_class, task_id: str, mode: TaskMode, kwargs: Dict):
+
+        # 强制将已知会引发 GIL 锁死的重型任务转移到独立进程，无视工具组件的原始请求
+        if task_class.__name__ in ["VerifyModelsTask", "VersionCheckTask"]:
+            if mode == TaskMode.THREAD:
+                self.logger.warning(f"Intercepted {task_class.__name__}: Forcing PROCESS mode to prevent UI freeze.")
+                mode = TaskMode.PROCESS
+
         self.logger.info(f"Launching {task_class.__name__} in {mode.value} mode")
         if mode == TaskMode.PROCESS:
             self.task_queue = mp.Queue()

@@ -156,28 +156,31 @@ class MainWindow(QMainWindow):
             "About": "info"
         }
 
-        # 注册所有工具
-        self.add_tool(ImportTool())
-        QApplication.processEvents()
+        self.tool_classes = [
+            ("Library Manager", ImportTool),
+            ("Chat Assistant", ChatTool),
+            ("Literature Tracker", RSSTool),
+            ("Global Settings", SettingsTool),
+            ("System Logs", LogTool),
+            ("About", AboutTool)
+        ]
+        self.tools = [None] * len(self.tool_classes)
 
-        self.add_tool(ChatTool())
-        QApplication.processEvents()
+        # 仅生成左侧边栏按钮和右侧占位符，不进行耗时的实例化
+        for name, _ in self.tool_classes:
+            icon_name = self.icon_map.get(name, "tag")
+            item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {name}")
+            self.sidebar.addItem(item)
 
-        self.add_tool(RSSTool())
-        QApplication.processEvents()
+            dummy_widget = QWidget()
+            dummy_widget.setStyleSheet("background-color: transparent;")
+            self.tool_stack.addWidget(dummy_widget)
 
-        self.add_tool(SettingsTool())
-        QApplication.processEvents()
-
-        self.add_tool(LogTool())
-        QApplication.processEvents()
-
-        self.add_tool(AboutTool())
-        self.sidebar.setCurrentRow(0)
         self.clean_old_logs()
         self._setup_mcp_status_bar()
         QTimer.singleShot(300, self.perform_startup_checks)
 
+        # 把原本这里的 translator_dialog 等初始化保留
         self.translator_dialog = QuickTranslatorWindow(None)
         self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
         self.shortcut_translate.activated.connect(self.toggle_quick_translator)
@@ -185,10 +188,27 @@ class MainWindow(QMainWindow):
         self.tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+        self.sidebar.setCurrentRow(0)
+        self.switch_tool(0)
+
         if sys.platform == "win32":
             ico_path = ThemeManager.get_resource_path("Assets", "icon.ico")
             hwnd = int(self.winId())
             QTimer.singleShot(100, lambda: force_windows_taskbar_icon(hwnd, ico_path))
+
+    def _lazy_load_tools(self):
+        tools_to_load = [
+            ImportTool, ChatTool, RSSTool, SettingsTool, LogTool, AboutTool
+        ]
+
+        for ToolClass in tools_to_load:
+            self.add_tool(ToolClass())
+            QApplication.processEvents()
+
+        self.sidebar.setCurrentRow(0)
+        self.clean_old_logs()
+        self._setup_mcp_status_bar()
+        QTimer.singleShot(300, self.perform_startup_checks)
 
     def toggle_quick_translator(self):
         if self.translator_dialog.isHidden() or self.translator_dialog.windowOpacity() == 0.0:
@@ -221,7 +241,7 @@ class MainWindow(QMainWindow):
 
         for i in range(self.sidebar.count()):
             item = self.sidebar.item(i)
-            tool_name = self.tools[i].tool_name
+            tool_name = self.tool_classes[i][0]
             icon_name = self.icon_map.get(tool_name, "tag")
             item.setIcon(tm.icon(icon_name, "text_main"))
 
@@ -370,6 +390,18 @@ class MainWindow(QMainWindow):
         self.sidebar.addItem(item)
 
     def switch_tool(self, index):
+        if self.tools[index] is None:
+            name, ToolClass = self.tool_classes[index]
+            tool_instance = ToolClass()
+            self.tools[index] = tool_instance
+
+            widget = tool_instance.get_ui_widget()
+
+            old_widget = self.tool_stack.widget(index)
+            self.tool_stack.insertWidget(index, widget)
+            self.tool_stack.removeWidget(old_widget)
+            old_widget.deleteLater()
+
         self.tool_stack.setCurrentIndex(index)
 
     def check_model_integrity(self):
@@ -384,7 +416,7 @@ class MainWindow(QMainWindow):
         self.integrity_task_mgr.start_task(
             VerifyModelsTask,
             task_id="startup_integrity_check",
-            mode=TaskMode.THREAD,
+            mode=TaskMode.PROCESS,
             embed_id=embed_id,
             rerank_id=rerank_id
         )

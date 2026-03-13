@@ -89,6 +89,19 @@ class EmailVerifyWorker(QObject):
         except Exception as e:
             self.sig_finished.emit(False, f"Email validation encountered a system error: {e}")
 
+class HWDetectThread(QThread):
+    sig_finished = Signal(dict, list)
+
+    def run(self):
+        try:
+            from src.core.device_manager import DeviceManager
+            dev_mgr = DeviceManager()
+            info = dev_mgr.get_sys_info()
+            info['gpu_info'] = dev_mgr.get_gpu_info()
+            devs = dev_mgr.get_available_devices()
+            self.sig_finished.emit(info, devs)
+        except Exception as e:
+            self.sig_finished.emit({"os": "Unknown OS", "error": str(e)}, [{"name": "Auto Detect", "id": "auto"}])
 
 
 class SettingsTool(BaseTool):
@@ -151,7 +164,28 @@ class SettingsTool(BaseTool):
         self.status_timer.timeout.connect(self._refresh_mcp_status)
         self.status_timer.start(5000)
 
+        self._cached_hw_info = {}
+        self.hw_thread = HWDetectThread(self.widget)
+        self.hw_thread.sig_finished.connect(self._on_hw_detected)
+        self.hw_thread.start()
+
         return self.widget
+
+    def _on_hw_detected(self, info, devs):
+        self._cached_hw_info = info
+        self._update_hardware_html()
+
+        curr_device = self.config.user_settings.get("inference_device", "auto")
+        self.combo_device.blockSignals(True)
+        self.combo_device.clear()
+        for dev in devs:
+            self.combo_device.addItem(dev["name"], dev["id"])
+
+        idx_dev = self.combo_device.findData(curr_device)
+        if idx_dev >= 0:
+            self.combo_device.setCurrentIndex(idx_dev)
+        self.combo_device.blockSignals(False)
+
 
     def _setup_change_listeners(self):
         """挂载全部输入组件变更事件，跟踪是否发生了改动"""
@@ -388,11 +422,20 @@ class SettingsTool(BaseTool):
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
 
         self.input_s2_rate_limit = QLineEdit()
-        self.input_s2_rate_limit.setPlaceholderText("S2 Rate Limit (requests/sec, default: 1)")
-        current_limit = self.config.user_settings.get("s2_rate_limit", "1.0")
-        if not current_limit or not str(current_limit).replace('.', '', 1).isdigit():
-            current_limit = "1.0"
-        self.input_s2_rate_limit.setText(str(current_limit))
+        self.input_s2_rate_limit.setPlaceholderText("S2 Rate Limit (requests/sec, default: 1.0)")
+
+        from PySide6.QtGui import QDoubleValidator
+        validator = QDoubleValidator(0.01, 1000.0, 2, self.input_s2_rate_limit)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        self.input_s2_rate_limit.setValidator(validator)
+
+        current_limit = self.config.user_settings.get("s2_rate_limit", 1.0)
+        try:
+            val = float(current_limit)
+            if val <= 0: val = 1.0
+        except (ValueError, TypeError):
+            val = 1.0
+        self.input_s2_rate_limit.setText(str(val))
 
         self.input_github_token = HoverRevealLineEdit()
         self.input_github_token.setPlaceholderText("GitHub Personal Access Token (Prevents rate limiting)")
@@ -514,16 +557,18 @@ class SettingsTool(BaseTool):
                        f"It has been auto-selected in the list. Please click the blue 'Save Settings & Verify Models' button below to download it.",
                        show_cancel=False).exec()
 
+
     def init_hardware_section(self):
         self.group_hw = QGroupBox("System Hardware Info")
         self.group_hw.setObjectName("group_hw")
         layout = QVBoxLayout(self.group_hw)
-        self.lbl_hw_info = QLabel()
+
+        self.lbl_hw_info = QLabel("Scanning hardware info... Please wait.")
         self.lbl_hw_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_hw_info.setTextFormat(Qt.RichText)
         layout.addWidget(self.lbl_hw_info)
+
         self.layout.addWidget(self.group_hw)
-        self._update_hardware_html()
 
 
     def _get_btn_style(self, btn_type="default"):
@@ -562,17 +607,17 @@ class SettingsTool(BaseTool):
         """
 
     def _update_hardware_html(self):
-        if not hasattr(self, 'lbl_hw_info'): return
+        if not hasattr(self, 'lbl_hw_info') or not getattr(self, '_cached_hw_info', None): return
 
         tm = ThemeManager()
-        info = self.dev_mgr.get_sys_info()
-
-        gpu_info_list = info.get('gpu_info', self.dev_mgr.get_gpu_info())
+        info = self._cached_hw_info
+        gpu_info_list = info.get('gpu_info', [])
 
         gpu_str = "<br>".join([
-            f"&nbsp;&nbsp;• {g['name']} <span style='color:{tm.color('accent')};'>[{g['vram']}]</span>"
+            f"&nbsp;&nbsp;• {g.get('name', 'Unknown')} <span style='color:{tm.color('accent')};'>[{g.get('vram', 'N/A')}]</span>"
             for g in gpu_info_list
         ])
+        if not gpu_str: gpu_str = "None detected"
 
         has_accel = any(p in info.get('ort_providers', []) for p in
                         ["CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider",
@@ -923,14 +968,7 @@ class SettingsTool(BaseTool):
 
         # --- 3. 硬件加速设备选择 ---
         self.combo_device = BaseComboBox()
-        dev_mgr = DeviceManager()
-        for dev in dev_mgr.get_available_devices():
-            self.combo_device.addItem(dev["name"], dev["id"])
-
-        curr_device = self.config.user_settings.get("inference_device", "auto")
-        idx_dev = self.combo_device.findData(curr_device)
-        self.combo_device.setCurrentIndex(max(0, idx_dev))
-
+        self.combo_device.addItem("Detecting devices...", "auto")
         layout.addRow("Compute Device:", self.combo_device)
 
         # --- 4. 其他模型设置 ---
@@ -954,12 +992,10 @@ class SettingsTool(BaseTool):
         layout.addRow("", self.lbl_vram_desc)
 
         self.layout.addWidget(group)
-        QThread.msleep(50)
-        self.check_models_status()
+        QTimer.singleShot(50, self.check_models_status)
 
         self.combo_embed.currentTextChanged.connect(self.combo_embed.setToolTip)
         self.combo_rerank.currentTextChanged.connect(self.combo_rerank.setToolTip)
-
 
     def _update_vram_html(self):
         if not hasattr(self, 'lbl_vram_desc'): return
@@ -1939,7 +1975,11 @@ class SettingsTool(BaseTool):
         new_key = self.input_ncbi_api_key.text().strip()
         new_s2_key = self.input_s2_api_key.text().strip()
         s2_rate_text = self.input_s2_rate_limit.text().strip()
-        if not s2_rate_text or not s2_rate_text.replace('.', '', 1).isdigit():
+        try:
+            val = float(s2_rate_text.replace(',', '.'))
+            if val <= 0: val = 1.0
+            s2_rate_text = str(val)
+        except ValueError:
             s2_rate_text = "1.0"
 
         new_github_token = self.input_github_token.text().strip()

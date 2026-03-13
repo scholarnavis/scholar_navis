@@ -25,13 +25,18 @@ class S2TaskManager:
             if not key:
                 key = os.environ.get("S2_API_KEY", "").strip()
 
-            limit_str = str(config.get("s2_rate_limit", "")).strip()
-            if not limit_str:
-                limit_str = os.environ.get("S2_RATE_LIMIT", "1.0").strip()
+            limit_raw = config.get("s2_rate_limit", "")
+            if not limit_raw:
+                limit_raw = os.environ.get("S2_RATE_LIMIT", 1.0)
 
-            if not limit_str or not limit_str.replace('.', '', 1).isdigit():
-                limit_str = "1.0"
-            return key, float(limit_str)
+            try:
+                rate_limit = float(limit_raw)
+                if rate_limit <= 0:
+                    rate_limit = 1.0
+            except (ValueError, TypeError):
+                rate_limit = 1.0
+
+            return key, rate_limit
         except Exception as e:
             logger.error(f"Failed to load S2 config: {e}")
             return "", 1.0

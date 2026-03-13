@@ -14,11 +14,12 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QFileDialog, QFrame, QAbstractItemView, QMenu, QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.core_task import TaskManager, TaskState
+from src.core.core_task import TaskManager, TaskState, TaskMode
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
-from src.task.rss_tasks import FetchRSSTask
+from src.task.rss_tasks import FetchRSSTask, SearchArticlesTask
 from src.tools.base_tool import BaseTool
+from src.ui.components.RotatingSpinner import ModernSpinner
 from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog, StandardDialog
 from src.ui.components.toast import ToastManager
 
@@ -469,8 +470,94 @@ class RSSTool(BaseTool):
             self.btn_export_pdf.setIcon(tm.icon("file-text", "warning"))
             self.btn_export_pdf.setStyleSheet(f"QPushButton {{ color: {tm.color('warning')}; background-color: transparent; border: 1px solid {tm.color('warning')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; }}")
 
+        if hasattr(self, 'inp_global_search'):
+            self.inp_global_search.setStyleSheet(f"""
+                        QLineEdit {{
+                            background-color: {bg_main}; 
+                            color: {text_main}; 
+                            border: 1px solid {tm.color('accent')}; 
+                            border-radius: 15px; 
+                            padding: 6px 15px; 
+                            font-size: 13px;
+                        }}
+                        QLineEdit:focus {{
+                            border: 2px solid {tm.color('accent_hover')};
+                        }}
+                    """)
 
+        if hasattr(self, 'lbl_loading_anim'):
+            self.lbl_loading_anim.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: bold;")
 
+    def trigger_global_search(self):
+        query = self.inp_global_search.text().strip()
+        if not query:
+            row = self.feed_list.currentRow()
+            if row >= 0:
+                self._on_feed_selected(row)
+            return
+
+        self._clear_articles()
+        self.feed_list.clearSelection()
+
+        self.lbl_loading_text.setText(f"Searching for '{query}'...")
+        self.loading_container.show()
+        self.spinner.start()
+        self.scroll_area.hide()
+
+        if not hasattr(self, 'search_task_mgr'):
+            self.search_task_mgr = TaskManager()
+
+        try:
+            self.search_task_mgr.sig_result.disconnect()
+            self.search_task_mgr.sig_state_changed.disconnect()
+        except Exception:
+            pass
+
+        self.search_task_mgr.sig_result.connect(self._on_search_result)
+        self.search_task_mgr.sig_state_changed.connect(self._on_search_state)
+
+        # Launch the background search
+        from src.core.core_task import TaskMode
+        self.search_task_mgr.start_task(
+            SearchArticlesTask,
+            "rss_search",
+            mode=TaskMode.PROCESS,
+            query=query,
+            cache_file=self.cache_file
+        )
+
+    def _on_search_state(self, state, msg):
+        if state in [TaskState.SUCCESS.value, TaskState.FAILED.value, TaskState.TERMINATED.value]:
+
+            # --- 停止并隐藏动画 ---
+            self.spinner.stop()
+            self.loading_container.hide()
+            self.scroll_area.show()
+
+            if state == TaskState.FAILED.value:
+                ToastManager().show(f"Search failed: {msg}", "error")
+
+    def _on_search_result(self, results):
+        if not results:
+            lbl = QLabel(f"No articles found matching '{self.inp_global_search.text()}'")
+            lbl.setStyleSheet(
+                f"color: {ThemeManager().color('text_muted')}; padding: 30px; font-size: 15px; font-style: italic;")
+            lbl.setAlignment(Qt.AlignCenter)
+            self.article_layout.insertWidget(0, lbl)
+            return
+
+        # Prepare for rendering
+        if not hasattr(self, 'article_widgets_cache'):
+            self.article_widgets_cache = {}
+
+        # Use a virtual URL key for search results cache
+        self.current_render_url = "_global_search_results"
+        self.article_widgets_cache[self.current_render_url] = []
+        self.render_queue = results.copy()
+
+        # Start standard batch rendering mechanism
+        self.render_timer.start(15)
+        ToastManager().show(f"Found {len(results)} relevant articles.", "success")
 
     def get_ui_widget(self) -> QWidget:
         if hasattr(self, 'widget'): return self.widget
@@ -586,6 +673,25 @@ class RSSTool(BaseTool):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        self.loading_container = QWidget()
+        self.loading_layout = QHBoxLayout(self.loading_container)
+        self.loading_layout.setAlignment(Qt.AlignCenter)
+        self.loading_layout.setContentsMargins(0, 40, 0, 40)
+
+        self.spinner = ModernSpinner(size=32)
+
+        tm = ThemeManager()
+        self.lbl_loading_text = QLabel("Searching...")
+        self.lbl_loading_text.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: bold;")
+
+        self.loading_layout.addWidget(self.spinner)
+        self.loading_layout.addSpacing(10)
+        self.loading_layout.addWidget(self.lbl_loading_text)
+
+        self.loading_container.hide()
+        right_layout.insertWidget(2, self.loading_container)
+
 
         self.article_container = QWidget()
         self.article_container.setStyleSheet("background: transparent;")
@@ -772,7 +878,10 @@ class RSSTool(BaseTool):
         self.task_mgr.sig_state_changed.connect(self._on_fetch_done)
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
 
-        self.task_mgr.start_task(FetchRSSTask, "rss_fetch", feeds=target_feeds, save_path=self.cache_file)
+        self.task_mgr.start_task(FetchRSSTask, "rss_fetch",
+                                 feeds=target_feeds,
+                                 mode=TaskMode.THREAD,
+                                 save_path=self.cache_file)
 
     def _on_fetch_done(self, state, msg):
         try:

@@ -13,8 +13,45 @@ class OAFetcher:
     def is_supplement(self, url: str) -> bool:
         if not url:
             return False
-        url_lower = url.lower()
-        return "supp" in url_lower or "appendix" in url_lower or "dataset" in url_lower
+
+        # 使用 urlparse 拆分 URL，仅在路径和参数中查找，防止域名导致误判
+        parsed = urllib.parse.urlparse(url.lower())
+        path_and_query = parsed.path + "?" + parsed.query
+        filename = parsed.path.split('/')[-1]
+
+        # 1. 扩充的补充文件路径/参数特征词
+        supp_keywords = [
+            "supp",  # 涵盖 supplementary, supplement, suppinfo 等
+            "appendix",  # 附录
+            "dataset",  # 数据集
+            "attachment",  # 附件
+            "media",  # 多媒体
+            "extended",  # 扩展数据 (extended data)
+            "supporting"  # 支持材料
+        ]
+
+        for kw in supp_keywords:
+            if kw in path_and_query:
+                return True
+
+        # 2. 针对补充文件常见命名习惯的正则匹配
+        if filename:
+            if re.search(r'(?:^|[-_])(mmc\d*|s\d+|sm|som|esm\d*)\.pdf$', filename):
+                return True
+
+        return False
+
+    def normalize_pdf_url(self, url: str) -> str:
+
+        if not url:
+            return ""
+
+        match = re.search(r'ncbi\.nlm\.nih\.gov/articles/(PMC\d+)', url, re.IGNORECASE)
+        if match:
+            pmcid = match.group(1).upper()
+            return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
+
+        return url
 
     def is_valid_pdf_link(self, url: str) -> bool:
         if not url:
@@ -84,7 +121,10 @@ class OAFetcher:
                             if loc and loc.get("url_for_pdf"):
                                 candidates.append(loc["url_for_pdf"])
 
-                        main_pdfs = [c for c in candidates if not self.is_supplement(c) and self.is_valid_pdf_link(c)]
+                        normalized_candidates = [self.normalize_pdf_url(c) for c in candidates]
+
+                        main_pdfs = [c for c in normalized_candidates if
+                                     not self.is_supplement(c) and self.is_valid_pdf_link(c)]
                         pdf_url = main_pdfs[0] if main_pdfs else ""
 
                         if pdf_url:
@@ -161,7 +201,9 @@ class OAFetcher:
                         raise ValueError("S2 response data is invalid")
 
                     if data.get("isOpenAccess") and data.get("openAccessPdf"):
-                        pdf_url = data["openAccessPdf"].get("url", "")
+                        raw_pdf_url = data["openAccessPdf"].get("url", "")
+                        pdf_url = self.normalize_pdf_url(raw_pdf_url)
+
                         if pdf_url and not self.is_supplement(pdf_url) and self.is_valid_pdf_link(pdf_url):
                             self.logger.info(f"OA PDF found via Semantic Scholar: {pdf_url}")
                             return {"is_oa": True, "pdf_url": pdf_url, "landing_page_url": landing_url,
