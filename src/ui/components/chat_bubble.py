@@ -7,7 +7,7 @@ import time
 from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QThread
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea)
+                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
 from src.core.network_worker import LightNetworkWorker
 from src.core.theme_manager import ThemeManager
@@ -105,16 +105,18 @@ class ChatBubbleWidget(QWidget):
             self.content_layout.addWidget(self.ctx_frame)
 
         # 正文文本框
-        self.lbl_text = QLabel()
-        self.lbl_text.setWordWrap(True)
-        self.lbl_text.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.lbl_text.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.lbl_text = QTextBrowser()
         self.lbl_text.setOpenExternalLinks(False)
-        self.lbl_text.linkActivated.connect(self.sig_link_clicked.emit)
+        self.lbl_text.setFrameShape(QFrame.NoFrame)
+        self.lbl_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.lbl_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.lbl_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.lbl_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
+        self.lbl_text.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
 
+
+        self.lbl_text.document().documentLayout().documentSizeChanged.connect(self._adjust_browser_height)
         if self.is_user:
             self.main_layout.addWidget(self.spacer)
             self.main_layout.addWidget(self.content_container)
@@ -204,9 +206,13 @@ class ChatBubbleWidget(QWidget):
             self.lbl_text.setMinimumHeight(0)
 
             max_w = int(parent.width() * 0.80)
-            self.lbl_text.setMaximumWidth(max_w)
-            if hasattr(self, 'edit_input'):
-                self.edit_input.setMaximumWidth(max_w)
+
+            if self.lbl_text.maximumWidth() != max_w:
+                self.lbl_text.setMaximumWidth(max_w)
+                if hasattr(self, 'edit_input'):
+                    self.edit_input.setMaximumWidth(max_w)
+
+                self.lbl_text.updateGeometry()
 
 
     def adjust_edit_height(self):
@@ -287,12 +293,21 @@ class ChatBubbleWidget(QWidget):
         """)
 
         self.lbl_text.setStyleSheet(f"""
-                   QLabel {{
-                       background-color: transparent; color: {tm.color('text_main')};
-                       border: none; padding: 0px; 
-                       font-size: 14px; font-family: {font_family};
-                   }}
-               """)
+                    QTextBrowser {{
+                        background-color: transparent; color: {tm.color('text_main')};
+                        border: none; padding: 0px; 
+                        font-size: 14px; font-family: {font_family};
+                    }}
+                    QScrollBar:horizontal {{
+                        background: transparent; height: 8px; margin: 0px;
+                    }}
+                    QScrollBar::handle:horizontal {{
+                        background: {hex_to_rgba(tm.color('text_muted'), 0.4) if 'hex_to_rgba' in globals() else 'rgba(150, 150, 150, 0.35)'}; 
+                        border-radius: 4px;
+                    }}
+                    QScrollBar::handle:horizontal:hover {{ background: {tm.color('accent')}; }}
+                    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+                """)
 
         self.edit_input.setStyleSheet(f"""
             QTextEdit {{ 
@@ -543,6 +558,13 @@ class ChatBubbleWidget(QWidget):
                        font-family: {font_family};
                    }}
                """)
+
+    def _adjust_browser_height(self):
+        doc_height = int(self.lbl_text.document().size().height())
+        sb = self.lbl_text.horizontalScrollBar()
+        sb_height = sb.height() if sb.isVisible() else 0
+        self.lbl_text.setFixedHeight(doc_height + sb_height)
+
 
     def _start_image_download(self, url):
         ext = url.split("?")[0].split(".")[-1]

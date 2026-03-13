@@ -2026,7 +2026,7 @@ class ChatTool(BaseTool):
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
             bubble.sig_link_clicked.connect(self.handle_link_click)
         else:
-            bubble.lbl_text.linkActivated.connect(self.handle_link_click)
+            bubble.lbl_text.anchorClicked.connect(self.handle_link_click)
 
         self.chat_layout.addWidget(bubble)
 
@@ -2721,7 +2721,11 @@ class ChatTool(BaseTool):
             elif item.spacerItem():
                 pass
 
-    def handle_link_click(self, url_str):
+    def handle_link_click(self, url):
+        if hasattr(url, 'toString'):
+            url_str = url.toString()
+        else:
+            url_str = str(url)
 
         if url_str.startswith("mermaid://"):
             parsed = urlparse(url_str)

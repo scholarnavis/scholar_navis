@@ -220,10 +220,11 @@ class FetchRSSTask(BackgroundTask):
 
             if doi:
                 s2_key = os.environ.get("S2_API_KEY", "").strip()
+                ncbi_key = os.environ.get("NCBI_API_KEY", "").strip()
                 from src.core.oa import OAFetcher
                 fetcher = OAFetcher()
 
-                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, s2_key, None)
+                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, ncbi_api_key=ncbi_key)
 
                 if oa_result.get("is_oa"):
                     pdf_url = oa_result["pdf_url"]
@@ -282,10 +283,10 @@ class FetchRSSTask(BackgroundTask):
             user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
 
             if doi:
-                s2_key = os.environ.get("S2_API_KEY", "").strip()
+                ncbi_key = os.environ.get("NCBI_API_KEY", "").strip()
                 from src.core.oa import OAFetcher
                 fetcher = OAFetcher()
-                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, s2_key, None)
+                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, ncbi_api_key=ncbi_key)
 
                 if oa_result.get("is_oa"):
                     pdf_url = oa_result["pdf_url"]

@@ -213,7 +213,7 @@ class TextFormatter:
         for i in range(0, len(parts), 2):
             if parts[i]:
                 parts[i] = re.sub(
-                    r'[^\s&;]{8,}',
+                    r'[^\s&;]{40,}',
                     lambda m: '\u200b'.join(list(m.group(0))),
                     parts[i]
                 )

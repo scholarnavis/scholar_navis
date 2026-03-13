@@ -1,23 +1,19 @@
 import asyncio
 import json
 import logging
-import threading
-import sys
 import os
+import sys
+import threading
 import time
-import secrets
 from contextlib import AsyncExitStack
+from typing import Dict
 
 import anyio
 import httpx
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
-from mcp.types import JSONRPCMessage
-
-from typing import Dict, List, Optional
+from mcp.client.stdio import stdio_client
 
 from src.core.config_manager import ConfigManager
 from src.core.signals import GlobalSignals
@@ -106,11 +102,33 @@ class MCPManager:
             safe_base_env["HTTPS_PROXY"] = proxy
             safe_base_env["http_proxy"] = proxy
             safe_base_env["https_proxy"] = proxy
+        else:
+            safe_base_env.pop("HTTP_PROXY", None)
+            safe_base_env.pop("HTTPS_PROXY", None)
+            safe_base_env.pop("http_proxy", None)
+            safe_base_env.pop("https_proxy", None)
 
         builtin_env = safe_base_env.copy()
-        if user_cfg.get("ncbi_email"): builtin_env["NCBI_API_EMAIL"] = user_cfg.get("ncbi_email")
-        if user_cfg.get("ncbi_api_key"): builtin_env["NCBI_API_KEY"] = user_cfg.get("ncbi_api_key")
-        if user_cfg.get("s2_api_key"): builtin_env["S2_API_KEY"] = user_cfg.get("s2_api_key")
+        if user_cfg.get("ncbi_email"):
+            builtin_env["NCBI_API_EMAIL"] = user_cfg.get("ncbi_email")
+        else:
+            builtin_env.pop("NCBI_API_EMAIL", None)
+
+        if user_cfg.get("ncbi_api_key"):
+            builtin_env["NCBI_API_KEY"] = user_cfg.get("ncbi_api_key")
+        else:
+            builtin_env.pop("NCBI_API_KEY", None)
+
+        if user_cfg.get("s2_api_key"):
+            builtin_env["S2_API_KEY"] = user_cfg.get("s2_api_key")
+        else:
+            builtin_env.pop("S2_API_KEY", None)
+
+        if user_cfg.get("github_token"):
+            builtin_env["GITHUB_TOKEN"] = user_cfg.get("github_token")
+        else:
+            builtin_env.pop("GITHUB_TOKEN", None)
+
         if hasattr(self, 'log_port'):
             builtin_env["MCP_LOG_PORT"] = str(self.log_port)
             safe_base_env["MCP_LOG_PORT"] = str(self.log_port)
@@ -458,7 +476,6 @@ class MCPManager:
     def disconnect_server(self, server_name: str):
         if server_name in self.server_stops:
             self._loop.call_soon_threadsafe(self.server_stops[server_name].set)
-            time.sleep(0.02)
 
         if server_name in self.sessions:
             del self.sessions[server_name]

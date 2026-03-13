@@ -259,6 +259,12 @@ class ArticleWidget(QFrame):
         self.btn_chat.clicked.connect(self._send_to_chat)
         btn_layout.insertWidget(1, self.btn_chat)
 
+        if self.article_data.get('pdf_url'):
+            self.btn_download_oa = QPushButton(" Download OA Article")
+            self.btn_download_oa.setCursor(Qt.PointingHandCursor)
+            self.btn_download_oa.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['pdf_url'])))
+            btn_layout.insertWidget(0, self.btn_download_oa)
+
         self.btn_link = QPushButton(" Publisher Link")
         self.btn_link.setCursor(Qt.PointingHandCursor)
         self.btn_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['link'])))
@@ -291,6 +297,14 @@ class ArticleWidget(QFrame):
         if hasattr(self, 'btn_chat'):
             self.btn_chat.setIcon(tm.icon("send", "text_main"))
             self.btn_chat.setStyleSheet(btn_style)
+
+        if hasattr(self, 'btn_download_oa'):
+            self.btn_download_oa.setIcon(tm.icon("download", "bg_main"))
+            # Uses a solid green success background with main background color (usually white/black) for text
+            self.btn_download_oa.setStyleSheet(
+                f"QPushButton {{ background-color: {tm.color('success')}; color: {tm.color('bg_main')}; border: none; border-radius: 4px; padding: 4px 10px; font-weight: bold; }}"
+                f"QPushButton:hover {{ opacity: 0.8; }}"
+            )
 
         if hasattr(self, 'btn_link'):
             self.btn_link.setIcon(tm.icon("link", "text_main"))

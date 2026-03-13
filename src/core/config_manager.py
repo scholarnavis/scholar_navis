@@ -160,12 +160,13 @@ class ConfigManager:
             "proxy_url": "",
             "hf_mirror": "",
             "hf_token": "",
-            "theme": "Dark",
+            "theme": "auto",
             "log_level": "INFO",
             "is_first_run": True,
             "ncbi_email": "",
             "ncbi_api_key": "",
             "s2_api_key": "",
+            "s2_rate_limit": "1.0",
             "github_token": ""
         }
 

@@ -17,6 +17,7 @@ from src.core.config_manager import ConfigManager
 from src.core.email_check import verify_email_robust
 from src.core.network_worker import setup_global_network_env, create_robust_session
 from src.core.oa import OAFetcher
+from src.task.s2_task import s2_request, is_s2_enabled
 
 
 def get_app_root():
@@ -72,10 +73,17 @@ root_logger.addHandler(stderr_handler)
 ConfigManager()
 setup_global_network_env()
 
-ncbi_email = os.environ.get("NCBI_API_EMAIL", "").strip()
-ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
-s2_api_key = os.environ.get("S2_API_KEY", "").strip()
-github_token = os.environ.get("GITHUB_TOKEN", "").strip()
+def get_setting_or_env(key, env_name):
+    """优先读取 GUI 设置，如果为空再读环境变量"""
+    val = str(ConfigManager().user_settings.get(key, "")).strip()
+    if not val:
+        val = os.environ.get(env_name, "").strip()
+    return val
+
+ncbi_email = get_setting_or_env("ncbi_email", "NCBI_API_EMAIL")
+ncbi_api_key = get_setting_or_env("ncbi_api_key", "NCBI_API_KEY")
+s2_api_key = get_setting_or_env("s2_api_key", "S2_API_KEY")
+github_token = get_setting_or_env("github_token", "GITHUB_TOKEN")
 
 _EMAIL_VALID_CACHE = None
 def is_ncbi_email_valid():
@@ -86,11 +94,16 @@ def is_ncbi_email_valid():
         else:
             _EMAIL_VALID_CACHE = False
 
-    if _EMAIL_VALID_CACHE:logger.info(f"Email: {ncbi_email[0:5]}... is valid.")
-    else: logger.error(f"EMail: {ncbi_email[0:5]}... is invalid.")
+    if _EMAIL_VALID_CACHE:logger.info(f"NCBI email: {ncbi_email[0:5]}...{ncbi_email[-5:]} is valid.")
+    else: logger.error(f"NCBI email: {ncbi_email[0:5]}...{ncbi_email[-5:]} is invalid.")
 
     return _EMAIL_VALID_CACHE
 
+def is_ncbi_enabled():
+    """双重校验：只有 Email 和 API Key 都存在才能使用 NCBI"""
+    return is_ncbi_email_valid() and bool(ncbi_api_key)
+
+# 满足你的需求：保持启动时的日志打印！
 if ncbi_email: logger.info("Using NCBI Email.")
 if ncbi_api_key: logger.info("Using NCBI API Key.")
 if s2_api_key: logger.info("Using S2 API Key.")
@@ -178,105 +191,81 @@ def simple_retry(max_attempts=3, delay=2):
 def search_academic_literature(query: str, max_results: int = 15, offset: int = 0, source: Literal["auto", "semantic_scholar", "openalex", "crossref", "pubmed"] = "auto") -> str:
     logger.info(f"Task: Unified Literature Search | Query: '{query}' | Offset: {offset} | Source: {source}")
 
-    if not is_ncbi_email_valid():
+    if not is_ncbi_enabled():
         logger.error("NCBI has been disabled due to the lack of available email addresses; other tools are still functioning normally.")
 
-    try:
-        if s2_api_key and source in ["auto", "semantic_scholar"]:
-            url = "https://api.semanticscholar.org/graph/v1/paper/search"
-            params = {"query": query, "limit": max_results, "offset": offset,
-                      "fields": "title,authors,year,abstract,citationCount,isOpenAccess,url,externalIds"}
-            try:
-                res = mcp_request("GET", url, params=params, headers={"x-api-key": s2_api_key}, timeout=15)
-                res.raise_for_status()
-                parsed = []
-                for p in res.json().get("data", []):
-                    if not isinstance(p, dict): continue
-                    authors_raw = p.get("authors") or []
-                    if not isinstance(authors_raw, list): authors_raw = []
-                    ext_ids = p.get("externalIds")
-                    parsed.append({"title": p.get("title", ""), "year": p.get("year", "Unknown"),
-                                   "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
-                                   "citation_count": p.get("citationCount", 0),
-                                   "abstract": p.get("abstract") or "No abstract",
-                                   "doi": ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else "",
-                                   "url": p.get("url", ""),
-                                   "source_db": "Semantic Scholar"})
-                if parsed: return json.dumps({"status": "success", "source": "semantic_scholar", "results": parsed})
-            except Exception as e:
-                logger.warning(f"S2 search failed: {e}")
+    if source in ["auto", "openalex"]:
+        page = (offset // max_results) + 1
+        url = f"https://api.openalex.org/works?search={urllib.parse.quote(query)}&mailto={ncbi_email}&per-page={max_results}&page={page}"
+        try:
+            res = mcp_request("GET", url, timeout=15)
+            res.raise_for_status()
+            parsed = []
+            for p in res.json().get("results", []):
+                if not isinstance(p, dict): continue
+                abs_idx = p.get("abstract_inverted_index")
+                abstract_text = "No abstract"
+                if isinstance(abs_idx, dict):
+                    words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
+                             positions]
+                    words.sort()
+                    abstract_text = " ".join([w for pos_idx, w in words])
 
-        if source in ["auto", "openalex"]:
-            page = (offset // max_results) + 1
-            url = f"https://api.openalex.org/works?search={urllib.parse.quote(query)}&mailto={ncbi_email}&per-page={max_results}&page={page}"
-            try:
-                res = mcp_request("GET", url, timeout=15)
-                res.raise_for_status()
-                parsed = []
-                for p in res.json().get("results", []):
-                    if not isinstance(p, dict): continue
-                    abs_idx = p.get("abstract_inverted_index")
-                    abstract_text = "No abstract"
-                    if isinstance(abs_idx, dict):
-                        words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
-                                 positions]
-                        words.sort()
-                        abstract_text = " ".join([w for pos_idx, w in words])
+                authors_raw = p.get("authorships") or []
+                if not isinstance(authors_raw, list): authors_raw = []
+                authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
+                           isinstance(a, dict) and isinstance(a.get("author"), dict)]
 
-                    authors_raw = p.get("authorships") or []
-                    if not isinstance(authors_raw, list): authors_raw = []
-                    authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
-                               isinstance(a, dict) and isinstance(a.get("author"), dict)]
+                parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
+                               "authors": authors,
+                               "citation_count": p.get("cited_by_count", 0), "abstract": abstract_text,
+                               "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
+                               "url": p.get("id", ""), "source_db": "OpenAlex"})
+            if parsed: return json.dumps({"status": "success", "source": "openalex", "results": parsed})
+        except Exception as e:
+            logger.warning(f"OpenAlex search failed: {e}")
 
-                    parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
-                                   "authors": authors,
-                                   "citation_count": p.get("cited_by_count", 0), "abstract": abstract_text,
-                                   "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
-                                   "url": p.get("id", ""), "source_db": "OpenAlex"})
-                if parsed: return json.dumps({"status": "success", "source": "openalex", "results": parsed})
-            except Exception as e:
-                logger.warning(f"OpenAlex search failed: {e}")
+    if source in ["auto", "crossref"]:
+        url = f"https://api.crossref.org/works?query={urllib.parse.quote(query)}&mailto={ncbi_email}&rows={max_results}&offset={offset}"
+        try:
+            res = mcp_request("GET", url, timeout=15)
+            res.raise_for_status()
+            parsed = []
+            msg_dict = res.json().get("message")
+            items = msg_dict.get("items", []) if isinstance(msg_dict, dict) else []
+            for p in items:
+                if not isinstance(p, dict): continue
+                authors_raw = p.get("author") or []
+                if not isinstance(authors_raw, list): authors_raw = []
+                authors = [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in authors_raw if
+                           isinstance(a, dict)]
 
-        if source in ["auto", "crossref"]:
-            url = f"https://api.crossref.org/works?query={urllib.parse.quote(query)}&mailto={ncbi_email}&rows={max_results}&offset={offset}"
-            try:
-                res = mcp_request("GET", url, timeout=15)
-                res.raise_for_status()
-                parsed = []
-                msg_dict = res.json().get("message")
-                items = msg_dict.get("items", []) if isinstance(msg_dict, dict) else []
-                for p in items:
-                    if not isinstance(p, dict): continue
-                    authors_raw = p.get("author") or []
-                    if not isinstance(authors_raw, list): authors_raw = []
-                    authors = [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in authors_raw if
-                               isinstance(a, dict)]
+                title_raw = p.get("title")
+                title = title_raw[0] if isinstance(title_raw, list) and len(title_raw) > 0 else (
+                    title_raw if isinstance(title_raw, str) else "")
 
-                    title_raw = p.get("title")
-                    title = title_raw[0] if isinstance(title_raw, list) and len(title_raw) > 0 else (
-                        title_raw if isinstance(title_raw, str) else "")
+                created = p.get("created")
+                year = "Unknown"
+                if isinstance(created, dict):
+                    date_parts = created.get("date-parts")
+                    if isinstance(date_parts, list) and len(date_parts) > 0 and isinstance(date_parts[0],
+                                                                                           list) and len(
+                            date_parts[0]) > 0:
+                        year = str(date_parts[0][0])
 
-                    created = p.get("created")
-                    year = "Unknown"
-                    if isinstance(created, dict):
-                        date_parts = created.get("date-parts")
-                        if isinstance(date_parts, list) and len(date_parts) > 0 and isinstance(date_parts[0],
-                                                                                               list) and len(
-                                date_parts[0]) > 0:
-                            year = str(date_parts[0][0])
+                parsed.append({"title": title,
+                               "year": year,
+                               "authors": authors, "citation_count": p.get("is-referenced-by-count", 0),
+                               "abstract": p.get("abstract", "No abstract").replace("<jats:p>", "").replace(
+                                   "</jats:p>", ""),
+                               "doi": p.get("DOI", ""), "url": p.get("URL", ""),
+                               "source_db": "Crossref"})
+            if parsed: return json.dumps({"status": "success", "source": "crossref", "results": parsed})
+        except Exception as e:
+            logger.warning(f"Crossref search failed: {e}")
 
-                    parsed.append({"title": title,
-                                   "year": year,
-                                   "authors": authors, "citation_count": p.get("is-referenced-by-count", 0),
-                                   "abstract": p.get("abstract", "No abstract").replace("<jats:p>", "").replace(
-                                       "</jats:p>", ""),
-                                   "doi": p.get("DOI", ""), "url": p.get("URL", ""),
-                                   "source_db": "Crossref"})
-                if parsed: return json.dumps({"status": "success", "source": "crossref", "results": parsed})
-            except Exception as e:
-                logger.warning(f"Crossref search failed: {e}")
-
-        if source in ["auto", "pubmed"]:
+    if source in ["auto", "pubmed"] and is_ncbi_enabled():
+        try:
             search_handle = Entrez.esearch(db="pubmed", term=query, retstart=offset, retmax=max_results)
             search_res = Entrez.read(search_handle, validate=False)
             ids = search_res.get("IdList", []) if isinstance(search_res, dict) else []
@@ -311,9 +300,49 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
                                    "pmid": d.get("Id", ""),
                                    "doi": doi,
                                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{d.get('Id', '')}/", "source_db": "PubMed"})
-                return json.dumps({"status": "success", "source": "pubmed", "results": parsed})
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+                if parsed: return json.dumps({"status": "success", "source": "pubmed", "results": parsed})
+        except Exception as e:
+            logger.warning(f"Pubmed search failed: {e}")
+
+    if source in ["auto", "semantic_scholar"] and is_s2_enabled():
+        try:
+            url = "https://api.semanticscholar.org/graph/v1/paper/search"
+            params = {"query": query, "limit": max_results, "offset": offset,
+                      "fields": "title,authors,year,abstract,citationCount,isOpenAccess,url,externalIds"}
+
+            res = s2_request("GET", url, params=params)
+            if res is None:
+                logger.warning("S2 request returned None (likely API key missing or rate limited).")
+                raise ValueError("S2 request failed silently")
+            res.raise_for_status()
+            response_text = res.text
+            if not response_text or len(response_text.strip()) == 0:
+                logger.warning("S2 response is empty")
+                raise ValueError("S2 response is empty")
+            json_data = res.json()
+            if not isinstance(json_data, dict):
+                raise ValueError("S2 response is not a dictionary")
+            parsed = []
+            for p in res.json().get("data", []):
+                if not isinstance(p, dict): continue
+                authors_raw = p.get("authors") or []
+                if not isinstance(authors_raw, list): authors_raw = []
+                ext_ids = p.get("externalIds")
+                parsed.append({"title": p.get("title", ""), "year": p.get("year", "Unknown"),
+                               "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
+                               "citation_count": p.get("citationCount", 0),
+                               "abstract": p.get("abstract") or "No abstract",
+                               "doi": ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else "",
+                               "url": p.get("url", ""),
+                               "source_db": "Semantic Scholar"})
+
+                if parsed: return json.dumps({"status": "success", "source": "semantic_scholar", "results": parsed})
+        except Exception as e:
+            logger.warning(f"Semantic scholar search failed: {e}")
+
+
+    return json.dumps({"status": "success", "results": [], "message": "No results found from any source"})
+
 
 @mcp.tool(
     name="traverse_citation_graph",
@@ -325,95 +354,125 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
 )
 @simple_retry(max_attempts=2, delay=1)
 def traverse_citation_graph(doi: str, direction: Literal["references", "citations"] = "references",
-                            max_results: int = 10) -> str:
-    logger.info(f"Task: Citation Graph | DOI: {doi} | Direction: {direction}")
+                            max_results: int = 10, source: Literal["auto", "openalex", "semantic_scholar"] = "auto") -> str:
+    logger.info(f"Task: Citation Graph | DOI: {doi} | Direction: {direction} | Source: {source}")
+
     if direction not in ["references", "citations"]: return json.dumps(
         {"status": "error", "message": "direction must be 'references' or 'citations'"})
-    clean_doi = re.sub(r'^(https?://(dx\.)?doi\.org/)?', '', doi.strip())
 
-    if s2_api_key:
+    clean_doi = re.sub(r'^(https?://(dx\.)?doi\.org/)?', '', doi.strip())
+    last_error = None
+
+    if source in ["auto", "openalex"]:
         try:
-            url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/{direction}?fields=title,authors,year,abstract,citationCount,externalIds,url&limit={max_results}"
-            res = mcp_request("GET", url, headers={"x-api-key": s2_api_key}, timeout=15)
+            if direction == "references":
+                work_res = mcp_request("GET",
+                                       f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={ncbi_email}",
+                                       timeout=15)
+                if work_res.status_code == 404:
+                    return json.dumps({"status": "success", "results": [], "message": f"DOI '{clean_doi}' not found."})
+                work_res.raise_for_status()
+
+                ref_ids = work_res.json().get("referenced_works", [])[:max_results]
+
+                if not ref_ids:
+                    return json.dumps({"status": "success", "results": []})
+
+                filter_str = "|".join([r.split("/")[-1] for r in ref_ids])
+                safe_filter = urllib.parse.quote(f"ids.openalex:{filter_str}")
+                url = f"https://api.openalex.org/works?filter={safe_filter}&mailto={ncbi_email}"
+            else:
+                safe_filter = urllib.parse.quote(f"cites:https://doi.org/{clean_doi}")
+                url = f"https://api.openalex.org/works?filter={safe_filter}&per-page={max_results}&mailto={ncbi_email}"
+
+            res = mcp_request("GET", url, timeout=15)
             res.raise_for_status()
             parsed = []
-            data_list = res.json().get("data")
-            if isinstance(data_list, list):
-                for item in data_list:
-                    if not isinstance(item, dict): continue
-                    p = item.get("citedPaper") if direction == "references" else item.get("citingPaper")
-                    if not isinstance(p, dict) or not p.get("title"): continue
+            for p in res.json().get("results", []):
+                if not isinstance(p, dict): continue
 
-                    authors_raw = p.get("authors") or []
-                    if not isinstance(authors_raw, list): authors_raw = []
+                abs_idx = p.get("abstract_inverted_index")
+                abstract_text = "No abstract"
+                if isinstance(abs_idx, dict):
+                    words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
+                             positions]
+                    words.sort()
+                    abstract_text = " ".join([w for pos_idx, w in words])
 
-                    ext_ids = p.get("externalIds")
-                    doi_str = ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else ""
+                authors_raw = p.get("authorships") or []
+                if not isinstance(authors_raw, list): authors_raw = []
+                authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
+                           isinstance(a, dict) and isinstance(a.get("author"), dict)]
 
-                    # 喵：去掉了作者 [:3] 的限制，并加上了 abstract 解析
-                    parsed.append({
-                        "title": p.get("title", ""), "year": p.get("year", "Unknown"),
-                        "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
-                        "citation_count": p.get("citationCount", 0),
-                        "abstract": p.get("abstract") or "No abstract",
-                        "doi": doi_str,
-                        "url": p.get("url", "")
-                    })
-            if parsed:
+                parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
+                               "authors": authors,
+                               "citation_count": p.get("cited_by_count", 0),
+                               "abstract": abstract_text,
+                               "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
+                               "url": p.get("id", "")})
+
+            return json.dumps({"status": "success", "source": "OpenAlex", "direction": direction, "results": parsed})
+        except Exception as e:
+            logger.warning(f"OpenAlex citation graph failed: {e}. Falling back to S2 if configured...")
+            last_error = e
+
+    if source in ["auto", "semantic_scholar"]:
+        if is_s2_enabled():
+            try:
+                url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/{direction}?fields=title,authors,year,abstract,citationCount,externalIds,url&limit={max_results}"
+
+                res = s2_request("GET", url, timeout=15)
+
+                if res is None:
+                    raise ValueError("S2 request returned None")
+                res.raise_for_status()
+
+                response_text = res.text
+                if not response_text or len(response_text.strip()) == 0:
+                    logger.warning("S2 citation graph response is empty")
+                    raise ValueError("S2 response is empty")
+
+                json_data = res.json()
+
+                if not isinstance(json_data, dict):
+                    logger.warning(f"S2 citation graph response is not a dict: {type(json_data)}")
+                    raise ValueError("S2 response is not a dictionary")
+                parsed = []
+                data_list = json_data.get("data")
+
+                if isinstance(data_list, list):
+                    for item in data_list:
+                        if not isinstance(item, dict): continue
+                        p = item.get("citedPaper") if direction == "references" else item.get("citingPaper")
+                        if not isinstance(p, dict) or not p.get("title"): continue
+
+                        authors_raw = p.get("authors") or []
+                        if not isinstance(authors_raw, list): authors_raw = []
+
+                        ext_ids = p.get("externalIds")
+                        doi_str = ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else ""
+
+                        parsed.append({
+                            "title": p.get("title", ""), "year": p.get("year", "Unknown"),
+                            "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
+                            "citation_count": p.get("citationCount", 0),
+                            "abstract": p.get("abstract") or "No abstract",
+                            "doi": doi_str,
+                            "url": p.get("url", "")
+                        })
+                print(parsed)
                 return json.dumps(
                     {"status": "success", "source": "Semantic Scholar", "direction": direction, "results": parsed})
-        except Exception as e:
-            logger.warning(f"S2 citation graph failed: {e}")
+            except Exception as e:
+                logger.warning(f"S2 citation graph fallback failed: {e}")
+                last_error = e
 
-    try:
-        if direction == "references":
-            work_res = mcp_request("GET",
-                                   f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={ncbi_email}",
-                                   timeout=15)
-            if work_res.status_code == 404:
-                return json.dumps({"status": "success", "results": [], "message": f"DOI '{clean_doi}' not found."})
-            work_res.raise_for_status()
 
-            ref_ids = work_res.json().get("referenced_works", [])[:max_results]
+    if last_error:
+        return json.dumps({"status": "error", "message": f"Failed to traverse citation graph: {str(last_error)}"})
 
-            if not ref_ids:
-                return json.dumps({"status": "success", "results": []})
+    return json.dumps({"status": "error", "message": "Unexpected error traversing citation graph."})
 
-            filter_str = "|".join([r.split("/")[-1] for r in ref_ids])
-            safe_filter = urllib.parse.quote(f"ids.openalex:{filter_str}")
-            url = f"https://api.openalex.org/works?filter={safe_filter}&mailto={ncbi_email}"
-        else:
-            safe_filter = urllib.parse.quote(f"cites:https://doi.org/{clean_doi}")
-            url = f"https://api.openalex.org/works?filter={safe_filter}&per-page={max_results}&mailto={ncbi_email}"
-
-        res = mcp_request("GET", url, timeout=15)
-        res.raise_for_status()
-        parsed = []
-        for p in res.json().get("results", []):
-            if not isinstance(p, dict): continue
-
-            abs_idx = p.get("abstract_inverted_index")
-            abstract_text = "No abstract"
-            if isinstance(abs_idx, dict):
-                words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
-                         positions]
-                words.sort()
-                abstract_text = " ".join([w for pos_idx, w in words])
-
-            authors_raw = p.get("authorships") or []
-            if not isinstance(authors_raw, list): authors_raw = []
-            authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
-                       isinstance(a, dict) and isinstance(a.get("author"), dict)]
-
-            parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
-                           "authors": authors,
-                           "citation_count": p.get("cited_by_count", 0),
-                           "abstract": abstract_text,
-                           "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
-                           "url": p.get("id", "")})
-        return json.dumps({"status": "success", "source": "OpenAlex", "direction": direction, "results": parsed})
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
 
 
 @mcp.tool(
@@ -421,10 +480,11 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
     description=("[Tags: Literature] Check if a given DOI has an Open Access PDF and return its direct download link.")
 )
 @simple_retry()
-def fetch_open_access_pdf(doi: str) -> str:
-    logger.info(f"Task: Fetch OA PDF | DOI: '{doi}'")
+def fetch_open_access_pdf(doi: str, source: Literal["auto", "openalex", "unpaywall", "pubmed", "semantic_scholar"] = "auto") -> str:
+    logger.info(f"Task: Fetch OA PDF | DOI: '{doi}' | Source: '{source}'")
+
     fetcher = OAFetcher()
-    result = fetcher.fetch_best_oa_pdf(doi, ncbi_email, s2_api_key)
+    result = fetcher.fetch_best_oa_pdf(doi, ncbi_email, ncbi_api_key=ncbi_api_key, source=source)
     if result.get("is_oa"):
         return json.dumps({"status": "success", "is_oa": True, "pdf_url": result["pdf_url"],
                            "landing_page_url": result["landing_page_url"], "source": result["source"]})
@@ -447,7 +507,7 @@ def fetch_open_access_pdf(doi: str) -> str:
 def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", max_results: int = 5) -> str:
     logger.info(f"Task: Omics Dataset Search | DB: {db_type} | Query: '{query}'")
 
-    if not is_ncbi_email_valid():
+    if not is_ncbi_enabled():
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -536,7 +596,7 @@ def read_local_sequence_file(file_path: str, max_chars: int = 50000) -> str:
 def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein"] = "nuccore") -> str:
     logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
 
-    if not is_ncbi_email_valid():
+    if not is_ncbi_enabled():
         return json.dumps({"status": "error", "message": "NCBI tools are disabled..."})
 
     safe_id = accession_id.strip()
@@ -581,7 +641,7 @@ def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein
 def fetch_taxonomy_info(organism_name: str) -> str:
     logger.info(f"Task: Taxonomy Fetch | Organism: '{organism_name}'")
 
-    if not is_ncbi_email_valid():
+    if not is_ncbi_enabled():
         return json.dumps({"status": "error",
                            "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
 
@@ -604,40 +664,6 @@ def fetch_taxonomy_info(organism_name: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="fetch_pubmed_abstract",
-    description=("[Tags: Literature] Fetch the full-text abstract of a specific PubMed article using its PMID.")
-)
-@simple_retry()
-def fetch_pubmed_abstract(pmid: str) -> str:
-    logger.info(f"Task: Fetch Abstract | PMID: {pmid}")
-
-    if not is_ncbi_email_valid():
-        return json.dumps({"status": "error",
-                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
-
-
-
-    clean_pmid = str(pmid).strip()
-    if clean_pmid.lower().startswith("pmid:"):
-        clean_pmid = clean_pmid[5:].strip()
-    elif clean_pmid.lower().startswith("pmid"):
-        clean_pmid = clean_pmid[4:].strip()
-
-    if not clean_pmid.isdigit():
-        return json.dumps({
-            "status": "error",
-            "message": f"Invalid PMID: '{pmid}'. Must be a purely numeric PubMed ID (e.g., '31234567'). If you only have a DOI or title, use search_academic_literature first to find the correct PMID."
-        })
-
-    try:
-        handle = Entrez.efetch(db="pubmed", id=clean_pmid, rettype="abstract", retmode="text")
-        abstract_text = handle.read()
-        handle.close()
-        return json.dumps({"status": "success", "pmid": clean_pmid, "abstract": abstract_text.strip()})
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
-
 
 @mcp.tool(
     name="universal_ncbi_summary",
@@ -652,11 +678,9 @@ def fetch_pubmed_abstract(pmid: str) -> str:
 def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> str:
     logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query}")
 
-
-    if not is_ncbi_email_valid():
+    if not is_ncbi_enabled():
         return json.dumps({"status": "error",
-                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
-
+                           "message": "NCBI tools are disabled. Both a valid Email and NCBI API Key must be configured in Global Settings."})
 
     try:
         search_handle = Entrez.esearch(db=database, term=query, retmax=max_results)
