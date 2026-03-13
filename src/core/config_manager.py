@@ -167,7 +167,13 @@ class ConfigManager:
             "ncbi_api_key": "",
             "s2_api_key": "",
             "s2_rate_limit": "1.0",
-            "github_token": ""
+            "github_token": "",
+            "quick_trans_is_pinned": True,
+            "quick_trans_markdown": True,
+            "trans_source_lang": "Auto Detect",
+            "trans_target_lang": "English",
+            "quick_trans_model_name": "",
+            "quick_trans_llm_id": ""
         }
 
         current_settings = self.load_json(self.SETTINGS_PATH, encrypt=True)

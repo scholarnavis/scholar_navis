@@ -203,8 +203,6 @@ class ChatBubbleWidget(QWidget):
         super().resizeEvent(event)
         parent = self.parentWidget()
         if parent:
-            self.lbl_text.setMinimumHeight(0)
-
             max_w = int(parent.width() * 0.80)
 
             if self.lbl_text.maximumWidth() != max_w:
@@ -214,6 +212,7 @@ class ChatBubbleWidget(QWidget):
 
                 self.lbl_text.updateGeometry()
 
+        self._adjust_browser_height()
 
     def adjust_edit_height(self):
         doc_h = int(self.edit_input.document().size().height())
@@ -562,8 +561,15 @@ class ChatBubbleWidget(QWidget):
     def _adjust_browser_height(self):
         doc_height = int(self.lbl_text.document().size().height())
         sb = self.lbl_text.horizontalScrollBar()
-        sb_height = sb.height() if sb.isVisible() else 0
-        self.lbl_text.setFixedHeight(doc_height + sb_height)
+        sb_height = 0
+
+        if sb.isVisible():
+            sb_height = sb.height()
+        else:
+            if self.lbl_text.document().idealWidth() > self.lbl_text.viewport().width():
+                sb_height = sb.sizeHint().height()
+
+        self.lbl_text.setFixedHeight(doc_height + sb_height + 15)
 
 
     def _start_image_download(self, url):

@@ -122,18 +122,31 @@ class TranslatorWorker(QObject):
 class QuickTranslatorWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(None)
-        self.is_pinned = True
 
-        # 初始属性：无边框 + 顶层显示 + 工具窗口(不在任务栏占位)
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.cfg_mgr = ConfigManager()
+
+        self.is_pinned = self.cfg_mgr.user_settings.get("quick_trans_is_pinned", True)
+
+        flags = Qt.Window | Qt.FramelessWindowHint | Qt.Tool
+        if self.is_pinned:
+            flags |= Qt.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(800, 500)
+        self.setMinimumSize(400, 300)
+
+        # 为自定义边缘拉伸开启鼠标追踪
+        self.setMouseTracking(True)
+        self.EDGE_MARGIN = 10
+        self._resize_dir = None
+        self.start_geometry = None
         self.worker_thread = None
         self.worker = None
         self.drag_pos = None
 
-        self.cfg_mgr = ConfigManager()
         self._setup_ui()
+        self._update_pin_ui()
         self._center_on_screen()
         ThemeManager().theme_changed.connect(self._apply_theme)
 
@@ -149,6 +162,8 @@ class QuickTranslatorWindow(QWidget):
         self.main_frame = QWidget(self)
         self.main_frame.setStyleSheet(
             "QWidget { background-color: #252526; border: 1px solid #3e3e42; border-radius: 12px; }")
+        self.main_frame.setMouseTracking(True)
+
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.addWidget(self.main_frame)
@@ -160,13 +175,7 @@ class QuickTranslatorWindow(QWidget):
         title.setStyleSheet("color: #05B8CC; font-weight: bold; border: none;")
 
         self.btn_pin = QPushButton()
-        self.btn_pin.setIcon(ThemeManager().icon("keep", "accent"))
-        self.btn_pin.setToolTip("Toggle Always on Top")
         self.btn_pin.setFixedSize(24, 24)
-        self.btn_pin.setStyleSheet(
-            "QPushButton { background: transparent; border: none; } "
-            "QPushButton:hover { background: rgba(255, 255, 255, 0.1); border-radius: 4px; }"
-        )
         self.btn_pin.clicked.connect(self._toggle_pin)
 
         btn_close = QPushButton()
@@ -245,9 +254,12 @@ class QuickTranslatorWindow(QWidget):
         self.btn_stop = QPushButton("Stop")
         self.btn_clear = QPushButton("Clear")
         self.btn_copy = QPushButton("Copy")
+
+        saved_md = self.cfg_mgr.user_settings.get("quick_trans_markdown", True)
         self.chk_markdown = QCheckBox("Markdown Render")
-        self.chk_markdown.setChecked(True)
+        self.chk_markdown.setChecked(saved_md)
         self.chk_markdown.toggled.connect(self._re_render_output)
+        self.chk_markdown.toggled.connect(self._save_markdown_setting)
 
         self.btn_trans.setStyleSheet(
             "background-color: #007acc; color: white; border-radius: 6px; padding: 6px; font-weight: bold;")
@@ -283,6 +295,25 @@ class QuickTranslatorWindow(QWidget):
         frame_layout.addLayout(grip_layout)
 
         self.current_out_text = ""
+
+    def _save_markdown_setting(self, checked):
+        """保存 Markdown 复选框的状态"""
+        self.cfg_mgr.user_settings["quick_trans_markdown"] = checked
+        self.cfg_mgr.save_settings()
+
+    def _update_pin_ui(self):
+        """仅更新置顶按钮的图标和 ToolTip"""
+        if self.is_pinned:
+            self.btn_pin.setIcon(ThemeManager().icon("keep_off", "accent"))
+            self.btn_pin.setToolTip("Unpin Window")
+            self.btn_pin.setStyleSheet(
+                "QPushButton { background: transparent; color: #05B8CC; border: none; font-size: 15px; } QPushButton:hover { color: #fff; }")
+        else:
+            self.btn_pin.setIcon(ThemeManager().icon("keep", "text_muted"))
+            self.btn_pin.setToolTip("Pin to Top")
+            self.btn_pin.setStyleSheet(
+                "QPushButton { background: transparent; color: #888; border: none; font-size: 15px; opacity: 0.6; } QPushButton:hover { color: #ccc; }")
+
 
 
     def _stop_translation(self):
@@ -328,28 +359,49 @@ class QuickTranslatorWindow(QWidget):
             self.output_box.setHtml(clean_text.replace('\n', '<br>'))
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
 
-
-
     def _toggle_pin(self):
-        """切换置顶状态，并刷新 Window Flags 和图标"""
         self.is_pinned = not self.is_pinned
-        flags = self.windowFlags()
+        self.cfg_mgr.user_settings["quick_trans_is_pinned"] = self.is_pinned
+        self.cfg_mgr.save_settings()
 
+        flags = self.windowFlags()
         if self.is_pinned:
             flags |= Qt.WindowStaysOnTopHint
-            self.btn_pin.setIcon(ThemeManager().icon("keep_off", "accent"))
-            self.btn_pin.setToolTip("Unpin Window")
-            self.btn_pin.setStyleSheet(
-                "QPushButton { background: transparent; color: #05B8CC; border: none; font-size: 15px; } QPushButton:hover { color: #fff; }")
         else:
             flags &= ~Qt.WindowStaysOnTopHint
-            self.btn_pin.setIcon(ThemeManager().icon("keep", "text_muted"))
-            self.btn_pin.setToolTip("Pin to Top")
-            self.btn_pin.setStyleSheet(
-                "QPushButton { background: transparent; color: #888; border: none; font-size: 15px; opacity: 0.6; } QPushButton:hover { color: #ccc; }")
 
         self.setWindowFlags(flags)
+        self._update_pin_ui()
         self.show()
+
+    def _get_resize_dir(self, pos):
+        """判断鼠标位置属于哪个边缘"""
+        x, y = pos.x(), pos.y()
+        w, h = self.width(), self.height()
+        m = self.EDGE_MARGIN
+        dir_ = ""
+        if y < m:
+            dir_ += "top"
+        elif y > h - m:
+            dir_ += "bottom"
+        if x < m:
+            dir_ += "left"
+        elif x > w - m:
+            dir_ += "right"
+        return dir_
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._resize_dir = self._get_resize_dir(event.pos())
+            if self._resize_dir:
+                self.drag_pos = event.globalPos()
+                self.start_geometry = self.geometry()
+            else:
+                self.drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+
+
 
     def _save_lang(self, key, val):
         self.cfg_mgr.user_settings[key] = val
@@ -546,12 +598,62 @@ class QuickTranslatorWindow(QWidget):
             event.accept()
 
     def mouseMoveEvent(self, event):
+        pos = event.pos()
+
+        # 1. 鼠标悬停边缘时改变光标状态 (未按下按钮时)
+        if not event.buttons() & Qt.LeftButton:
+            dir_ = self._get_resize_dir(pos)
+            if dir_ in ["topleft", "bottomright"]:
+                self.setCursor(Qt.SizeFDiagCursor)
+            elif dir_ in ["topright", "bottomleft"]:
+                self.setCursor(Qt.SizeBDiagCursor)
+            elif dir_ in ["left", "right"]:
+                self.setCursor(Qt.SizeHorCursor)
+            elif dir_ in ["top", "bottom"]:
+                self.setCursor(Qt.SizeVerCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+
+        # 2. 鼠标拖动处理
         if event.buttons() == Qt.LeftButton and self.drag_pos is not None:
-            self.move(event.globalPos() - self.drag_pos)
+            if getattr(self, '_resize_dir', None):
+                # 拉伸窗口逻辑
+                delta = event.globalPos() - self.drag_pos
+                rect = self.start_geometry
+
+                new_left = rect.left()
+                new_top = rect.top()
+                new_right = rect.right()
+                new_bottom = rect.bottom()
+
+                if "left" in self._resize_dir: new_left += delta.x()
+                if "right" in self._resize_dir: new_right += delta.x()
+                if "top" in self._resize_dir: new_top += delta.y()
+                if "bottom" in self._resize_dir: new_bottom += delta.y()
+
+                # 约束最小窗口限制
+                if new_right - new_left < self.minimumWidth():
+                    if "left" in self._resize_dir:
+                        new_left = new_right - self.minimumWidth()
+                    else:
+                        new_right = new_left + self.minimumWidth()
+                if new_bottom - new_top < self.minimumHeight():
+                    if "top" in self._resize_dir:
+                        new_top = new_bottom - self.minimumHeight()
+                    else:
+                        new_bottom = new_top + self.minimumHeight()
+
+                self.setGeometry(new_left, new_top, new_right - new_left, new_bottom - new_top)
+            else:
+                # 移动窗口逻辑
+                self.move(event.globalPos() - self.drag_pos)
             event.accept()
 
     def mouseReleaseEvent(self, event):
         self.drag_pos = None
+        self._resize_dir = None
+        self.setCursor(Qt.ArrowCursor)
+
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
