@@ -179,6 +179,14 @@ class TextFormatter:
             # NCBI RefSeq / GenBank / Accessions
             (r'\b((?:NM|NP|NR|NC|NG|XM|XP|XR|WP|YP|AP)_\d{4,10}(?:\.\d+)?)\b',
              r'<a href="https://www.ncbi.nlm.nih.gov/search/all/?term=\1">\1</a>'),
+
+            # AlphaFold 结构标识符 (例如: AF-Q0E4M8-F1)
+            (r'\b(AF-[O,P,Q,A-N,R-Z][0-9][A-Z0-9]{3}[0-9]-F\d+)\b',
+             r'<a href="https://alphafold.ebi.ac.uk/entry/\1">AlphaFold \1</a>'),
+            # AlphaFold 原始模型文件下载提取 (捕获 pdb 或 cif 文件后缀)
+            (r'\b(AF-[A-Z0-9]{6,10}-F\d+-model_v\d+\.(?:pdb|cif))\b',
+             r'<a href="https://alphafold.ebi.ac.uk/files/\1">Download Model: \1</a>'),
+
             # UniProt
             (r'\b([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\b',
              r'<a href="https://www.uniprot.org/uniprotkb/\1/entry">\1</a>'),
@@ -194,6 +202,14 @@ class TextFormatter:
             (r'\bPDB\s*(?:ID\s*)?:?\s*([1-9][A-Z0-9]{3})\b', r'<a href="https://www.rcsb.org/structure/\1">PDB \1</a>'),
             # STRING DB 蛋白互作网络
             (r'\b(\d+\.ENSP\d{11})\b', r'<a href="https://string-db.org/network/\1">\1</a>'),
+
+
+            # GBIF Taxon Key (分类单元唯一标识符)
+            (r'\b(?:GBIF\s*Taxon\s*Key|GBIF\s*ID|TaxonKey)\s*:?\s*(\d+)\b',
+             r'<a href="https://www.gbif.org/species/\1">GBIF Taxon \1</a>'),
+            # GBIF 发生记录主页映射 (针对 LLM 自动生成的纯文本引用)
+            (r'(Global\s*Biodiversity\s*Information\s*Facility\s*\(GBIF\)\s*-\s*Occurrence\s*(?:Download|Records?))',
+             r'<a href="https://www.gbif.org/occurrence/search">\1</a>'),
         ]
 
         for pat, template in replacements:
@@ -230,7 +246,7 @@ class TextFormatter:
             text = text[final_match.end():]
         else:
             text = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
-            
+
         text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[\s*FOLLOW[_-]?\s*UPS?\s*\]", "", text,
                       flags=re.IGNORECASE)
         text = re.sub(r"\[AI is reasoning in the background\.\.\.\]", "", text, flags=re.IGNORECASE)

@@ -107,6 +107,7 @@ class ChatBubbleWidget(QWidget):
         # 正文文本框
         self.lbl_text = QTextBrowser()
         self.lbl_text.setOpenExternalLinks(False)
+        self.lbl_text.setOpenLinks(False)
         self.lbl_text.setFrameShape(QFrame.NoFrame)
         self.lbl_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.lbl_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)

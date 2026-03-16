@@ -664,6 +664,58 @@ def fetch_taxonomy_info(organism_name: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
+@mcp.tool(
+    name="search_gbif_occurrences",
+    description=(
+            "[Tags: Taxonomy, Ecology] Search the Global Biodiversity Information Facility (GBIF) for species occurrence records. "
+            "CRITICAL: 'scientific_name' MUST be a valid binomial/trinomial scientific name. "
+            "Returns spatial distribution metrics, observation counts, and basic ecological context."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def search_gbif_occurrences(scientific_name: str, limit: int = 5) -> str:
+    logger.info(f"Task: GBIF Occurrence Search | Species: '{scientific_name}'")
+    try:
+        match_url = f"https://api.gbif.org/v1/species/match?name={urllib.parse.quote(scientific_name)}"
+        match_res = mcp_request("GET", match_url, timeout=10)
+        match_res.raise_for_status()
+        match_data = match_res.json()
+
+        if match_data.get("matchType") == "NONE" or "usageKey" not in match_data:
+            return json.dumps(
+                {"status": "error", "message": f"GBIF could not resolve the scientific name '{scientific_name}'."})
+
+        taxon_key = match_data["usageKey"]
+        exact_name = match_data.get("scientificName", scientific_name)
+
+        occ_url = f"https://api.gbif.org/v1/occurrence/search?taxonKey={taxon_key}&limit={limit}&hasCoordinate=true"
+        occ_res = mcp_request("GET", occ_url, timeout=15)
+        occ_res.raise_for_status()
+        occ_data = occ_res.json()
+
+        total_records = occ_data.get("count", 0)
+        results = []
+        for item in occ_data.get("results", []):
+            results.append({
+                "country": item.get("country", "Unknown"),
+                "decimalLatitude": item.get("decimalLatitude"),
+                "decimalLongitude": item.get("decimalLongitude"),
+                "eventDate": item.get("eventDate", "Unknown"),
+                "basisOfRecord": item.get("basisOfRecord", "Unknown"),
+                "institutionCode": item.get("institutionCode", "Unknown")
+            })
+
+        return json.dumps({
+            "status": "success",
+            "species": exact_name,
+            "taxon_key": taxon_key,
+            "total_global_occurrences_with_coordinates": total_records,
+            "sample_records": results
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
 
 @mcp.tool(
     name="universal_ncbi_summary",
@@ -1276,6 +1328,56 @@ def query_uniprot_database(query: str, db_type: Literal[
     except Exception as e:
         logger.error(f"Unified UniProt Search failed: {e}")
         return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
+    name="fetch_alphafold_structure",
+    description=(
+            "[Tags: Structure] Fetch predicted 3D structure metadata and download links from AlphaFold Protein Structure Database. "
+            "CRITICAL: The 'uniprot_id' MUST be a valid UniProt Accession (e.g., 'P04637', 'Q9STM3'). "
+            "Use this to find structures for proteins lacking experimentally determined PDB records."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def fetch_alphafold_structure(uniprot_id: str) -> str:
+    logger.info(f"Task: AlphaFold Structure Fetch | UniProt ID: '{uniprot_id}'")
+    try:
+        safe_id = urllib.parse.quote(uniprot_id.strip().upper())
+        url = f"https://alphafold.ebi.ac.uk/api/prediction/{safe_id}"
+
+        res = mcp_request("GET", url, timeout=15)
+
+        if res.status_code == 404:
+            return json.dumps({
+                "status": "error",
+                "message": f"AlphaFold prediction not found for UniProt ID '{uniprot_id}'. The protein might not be in the database or the ID is invalid."
+            })
+        res.raise_for_status()
+
+        data = res.json()
+        if not data:
+            return json.dumps({"status": "error", "message": "Empty response from AlphaFold DB."})
+
+        results = []
+        for item in data:
+            results.append({
+                "uniprot_id": item.get("uniprotAccession"),
+                "uniprot_description": item.get("uniprotDescription"),
+                "organism": item.get("speciesScientificName"),
+                "model_created_date": item.get("modelCreatedDate"),
+                "latest_version": item.get("latestVersion"),
+                "pdb_download_url": item.get("pdbUrl"),
+                "cif_download_url": item.get("cifUrl"),
+                "pae_image_url": item.get("paeImageUrl"),
+                "confidence_score_avg": item.get("fractionConfidentResidues")
+            })
+
+        return json.dumps({"status": "success", "source": "AlphaFold DB", "results": results}, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
 
 
 @mcp.tool(

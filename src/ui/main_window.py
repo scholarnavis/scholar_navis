@@ -432,7 +432,7 @@ class MainWindow(QMainWindow):
                 f"Please go to <b>Global Settings</b> to verify the path or download them."
             )
             dlg = StandardDialog(self, "System Check", msg)
-            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+
             dlg.exec()
             self._jump_to_settings()
 
