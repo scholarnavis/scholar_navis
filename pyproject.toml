@@ -36,6 +36,7 @@ dependencies = [
     "duckduckgo-search>=8.1.1",
     "beautifulsoup4>=4.14.3",
     "litellm>=1.82.1",
+    "pyjwt>=2.12.0",
 ]
 
 
