@@ -498,7 +498,7 @@ def fetch_open_access_pdf(doi: str, source: Literal["auto", "openalex", "unpaywa
 @mcp.tool(
     name="search_omics_datasets",
     description=(
-    "[Tags: Transcriptomics, Genomics] Search high-throughput NCBI datasets. "
+    "[Tags: Transcriptomics, Genomics, Systems Biology] Search high-throughput NCBI datasets. "
     "Set db_type to 'sra' for raw sequencing runs (e.g., RNA-Seq reads, FASTQ metadata) "
     "or 'geo' for curated datasets, microarray results, and overall study summaries."
     )
@@ -555,7 +555,7 @@ def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", ma
 @mcp.tool(
     name="read_local_sequence_file",
     description=(
-        "[Tags: Sequence] Read the contents of a local file downloaded to the workspace. "
+        "[Tags: Sequence, Systems Biology] Read the contents of a local file downloaded to the workspace. "
         "Use this tool when another tool (like fetch_sequence_fasta) saves a massive file locally and returns a 'local_path'. "
         "Only pass the filename or the path provided by the previous tool."
     )
@@ -958,7 +958,7 @@ def search_github_repos(query: str, max_results: int = 5) -> str:
 @mcp.tool(
     name="fetch_ensembl_gene",
     description=(
-            "[Tags: Genomics] Lookup a gene in Ensembl to get its location, biotype, and description. "
+            "[Tags: Genomics, Systems Biology] Lookup a gene in Ensembl to get its location, biotype, and description. "
             "CRITICAL WARNING: The default species is 'arabidopsis_thaliana'. If querying other species, "
             "you MUST explicitly provide the correct species name (e.g., 'homo_sapiens', 'mus_musculus', 'oryza_sativa'). "
             "The 'symbol' MUST be a canonical gene symbol (e.g., 'BRCA1', 'Trp53'). "
@@ -1007,9 +1007,69 @@ def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> st
 
 
 @mcp.tool(
+    name="fetch_ensembl_homologs",
+    description=(
+            "[Tags: Genomics] Fetch homologous genes (orthologs) across different species using the Ensembl REST API. "
+            "CRITICAL: 'species' is the source species (e.g., 'arabidopsis_thaliana'). 'symbol' is the gene symbol (e.g., 'FT', 'sh4'). "
+            "Provide 'target_species' (e.g., 'oryza_sativa', 'homo_sapiens', 'zea_mays') to explicitly filter results. "
+            "Extremely useful for finding equivalent genes in other organisms."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def fetch_ensembl_homologs(symbol: str, species: str = "arabidopsis_thaliana",
+                           target_species: str = "oryza_sativa") -> str:
+    logger.info(f"Task: Ensembl Homology Fetch | Symbol: '{symbol}' | From: '{species}' | To: '{target_species}'")
+    try:
+        safe_species = species.strip().lower().replace(" ", "_")
+        safe_target = target_species.strip().lower().replace(" ", "_")
+
+        url = f"https://rest.ensembl.org/homology/symbol/{safe_species}/{symbol}?target_species={safe_target}&sequence=none"
+        headers = {"Content-Type": "application/json"}
+
+        res = mcp_request("GET", url, headers=headers, timeout=15)
+
+        if res.status_code == 400:
+            return json.dumps(
+                {"status": "error", "message": f"HTTP 400: Gene '{symbol}' not found in '{safe_species}'."})
+        res.raise_for_status()
+
+        data = res.json()
+        results = []
+
+        for item in data.get("data", []):
+            for h in item.get("homologies", []):
+                target = h.get("target", {})
+                results.append({
+                    "homology_type": h.get("type", ""),
+                    "target_species": target.get("species", ""),
+                    "target_gene_id": target.get("id", ""),
+                    "target_protein_id": target.get("protein_id", ""),
+                    "query_identity_percent": h.get("source", {}).get("perc_id", 0),
+                    "target_identity_percent": target.get("perc_id", 0)
+                })
+
+        if not results:
+            return json.dumps({"status": "success", "message": f"No orthologs found for {symbol} in {target_species}."})
+
+        # 按相似度降序排列，取前 10 个最相关的同源基因
+        results = sorted(results, key=lambda x: x["target_identity_percent"], reverse=True)[:10]
+
+        return json.dumps({
+            "status": "success",
+            "source_gene": symbol,
+            "source_species": safe_species,
+            "homologs": results
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+
+@mcp.tool(
     name="search_kegg_pathway",
     description=(
-            "[Tags: Pathways] Search KEGG database for pathways. "
+            "[Tags: Function, Systems Biology] Search KEGG database for pathways. "
             "CRITICAL WARNING: The default 'organism_code' is 'ath' (Arabidopsis thaliana). "
             "For other species, you MUST change it to the exact 3-4 letter KEGG code! "
             "Examples: 'hsa' (Human), 'mmu' (Mouse), 'dosa' (Oryza sativa/Rice), 'sly' (Tomato), or 'map' (Global reference). "
@@ -1056,8 +1116,51 @@ def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
 
 
 @mcp.tool(
+    name="fetch_go_annotations",
+    description=(
+            "[Tags: Function, Systems Biology] Fetch Gene Ontology (GO) annotations (Molecular Function, Biological Process, Cellular Component) for a given UniProt ID using the EBI QuickGO API. "
+            "CRITICAL: 'uniprot_id' MUST be a valid UniProt Accession (e.g., 'P04637')."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def fetch_go_annotations(uniprot_id: str, limit: int = 10) -> str:
+    logger.info(f"Task: QuickGO Annotation Fetch | UniProt ID: '{uniprot_id}'")
+    try:
+        safe_id = urllib.parse.quote(uniprot_id.strip().upper())
+        # 查询包含该 UniProt ID 的所有 GO 注释
+        url = f"https://www.ebi.ac.uk/QuickGO/services/annotation/search?geneProductId={safe_id}&limit={limit}"
+
+        res = mcp_request("GET", url, timeout=15)
+        res.raise_for_status()
+
+        data = res.json()
+        results = []
+        for item in data.get("results", []):
+            results.append({
+                "goId": item.get("goId"),
+                "goName": item.get("goName"),
+                "aspect": item.get("goAspect"),
+                "evidenceCode": item.get("goEvidence"),
+                "reference": item.get("reference")
+            })
+
+        if not results:
+            return json.dumps({"status": "success", "message": f"No GO annotations found for {uniprot_id}."})
+
+        return json.dumps({"status": "success", "source": "QuickGO", "uniprot_id": uniprot_id, "annotations": results},
+                          ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
     name="fetch_pubchem_compound",
-    description=("[Tags: PubChem] Fetch chemical properties of a molecule from PubChem using its common name.")
+    description=(
+        "[Tags: Phytochemistry] Fetch detailed chemical properties (Molecular Weight, Formula, SMILES, XLogP, etc.) of a molecule from PubChem. "
+        "CRITICAL: You MUST use the exact common English chemical name or IUPAC name (e.g., 'Aspirin', 'Quercetin', 'Paclitaxel'). "
+        "If the first query returns a 404, try using a widely known synonym."
+    )
 )
 @simple_retry(max_attempts=2, delay=1)
 def fetch_pubchem_compound(compound_name: str) -> str:
@@ -1095,7 +1198,11 @@ def fetch_pubchem_compound(compound_name: str) -> str:
 
 @mcp.tool(
     name="search_chembl_target",
-    description=("[Tags: PubChem] Search the ChEMBL database for protein targets.")
+    description=(
+            "[Tags: Phytochemistry] Search the ChEMBL database for pharmacological protein targets. "
+            "Use this to find Target ChEMBL IDs and preferred names associated with specific biological targets, enzymes, or pathways (e.g., 'Tubulin', 'EGFR', 'Kinase'). "
+            "Do NOT use this to search for chemical compounds directly; it is strictly for finding biological TARGETS."
+    )
 )
 @simple_retry(max_attempts=2, delay=1)
 def search_chembl_target(query: str, max_results: int = 5) -> str:
@@ -1167,7 +1274,7 @@ def uniprot_id_mapping(from_db: str, to_db: str, ids: str) -> str:
 @mcp.tool(
     name="query_uniprot_database",
     description=(
-            "[Tags: Proteomics] A unified tool to search UniProt sub-databases. "
+            "[Tags: Proteomics, Structure] A unified tool to search UniProt sub-databases. "
             "CRITICAL SEARCH SYNTAX: The UniProt API is very strict! "
             "If searching by gene and species, you MUST use 'organism_name' and wrap multi-word species in quotes! "
             "To strictly retrieve the canonical, non-obsolete protein, you MUST append AND (reviewed:true) to your query! "
@@ -1497,13 +1604,10 @@ def query_pdb_structure(query: str, action: Literal["search", "details"] = "sear
 @mcp.tool(
     name="query_string_database",
     description=(
-            "[Tags: Interaction] Analyze protein networks(interaction) via STRING DB. "
-            "interacting protein!!!!! interacting protein!!!!! interacting protein!!!!!"
-            "CRITICAL WARNING: The default 'species' parameter is 9606 (Human). "
-            "If you are querying plant genes (e.g., Arabidopsis, Rice) or other non-human animals, "
-            "you MUST MUST MUST first use 'fetch_taxonomy_info' to find the correct NCBI Taxonomy ID "
-            "(e.g., 3702 for Arabidopsis) and pass it explicitly to the 'species' parameter! "
-            "action='interactions' retrieves interacting partners. action='enrichment' fetches functional enrichment."
+            "[Tags: Interaction, Systems Biology] "
+            "Use this tool ONLY when the user asks for 'protein-protein interactions' (PPI), 'protein networks', 'interacting partners', or 'functional enrichment' of a protein list. "
+            "CRITICAL: If the user provides a protein symbol (e.g., 'CRY1') but doesn't specify an organism, prioritize using 'fetch_taxonomy_info' first to get the TaxID (e.g., 9606 for Human, 3702 for Arabidopsis). "
+            "This tool is the ONLY source for calculating statistical enrichment of biological pathways for a group of genes."
     )
 )
 @simple_retry(max_attempts=2, delay=1)

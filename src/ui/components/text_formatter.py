@@ -141,15 +141,35 @@ class TextFormatter:
         if main_text:
             main_text = re.sub(r'\[FINAL_ANSWER\]\s*', '', main_text, flags=re.IGNORECASE)
             main_text = re.sub(r'\[\s*FOLLOW[_-]?\s*UPS?\s*\]\s*', '', main_text, flags=re.IGNORECASE)
-            final_html += f"\n\n{main_text}"
+
+            main_text = re.sub(r'<br\s*/?>', '\n', main_text, flags=re.IGNORECASE)
+
+            rendered_main_html = TextFormatter.markdown_to_html(main_text)
+            final_html += f"\n\n{rendered_main_html}"
 
         return final_html
 
     @staticmethod
-    @staticmethod
     def markdown_to_html(text):
         tm = ThemeManager()
         processed_text = text
+
+        # ================= 救砖：修复丢失换行符的极度压缩 Markdown =================
+        # 1. 修复连成一行的水平分割线
+        processed_text = re.sub(r'(?<=\S)\s+(--+)\s+(?=\S)', r'\n\n\1\n\n', processed_text)
+        # 2. 修复紧贴文本的标题，以及跟在表格后面的标题
+        processed_text = re.sub(r'(\|\s*)(#{1,6}\s+)', r'\1\n\n\2', processed_text)
+        processed_text = re.sub(r'(?<=\S)\s+(#{1,6}\s+)', r'\n\n\1', processed_text)
+        processed_text = re.sub(r'([^\n])\n(#{1,6}\s+)', r'\1\n\n\2', processed_text)
+        # 3. 修复标题和表格完全粘在一行的情况
+        processed_text = re.sub(r'(#{1,6}\s+[^|\n]+?)\s+(\|)', r'\1\n\n\2', processed_text)
+        # 4. 修复表格缺空行导致的解析失败 (紧贴文本的表格前加强制换行)
+        processed_text = re.sub(r'([^\n])\n(\s*\|.*\|)\s*\n(\s*\|[-:| ]+\|)', r'\1\n\n\2\n\3', processed_text)
+        # 5. 修复表格内部被压扁成单行的情况
+        processed_text = processed_text.replace('| |-', '|\n|-')
+        processed_text = re.sub(r'(\|\s*\[\d+\]\s*\|)\s*(?=\|)', r'\1\n', processed_text)
+        # =========================================================================
+
         processed_text = TextFormatter._render_simple_latex(processed_text)
         processed_text = TextFormatter._render_chemistry(processed_text)
 
@@ -180,12 +200,12 @@ class TextFormatter:
             (r'\b((?:NM|NP|NR|NC|NG|XM|XP|XR|WP|YP|AP)_\d{4,10}(?:\.\d+)?)\b',
              r'<a href="https://www.ncbi.nlm.nih.gov/search/all/?term=\1">\1</a>'),
 
-            # AlphaFold 结构标识符 (例如: AF-Q0E4M8-F1)
-            (r'\b(AF-[O,P,Q,A-N,R-Z][0-9][A-Z0-9]{3}[0-9]-F\d+)\b',
-             r'<a href="https://alphafold.ebi.ac.uk/entry/\1">AlphaFold \1</a>'),
-            # AlphaFold 原始模型文件下载提取 (捕获 pdb 或 cif 文件后缀)
+            # AlphaFold 原始模型文件下载提取
             (r'\b(AF-[A-Z0-9]{6,10}-F\d+-model_v\d+\.(?:pdb|cif))\b',
-             r'<a href="https://alphafold.ebi.ac.uk/files/\1">Download Model: \1</a>'),
+             r'<a href="https://alphafold.ebi.ac.uk/files/\1" style="color: #10b981;">📥 \1</a>'),
+            # AlphaFold 结构标识符
+            (r'\b(AF-[A-Z0-9]{6,10}-F\d+)\b',
+             r'<a href="https://alphafold.ebi.ac.uk/entry/\1">AlphaFold \1</a>'),
 
             # UniProt
             (r'\b([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\b',
@@ -203,13 +223,22 @@ class TextFormatter:
             # STRING DB 蛋白互作网络
             (r'\b(\d+\.ENSP\d{11})\b', r'<a href="https://string-db.org/network/\1">\1</a>'),
 
-
             # GBIF Taxon Key (分类单元唯一标识符)
             (r'\b(?:GBIF\s*Taxon\s*Key|GBIF\s*ID|TaxonKey)\s*:?\s*(\d+)\b',
              r'<a href="https://www.gbif.org/species/\1">GBIF Taxon \1</a>'),
-            # GBIF 发生记录主页映射 (针对 LLM 自动生成的纯文本引用)
+            # GBIF 发生记录主页映射
             (r'(Global\s*Biodiversity\s*Information\s*Facility\s*\(GBIF\)\s*-\s*Occurrence\s*(?:Download|Records?))',
              r'<a href="https://www.gbif.org/occurrence/search">\1</a>'),
+
+            # Gene Ontology (GO) 映射
+            (r'\b(GO:\d{7})\b', r'<a href="https://www.ebi.ac.uk/QuickGO/term/\1">\1</a>'),
+            # ChEMBL Target ID 映射
+            (r'\b(CHEMBL\d+)\b', r'<a href="https://www.ebi.ac.uk/chembl/target_report_card/\1">\1</a>'),
+
+            # 拟南芥 AGI 基因号
+            (r'\b(AT[1-5CM]G\d{5})\b',
+             r'<a href="https://plants.ensembl.org/Arabidopsis_thaliana/Gene/Summary?g=\1">\1</a>'),
+
         ]
 
         for pat, template in replacements:
