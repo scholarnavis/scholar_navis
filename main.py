@@ -76,52 +76,8 @@ class StartupWorker(QThread):
             time.sleep(0.1)
             cfg_mgr.load_mcp_servers()
 
-            self.sig_progress.emit(80, "Verifying AI Models (ONNX)...")
-            time.sleep(0.1)
-            missing_models = []
 
-            try:
-                from src.task.common_task import VerifyModelsTask
-                from src.core.config_manager import ConfigManager
-
-                cfg = ConfigManager()
-                embed_id = cfg.user_settings.get("current_model_id", "embed_auto")
-                rerank_id = cfg.user_settings.get("rerank_model_id", "rerank_auto")
-
-                class SplashProgressQueue:
-                    def __init__(self, worker):
-                        self.worker = worker
-
-                    def put(self, item, block=True, timeout=None):
-                        if isinstance(item, dict) and item.get("type") == "state":
-                            prog = item.get("progress", -1)
-                            msg = item.get("msg", "Verifying models...")
-                            if 0 <= prog <= 100:
-                                # 将任务的 0-100% 进度映射到启动页的 80-95%
-                                mapped_prog = 80 + int(prog * 0.15)
-                                self.worker.sig_progress.emit(mapped_prog, msg)
-
-                task_kwargs = {
-                    "embed_id": embed_id,
-                    "rerank_id": rerank_id
-                }
-
-                verify_task = VerifyModelsTask(
-                    task_id="startup_integrity_check",
-                    task_queue=SplashProgressQueue(self),
-                    kwargs=task_kwargs
-                )
-
-                result = verify_task._execute()
-                missing_models = result.get("to_download", [])
-
-                if missing_models:
-                    self.logger.info(f"Models to prepare: {missing_models}")
-
-            except Exception as e:
-                self.logger.error(f"Failed to verify ONNX models during startup: {e}")
-
-            self.sig_progress.emit(95, "Pre-loading UI components & ML libraries...")
+            self.sig_progress.emit(80, "Pre-loading UI components & ML libraries...")
             time.sleep(0.1)
             from src.ui.main_window import MainWindow
             from src.core.mcp_manager import MCPManager

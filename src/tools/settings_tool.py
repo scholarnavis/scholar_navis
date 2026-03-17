@@ -1357,13 +1357,13 @@ class SettingsTool(BaseTool):
         if idx < 0: return
         conf = self.llm_configs[idx]
 
-        curr_model = conf.get("trans_model_name", conf.get("model_name", ""))
+        curr_model = conf.get("trans_model_name", conf.get("model_name", "")).strip()
         fetched = conf.get("fetched_models", [])
 
         self.combo_trans_model.blockSignals(True)
         self.combo_trans_model.clear()
 
-        items = list(fetched)
+        items = [m for m in fetched if m.strip()]
         if curr_model and curr_model not in items:
             items.insert(0, curr_model)
 
@@ -1451,7 +1451,7 @@ class SettingsTool(BaseTool):
     def _add_llm_model(self):
         dlg = AddModelDialog(self.widget)
         if dlg.exec():
-            new_model = dlg.get_name()
+            new_model = dlg.get_name().strip()
             if new_model:
                 idx = self.combo_llm_preset.currentIndex()
                 if idx >= 0:
@@ -1527,11 +1527,11 @@ class SettingsTool(BaseTool):
         self.combo_llm_model.blockSignals(True)
         self.combo_llm_model.clear()
 
-        fetched = list(conf.get("fetched_models", []))
+        fetched = [m for m in conf.get("fetched_models", []) if m.strip()]
         models_config = conf.get("models_config", {})
 
         for m in models_config.keys():
-            if m not in fetched:
+            if m.strip() and m not in fetched:
                 fetched.append(m)
 
         if curr_real and curr_real not in fetched:

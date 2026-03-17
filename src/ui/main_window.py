@@ -376,12 +376,10 @@ class MainWindow(QMainWindow):
                         pass
 
     def perform_startup_checks(self):
-        if self.show_mandatory_disclaimer():
-            self.check_model_integrity()
+        self.show_mandatory_disclaimer()
 
     def show_mandatory_disclaimer(self):
         cfg = ConfigManager()
-        # 废弃旧的 is_first_run，使用新的 agreement_accepted
         if not cfg.user_settings.get("agreement_accepted", False):
             tm = ThemeManager()
             dlg = BaseDialog(self, title="Terms of Service & AI Disclaimer", width=600)

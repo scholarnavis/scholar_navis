@@ -550,7 +550,7 @@ class ImportTool(BaseTool):
 
     def commit_changes(self):
         """Commit and apply all staged changes"""
-        needs_model = self.staged_add or self.rebuild_required
+        needs_model = any([self.staged_add, self.staged_del, self.staged_rename, self.rebuild_required])
 
         data = self.combo_kb.currentData()
         m_id = self.staged_meta['model_id'] if self.staged_meta else (data['model_id'] if data else 'embed_auto')
@@ -730,28 +730,30 @@ class ImportTool(BaseTool):
 
         if self.pd: self.pd.close_safe()
 
-        is_model_error = "OSError" in msg or "no file named" in msg.lower() or "model weights" in msg.lower()
+        msg_lower = msg.lower()
+        is_model_error = (
+            "oserror" in msg_lower or
+            "no file named" in msg_lower or
+            "model weights" in msg_lower or
+            "model load failed" in msg_lower or
+            "onnx" in msg_lower
+        )
 
         if is_model_error:
-            # 弹窗提示用户
             dlg = StandardDialog(
                 self.widget,
                 title="Model Incomplete",
-                message="The required AI model files are missing or corrupted. Would you like to go to Settings to download them now?",
+                message="The required AI model files are missing or corrupted (e.g., .onnx file not found). Would you like to go to Settings to download them now?",
                 show_cancel=True
             )
             if dlg.exec():
-                # 确认后跳转到设置页面
                 GlobalSignals().navigate_to_tool.emit("Global Settings")
-                # 自动触发该模型的下载请求 (如果有模型 ID 的话)
                 data = self.combo_kb.currentData()
                 if data:
                     GlobalSignals().request_model_download.emit(data['model_id'], "embedding")
         else:
-            # 普通错误弹窗
             StandardDialog(self.widget, "Error", f"Operation failed: {msg}").exec()
 
-        # 清理信号
         for slot in [self._on_rename_done, self._on_del_done, self._on_final_done]:
             try:
                 self.task_mgr.sig_state_changed.disconnect(slot)
@@ -936,7 +938,6 @@ class ImportTool(BaseTool):
 
         new_kb_id = data.get('id')
 
-        # 保护机制：只有当真正切换到不同库时，才重置暂存区。
         if getattr(self, 'current_kb_id', None) != new_kb_id:
             self.current_kb_id = new_kb_id
             self.staged_add, self.staged_del, self.staged_rename = [], [], {}
@@ -946,17 +947,6 @@ class ImportTool(BaseTool):
         if hasattr(self, '_toggle_kb_actions'):
             self._toggle_kb_actions(True, status=kb_status)
 
-        conf = get_model_conf(data.get('model_id', ''), "embedding")
-        if conf and not check_model_exists(conf.get('hf_repo_id')):
-            dlg = StandardDialog(
-                self.widget,
-                "Model Required",
-                f"The required AI model '{conf.get('ui_name', conf.get('id'))}' for this project is not downloaded locally.\nWould you like to go to Global Settings to download it now?",
-                show_cancel=True
-            )
-            if dlg.exec():
-                GlobalSignals().navigate_to_tool.emit("Global Settings")
-                GlobalSignals().request_model_download.emit(conf.get('id'), "embedding")
 
         self.update_file_list()
 
