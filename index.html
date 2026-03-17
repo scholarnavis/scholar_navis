@@ -10,7 +10,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 
-    <meta name="description" content="A high-performance PySide6 desktop application for academic research, featuring Local RAG, Academic MCP, and RSS integration.">
+    <meta name="description" content="A high-performance PySide6 desktop application for academic research, featuring Local RAG, Academic MCP, and structured evidence organization.">
 
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -27,6 +27,7 @@
                         primary: '#3b82f6',
                         darkBg: '#0f172a',
                         darkSurface: '#1e293b',
+                        warning: '#f59e0b',
                     }
                 }
             }
@@ -52,7 +53,6 @@
 </head>
 <body class="bg-slate-50 text-slate-900 dark:bg-darkBg dark:text-slate-100 transition-colors duration-300 min-h-screen flex flex-col">
 
-    <!-- Navigation -->
     <nav class="fixed w-full z-50 bg-white/80 dark:bg-darkBg/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
             <div class="flex items-center gap-3">
@@ -83,8 +83,7 @@
         </div>
     </nav>
 
-    <!-- Hero Section -->
-    <header class="pt-32 pb-16 px-4 text-center">
+    <header class="pt-32 pb-12 px-4 text-center">
         <div class="max-w-4xl mx-auto">
             <div class="w-40 h-40 mx-auto mb-8 logo-container">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="100%" height="100%">
@@ -112,88 +111,110 @@
             <h1 class="text-4xl md:text-6xl font-black mb-6 tracking-tight">
                 Scholar Navis
             </h1>
-            <p class="text-lg md:text-xl text-slate-600 dark:text-slate-400 mb-10 max-w-2xl mx-auto leading-relaxed">
-                A high-performance academic workstation powered by PySide6. Local RAG, Academic MCP, and deep AI integration for the modern researcher.
+            <p class="text-lg md:text-xl text-slate-600 dark:text-slate-400 mb-10 max-w-3xl mx-auto leading-relaxed">
+                An intelligent <strong>Evidence Organizer</strong> designed for rigorous scientific literature review. Mitigating LLM hallucinations through a fusion of Local RAG, Hardware-Accelerated Reranking, and direct Model Context Protocol (MCP) integrations.
             </p>
 
             <div class="flex flex-col sm:flex-row justify-center gap-4">
                 <a href="http://scholarnavis.com/dl" class="inline-flex items-center justify-center px-8 py-4 bg-primary text-white font-bold rounded-xl hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
-                    <i class="fa-solid fa-download mr-2"></i> Download Latest Version
+                    <i class="fa-solid fa-download mr-2"></i> Download Release
                 </a>
-                <a href="#features" class="inline-flex items-center justify-center px-8 py-4 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 transition-all">
-                    Learn More
+                <a href="#architecture" class="inline-flex items-center justify-center px-8 py-4 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 transition-all">
+                    Explore Architecture
                 </a>
             </div>
         </div>
     </header>
 
-    <!-- Main Features -->
+    <section class="px-4 pb-12">
+        <div class="max-w-4xl mx-auto bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 border-l-4 border-l-warning rounded-xl p-6 shadow-sm flex items-start gap-4">
+            <div class="text-warning mt-1">
+                <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
+            </div>
+            <div>
+                <h4 class="font-bold text-slate-900 dark:text-slate-100 mb-2">IMPORTANT DISCLAIMER: AI Usage & Accuracy</h4>
+                <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                    Scholar Navis utilizes Large Language Models (LLMs). While structurally augmented with Local RAG and MCP tools, AI-generated content may still contain <b>inaccuracies, fabricated references, or structural hallucinations</b>. Users are <b>strictly required</b> to manually verify all information via the provided citations, source links, or original manuscripts. The developers assume no liability for research errors, data misinterpretation, or academic misconduct arising from the use of this software.
+                </p>
+            </div>
+        </div>
+    </section>
+
+    <section id="architecture" class="py-20 px-4 bg-slate-100 dark:bg-slate-900/50">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16">
+                <h2 class="text-3xl font-bold mb-4">The Three-Layer Architecture</h2>
+                <p class="text-slate-500 max-w-2xl mx-auto">Discarding conventional cloud wrappers, Scholar Navis operates entirely locally through a rigorously engineered pipeline orchestrated by a native Qt Event Bus.</p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
+                    <div class="text-primary mb-4"><i class="fa-solid fa-shield-halved text-3xl"></i></div>
+                    <h3 class="text-xl font-bold mb-3">Layer 1: Secure Data Ingestion</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4">
+                        A dual-path pipeline guarantees data sovereignty. The persistent path independently processes local PDFs through hardware-accelerated ONNX vectorization into a local ChromaDB, ensuring absolute privacy for unpublished manuscripts. A secondary, temporary path integrates journal RSS feeds seamlessly.
+                    </p>
+                </div>
+
+                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
+                    <div class="text-purple-500 mb-4"><i class="fa-solid fa-network-wired text-3xl"></i></div>
+                    <h3 class="text-xl font-bold mb-3">Layer 2: Logical Orchestration</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4">
+                        Mitigates corpus bias through automated language detection and English pre-translation. Standardized queries traverse Vector Search, Reranker scoring, in-context prompting, and schema injection before dispatch. Calibrated to anchor high-compliance LLMs against hallucination metrics.
+                    </p>
+                </div>
+
+                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
+                    <div class="text-emerald-500 mb-4"><i class="fa-solid fa-code text-3xl"></i></div>
+                    <h3 class="text-xl font-bold mb-3">Layer 3: Output Rendering</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Generated outputs undergo real-time parsing via regular expressions (regex) to drive a highly interactive UI. Native support for HTTP, Mermaid diagrams, and Cite protocols enables contextual citation verification and immediate database navigation.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <section id="features" class="py-20 px-4">
         <div class="max-w-7xl mx-auto">
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <!-- RAG -->
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
                     <div class="w-12 h-12 bg-blue-100 dark:bg-blue-900/30 rounded-lg flex items-center justify-center mb-6 text-blue-600 dark:text-blue-400">
                         <i class="fa-solid fa-database text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Local Research Memory</h3>
+                    <h3 class="text-xl font-bold mb-3">Anchored Local RAG</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Build your private knowledge base with local vector embeddings. RAG ensures all AI answers are grounded in your specific literature, minimizing hallucinations.
+                        Build your private knowledge base with granular data traceability. Acts as an effective anchoring framework, significantly reducing citation and entity extraction error rates compared to standalone LLMs.
                     </p>
                 </div>
 
-                <!-- MCP -->
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
                     <div class="w-12 h-12 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center mb-6 text-purple-600 dark:text-purple-400">
                         <i class="fa-solid fa-microscope text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Academic MCP Servers</h3>
+                    <h3 class="text-xl font-bold mb-3">Authoritative MCP Interoperability</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Direct integration with NCBI, UniProt, Semantic Scholar, and Unpaywall. The AI can fetch full-text PDFs and biological sequences autonomously.
+                        Direct interoperability with authoritative biological databases including NCBI, UniProt, and Semantic Scholar. Empowers the AI to autonomously retrieve full-text PDFs and quantitative genetic datasets.
                     </p>
                 </div>
 
-                <!-- RSS -->
+                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
+                    <div class="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg flex items-center justify-center mb-6 text-emerald-600 dark:text-emerald-400">
+                        <i class="fa-solid fa-chart-line text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-bold mb-3">Benchmarked Extraction</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Rigorously tested against structured data extraction tasks for critical plant biology genes (e.g., <i>AMS</i>, <i>DYT1</i>). Enhances manual literature curation efficiency while maintaining strict factual accuracy.
+                    </p>
+                </div>
+
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
                     <div class="w-12 h-12 bg-orange-100 dark:bg-orange-900/30 rounded-lg flex items-center justify-center mb-6 text-orange-600 dark:text-orange-400">
                         <i class="fa-solid fa-rss text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Journal Feed Tracking</h3>
+                    <h3 class="text-xl font-bold mb-3">Transient Feed Processing</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Stay updated with real-time RSS subscriptions from top journals. Save lists and initiate AI discussions on the latest papers immediately.
-                    </p>
-                </div>
-
-                <!-- Chat -->
-                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
-                    <div class="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg flex items-center justify-center mb-6 text-emerald-600 dark:text-emerald-400">
-                        <i class="fa-solid fa-message text-xl"></i>
-                    </div>
-                    <h3 class="text-xl font-bold mb-3">Guided AI Interaction</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Advanced chat interface with auto-follow-up question suggestions. Custom API parameters allow you to fine-tune the AI's scientific reasoning.
-                    </p>
-                </div>
-
-                <!-- Translator -->
-                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
-                    <div class="w-12 h-12 bg-cyan-100 dark:bg-cyan-900/30 rounded-lg flex items-center justify-center mb-6 text-cyan-600 dark:text-cyan-400">
-                        <i class="fa-solid fa-language text-xl"></i>
-                    </div>
-                    <h3 class="text-xl font-bold mb-3">Global Overlay Translator</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        A floating window accessible from any application. Perform multi-language translation and AI polishing on any text you highlight.
-                    </p>
-                </div>
-
-
-                <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
-                    <div class="w-12 h-12 bg-rose-100 dark:bg-rose-900/30 rounded-lg flex items-center justify-center mb-6 text-rose-600 dark:text-rose-400">
-                        <i class="fa-solid fa-plug-circle-bolt text-xl"></i>
-                    </div>
-                    <h3 class="text-xl font-bold mb-3">Extensible MCP Ecosystem</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Effortlessly expand software capabilities by connecting external Model Context Protocol (MCP) servers. Integrate specialized academic databases or external lab tools directly into your workflow.
+                        Stay updated with real-time RSS subscriptions from top journals. The architecture seamlessly funnels transient texts into the primary data stream for immediate analysis without permanently polluting the local ChromaDB.
                     </p>
                 </div>
 
@@ -201,9 +222,9 @@
                     <div class="w-12 h-12 bg-indigo-100 dark:bg-indigo-900/30 rounded-lg flex items-center justify-center mb-6 text-indigo-600 dark:text-indigo-400">
                         <i class="fa-solid fa-microchip text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Universal AI Acceleration</h3>
+                    <h3 class="text-xl font-bold mb-3">Adaptive Model Routing</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Maximize local inference speeds across any hardware. The engine dynamically routes tasks via CUDA for NVIDIA, DirectML for AMD/Intel, and CoreML for Apple Silicon.
+                        Designed to balance the trade-offs of base models. Mitigates the "knowledge conflict" inherent in massive pre-trained models, while accounting for the "latency penalty" associated with integrating high-accuracy native models into complex workflows.
                     </p>
                 </div>
 
@@ -211,25 +232,23 @@
                     <div class="w-12 h-12 bg-cyan-100 dark:bg-cyan-900/30 rounded-lg flex items-center justify-center mb-6 text-cyan-600 dark:text-cyan-400">
                         <i class="fa-solid fa-language text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Cross-Lingual RAG Engine</h3>
+                    <h3 class="text-xl font-bold mb-3">Cross-Lingual UI Layer</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Query global literature in your native language. Whether analyzing single-cell sequencing data or writing gene cloning protocols, inputs are pre-translated to English to maximize vector matching precision. Take full control with highly customizable LLM parameters.
+                        A floating window accessible globally across the OS. Facilitates multi-language translation and AI polishing on highlighted text, operating seamlessly over the core execution inference layer.
                     </p>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- System Requirements (RAG Focused) -->
-    <section class="py-24 bg-slate-100 dark:bg-slate-900/50">
+    <section class="py-24 bg-slate-100 dark:bg-slate-900/50 border-t border-slate-200 dark:border-slate-800">
         <div class="max-w-5xl mx-auto px-4">
             <div class="text-center mb-16">
-                <h2 class="text-3xl font-bold mb-4">System Requirements</h2>
-                <p class="text-slate-500">Scholar Navis utilizes local Embedding and Reranker models for maximum privacy and precision.</p>
+                <h2 class="text-3xl font-bold mb-4">Hardware Utilization</h2>
+                <p class="text-slate-500">Scholar Navis maximizes local inference speeds dynamically routing tasks via CUDA (NVIDIA), DirectML (AMD/Intel), or CoreML (Apple Silicon).</p>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <!-- Minimum -->
                 <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border border-slate-200 dark:border-slate-800">
                     <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
                         <span class="w-2 h-2 rounded-full bg-yellow-500"></span> Minimum Configuration
@@ -254,8 +273,7 @@
                     </ul>
                 </div>
 
-                <!-- Recommended -->
-                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border-2 border-primary shadow-xl scale-105">
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border-2 border-primary shadow-xl md:scale-105">
                     <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
                         <span class="w-2 h-2 rounded-full bg-emerald-500"></span> Recommended (Pro)
                     </h4>
@@ -279,11 +297,10 @@
                     </ul>
                 </div>
             </div>
-            <p class="mt-12 text-center text-xs text-slate-400 italic">Note: High-performance Reranker models (like Gemma-9B) may require 20GB+ VRAM for optimal speed.</p>
+            <p class="mt-12 text-center text-xs text-slate-400 italic">Note: High-performance Reranker models (e.g., Gemma-9B architecture) may incur substantial latency penalties or require 20GB+ VRAM for optimal execution speed.</p>
         </div>
     </section>
 
-    <!-- Footer -->
     <footer class="mt-auto py-12 border-t border-slate-200 dark:border-slate-800">
         <div class="max-w-7xl mx-auto px-4 flex flex-col md:flex-row justify-between items-center gap-6">
             <div class="flex items-center gap-2">
