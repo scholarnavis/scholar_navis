@@ -208,10 +208,11 @@ class OpenAICompatibleLLM:
         base = self.base_url.lower() if self.base_url else ""
 
         # 智能路由 1：处理几个规矩特殊、需要走原生协议的官方 API
-        if "api.anthropic.com" in base:
+        print("basebasebasebasebasebase: ", base)
+        if "api.anthropic.com" in base or "api.minimaxi.com/anthropic" in base:
             kwargs["custom_llm_provider"] = "anthropic"
             if not self.model_name.startswith("anthropic/"):
-                kwargs["model"] = f"anthropic/{self.model_name}"
+                pass
         elif "api.deepseek.com" in base:
             kwargs["custom_llm_provider"] = "deepseek"
             if not self.model_name.startswith("deepseek/"):

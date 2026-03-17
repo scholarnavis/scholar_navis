@@ -1,6 +1,5 @@
-import asyncio
 import json
-import logging
+import json
 import logging
 import os
 import time
@@ -11,12 +10,11 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QScrollArea, QHBoxLayout, QTableWidget,
                                QAbstractItemView, QHeaderView,
-                               QTableWidgetItem, QCheckBox, QApplication, QFrame, QFileDialog, QInputDialog)
+                               QTableWidgetItem, QCheckBox, QApplication, QFrame, QFileDialog)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
-from src.core.encryption_service import SystemEncryptionService
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, resolve_auto_model, get_onnx_cache_dir)
@@ -35,7 +33,10 @@ from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDi
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
-
+MINIMAX_DEFAULT_MODELS = [
+    "MiniMax-M2", "M2-her", "MiniMax-M2.1",
+    "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning"
+]
 
 class HardwareAuthWorker(QObject):
     sig_finished = Signal(bool)
@@ -105,6 +106,7 @@ class EmailVerifyWorker(QObject):
                 self.sig_finished.emit(True, "")
         except Exception as e:
             self.sig_finished.emit(False, f"Email validation encountered a system error: {e}")
+
 
 class HWDetectThread(QThread):
     sig_finished = Signal(dict, list)
@@ -211,7 +213,6 @@ class SettingsTool(BaseTool):
             self.combo_device.setCurrentIndex(idx_dev)
         self.combo_device.blockSignals(False)
 
-
     def _setup_change_listeners(self):
         """挂载全部输入组件变更事件，跟踪是否发生了改动"""
         self.input_ncbi_email.textChanged.connect(self._mark_unsaved)
@@ -298,13 +299,11 @@ class SettingsTool(BaseTool):
                         chk.setStyleSheet(
                             f"color: {tm.color('text_main')}; background: transparent; margin-left: 10px;")
 
-
     def _mark_unsaved(self, *args, **kwargs):
         if getattr(self, '_is_loading', False): return
         if not self.btn_undo.isEnabled():
             self.btn_undo.setEnabled(True)
             self.btn_save.setText(" Save Settings*")
-
 
     def _clear_unsaved(self):
         self.btn_undo.setEnabled(False)
@@ -332,7 +331,6 @@ class SettingsTool(BaseTool):
 
         if hasattr(self, 'combo_proxy_mode'):
             self._on_proxy_mode_changed(self.combo_proxy_mode.currentIndex())
-
 
     def _update_all_icons(self):
         """Re-assign icons to update their currentColor based on the tinted buttons"""
@@ -416,7 +414,6 @@ class SettingsTool(BaseTool):
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
 
-
         if hasattr(self, '_load_mcp_servers_to_ui'):
             self._load_mcp_servers_to_ui()
 
@@ -498,7 +495,6 @@ class SettingsTool(BaseTool):
             f"</div>"
         )
 
-
     def _refresh_mcp_status(self):
         try:
             tm = ThemeManager()
@@ -560,10 +556,8 @@ class SettingsTool(BaseTool):
         self.combo_rerank.blockSignals(False)
         self.check_models_status()
 
-
     def on_undo_clicked(self):
         self._load_current_settings(is_undo=True)
-
 
     def on_download_requested(self, model_id, model_type):
         self.refresh_model_combos()
@@ -582,7 +576,6 @@ class SettingsTool(BaseTool):
                        f"It has been auto-selected in the list. Please click the blue 'Save Settings & Verify Models' button below to download it.",
                        show_cancel=False).exec()
 
-
     def init_hardware_section(self):
         self.group_hw = QGroupBox("System Hardware Info")
         self.group_hw.setObjectName("group_hw")
@@ -594,7 +587,6 @@ class SettingsTool(BaseTool):
         layout.addWidget(self.lbl_hw_info)
 
         self.layout.addWidget(self.group_hw)
-
 
     def _get_btn_style(self, btn_type="default"):
         tm = ThemeManager()
@@ -665,10 +657,6 @@ class SettingsTool(BaseTool):
         """
         self.lbl_hw_info.setText(html)
 
-
-
-
-
     def init_mcp_section(self):
         tm = ThemeManager()
         group = QGroupBox("MCP Servers (Unified)")
@@ -683,7 +671,6 @@ class SettingsTool(BaseTool):
 
         self.btn_refresh_mcp = QPushButton(" Refresh Status")
         self.btn_refresh_mcp.clicked.connect(self._on_refresh_mcp_clicked)
-
 
         header_layout.addWidget(self.btn_add_mcp)
         header_layout.addWidget(self.btn_refresh_mcp)
@@ -734,8 +721,6 @@ class SettingsTool(BaseTool):
             self._refresh_mcp_status()
         except Exception as e:
             self.logger.error(f"Refresh MCP clicked failed: {e}")
-
-
 
     def _add_mcp_row(self, name, cfg):
         row = self.table_mcp.rowCount()
@@ -1036,12 +1021,10 @@ class SettingsTool(BaseTool):
             f"</div>"
         )
 
-
     def _open_hf_cache(self):
         model_dir = os.path.join(self.config.BASE_DIR, "models")
         os.makedirs(model_dir, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
-
 
     def _test_compute_device(self):
         device_id = self.combo_device.currentData()
@@ -1075,14 +1058,19 @@ class SettingsTool(BaseTool):
 
         QTimer.singleShot(150, _show_result)
 
-
-
     def _load_llm_config(self):
         default_config = [
             {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "",
              "api_key": ""},
             {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
              "model_name": "", "api_key": ""},
+            {"id": "minimax", "name": "MiniMax","base_url": "https://api.minimaxi.com/anthropic",
+             "model_name": "MiniMax-M2.5", "api_key": "",
+             "fetched_models": [
+                 "MiniMax-M2", "M2-her", "MiniMax-M2.1",
+                 "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning"
+             ]},
+
             {"id": "gemini", "name": "Google Gemini",
              "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "",
              "api_key": ""},
@@ -1098,12 +1086,16 @@ class SettingsTool(BaseTool):
              "model_name": "", "api_key": ""},
             {"id": "lmstudio", "name": "LM Studio", "base_url": "http://localhost:1234/v1", "model_name": "",
              "api_key": "lm-studio"},
-            {"id": "local", "name": "Local Custom", "base_url": "http://localhost:11434/v1",
+            {"id": "ollma", "name": "Ollma", "base_url": "http://localhost:11434/v1",
              "model_name": "", "api_key": "ollama"}
         ]
 
         try:
-            loaded_configs  = self.config.load_llm_configs()
+            loaded_configs = self.config.load_llm_configs()
+
+            if not loaded_configs:
+                loaded_configs = []
+
             for cfg in loaded_configs:
                 cfg.pop("thinking_model_name", None)
                 if "model_params_mode" in cfg and "models_config" not in cfg:
@@ -1116,6 +1108,7 @@ class SettingsTool(BaseTool):
                     }
         except Exception as e:
             self.logger.error(f"Error loading llm_config.json: {e}")
+            loaded_configs = []
 
         existing_ids = {c.get("id") for c in loaded_configs}
         needs_resave = False
@@ -1126,12 +1119,26 @@ class SettingsTool(BaseTool):
                 loaded_configs.insert(i, dc)
                 missing_ids.append(dc["id"])
                 needs_resave = True
+            else:
+                for cfg in loaded_configs:
+                    if cfg.get("id") == dc["id"] and "fetched_models" in dc:
+                        current_fetched = cfg.get("fetched_models", [])
+                        added_any = False
+                        for m in dc["fetched_models"]:
+                            if m not in current_fetched:
+                                current_fetched.append(m)
+                                added_any = True
+                        if added_any:
+                            cfg["fetched_models"] = current_fetched
+                            needs_resave = True
+                        break
 
         if needs_resave:
             self.logger.warning(
-                f"Required default LLM identifiers were missing: {missing_ids}. "
+                f"Required default LLM identifiers or models were missing: {missing_ids}. "
                 f"The system has automatically supplemented and persisted these records."
             )
+            self.llm_configs = loaded_configs
             self._save_llm_config()
 
         return loaded_configs if loaded_configs else default_config
@@ -1173,7 +1180,6 @@ class SettingsTool(BaseTool):
         header_layout.addWidget(self.btn_add_llm)
         header_layout.addWidget(self.btn_del_llm)
         header_layout.addWidget(self.btn_help_params)
-
 
         self.input_llm_name = QLineEdit()
         self.input_llm_url = QLineEdit()
@@ -1255,7 +1261,6 @@ class SettingsTool(BaseTool):
         trans_layout.addRow("Translation Provider:", trans_provider_layout)
         trans_layout.addRow("Translation Model:", self.combo_trans_model)
 
-
         layout.addRow("Service Provider:", header_layout)
         layout.addRow("Provider Name:", self.input_llm_name)
         layout.addRow("API Base URL:", self.input_llm_url)
@@ -1296,7 +1301,6 @@ class SettingsTool(BaseTool):
 
         self.combo_llm_model.currentTextChanged.connect(self.combo_llm_model.setToolTip)
         self.combo_trans_model.currentTextChanged.connect(self.combo_trans_model.setToolTip)
-
 
     def _on_trans_refresh_clicked(self):
         self._refresh_trans_models_ui()
@@ -1348,7 +1352,6 @@ class SettingsTool(BaseTool):
                     ToastManager().show("Model cache not found locally.", "info")
                     self.check_models_status()
 
-
     def _refresh_trans_models_ui(self):
         idx = self.combo_trans_provider.currentIndex()
         if idx < 0: return
@@ -1383,9 +1386,6 @@ class SettingsTool(BaseTool):
             if display_text.endswith(suffix):
                 return display_text[:-len(suffix)]
         return display_text
-
-
-
 
     def _on_copy_params_clicked(self):
         from src.ui.components.dialog import StandardDialog
@@ -1530,6 +1530,10 @@ class SettingsTool(BaseTool):
         fetched = list(conf.get("fetched_models", []))
         models_config = conf.get("models_config", {})
 
+        for m in models_config.keys():
+            if m not in fetched:
+                fetched.append(m)
+
         if curr_real and curr_real not in fetched:
             fetched.insert(0, curr_real)
 
@@ -1560,19 +1564,21 @@ class SettingsTool(BaseTool):
         self._load_model_params_to_ui(conf, curr_real)
 
     def on_export_clicked(self):
-        # 1. Setup Password Encryption (Biometric authentication bypassed)
+        # 1. 获取加密密码
         pwd_dlg = ExportPasswordDialog(self.widget)
         pwd_dlg.exec()
         if pwd_dlg.is_cancelled:
             return
         password = pwd_dlg.password
 
-        # 2. File Selection
-        path, _ = QFileDialog.getSaveFileName(self.widget, "Save Config", "scholar_navis_config.json",
-                                              "JSON (*.json)")
-        if not path: return
+        # 2. 选择保存路径
+        path, _ = QFileDialog.getSaveFileName(
+            self.widget, "Save Config", "scholar_navis_config.json", "JSON (*.json)"
+        )
+        if not path:
+            return
 
-        # 3. Compile Bundle & Execute Background Task
+        # 3. 准备数据束
         bundle = {
             "settings": self.config.user_settings,
             "mcp_servers": self.config.mcp_servers,
@@ -1580,59 +1586,42 @@ class SettingsTool(BaseTool):
         }
 
         self.btn_export.setEnabled(False)
-        pd = ProgressDialog(self.widget, "Security Export", "Performing high-intensity key derivation (PBKDF2)...")
+        pd = ProgressDialog(self.widget, "Security Export", "Performing encryption & serialization...")
         pd.show()
 
+        # 4. 启动异步导出任务，并将 path 传递给回调函数
         self.export_task_mgr = TaskManager()
         self.export_task_mgr.sig_progress.connect(pd.update_progress)
         self.export_task_mgr.sig_result.connect(lambda res: self._finalize_export(res, path, pd))
-        self.export_task_mgr.start_task(ExportConfigTask, "export_cfg", mode=TaskMode.THREAD, bundle=bundle,
-                                        password=password)
+        self.export_task_mgr.start_task(
+            ExportConfigTask, "export_cfg", mode=TaskMode.THREAD,
+            bundle=bundle, password=password
+        )
 
     def _finalize_export(self, result, path, pd):
-        # 2. Setup Password Encryption
-        pwd_dlg = ExportPasswordDialog(self.widget)
-        pwd_dlg.exec()
-        if pwd_dlg.is_cancelled:
-            return
-        password = pwd_dlg.password
-
-        # 3. File Selection
-        path, _ = QFileDialog.getSaveFileName(self.widget, "Save Config", "scholar_navis_config.json",
-                                              "JSON (*.json)")
-        if not path: return
-
-        # 4. Compile Bundle & Execute Background Task
-        bundle = {
-            "settings": self.config.user_settings,
-            "mcp_servers": self.config.mcp_servers,
-            "llm_configs": self.llm_configs
-        }
-
-        self.btn_export.setEnabled(False)
-        pd = ProgressDialog(self.widget, "Exporting", "Preparing data...")
-        pd.show()
-
-        self.export_task_mgr = TaskManager()
-        self.export_task_mgr.sig_progress.connect(pd.update_progress)
-        self.export_task_mgr.sig_result.connect(lambda res: self._finalize_export(res, path, pd))
-        self.export_task_mgr.start_task(ExportConfigTask, "export_cfg", mode=TaskMode.THREAD, bundle=bundle,
-                                        password=password)
-
-    def _finalize_export(self, result, path, pd):
+        """处理导出任务结果并持久化至磁盘"""
         self.btn_export.setEnabled(True)
-        try:
-            if not result.get("success"):
-                raise Exception(result.get("msg", "Unknown export error"))
+        pd.close_safe()
 
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=4, ensure_ascii=False)
+        if result.get("success"):
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, indent=4, ensure_ascii=False)
 
-            pd.close_safe()
-            ToastManager().show("Export successful", "success")
-        except Exception as e:
-            pd.close_safe()
-            StandardDialog(self.widget, "Error", f"Failed to save: {e}").exec()
+                StandardDialog(
+                    self.widget,
+                    "Export Successful",
+                    f"Configuration bundle has been securely saved to:\n{path}"
+                ).exec()
+            except Exception as e:
+                StandardDialog(self.widget, "Write Error", f"Failed to write file to disk: {e}").exec()
+        else:
+            StandardDialog(
+                self.widget,
+                "Export Failed",
+                result.get("msg", "An analytical error occurred during encryption.")
+            ).exec()
+
 
     def on_import_clicked(self, auto_path=None):
 
@@ -1669,21 +1658,19 @@ class SettingsTool(BaseTool):
         self.import_task_mgr.start_task(ImportConfigTask, "import_cfg", mode=TaskMode.THREAD, path=path,
                                         password=password)
 
-
     def _finalize_import(self, result, pd, path):
         self.btn_import.setEnabled(True)
         pd.close_safe()
 
-        # Check for decryption failure to allow retry
         if not result.get("success"):
             if "Decryption failed" in result.get("msg", ""):
-                from PySide6.QtWidgets import QMessageBox
-                reply = QMessageBox.warning(
-                    self.widget, "Decryption Failed",
+                dlg = StandardDialog(
+                    self.widget,
+                    "Decryption Failed",
                     "Incorrect password or corrupted file.\nWould you like to try entering the password again?",
-                    QMessageBox.Retry | QMessageBox.Cancel
+                    show_cancel=True
                 )
-                if reply == QMessageBox.Retry:
+                if dlg.exec():
                     self.on_import_clicked(auto_path=path)
             else:
                 StandardDialog(self.widget, "Import Failed", result.get("msg", "Unknown error")).exec()
@@ -1707,8 +1694,6 @@ class SettingsTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Import application failed: {e}")
             StandardDialog(self.widget, "Import Error", f"Failed to apply settings to UI:\n{e}").exec()
-
-
 
     def _update_current_model_marker(self, real_name, mode):
         self.combo_llm_model.blockSignals(True)
@@ -1765,14 +1750,25 @@ class SettingsTool(BaseTool):
         self.input_llm_key.blockSignals(False)
         self.combo_model_param_strategy.blockSignals(False)
 
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "lmstudio","local"]
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow",
+                       "lmstudio", "ollma", "minimax"]
         self.btn_del_llm.setEnabled(conf.get("id") not in default_ids)
 
-        self.btn_fetch_models.setToolTip("")
-        self.btn_fetch_models.setText(" Fetch")
+        is_minimax = conf.get("id") == "minimax"
+        tm = ThemeManager()
 
+        if is_minimax:
+            self.btn_fetch_models.setText(" Refresh")
+            self.btn_fetch_models.setIcon(tm.icon("refresh", "bg_main"))
+            self.btn_fetch_models.setToolTip("Model retrieval is currently unsupported by the MiniMax provider. "
+                                             "Click to restore predefined models.")
+        else:
+            self.btn_fetch_models.setText(" Fetch")
+            self.btn_fetch_models.setIcon(tm.icon("api", "bg_main"))
+            self.btn_fetch_models.setToolTip("")
 
-        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen"]
+        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen", "minimax", "deepseek", "openai"]
+
         is_native = conf.get("id") in hide_url_providers
 
         form_layout = self.input_llm_url.parentWidget().layout()
@@ -1781,7 +1777,6 @@ class SettingsTool(BaseTool):
             if label:
                 label.setVisible(not is_native)
         self.input_llm_url.setVisible(not is_native)
-
 
         self._refresh_model_combo(conf)
 
@@ -1828,6 +1823,11 @@ class SettingsTool(BaseTool):
         idx = self.combo_llm_preset.currentIndex()
         conf = self.llm_configs[idx] if 0 <= idx < len(self.llm_configs) else {}
 
+        # 如果是 MiniMax，走本地刷新逻辑
+        if conf.get("id") == "minimax":
+            self._refresh_minimax_models(conf)
+            return
+
         base_url = conf.get("base_url", "").strip()
         api_key = conf.get("api_key", "").strip()
         provider_id = conf.get("id", "").strip()
@@ -1849,6 +1849,20 @@ class SettingsTool(BaseTool):
             base_url=base_url, api_key=api_key, provider_id=provider_id
         )
 
+    def _refresh_minimax_models(self, conf):
+        current_models = conf.get("fetched_models", [])
+
+        for model in MINIMAX_DEFAULT_MODELS:
+            if model not in current_models:
+                current_models.append(model)
+
+        conf["fetched_models"] = current_models
+        self._refresh_model_combo(conf)
+
+        from src.ui.components.toast import ToastManager
+        ToastManager().show("MiniMax model list refreshed (defaults restored).", "success")
+
+
     def _on_models_fetched(self, result):
         self.net_pd.close_safe()
 
@@ -1866,7 +1880,6 @@ class SettingsTool(BaseTool):
                 ToastManager().show(f"Fetch Models Failed: {result['msg']}", "error")
 
         QTimer.singleShot(150, _show_result)
-
 
     def _start_test_task(self):
         self._sync_llm_data()
@@ -1929,7 +1942,6 @@ class SettingsTool(BaseTool):
 
         QTimer.singleShot(150, _show_result)
 
-
     def _add_llm_provider(self):
         new_id = f"custom_{int(time.time())}"
         new_conf = {
@@ -1948,7 +1960,8 @@ class SettingsTool(BaseTool):
         idx = self.combo_llm_preset.currentIndex()
         if idx < 0: return
         conf = self.llm_configs[idx]
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow","lmstudio",  "local"]
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow",
+                       "lmstudio", "local"]
         if conf.get("id") in default_ids:
             StandardDialog(
                 self.widget,
@@ -1973,12 +1986,9 @@ class SettingsTool(BaseTool):
         self.combo_log.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
 
-
         layout.addRow("Theme:", self.combo_theme)
         layout.addRow("Log Level:", self.combo_log)
         self.layout.addWidget(group)
-
-
 
     def _get_req_html(self, conf):
         if not conf or 'recommended_config' not in conf:
@@ -2020,8 +2030,6 @@ class SettingsTool(BaseTool):
             embed_id=embed_id,
             rerank_id=rerank_id
         )
-
-
 
     def _on_models_status_result(self, result):
         """Callback to update the UI based on VerifyModelsTask result."""
@@ -2170,7 +2178,17 @@ class SettingsTool(BaseTool):
             for row in range(self.table_mcp.rowCount()):
                 name_item = self.table_mcp.item(row, 1)
                 if not name_item: continue
-                # ... 省略中间字典拷贝代码 ...
+
+                name = name_item.text()
+                cfg = name_item.data(Qt.UserRole).copy()
+
+                chk_widget = self.table_mcp.cellWidget(row, 0)
+                if chk_widget:
+                    chk = chk_widget.layout().itemAt(0).widget()
+                    cfg["enabled"] = chk.isChecked()
+
+                new_mcp_servers[name] = cfg
+
             self.config.mcp_servers["mcpServers"] = new_mcp_servers
             self.config.save_mcp_servers()
 
@@ -2256,14 +2274,12 @@ class SettingsTool(BaseTool):
 
         setup_global_network_env()
 
-
         try:
             from src.task.s2_task import s2_manager
             s2_manager.reload_config()
             logging.info("S2 Task Manager configuration reloaded successfully.")
         except Exception as e:
             logging.error(f"Failed to reload S2 Task Manager: {e}")
-
 
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.emit()
@@ -2300,7 +2316,6 @@ class SettingsTool(BaseTool):
             self.logger.error(f"Save process failed: {msg}")
             ToastManager().show(f"System Error: {msg}", "error")
 
-
     def _on_save_task_result(self, result_dict):
         self._clear_unsaved()
 
@@ -2328,7 +2343,6 @@ class SettingsTool(BaseTool):
 
             StandardDialog(self.widget, "Settings Saved", msg).exec()
             self.check_models_status()
-
 
             if hasattr(self, '_pending_route_callback') and self._pending_route_callback:
                 cb = self._pending_route_callback

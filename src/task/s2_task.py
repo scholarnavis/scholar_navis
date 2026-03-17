@@ -18,6 +18,16 @@ class S2TaskManager:
                 cls._instance = super(S2TaskManager, cls).__new__(cls)
             return cls._instance
 
+    def reload_config(self):
+        """
+        Resets the internal rate limiter state.
+        Ensures immediate adoption of updated configurations by clearing legacy timestamps.
+        """
+        with self._lock:
+            if hasattr(self, '_last_request_time'):
+                delattr(self, '_last_request_time')
+
+
     def _get_current_config(self):
         try:
             config = ConfigManager().user_settings
