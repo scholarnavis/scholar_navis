@@ -4,6 +4,9 @@ import shutil
 import platform
 import subprocess
 import re
+import tarfile
+import zipfile
+
 import boto3
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
@@ -150,12 +153,21 @@ def build_app():
 
     print(f"\n[3/4] Build successful. Creating archive: {output_archive_name}.{archive_format}...")
 
-    archive_path = shutil.make_archive(
-        base_name=output_archive_name,
-        format=archive_format,
-        root_dir=dist_dir,
-        base_dir=app_name_safe
-    )
+    if sys_os == "Windows":
+        archive_path = f"{output_archive_name}.zip"
+        with zipfile.ZipFile(archive_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
+            for root, dirs, files in os.walk(target_folder):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, dist_dir)
+                    zipf.write(file_path, arcname)
+                    print(f"  [+] Added: {arcname}")
+    else:
+        archive_path = f"{output_archive_name}.tar.gz"
+        with tarfile.open(archive_path, 'w:gz', compresslevel=9) as tarf:
+            tarf.add(target_folder, arcname=app_name_safe)
+            print(f"  [+] Added: {app_name_safe}/")
+
     print(f"[+] Packed to {archive_path}")
 
     # R2 云端上传逻辑

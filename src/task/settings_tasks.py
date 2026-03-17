@@ -166,3 +166,5 @@ class TestApiTask(BackgroundTask):
             return {"success": True, "msg": f"Connection excellent!\nModel replied: '{raw_content.strip()}'"}
         except Exception as e:
             return {"success": False, "msg": str(e)}
+
+

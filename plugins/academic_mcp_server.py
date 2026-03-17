@@ -785,60 +785,106 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
     name="search_web",
     description=(
             "[Tags: Web] Search the web for general information, news, or current events. "
+            "Supported engines: 'duckduckgo' (default, most stable), 'google', 'bing', 'baidu'. "
             "CRITICAL INSTRUCTION: You MUST use the provided '_mcp_cite_id' (e.g., [101], [102]) inline to cite your claims. "
             "You MUST also append a 'References' list at the very end of your response containing the exact URLs."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def search_web(query: str, max_results: int = 3) -> str:
-    logger.info(f"Task: Web Search (DDG Lite) | Query: '{query}'")
+def search_web(query: str, engine: Literal["duckduckgo", "google", "bing", "baidu"] = "duckduckgo",
+               max_results: int = 3) -> str:
+    logger.info(f"Task: Web Search ({engine}) | Query: '{query}'")
     try:
-        url = "https://lite.duckduckgo.com/lite/"
-        data = {"q": query, "kl": "wt-wt"}
         headers = {
-            "Origin": "https://lite.duckduckgo.com",
-            "Referer": "https://lite.duckduckgo.com/",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7"
         }
-
-        res = mcp_request("POST", url, data=data, headers=headers, timeout=10)
-        res.raise_for_status()
-
+        results = []
         from bs4 import BeautifulSoup
-        soup = BeautifulSoup(res.text, 'html.parser')
 
-        results =[]
-        for a in soup.find_all('a', class_='result-url'):
-            if len(results) >= max_results:
-                break
+        safe_query = urllib.parse.quote(query)
 
-            title = a.get_text(strip=True)
-            link = a.get('href', '')
+        if engine == "duckduckgo":
+            url = "https://lite.duckduckgo.com/lite/"
+            data = {"q": query, "kl": "wt-wt"}
+            headers.update({"Origin": "https://lite.duckduckgo.com", "Referer": "https://lite.duckduckgo.com/",
+                            "Content-Type": "application/x-www-form-urlencoded"})
+            res = mcp_request("POST", url, data=data, headers=headers, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, 'html.parser')
+            for a in soup.find_all('a', class_='result-url'):
+                if len(results) >= max_results: break
+                title = a.get_text(strip=True)
+                link = a.get('href', '')
+                tr = a.find_parent('tr')
+                snippet_td = tr.find_next_sibling('tr', class_='result-snippet') if tr else None
+                snippet = snippet_td.get_text(separator=" ", strip=True) if snippet_td else "No abstract."
+                if link and not link.startswith(('/', 'duckduckgo.com')):
+                    results.append(
+                        {"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
+                         "snippet": snippet})
 
-            tr = a.find_parent('tr')
-            snippet_td = tr.find_next_sibling('tr', class_='result-snippet') if tr else None
-            snippet = snippet_td.get_text(separator=" ", strip=True) if snippet_td else "No abstract."
+        elif engine == "bing":
+            url = f"https://www.bing.com/search?q={safe_query}"
+            res = mcp_request("GET", url, headers=headers, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, 'html.parser')
+            for li in soup.find_all('li', class_='b_algo'):
+                if len(results) >= max_results: break
+                h2 = li.find('h2')
+                a = h2.find('a') if h2 else None
+                if not a or not a.get('href'): continue
+                title = a.get_text(strip=True)
+                link = a.get('href')
+                snippet_div = li.find('div', class_='b_caption') or li.find('p')
+                snippet = snippet_div.get_text(separator=" ", strip=True) if snippet_div else "No abstract."
+                results.append({"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
+                                "snippet": snippet})
 
-            if link and not link.startswith(('/', 'duckduckgo.com')):
-                cite_id = str(101 + len(results))
-                results.append({
-                    "_mcp_cite_id": cite_id,
-                    "cite_link": link,
-                    "title": title,
-                    "url": link,
-                    "snippet": snippet
-                })
+
+        elif engine == "google":
+            url = f"https://www.google.com/search?q={safe_query}"
+            res = mcp_request("GET", url, headers=headers, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, 'html.parser')
+            for div in soup.find_all('div', class_='g'):
+                if len(results) >= max_results: break
+                a = div.find('a')
+                h3 = div.find('h3')
+                if not a or not a.get('href') or not h3: continue
+                title = h3.get_text(strip=True)
+                link = a.get('href')
+                snippet_div = div.find('div', class_='VwiC3b') or div.find('div',
+                                                                           style=re.compile(r'-webkit-line-clamp'))
+                snippet = snippet_div.get_text(separator=" ", strip=True) if snippet_div else "No abstract."
+                results.append({"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
+                                "snippet": snippet})
+
+
+        elif engine == "baidu":
+            url = f"https://www.baidu.com/s?wd={safe_query}"
+            res = mcp_request("GET", url, headers=headers, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, 'html.parser')
+            for div in soup.find_all('div', class_=re.compile(r'result c-container')):
+                if len(results) >= max_results: break
+                h3 = div.find('h3')
+                a = h3.find('a') if h3 else None
+                if not a or not a.get('href'): continue
+                title = a.get_text(strip=True)
+                link = a.get('href')
+                snippet_div = div.find('div', class_=re.compile(r'c-abstract'))
+                snippet = snippet_div.get_text(separator=" ", strip=True) if snippet_div else "No abstract."
+                results.append({"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
+                                "snippet": snippet})
 
         if not results:
-            if "Something went wrong" in res.text or "Rate limit" in res.text:
-                return json.dumps({"status": "error", "message": "DuckDuckGo Rate Limited or Blocked. Try using search_academic_literature or fetch_wikipedia_summary instead."})
-            return json.dumps({"status": "success", "results":[],
-                               "message": "No results found. Try search_academic_literature if it's an academic query."})
+            return json.dumps({"status": "error",
+                               "message": f"{engine.capitalize()} blocked the request or returned no results. Try another engine or 'search_academic_literature'."})
 
         return json.dumps({
             "status": "success",
-            "engine": "DuckDuckGo Lite",
+            "engine": engine.capitalize(),
             "query": query,
             "results": results
         }, ensure_ascii=False)
@@ -848,7 +894,8 @@ def search_web(query: str, max_results: int = 3) -> str:
         return json.dumps({"status": "error", "message": "Please install beautifulsoup4 via pip."})
     except Exception as e:
         logger.error(f"Web search failed: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
+        return json.dumps({"status": "error",
+                           "message": f"Search engine error: {str(e)}. Consider using 'duckduckgo' if 403 Forbidden occurs."})
 
 
 @mcp.tool(
@@ -1081,6 +1128,53 @@ def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
             })
 
         return json.dumps({"status": "success", "organism": safe_org_code, "results": results[:10]}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
+    name="query_kegg_record",
+    description=(
+            "[Tags: Function, Systems Biology] Fetch detailed database records for a specific KEGG identifier. "
+            "CRITICAL: Use this to parse exact metadata for a KEGG Orthology (KO) number (e.g., 'K01803') or a pathway map (e.g., 'map00010'). "
+            "Returns orthologous group definitions, EC numbers, and linked pathways."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def query_kegg_record(kegg_id: str) -> str:
+    safe_id = kegg_id.strip()
+    logger.info(f"Task: KEGG Record Fetch | ID: '{safe_id}'")
+    try:
+        url = f"https://rest.kegg.jp/get/{urllib.parse.quote(safe_id)}"
+        res = mcp_request("GET", url, timeout=15)
+
+        if res.status_code in [400, 404] or not res.text.strip():
+            return json.dumps({
+                "status": "error",
+                "message": f"KEGG record '{safe_id}' not found. Ensure you are using a valid identifier (e.g., K01803)."
+            })
+        res.raise_for_status()
+
+        parsed_data = {}
+        current_key = None
+        for line in res.text.split("\n"):
+            if not line: continue
+            if not line.startswith(" "):
+                current_key = line[:12].strip()
+                parsed_data[current_key] = [line[12:].strip()]
+            elif current_key:
+                parsed_data[current_key].append(line[12:].strip())
+
+        summary = {
+            "identifier": safe_id,
+            "name": ", ".join(parsed_data.get("NAME", [])),
+            "definition": " ".join(parsed_data.get("DEFINITION", [])),
+            "pathways": [p for p in parsed_data.get("PATHWAY", [])] if "PATHWAY" in parsed_data else [],
+            "modules": [m for m in parsed_data.get("MODULE", [])] if "MODULE" in parsed_data else [],
+            "genes": [g for g in parsed_data.get("GENES", [])][:5]  # Limit gene output to prevent token overflow
+        }
+
+        return json.dumps({"status": "success", "source": "KEGG", "record": summary}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 

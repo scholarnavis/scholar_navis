@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import psutil
 import torch
@@ -15,6 +16,7 @@ from src.core.mcp_manager import MCPManager
 from src.core.models_registry import EMBEDDING_MODELS
 from src.ui.components.param_editor import ParamEditorWidget
 from src.core.theme_manager import ThemeManager
+from src.ui.components.toast import ToastManager
 
 
 class BaseDialog(QDialog):
@@ -1274,6 +1276,118 @@ class ProgressDialog(BaseDialog):
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
         if hasattr(self, 'stall_timer'): self.stall_timer.stop()
         super().closeEvent(event)
+
+
+class UnsavedChangesDialog(BaseDialog):
+    def __init__(self, parent):
+        super().__init__(parent, title="Unsaved Modifications", width=460)
+        self.user_choice = "close"  # Default fallback action
+
+        # Configure the message label
+        msg_label = QLabel(
+            "You have unsaved configuration changes.\n"
+            "Please specify how you would like to proceed before navigating away:"
+        )
+        msg_label.setWordWrap(True)
+        msg_label.setStyleSheet(
+            f"color: {self.tm.color('text_main')}; font-size: 14px; border: none; background: transparent;"
+        )
+        self.content_layout.addWidget(msg_label)
+
+        # Callback generator for buttons
+        def set_choice(action, accept=False):
+            self.user_choice = action
+            self.accept() if accept else self.reject()
+
+        # Construct Footer Buttons
+        btn_close = self.add_button("Close", lambda: set_choice("close"))
+        btn_revert = self.add_button("Revert Changes", lambda: set_choice("revert"), is_danger=True)
+        btn_save = self.add_button("Save Settings", lambda: set_choice("save", True), is_primary=True)
+
+        btn_close.setFixedWidth(80)
+        btn_revert.setFixedWidth(130)
+        btn_save.setFixedWidth(130)
+
+
+
+class ExportPasswordDialog(BaseDialog):
+    def __init__(self, parent):
+        super().__init__(parent, title="Export Security", width=420)
+        self.password = None
+        self.is_cancelled = True
+        self.regex = re.compile(r'^[a-zA-Z0-9@_\-+=!#$&^*]+$')
+
+        lbl = QLabel(
+            "Set a password to encrypt the exported configuration.\nLeave completely blank for an unencrypted JSON export.")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(
+            f"color: {self.tm.color('text_main')}; font-size: 13px; border: none; background: transparent;")
+
+        self.inp_pass = QLineEdit()
+        self.inp_pass.setEchoMode(QLineEdit.Password)
+        self.inp_pass.setPlaceholderText("Min 6 chars (a-zA-Z0-9@_-+=!#$&^*)")
+        self.inp_pass.setStyleSheet(
+            f"background: {self.tm.color('bg_input')}; color: {self.tm.color('text_main')}; border: 1px solid {self.tm.color('border')}; padding: 6px; border-radius: 4px;")
+
+        self.content_layout.addWidget(lbl)
+        self.content_layout.addWidget(self.inp_pass)
+
+        btn_cancel = self.add_button("Cancel", self.reject)
+        btn_confirm = self.add_button("Confirm", self._validate, is_primary=True)
+        btn_cancel.setFixedWidth(100)
+        btn_confirm.setFixedWidth(100)
+
+    def _validate(self):
+        pwd = self.inp_pass.text()
+        if not pwd:
+            self.is_cancelled = False
+            self.accept()
+            return
+
+        if len(pwd) < 6 or not self.regex.match(pwd):
+            ToastManager().show("Invalid password! Min 6 chars. Allowed: a-zA-Z0-9@_-+=!#$&^*", "error")
+            return
+
+        self.password = pwd
+        self.is_cancelled = False
+        self.accept()
+
+
+class ImportPasswordDialog(BaseDialog):
+    def __init__(self, parent):
+        super().__init__(parent, title="Encrypted Bundle Detected", width=420)
+        self.password = None
+        self.is_cancelled = True
+
+        lbl = QLabel("This configuration is encrypted.\nPlease enter the password to unlock:")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(
+            f"color: {self.tm.color('text_main')}; font-size: 13px; border: none; background: transparent;")
+
+        self.inp_pass = QLineEdit()
+        self.inp_pass.setEchoMode(QLineEdit.Password)
+        self.inp_pass.setPlaceholderText("Enter decryption password...")
+        self.inp_pass.setStyleSheet(
+            f"background: {self.tm.color('bg_input')}; color: {self.tm.color('text_main')}; border: 1px solid {self.tm.color('border')}; padding: 6px; border-radius: 4px;")
+
+        self.content_layout.addWidget(lbl)
+        self.content_layout.addWidget(self.inp_pass)
+
+        btn_cancel = self.add_button("Cancel", self.reject)
+        btn_confirm = self.add_button("Confirm", self._validate, is_primary=True)
+        btn_cancel.setFixedWidth(100)
+        btn_confirm.setFixedWidth(100)
+
+    def _validate(self):
+        pwd = self.inp_pass.text()
+        if not pwd:
+            from src.ui.components.toast import ToastManager
+            ToastManager().show("Password cannot be empty.", "error")
+            return
+        self.password = pwd
+        self.is_cancelled = False
+        self.accept()
+
 
 class ProjectEditorDialog(BaseDialog):
     def __init__(self, parent=None, is_edit=False, current_data=None):

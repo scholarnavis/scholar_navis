@@ -218,72 +218,43 @@ class MCPManager:
                     write_tx, write_rx = anyio.create_memory_object_stream(100)
 
                     async def http_poster():
-
                         import json
-
-                        # [修复] 增加超时时间，防止工具调用执行时间过长被意外截断
-
                         async with httpx.AsyncClient(timeout=120.0) as client:
-
                             async with write_rx:
-
                                 async for message in write_rx:
-
                                     try:
-
-                                        # [修复] 严格排除 None 值，防止外部服务端严格校验格式时报错
-
                                         if hasattr(message, "model_dump"):
-
                                             payload = message.model_dump(mode='json', exclude_none=True)
-
                                         elif hasattr(message, "dict"):
-
                                             payload = message.dict(exclude_none=True)
-
                                         else:
-
                                             payload = json.loads(json.dumps(message, default=lambda o: o.__dict__))
 
                                         post_headers = {k: v for k, v in headers.items() if k.lower() != 'accept'}
-
                                         post_headers['Content-Type'] = 'application/json'
-
                                         await client.post(url, json=payload, headers=post_headers)
-
                                     except Exception as e:
-
                                         logger.error(f"HTTP POST failed: {e}")
 
                     async def http_receiver():
 
                         from pydantic import TypeAdapter
-
                         from mcp.types import JSONRPCMessage
 
-                        # [修复] JSONRPCMessage 是 Union 类型，必须借助 TypeAdapter 来反序列化
 
                         adapter = TypeAdapter(JSONRPCMessage)
 
                         async with read_tx:
-
                             try:
-
                                 limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-
                                 async with httpx.AsyncClient(timeout=None, limits=limits) as client:
-
                                     async with client.stream("GET", url, headers=headers) as resp:
-
                                         if resp.status_code != 200:
                                             logger.error(f"Abnormal HTTP status code: {resp.status_code}")
-
                                             return
 
                                         async for line in resp.aiter_lines():
-
                                             line = line.strip()
-
                                             if not line: continue
                                             if line.startswith("data: "):
                                                 line = line[6:].strip()

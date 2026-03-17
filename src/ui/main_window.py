@@ -390,6 +390,34 @@ class MainWindow(QMainWindow):
         self.sidebar.addItem(item)
 
     def switch_tool(self, index):
+        current_index = self.tool_stack.currentIndex()
+
+        if current_index >= 0 and self.tools[current_index] is not None:
+            current_tool = self.tools[current_index]
+            if hasattr(current_tool, 'check_unsaved_changes'):
+
+                def proceed_switch():
+                    self.sidebar.blockSignals(True)
+                    self.sidebar.setCurrentRow(index)
+                    self.sidebar.blockSignals(False)
+                    self._execute_tool_switch(index)
+
+                import inspect
+                sig = inspect.signature(current_tool.check_unsaved_changes)
+                if 'proceed_callback' in sig.parameters:
+                    can_switch = current_tool.check_unsaved_changes(proceed_callback=proceed_switch)
+                else:
+                    can_switch = current_tool.check_unsaved_changes()
+
+                if not can_switch:
+                    self.sidebar.blockSignals(True)
+                    self.sidebar.setCurrentRow(current_index)
+                    self.sidebar.blockSignals(False)
+                    return
+
+        self._execute_tool_switch(index)
+
+    def _execute_tool_switch(self, index):
         if self.tools[index] is None:
             name, ToolClass = self.tool_classes[index]
             tool_instance = ToolClass()

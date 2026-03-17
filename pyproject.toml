@@ -23,7 +23,7 @@ dependencies = [
     "curl-cffi>=0.14.0",
     "torch>=2.10.0",
     "cryptography>=46.0.5",
-    "keyring>=25.7.0",
+    "keyring>=24.0.0",
     "chardet<6.0",
     "hf-xet>=1.2.0",
     "optimum-onnx>=0.1.0",
@@ -37,6 +37,11 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "litellm>=1.82.1",
     "pyjwt>=2.12.0",
+    "pywin32>=306 ; sys_platform == 'win32'",
+    "pyobjc-framework-cocoa>=10.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-localauthentication>=10.0 ; sys_platform == 'darwin'",
+    "secretstorage>=3.3.0 ; sys_platform == 'linux'",
+    "jeepney>=0.6.0 ; sys_platform == 'linux'",
 ]
 
 

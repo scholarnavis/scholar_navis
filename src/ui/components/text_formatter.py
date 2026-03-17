@@ -232,6 +232,11 @@ class TextFormatter:
 
             # Gene Ontology (GO) 映射
             (r'\b(GO:\d{7})\b', r'<a href="https://www.ebi.ac.uk/QuickGO/term/\1">\1</a>'),
+
+            (r'\b(K\d{5})\b', r'<a href="https://www.kegg.jp/entry/\1">KEGG \1</a>'),
+            # KEGG Pathway Identifier mapping
+            (r'\b([a-z]{2,4}\d{5})\b', r'<a href="https://www.kegg.jp/pathway/\1">KEGG Pathway \1</a>'),
+
             # ChEMBL Target ID 映射
             (r'\b(CHEMBL\d+)\b', r'<a href="https://www.ebi.ac.uk/chembl/target_report_card/\1">\1</a>'),
 

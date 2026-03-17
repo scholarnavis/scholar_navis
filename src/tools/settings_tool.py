@@ -1,42 +1,59 @@
-import copy
+import asyncio
 import json
 import logging
+import logging
 import os
-import re
-import shutil
-import subprocess
-import sys
 import time
 
 import qdarktheme
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QEvent, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
-                               QLabel, QPushButton, QGroupBox, QScrollArea, QHBoxLayout, QComboBox, QTableWidget,
+                               QLabel, QPushButton, QGroupBox, QScrollArea, QHBoxLayout, QTableWidget,
                                QAbstractItemView, QHeaderView,
-                               QTableWidgetItem, QCheckBox, QApplication, QFrame)
-from huggingface_hub import constants
+                               QTableWidgetItem, QCheckBox, QApplication, QFrame, QFileDialog, QInputDialog)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
-from src.core.email_check import verify_email_robust
+from src.core.encryption_service import SystemEncryptionService
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
-                                      get_model_conf, check_model_exists, resolve_auto_model, get_onnx_cache_dir)
+                                      get_model_conf, resolve_auto_model, get_onnx_cache_dir)
 from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
+from src.task.common_task import VerifyModelsTask
+from src.task.config_task import ExportConfigTask, ImportConfigTask
 from src.task.hf_download_task import RealTimeHFDownloadTask
 from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask
-from src.task.common_task import VerifyModelsTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, AddModelDialog
+from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, AddModelDialog, \
+    UnsavedChangesDialog, ExportPasswordDialog, ImportPasswordDialog
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
+
+
+
+class HardwareAuthWorker(QObject):
+    sig_finished = Signal(bool)
+
+    def run(self):
+        import asyncio
+        from src.core.encryption_service import SystemEncryptionService
+        service = SystemEncryptionService()
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            res = loop.run_until_complete(service.verify_identity("Authorize configuration export"))
+            loop.close()
+            self.sig_finished.emit(res)
+        except Exception as e:
+            import logging
+            logging.getLogger("SettingsTool").warning(f"Hardware auth error: {e}")
+            self.sig_finished.emit(False)
 
 
 class ScrollInterceptTableWidget(QTableWidget):
@@ -152,6 +169,14 @@ class SettingsTool(BaseTool):
         self.btn_save = QPushButton(" Save Settings")
         self.btn_save.clicked.connect(self.on_save_clicked)
 
+        self.btn_export = QPushButton(" Export Config")
+        self.btn_export.clicked.connect(self.on_export_clicked)
+
+        self.btn_import = QPushButton(" Import Config")
+        self.btn_import.clicked.connect(self.on_import_clicked)
+
+        btn_layout.addWidget(self.btn_export)
+        btn_layout.addWidget(self.btn_import)
         btn_layout.addWidget(self.btn_undo)
         btn_layout.addWidget(self.btn_save)
         main_layout.addLayout(btn_layout)
@@ -203,7 +228,6 @@ class SettingsTool(BaseTool):
         self.chk_low_vram.stateChanged.connect(self._mark_unsaved)
         self.combo_theme.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_log.currentIndexChanged.connect(self._mark_unsaved)
-        self.input_ext_python.textChanged.connect(self._mark_unsaved)
 
         # LLM listeners
         self.input_llm_name.textChanged.connect(self._mark_unsaved)
@@ -337,18 +361,19 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setIcon(tm.icon("add", "success"))
         if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setIcon(tm.icon("refresh", "text_main"))
 
-    def _load_current_settings(self, is_undo=False):
+    def _load_current_settings(self, is_undo=False, reload_from_disk=True):
         self._is_loading = True
 
-        self.config.load_settings()
-        self.config.load_mcp_servers()
+        if reload_from_disk:
+            self.config.load_settings()
+            self.config.load_mcp_servers()
+            self.llm_configs = self._load_llm_config()
 
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
         self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
         self.input_s2_rate_limit.setText(str(self.config.user_settings.get("s2_rate_limit", 1.0)))
-
 
         mode_map = {"system": 0, "off": 1, "custom": 2}
         self.combo_proxy_mode.setCurrentIndex(
@@ -371,7 +396,6 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'chk_low_vram'):
             self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
 
-        self.llm_configs = self._load_llm_config()
         self.combo_llm_preset.blockSignals(True)
         self.combo_llm_preset.clear()
         for conf in self.llm_configs:
@@ -391,7 +415,7 @@ class SettingsTool(BaseTool):
 
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
-        self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
+
 
         if hasattr(self, '_load_mcp_servers_to_ui'):
             self._load_mcp_servers_to_ui()
@@ -400,6 +424,7 @@ class SettingsTool(BaseTool):
         self._is_loading = False
 
         if is_undo:
+            from src.ui.components.toast import ToastManager
             ToastManager().show("Changes reverted to the last saved state.", "info")
             if hasattr(self, '_refresh_mcp_status'):
                 self._refresh_mcp_status()
@@ -1094,11 +1119,20 @@ class SettingsTool(BaseTool):
 
         existing_ids = {c.get("id") for c in loaded_configs}
         needs_resave = False
+        missing_ids = []
+
         for i, dc in enumerate(default_config):
             if dc["id"] not in existing_ids:
                 loaded_configs.insert(i, dc)
+                missing_ids.append(dc["id"])
                 needs_resave = True
 
+        if needs_resave:
+            self.logger.warning(
+                f"Required default LLM identifiers were missing: {missing_ids}. "
+                f"The system has automatically supplemented and persisted these records."
+            )
+            self._save_llm_config()
 
         return loaded_configs if loaded_configs else default_config
 
@@ -1525,6 +1559,157 @@ class SettingsTool(BaseTool):
 
         self._load_model_params_to_ui(conf, curr_real)
 
+    def on_export_clicked(self):
+        # 1. Setup Password Encryption (Biometric authentication bypassed)
+        pwd_dlg = ExportPasswordDialog(self.widget)
+        pwd_dlg.exec()
+        if pwd_dlg.is_cancelled:
+            return
+        password = pwd_dlg.password
+
+        # 2. File Selection
+        path, _ = QFileDialog.getSaveFileName(self.widget, "Save Config", "scholar_navis_config.json",
+                                              "JSON (*.json)")
+        if not path: return
+
+        # 3. Compile Bundle & Execute Background Task
+        bundle = {
+            "settings": self.config.user_settings,
+            "mcp_servers": self.config.mcp_servers,
+            "llm_configs": self.llm_configs
+        }
+
+        self.btn_export.setEnabled(False)
+        pd = ProgressDialog(self.widget, "Security Export", "Performing high-intensity key derivation (PBKDF2)...")
+        pd.show()
+
+        self.export_task_mgr = TaskManager()
+        self.export_task_mgr.sig_progress.connect(pd.update_progress)
+        self.export_task_mgr.sig_result.connect(lambda res: self._finalize_export(res, path, pd))
+        self.export_task_mgr.start_task(ExportConfigTask, "export_cfg", mode=TaskMode.THREAD, bundle=bundle,
+                                        password=password)
+
+    def _finalize_export(self, result, path, pd):
+        # 2. Setup Password Encryption
+        pwd_dlg = ExportPasswordDialog(self.widget)
+        pwd_dlg.exec()
+        if pwd_dlg.is_cancelled:
+            return
+        password = pwd_dlg.password
+
+        # 3. File Selection
+        path, _ = QFileDialog.getSaveFileName(self.widget, "Save Config", "scholar_navis_config.json",
+                                              "JSON (*.json)")
+        if not path: return
+
+        # 4. Compile Bundle & Execute Background Task
+        bundle = {
+            "settings": self.config.user_settings,
+            "mcp_servers": self.config.mcp_servers,
+            "llm_configs": self.llm_configs
+        }
+
+        self.btn_export.setEnabled(False)
+        pd = ProgressDialog(self.widget, "Exporting", "Preparing data...")
+        pd.show()
+
+        self.export_task_mgr = TaskManager()
+        self.export_task_mgr.sig_progress.connect(pd.update_progress)
+        self.export_task_mgr.sig_result.connect(lambda res: self._finalize_export(res, path, pd))
+        self.export_task_mgr.start_task(ExportConfigTask, "export_cfg", mode=TaskMode.THREAD, bundle=bundle,
+                                        password=password)
+
+    def _finalize_export(self, result, path, pd):
+        self.btn_export.setEnabled(True)
+        try:
+            if not result.get("success"):
+                raise Exception(result.get("msg", "Unknown export error"))
+
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=4, ensure_ascii=False)
+
+            pd.close_safe()
+            ToastManager().show("Export successful", "success")
+        except Exception as e:
+            pd.close_safe()
+            StandardDialog(self.widget, "Error", f"Failed to save: {e}").exec()
+
+    def on_import_clicked(self, auto_path=None):
+
+        # Support retry flow without opening file dialog twice
+        path = auto_path
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self.widget, "Import Config Bundle", "", "JSON (*.json)")
+        if not path: return
+
+        # Quick Format Check
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                preview_bundle = json.load(f)
+            is_encrypted = "payload" in preview_bundle and "salt" in preview_bundle
+        except Exception as e:
+            StandardDialog(self.widget, "Import Error", f"Invalid JSON file: {e}").exec()
+            return
+
+        password = None
+        if is_encrypted:
+            pwd_dlg = ImportPasswordDialog(self.widget)
+            pwd_dlg.exec()
+            if pwd_dlg.is_cancelled:
+                return  # User cancelled the import process
+            password = pwd_dlg.password
+
+        self.btn_import.setEnabled(False)
+        pd = ProgressDialog(self.widget, "Importing", "Reading and decrypting...")
+        pd.show()
+
+        self.import_task_mgr = TaskManager()
+        self.import_task_mgr.sig_progress.connect(pd.update_progress)
+        self.import_task_mgr.sig_result.connect(lambda res: self._finalize_import(res, pd, path))
+        self.import_task_mgr.start_task(ImportConfigTask, "import_cfg", mode=TaskMode.THREAD, path=path,
+                                        password=password)
+
+
+    def _finalize_import(self, result, pd, path):
+        self.btn_import.setEnabled(True)
+        pd.close_safe()
+
+        # Check for decryption failure to allow retry
+        if not result.get("success"):
+            if "Decryption failed" in result.get("msg", ""):
+                from PySide6.QtWidgets import QMessageBox
+                reply = QMessageBox.warning(
+                    self.widget, "Decryption Failed",
+                    "Incorrect password or corrupted file.\nWould you like to try entering the password again?",
+                    QMessageBox.Retry | QMessageBox.Cancel
+                )
+                if reply == QMessageBox.Retry:
+                    self.on_import_clicked(auto_path=path)
+            else:
+                StandardDialog(self.widget, "Import Failed", result.get("msg", "Unknown error")).exec()
+            return
+
+        try:
+            final_data = result.get("data", {})
+
+            if "settings" in final_data:
+                self.config.user_settings = final_data.get("settings", {}).copy()
+            if "mcp_servers" in final_data:
+                self.config.mcp_servers = final_data.get("mcp_servers", {}).copy()
+            if "llm_configs" in final_data:
+                self.llm_configs = final_data.get("llm_configs", []).copy()
+
+            self._load_current_settings(reload_from_disk=False)
+            self._mark_unsaved()
+
+            mode = result.get("mode", "unknown")
+            ToastManager().show(f"Configuration imported to UI ({mode}). Please save to apply.", "success")
+        except Exception as e:
+            self.logger.error(f"Import application failed: {e}")
+            StandardDialog(self.widget, "Import Error", f"Failed to apply settings to UI:\n{e}").exec()
+
+
+
     def _update_current_model_marker(self, real_name, mode):
         self.combo_llm_model.blockSignals(True)
         tm = ThemeManager()
@@ -1788,13 +1973,9 @@ class SettingsTool(BaseTool):
         self.combo_log.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
 
-        self.input_ext_python = QLineEdit()
-        self.input_ext_python.setPlaceholderText("e.g. /usr/bin/python3 or C:/Python310/python.exe")
-        self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
 
         layout.addRow("Theme:", self.combo_theme)
         layout.addRow("Log Level:", self.combo_log)
-        layout.addRow("External Python Path:", self.input_ext_python)
         self.layout.addWidget(group)
 
 
@@ -1907,8 +2088,29 @@ class SettingsTool(BaseTool):
             self.btn_dl_rerank.setStyleSheet(self._get_btn_style(btn_type="primary"))
             self.btn_dl_rerank.setIcon(tm.icon("download", "bg_main"))
 
+    def check_unsaved_changes(self, proceed_callback=None) -> bool:
+        """
+        Navigation Guard: Evaluates the current component state for the main router.
+        When unsaved changes exist, it intercepts the navigation with a custom modal.
+        @return: True (allow routing), False (block routing and stay on the current component)
+        """
+        if getattr(self, '_is_loading', False) or not self.btn_undo.isEnabled():
+            return True
 
-    def on_save_clicked(self):
+        dlg = UnsavedChangesDialog(self.widget)
+        dlg.exec()
+
+        if dlg.user_choice == "save":
+            self.on_save_clicked(on_success=proceed_callback)
+            return False
+        elif dlg.user_choice == "revert":
+            self.on_undo_clicked()
+            return True
+        else:
+            return False
+
+    def on_save_clicked(self, on_success=None):
+        self._pending_route_callback = on_success
         self.widget.setFocus()
 
         new_email = self.input_ncbi_email.text().strip()
@@ -2010,7 +2212,6 @@ class SettingsTool(BaseTool):
             "s2_api_key": new_s2_key,
             "s2_rate_limit": s2_rate_text,
             "github_token": new_github_token,
-            "external_python_path": getattr(self, 'input_ext_python', QLineEdit()).text().strip(),
             "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked()
         })
 
@@ -2127,6 +2328,12 @@ class SettingsTool(BaseTool):
 
             StandardDialog(self.widget, "Settings Saved", msg).exec()
             self.check_models_status()
+
+
+            if hasattr(self, '_pending_route_callback') and self._pending_route_callback:
+                cb = self._pending_route_callback
+                self._pending_route_callback = None
+                cb()
 
         QTimer.singleShot(150, _show_success_dialog)
 

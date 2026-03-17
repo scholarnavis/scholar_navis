@@ -91,11 +91,15 @@ class BackgroundTask:
 class RunnerProcess(mp.Process):
     def __init__(self, task_cls, task_id, queue, kwargs):
         super().__init__(daemon=True)
+        self.logger = logging.getLogger(f"RunnerProcess-{task_id} ({self.pid})")
         self.task = task_cls(task_id, queue, kwargs)
 
     def run(self):
-        self.task.run()
-
+        try:
+            self.task.run()
+        except Exception as e:
+            self.logger.error(f"Process Crash: {traceback.format_exc()}")
+            raise
 
 class RunnerThread(QThread):
     def __init__(self, task_cls, task_id, queue, kwargs):
@@ -155,7 +159,8 @@ class TaskManager(QObject):
     def _real_start(self, task_class, task_id: str, mode: TaskMode, kwargs: Dict):
 
         # 强制将已知会引发 GIL 锁死的重型任务转移到独立进程，无视工具组件的原始请求
-        if task_class.__name__ in ["VerifyModelsTask", "VersionCheckTask"]:
+        heavy_tasks = ["VerifyModelsTask", "VersionCheckTask", "ExportConfigTask", "ImportConfigTask"]
+        if task_class.__name__ in heavy_tasks:
             if mode == TaskMode.THREAD:
                 self.logger.warning(f"Intercepted {task_class.__name__}: Forcing PROCESS mode to prevent UI freeze.")
                 mode = TaskMode.PROCESS

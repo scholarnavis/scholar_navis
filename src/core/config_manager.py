@@ -7,6 +7,11 @@ import tempfile
 import keyring
 from cryptography.fernet import Fernet, InvalidToken
 
+from src.core.encryption_service import SystemEncryptionService
+
+# 当前配置导出版本号，用于未来兼容性检查
+CONFIG_VERSION = "1.0"
+
 
 class ConfigManager:
     _instance = None
@@ -47,7 +52,8 @@ class ConfigManager:
         os.makedirs(self.CONFIG_DIR, exist_ok=True)
 
         # 2. 初始化加密套件
-        self._init_encryption()
+        self.encryption_service = SystemEncryptionService(service_name="ScholarNavis")
+        self.encryption_service._get_master_key()
 
         # 3. 加载核心配置
         self.load_settings()
@@ -92,34 +98,26 @@ class ConfigManager:
     def save_json(self, path, data, encrypt=True):
         """原子性写入 JSON 配置文件"""
         with self._lock:
-            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), text=not encrypt)
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), text=False)  # 始终二进制写入
             try:
                 json_str = json.dumps(data, indent=4, ensure_ascii=False)
-
                 if encrypt:
-                    content = self.fernet.encrypt(json_str.encode('utf-8'))
+                    content = self.encryption_service.encrypt(json_str)
                     with os.fdopen(temp_fd, 'wb') as f:
                         f.write(content)
                 else:
                     with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
                         f.write(json_str)
-
                 os.replace(temp_path, path)
             except Exception as e:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
                 self.logger.error(f"Failed to save config at {path}: {e}")
+                raise
 
     def load_json(self, path, encrypt=True):
-        """
-        完整定义的 load_json：
-        1. 处理文件不存在
-        2. 处理加密解密（包含 InvalidToken 容错）
-        3. 处理从明文到密文的自动迁移（真实触发保存）
-        """
         if not os.path.exists(path):
             return None
-
         with self._lock:
             try:
                 if encrypt:
@@ -127,29 +125,25 @@ class ConfigManager:
                         raw_data = f.read()
 
                     try:
-                        # 尝试解密
-                        decrypted_text = self.fernet.decrypt(raw_data).decode('utf-8')
+                        decrypted_text = self.encryption_service.decrypt(raw_data)
                         return json.loads(decrypted_text)
-                    except (InvalidToken, Exception) as e:
-                        self.logger.warning(f"Decryption failed for {path}, checking if plain text: {e}")
+                    except Exception as e:
+                        # 处理旧版本明文迁移逻辑
+                        self.logger.warning(f"Decryption failed, trying plain text migration: {e}")
                         try:
                             with open(path, 'r', encoding='utf-8') as f:
                                 plain_data = json.load(f)
-
-                            self.logger.info(f"Migrating plain-text config to encrypted: {path}")
                             self.save_json(path, plain_data, encrypt=True)
                             return plain_data
-
                         except Exception:
-                            self.logger.error(f"Config file is corrupted or not valid JSON: {path}")
                             return None
                 else:
-                    # 非加密模式读取
                     with open(path, 'r', encoding='utf-8') as f:
                         return json.load(f)
             except Exception as e:
                 self.logger.error(f"Critical error reading {path}: {e}")
                 return None
+
 
     def load_settings(self):
         default_settings = {
