@@ -552,36 +552,6 @@ def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", ma
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="read_local_sequence_file",
-    description=(
-        "[Tags: Sequence, Systems Biology] Read the contents of a local file downloaded to the workspace. "
-        "Use this tool when another tool (like fetch_sequence_fasta) saves a massive file locally and returns a 'local_path'. "
-        "Only pass the filename or the path provided by the previous tool."
-    )
-)
-@simple_retry(max_attempts=2, delay=1)
-def read_local_sequence_file(file_path: str, max_chars: int = 50000) -> str:
-    logger.info(f"Task: Read Workspace File | Path: '{file_path}'")
-    try:
-        clean_name = os.path.basename(file_path.strip().replace("\\", "/"))
-        target_path = os.path.abspath(os.path.join(WORKSPACE_DIR, clean_name))
-
-        if not target_path.startswith(os.path.abspath(WORKSPACE_DIR)):
-            return json.dumps({"status": "error", "message": "Security Error: Path traversal detected!"})
-
-        if not os.path.exists(target_path):
-            return json.dumps({"status": "error", "message": f"File '{clean_name}' not found in the local workspace."})
-
-        with open(target_path, 'r', encoding='utf-8') as f:
-            content = f.read(max_chars)
-            if len(content) == max_chars:
-                content += "\n\n...[Content truncated due to length limits. Ask user to download manually if more is needed.]"
-
-        return json.dumps({"status": "success", "file": clean_name, "content": content}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
-
 
 @mcp.tool(
     name="fetch_sequence_fasta",
@@ -1157,7 +1127,7 @@ def fetch_go_annotations(uniprot_id: str, limit: int = 10) -> str:
 @mcp.tool(
     name="fetch_pubchem_compound",
     description=(
-        "[Tags: Phytochemistry] Fetch detailed chemical properties (Molecular Weight, Formula, SMILES, XLogP, etc.) of a molecule from PubChem. "
+        "[Tags: Phytochemistry, Metabolomics] Fetch detailed chemical properties (Molecular Weight, Formula, SMILES, XLogP, etc.) of a molecule from PubChem. "
         "CRITICAL: You MUST use the exact common English chemical name or IUPAC name (e.g., 'Aspirin', 'Quercetin', 'Paclitaxel'). "
         "If the first query returns a 404, try using a widely known synonym."
     )
@@ -1199,7 +1169,7 @@ def fetch_pubchem_compound(compound_name: str) -> str:
 @mcp.tool(
     name="search_chembl_target",
     description=(
-            "[Tags: Phytochemistry] Search the ChEMBL database for pharmacological protein targets. "
+            "[Tags: Phytochemistry, Metabolomics] Search the ChEMBL database for pharmacological protein targets. "
             "Use this to find Target ChEMBL IDs and preferred names associated with specific biological targets, enzymes, or pathways (e.g., 'Tubulin', 'EGFR', 'Kinase'). "
             "Do NOT use this to search for chemical compounds directly; it is strictly for finding biological TARGETS."
     )
@@ -1677,6 +1647,157 @@ def query_string_database(identifiers: str, action: Literal["interactions", "enr
         return json.dumps({"status": "error", "message": str(e)})
 
 
+@mcp.tool(
+    name="search_jaspar_motifs",
+    description=(
+            "[Tags: Regulatory Genomics] Search JASPAR database for Transcription Factor binding motifs (DNA profiles). "
+            "Use this to find motif IDs (e.g., 'MA0001.1') and sequence logos for promoter analysis. "
+            "Default tax_group is 'plants'. Use 'collection' to filter (e.g., 'CORE')."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def search_jaspar_motifs(query: str, tax_group: str = "plants") -> str:
+    logger.info(f"Task: JASPAR Motif Search | Query: '{query}'")
+    try:
+        clean_query = query.strip().split()[0]
+        # 回退到官方最标准的基础查询参数，避免高级参数造成的空集
+        url = f"https://jaspar.elixir.no/api/v1/matrix/?search={urllib.parse.quote(clean_query)}&tax_group={tax_group}"
+
+        headers = {"Accept": "application/json"}
+        res = mcp_request("GET", url, headers=headers, timeout=15)
+
+        if "application/json" not in res.headers.get("Content-Type", "").lower():
+            return json.dumps({"status": "error", "message": "JASPAR server returned non-JSON response."})
+
+        res.raise_for_status()
+        data = res.json()
+
+        if not data.get("results"):
+            return json.dumps({"status": "success", "message": f"No motifs found for '{clean_query}' in {tax_group}."})
+
+        results = []
+        for item in data.get("results", []):
+            matrix_id = item.get("matrix_id")
+            results.append({
+                "matrix_id": matrix_id,
+                "name": item.get("name"),
+                "base_url": f"https://jaspar.elixir.no/matrix/{matrix_id}/",
+                "sequence_logo_url": f"https://jaspar.elixir.no/static/logos/all/svg/{matrix_id}.svg"
+            })
+
+        return json.dumps({"status": "success", "source": "JASPAR", "results": results}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
+    name="search_chebi_metabolite",
+    description=(
+            "[Tags: Phytochemistry, Metabolomics] Search the ChEBI database for biological metabolites and phytochemicals. "
+            "Returns detailed structural ontology and taxonomy, serving as a robust complement to HMDB."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def search_chebi_metabolite(query: str) -> str:
+    logger.info(f"Task: ChEBI Metabolite Search | Query: '{query}'")
+    try:
+        safe_query = urllib.parse.quote(query.strip())
+
+        ols_url = f"https://www.ebi.ac.uk/ols4/api/search?q={safe_query}&ontology=chebi&exact=false&rows=5"
+
+        res = mcp_request("GET", ols_url, timeout=15)
+        res.raise_for_status()
+
+        results = []
+        for item in res.json().get("response", {}).get("docs", []):
+            results.append({
+                "chebi_id": item.get("obo_id", ""),
+                "name": item.get("label", ""),
+                "description": item.get("description", [""])[0],
+                "ontology_iri": item.get("iri", "")
+            })
+
+        if not results:
+            return json.dumps({"status": "success", "message": f"No metabolites found in ChEBI for '{query}'."})
+
+        return json.dumps({"status": "success", "database": "ChEBI", "results": results}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
 if __name__ == "__main__":
-    logger.info("Academic MCP Server initialized (Consolidated Version).")
-    mcp.run(transport='stdio')
+    import sys
+    import time
+
+    # If the '--test' argument is passed, run the diagnostic test suite instead of starting the server.
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        logger.info("Initializing Comprehensive MCP Tool Test Suite...")
+
+        # Define standard academic test parameters for every registered tool
+        test_suite = [
+            (search_academic_literature, {"query": "CRISPR", "max_results": 1, "source": "openalex"}),
+            (traverse_citation_graph,
+             {"doi": "10.1038/nature11577", "direction": "references", "max_results": 1}),
+            (fetch_open_access_pdf, {"doi": "10.1038/nature11577"}),
+            (search_omics_datasets, {"query": "breast cancer", "db_type": "geo", "max_results": 1}),
+            (fetch_sequence_fasta, {"accession_id": "NM_001322051", "db_type": "nuccore"}),
+            (fetch_taxonomy_info, {"organism_name": "Arabidopsis thaliana"}),
+            (search_gbif_occurrences, {"scientific_name": "Panthera leo", "limit": 1}),
+            (universal_ncbi_summary, {"database": "gene", "query": "BRCA1", "max_results": 1}),
+            (fetch_webpage_content, {"url": "https://en.wikipedia.org/wiki/Bioinformatics"}),
+            (search_web, {"query": "latest advancements in structural biology", "max_results": 1}),
+            (search_preprints, {"query": "COVID-19", "max_results": 1}),
+            (fetch_wikipedia_summary, {"query": "Gene expression"}),
+            (search_github_repos, {"query": "single cell RNA seq pipeline", "max_results": 1}),
+            (fetch_ensembl_gene, {"symbol": "BRCA1", "species": "homo_sapiens"}),
+            (fetch_ensembl_homologs,
+             {"symbol": "FT", "species": "arabidopsis_thaliana", "target_species": "oryza_sativa"}),
+            (search_kegg_pathway, {"query": "glycolysis", "organism_code": "ath"}),
+            (fetch_go_annotations, {"uniprot_id": "P04637", "limit": 1}),
+            (fetch_pubchem_compound, {"compound_name": "Quercetin"}),
+            (search_chembl_target, {"query": "EGFR", "max_results": 1}),
+            (query_uniprot_database, {"query": "P04637", "db_type": "uniprotkb", "max_results": 1}),
+            (fetch_alphafold_structure, {"uniprot_id": "P04637"}),
+            (query_pdb_structure, {"query": "1U3C", "action": "details"}),
+            (query_string_database, {"identifiers": "CRY1", "action": "interactions", "species": 3702, "limit": 1}),
+            (search_jaspar_motifs, {"query": "MADS", "tax_group": "plants"}),
+            (uniprot_id_mapping, {"from_db": "UniProtKB_AC-ID", "to_db": "Ensembl", "ids": "P04637"})
+        ]
+
+        success_count = 0
+
+        print("\n" + "=" * 60)
+        print("🧬 SCHOLAR NAVIS - SYSTEMATIC API INTEGRITY TEST")
+        print("=" * 60 + "\n")
+
+        for func, kwargs in test_suite:
+            func_name = func.__name__
+            print(f"[TESTING] Executing {func_name} ...")
+            try:
+                # Direct pythonic invocation of the wrapped tool
+                result = func(**kwargs)
+
+                # Check if the returned JSON string contains an explicit error status
+                if '"status": "error"' in result or '"status": "timeout"' in result:
+                    print(f"⚠️  WARNING: {func_name} executed, but returned an API error state.")
+                    print(f"    RESPONSE: {str(result)}\n")
+                else:
+                    print(f"✅ SUCCESS: {func_name}")
+                    print(f"    OUTPUT (Truncated): {str(result)[:150]}...\n")
+                    success_count += 1
+
+            except Exception as e:
+                print(f"❌ CRITICAL FAILURE: {func_name}")
+                print(f"    EXCEPTION: {str(e)}\n")
+
+            # Strictly enforce a delay to respect external academic API rate limits (e.g., NCBI, EBI)
+            time.sleep(1.5)
+
+        print("*" * 60)
+        print(f"TEST RUN COMPLETED: {success_count} / {len(test_suite)} API endpoints responded successfully.")
+        print("*" * 60 + "\n")
+        sys.exit(0)
+
+    else:
+        logger.info("Academic MCP Server initialized (Consolidated Version).")
+        mcp.run(transport='stdio')

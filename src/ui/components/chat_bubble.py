@@ -149,8 +149,14 @@ class ChatBubbleWidget(QWidget):
         self.btn_copy = QPushButton(" Copy")
         self.btn_copy.setIcon(tm.icon("copy", "text_muted"))
         self.btn_copy.setCursor(Qt.PointingHandCursor)
-        self.btn_copy.clicked.connect(self.copy_text)
+        self.btn_copy.clicked.connect(self.copy_plain_text)
         self.btn_layout.addWidget(self.btn_copy)
+
+        self.btn_copy_md = QPushButton(" Copy MD")
+        self.btn_copy_md.setIcon(tm.icon("markdown_copy", "text_muted"))  # Using a distinct icon for Markdown
+        self.btn_copy_md.setCursor(Qt.PointingHandCursor)
+        self.btn_copy_md.clicked.connect(self.copy_markdown)
+        self.btn_layout.addWidget(self.btn_copy_md)
 
         if not self.is_user:
             self.btn_bubble_retry = QPushButton(" Retry")
@@ -251,13 +257,17 @@ class ChatBubbleWidget(QWidget):
         tm = ThemeManager()
         menu = QMenu(self)
         menu.setStyleSheet(f"""
-            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }} 
-            QMenu::item {{ padding: 6px 20px; border-radius: 2px; }}
-            QMenu::item:selected {{ background-color: {tm.color('btn_hover')}; }}
-        """)
+                    QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }} 
+                    QMenu::item {{ padding: 6px 20px; border-radius: 2px; }}
+                    QMenu::item:selected {{ background-color: {tm.color('btn_hover')}; }}
+                """)
 
-        act_copy = menu.addAction(tm.icon("copy", "text_main"), "复制 (Copy)")
-        act_copy.triggered.connect(self.copy_text)
+        act_copy = menu.addAction(tm.icon("copy", "text_main"), "Copy Plain Text")
+        act_copy.triggered.connect(self.copy_plain_text)
+
+        act_copy_md = menu.addAction(tm.icon("file-text", "text_main"), "Copy Markdown")
+        act_copy_md.triggered.connect(self.copy_markdown)
+
 
         if self.is_user and self._can_edit:
             act_edit = menu.addAction(tm.icon("edit", "text_main"), "编辑 (Edit)")
@@ -318,6 +328,7 @@ class ChatBubbleWidget(QWidget):
 
         btn_style = f"QPushButton {{ background-color: transparent; border: none; color: {tm.color('text_muted')}; font-size: 12px; padding: 2px 4px; border-radius: 4px; }} QPushButton:hover {{ color: {tm.color('text_main')}; background-color: {tm.color('btn_hover')}; }}"
         self.btn_copy.setStyleSheet(btn_style)
+        if hasattr(self, 'btn_copy_md'): self.btn_copy_md.setStyleSheet(btn_style)  # Apply style to the new button
         if hasattr(self, 'btn_edit'): self.btn_edit.setStyleSheet(btn_style)
         if hasattr(self, 'btn_cancel'): self.btn_cancel.setStyleSheet(btn_style)
 
@@ -575,7 +586,7 @@ class ChatBubbleWidget(QWidget):
 
     def _start_image_download(self, url):
         ext = url.split("?")[0].split(".")[-1]
-        if ext.lower() not in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
+        if ext.lower() not in ['png', 'jpg', 'jpeg', 'gif', 'webp','svg']:
             ext = 'png'
         file_name = f"navis_img_{hashlib.md5(url.encode()).hexdigest()}.{ext}"
         save_path = os.path.join(tempfile.gettempdir(), file_name)
@@ -618,7 +629,29 @@ class ChatBubbleWidget(QWidget):
 
         self.set_content(self.original_text)
 
-    def copy_text(self):
+    def copy_plain_text(self):
+        clipboard = QGuiApplication.clipboard()
+
+        # QTextBrowser's toPlainText() automatically parses HTML structures like tables
+        # into tab-spaced formats, providing an optimized baseline plain-text representation.
+        raw_text = self.lbl_text.toPlainText()
+
+        # Edge Case Mitigation 1: Remove potential dynamic UI artifacts (e.g., "Thinking...")
+        if self.is_loading:
+            raw_text = re.sub(r'^Thinking\.{0,3}\n*', '', raw_text)
+
+        # Edge Case Mitigation 2: Strip right-side trailing whitespaces per line to optimize
+        # spreadsheet pasting, while preserving the internal tab (\t) structures of tables.
+        lines = [line.rstrip() for line in raw_text.splitlines()]
+
+        # Edge Case Mitigation 3: Normalize excessive vertical spacing caused by block-level HTML conversion.
+        cleaned_text = '\n'.join(lines)
+        cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
+
+        clipboard.setText(cleaned_text)
+        ToastManager().show("Plain text successfully copied to clipboard.", "success")
+
+    def copy_markdown(self):
         clipboard = QGuiApplication.clipboard()
 
         raw_text = re.sub(r'<think>.*?</think>', '', self.original_text, flags=re.DOTALL | re.IGNORECASE)
@@ -635,6 +668,7 @@ class ChatBubbleWidget(QWidget):
 
         clipboard.setText(text_to_copy)
         ToastManager().show("Markdown successfully copied to clipboard.", "success")
+
 
     def toggle_edit(self):
         if not self.is_editing:

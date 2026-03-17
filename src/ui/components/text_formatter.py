@@ -118,11 +118,11 @@ class TextFormatter:
 
             # 根据内容智能显示折叠面板标题
             if mcp_contents and not think_contents:
-                status_title = "Tool Execution (Completed)" if is_closed else "Executing Tools..."
+                status_title = "Tool Execution" if is_closed else "Executing Tools..."
             elif mcp_contents and think_contents:
-                status_title = "Reasoning & Tool Execution (Completed)" if is_closed else "AI is Analyzing & Working..."
+                status_title = "Reasoning & Tool Execution" if is_closed else "AI is Analyzing & Working..."
             else:
-                status_title = "AI Reasoning (Completed)" if is_closed else "AI is thinking..."
+                status_title = "AI Reasoning" if is_closed else "AI is thinking..."
 
             link = f"<a href='think://{action}?index={index}' style='color:{accent_color}; text-decoration:none;'><nobr>{icon_html} <b>{status_title}</b></nobr></a>"
 
@@ -175,7 +175,7 @@ class TextFormatter:
 
         html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
 
-        skip_pattern = r'(?si)(<a\b[^>]*>.*?</a>|<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>)'
+        skip_pattern = r'(?si)(<a\b[^>]*>.*?</a>|<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>|<img\b[^>]*>)'
 
         url_pattern = skip_pattern + r'|(?<![="\'/])\b((?:https?|ftp|file)://[^\s<>\)\]"\'，。？！；：“”‘’\n]+(?<![.,?!;:：]))'
 
@@ -235,9 +235,20 @@ class TextFormatter:
             # ChEMBL Target ID 映射
             (r'\b(CHEMBL\d+)\b', r'<a href="https://www.ebi.ac.uk/chembl/target_report_card/\1">\1</a>'),
 
+            # ChEBI ID 映射
+            (r'\b(CHEBI:\d+)\b', r'<a href="https://www.ebi.ac.uk/chebi/searchId.do?chebiId=\1">\1</a>'),
+
             # 拟南芥 AGI 基因号
             (r'\b(AT[1-5CM]G\d{5})\b',
              r'<a href="https://plants.ensembl.org/Arabidopsis_thaliana/Gene/Summary?g=\1">\1</a>'),
+
+            # JASPAR Motif ID (例如: MA0001.1)
+            (r'\b(MA\d{4}\.\d+)\b', r'<a href="https://jaspar.elixir.no/matrix/\1/">JASPAR \1</a>'),
+
+            # SNP / Variation ID (例如: rs1234567)
+            (r'\b(rs\d+)\b', r'<a href="https://www.ensembl.org/Variation/Explore?v=\1">SNP \1</a>'),
+
+
 
         ]
 

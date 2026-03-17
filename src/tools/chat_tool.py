@@ -310,6 +310,9 @@ class ChatInputContainer(QFrame):
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+        if self.chk_mcp_enable.isChecked():
+            self.refresh_mcp_tags()
+
     def _apply_theme(self):
         tm = ThemeManager()
         self.setStyleSheet(
