@@ -376,9 +376,75 @@ class MainWindow(QMainWindow):
                         pass
 
     def perform_startup_checks(self):
-        is_first = self.check_first_run()
-        if not is_first:
+        if self.show_mandatory_disclaimer():
             self.check_model_integrity()
+
+    def show_mandatory_disclaimer(self):
+        cfg = ConfigManager()
+        # 废弃旧的 is_first_run，使用新的 agreement_accepted
+        if not cfg.user_settings.get("agreement_accepted", False):
+            tm = ThemeManager()
+            dlg = BaseDialog(self, title="Terms of Service & AI Disclaimer", width=600)
+            # 强化弹窗置顶与模态
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+            dlg.footer_widget.setVisible(False)
+
+            disclaimer_html = f"""
+                            <div style="font-family: {tm.font_family()}; color: {tm.color('text_main')}; line-height: 1.6;">
+                                <h2 style="color: {tm.color('danger')}; text-align: center; margin-bottom: 20px;">
+                                    Important AI Usage Disclaimer
+                                </h2>
+
+                                <p><b>1. Accuracy & Hallucinations:</b><br>
+                                Scholar Navis utilizes Large Language Models. <b>AI-generated content may contain inaccuracies or hallucinations</b>, even with RAG and MCP tools.</p>
+
+                                <p><b>2. Mandatory Verification:</b><br>
+                                Users must manually verify all information via the <b>provided citations and source links</b>. Do not rely solely on AI summaries.</p>
+
+                                <p><b>3. Responsibility:</b><br>
+                                The developers are not liable for any research errors or academic misconduct resulting from the use of this software.</p>
+
+                                <hr style="border: 0; border-top: 1px solid {tm.color('border')}; margin: 20px 0;">
+
+                                <p style="text-align: center; font-weight: bold; color: {tm.color('accent')};">
+                                    Accepting these terms is required to use the software.
+                                </p>
+                            </div>
+                        """
+
+            lbl = QLabel(disclaimer_html)
+            lbl.setWordWrap(True)
+            lbl.setTextFormat(Qt.RichText)
+            lbl.setStyleSheet("background: transparent; border: none;")
+            dlg.content_layout.addWidget(lbl)
+
+            btn_box = QHBoxLayout()
+            btn_reject = QPushButton("Reject and Exit")
+            btn_accept = QPushButton("Accept and Continue")
+
+            # 样式美化
+            btn_accept.setStyleSheet(
+                f"background-color: {tm.color('accent')}; color: white; font-weight: bold; height: 36px;")
+            btn_reject.setStyleSheet(
+                f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_muted')}; height: 36px;")
+
+            btn_box.addWidget(btn_reject)
+            btn_box.addWidget(btn_accept)
+            dlg.content_layout.addLayout(btn_box)
+
+            # 绑定逻辑
+            btn_accept.clicked.connect(dlg.accept)
+            btn_reject.clicked.connect(dlg.reject)
+
+            if dlg.exec():  # 用户点击接受
+                cfg.user_settings.update({"agreement_accepted": True})
+                cfg.save_settings()
+                return True
+            else:  # 用户拒绝或直接关闭窗口
+                QApplication.quit()
+                sys.exit(0)
+        return True
+
 
     def add_tool(self, tool):
         self.tools.append(tool)
@@ -391,6 +457,12 @@ class MainWindow(QMainWindow):
 
     def switch_tool(self, index):
         current_index = self.tool_stack.currentIndex()
+
+        if index == current_index:
+            self.sidebar.blockSignals(True)
+            self.sidebar.setCurrentRow(current_index)
+            self.sidebar.blockSignals(False)
+            return
 
         if current_index >= 0 and self.tools[current_index] is not None:
             current_tool = self.tools[current_index]
@@ -410,12 +482,16 @@ class MainWindow(QMainWindow):
                     can_switch = current_tool.check_unsaved_changes()
 
                 if not can_switch:
-                    self.sidebar.blockSignals(True)
-                    self.sidebar.setCurrentRow(current_index)
-                    self.sidebar.blockSignals(False)
+                    QTimer.singleShot(50, lambda: self._force_revert_sidebar(current_index))
                     return
 
         self._execute_tool_switch(index)
+
+    def _force_revert_sidebar(self, correct_index):
+        """延迟执行的方法：强行将侧边栏焦点拽回正确的索引"""
+        self.sidebar.blockSignals(True)
+        self.sidebar.setCurrentRow(correct_index)
+        self.sidebar.blockSignals(False)
 
     def _execute_tool_switch(self, index):
         if self.tools[index] is None:

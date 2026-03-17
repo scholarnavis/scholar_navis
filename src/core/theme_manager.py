@@ -1,7 +1,7 @@
 import logging
 import os
 import sys
-
+from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon, Qt
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtSvg import QSvgRenderer
@@ -72,13 +72,21 @@ class ThemeManager(QObject):
 
         try:
             saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
-            if saved_theme in self.themes:
+            if saved_theme == "auto":
+                self.current_theme = self._get_system_theme()
+            elif saved_theme in self.themes:
                 self.current_theme = saved_theme
         except Exception as e:
             self.logger.error(f"Failed to load theme from ConfigManager: {str(e)}")
 
     def font_family(self) -> str:
         return "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', Roboto, sans-serif"
+
+    def _get_system_theme(self) -> str:
+        palette = QApplication.instance().palette()
+        bg_color = palette.color(palette.ColorRole.Window)
+        return "light" if bg_color.lightness() > 128 else "dark"
+
 
     @staticmethod
     def get_resource_path(*paths):

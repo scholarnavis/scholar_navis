@@ -250,7 +250,6 @@ class AppController(QObject):
         self.main_window.show()
         self.splash.close()
 
-        QTimer.singleShot(300, self.main_window.perform_startup_checks)
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
 
 if __name__ == "__main__":
