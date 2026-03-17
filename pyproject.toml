@@ -36,12 +36,6 @@ dependencies = [
     "duckduckgo-search>=8.1.1",
     "beautifulsoup4>=4.14.3",
     "litellm>=1.82.1",
-    "pyjwt>=2.12.0",
-    "pywin32>=306 ; sys_platform == 'win32'",
-    "pyobjc-framework-cocoa>=10.0 ; sys_platform == 'darwin'",
-    "pyobjc-framework-localauthentication>=10.0 ; sys_platform == 'darwin'",
-    "secretstorage>=3.3.0 ; sys_platform == 'linux'",
-    "jeepney>=0.6.0 ; sys_platform == 'linux'",
 ]
 
 

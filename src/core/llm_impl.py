@@ -155,6 +155,11 @@ class OpenAICompatibleLLM:
         elif param_mode == "custom":
             custom_params = self._parse_custom_params(model_params)
 
+        if "temperature" not in custom_params:
+            custom_params["temperature"] = 0.01
+        if "top_p" not in custom_params:
+            custom_params["top_p"] = 0.1
+
         return {k: v for k, v in custom_params.items() if k not in ["messages", "model", "stream", "tools"]}
 
     def _process_messages(self, messages: List[Dict]) -> List[Dict]:

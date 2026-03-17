@@ -223,6 +223,10 @@ class TextFormatter:
             # STRING DB 蛋白互作网络
             (r'\b(\d+\.ENSP\d{11})\b', r'<a href="https://string-db.org/network/\1">\1</a>'),
 
+            # PubMed PMID (新增)
+            (r'\b(?:PMID|PubMed\s*ID)\s*:?\s*(\d+)\b',
+             r'<a href="https://pubmed.ncbi.nlm.nih.gov/\1/">PMID \1</a>'),
+
             # GBIF Taxon Key (分类单元唯一标识符)
             (r'\b(?:GBIF\s*Taxon\s*Key|GBIF\s*ID|TaxonKey)\s*:?\s*(\d+)\b',
              r'<a href="https://www.gbif.org/species/\1">GBIF Taxon \1</a>'),
@@ -236,6 +240,10 @@ class TextFormatter:
             (r'\b(K\d{5})\b', r'<a href="https://www.kegg.jp/entry/\1">KEGG \1</a>'),
             # KEGG Pathway Identifier mapping
             (r'\b([a-z]{2,4}\d{5})\b', r'<a href="https://www.kegg.jp/pathway/\1">KEGG Pathway \1</a>'),
+
+            # InterPro (IPR) - 新增
+            (r'\b(IPR\d{6})\b',
+             r'<a href="https://www.ebi.ac.uk/interpro/entry/InterPro/\1/">\1</a>'),
 
             # ChEMBL Target ID 映射
             (r'\b(CHEMBL\d+)\b', r'<a href="https://www.ebi.ac.uk/chembl/target_report_card/\1">\1</a>'),
