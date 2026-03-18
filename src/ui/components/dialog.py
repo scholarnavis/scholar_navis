@@ -24,10 +24,11 @@ class BaseDialog(QDialog):
         super().__init__(parent)
         self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
         self.setWindowTitle(title)
+
+        self._target_width = width
         self.setFixedWidth(width)
 
         self._is_closing = False
-
         self.tm = ThemeManager()
         self._tracked_buttons = []
 
@@ -35,10 +36,10 @@ class BaseDialog(QDialog):
         self.v_layout.setContentsMargins(0, 0, 0, 0)
         self.v_layout.setSpacing(0)
 
+        # --- 内容区 ---
         self.content_widget = QWidget()
         self.content_widget.setObjectName("ContentWidget")
         self.content_widget.setAttribute(Qt.WA_StyledBackground, True)
-        self.content_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(24, 24, 24, 24)
@@ -46,6 +47,7 @@ class BaseDialog(QDialog):
 
         self.v_layout.addWidget(self.content_widget, 1)
 
+        # --- 底部按钮区 ---
         self.footer_widget = QWidget()
         self.footer_widget.setAttribute(Qt.WA_StyledBackground, True)
         self.footer_widget.setFixedHeight(55)
@@ -55,8 +57,45 @@ class BaseDialog(QDialog):
         self.footer_layout.addStretch()
         self.v_layout.addWidget(self.footer_widget)
 
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
         self.tm.theme_changed.connect(self._apply_theme)
+
+        self._parent_ref = parent
+        QTimer.singleShot(0, self._adjust_and_anchor)
+
+    def _adjust_and_anchor(self):
+        """动态尺寸结算修复：去除套娃滚动条，利用原生 sizeHint 进行精准测量"""
+
+        self.content_widget.setFixedWidth(self._target_width)
+        self.layout().update()
+
+        # 获取 Qt 引擎根据所有子组件真实排版后算出的“理想高度”
+        ideal_height = self.layout().sizeHint().height()
+
+        min_allowed = self.minimumHeight()
+        ideal_height = max(ideal_height, min_allowed)
+
+        screen_geo = QGuiApplication.primaryScreen().availableGeometry()
+        max_allowed_height = int(screen_geo.height() * 0.85)
+
+        final_height = min(ideal_height, max_allowed_height)
+
+        self.setFixedSize(self._target_width, final_height)
+
+        self._anchor_to_center(self._parent_ref)
+
+    def _anchor_to_center(self, parent):
+        frame_geo = self.frameGeometry()
+
+        if parent and parent.window():
+            parent_geo = parent.window().geometry()
+            target_x = parent_geo.center().x() - (frame_geo.width() // 2)
+            target_y = parent_geo.center().y() - (frame_geo.height() // 2)
+        else:
+            screen_geo = QGuiApplication.primaryScreen().geometry()
+            target_x = screen_geo.center().x() - (frame_geo.width() // 2)
+            target_y = screen_geo.center().y() - (frame_geo.height() // 2)
+
+        self.move(target_x, target_y)
 
     def _apply_theme(self):
         tm = self.tm
@@ -70,11 +109,102 @@ class BaseDialog(QDialog):
             QGuiApplication.styleHints().setColorScheme(Qt.ColorScheme.Dark)
 
         self.setStyleSheet(f"""
-            QDialog {{
+            QDialog, QWidget#ContentWidget {{
                 background-color: {tm.color('bg_main')};
+                color: {tm.color('text_main')};
             }}
-            QWidget#ContentWidget {{
-                background-color: {tm.color('bg_main')};
+
+            QLineEdit, QTextEdit, QComboBox, QSpinBox {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                border-radius: 4px;
+                padding: 6px;
+                selection-background-color: {tm.color('accent')};
+                selection-color: {tm.color('selection_fg')};
+            }}
+
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus {{
+                border: 1px solid {tm.color('accent')};
+            }}
+
+            QComboBox QAbstractItemView {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                selection-background-color: {tm.color('btn_hover')};
+                selection-color: {tm.color('text_main')};
+                outline: none;
+            }}
+
+            QScrollArea {{
+                background-color: transparent;
+                border: none;
+            }}
+            QScrollBar:vertical, QScrollBar:horizontal {{
+                background-color: transparent;
+                border: none;
+                width: 12px;
+                height: 12px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+                background-color: {tm.color('text_muted')}; /* 弃用过浅的 border 颜色，改用更醒目的 text_muted */
+                border-radius: 4px;
+                min-height: 30px;
+                min-width: 30px;
+                margin: 2px; 
+            }}
+            QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+                background-color: {tm.color('text_main')}; 
+            }}
+            QScrollBar::add-line, QScrollBar::sub-line,
+            QScrollBar::add-page, QScrollBar::sub-page {{
+                background: none; border: none; height: 0px; width: 0px;
+            }}
+
+            QTableWidget {{
+                background-color: {tm.color('bg_card')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                gridline-color: {tm.color('bg_main')};
+                outline: none;
+            }}
+            QHeaderView::section {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_muted')};
+                border: none;
+                border-bottom: 1px solid {tm.color('border')};
+                border-right: 1px solid {tm.color('border')};
+                padding: 8px;
+                font-weight: bold;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {tm.color('btn_hover')};
+                color: {tm.color('text_main')};
+            }}
+            QTableCornerButton::section {{
+                background-color: {tm.color('bg_input')};
+                border: none;
+            }}
+
+            QListWidget {{
+                background-color: {tm.color('bg_card')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                border-radius: 6px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                border-bottom: 1px solid {tm.color('bg_main')};
+                padding: 6px;
+            }}
+            QListWidget::item:hover {{
+                background-color: {tm.color('btn_hover')};
+            }}
+            QListWidget::item:selected {{
+                background-color: {tm.color('accent')};
+                color: {tm.color('selection_fg')};
             }}
         """)
 
@@ -82,6 +212,9 @@ class BaseDialog(QDialog):
             background-color: {tm.color('bg_card')}; 
             border-top: 1px solid {tm.color('border')};
         """)
+
+
+
 
         for btn, b_type in self._tracked_buttons:
             self._update_button_style(btn, b_type)
@@ -177,34 +310,7 @@ class StandardDialog(BaseDialog):
         self.msg_label.setStyleSheet(
             f"color: {tm.color('text_main')}; background-color: transparent; font-size: 14px; padding: 5px; border: none;"
         )
-
         if self.is_long_text:
-            self.scroll_area.setStyleSheet(f"""
-                QScrollArea {{ 
-                    background-color: transparent; 
-                    border: none; 
-                }}
-                QScrollBar:vertical {{ 
-                    border: none;
-                    background-color: transparent;
-                    width: 6px;
-                    margin: 0px;
-                }}
-                QScrollBar::handle:vertical {{ 
-                    background-color: {tm.color('border')};
-                    border-radius: 3px;
-                    min-height: 20px;
-                }}
-                QScrollBar::handle:vertical:hover {{
-                    background-color: {tm.color('text_muted')};
-                }}
-                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                    height: 0px; border: none; background: none;
-                }}
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-                    background: none;
-                }}
-            """)
             self.scroll_area.viewport().setStyleSheet("background-color: transparent;")
 
 
@@ -261,21 +367,6 @@ class FeedEditorDialog(BaseDialog):
 
         self._apply_theme()
 
-    def _apply_theme(self):
-        super()._apply_theme()
-        tm = self.tm
-
-        style = f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;"
-        disabled_style = f"background-color: {tm.color('bg_main')}; color: {tm.color('text_muted')}; border: 1px dashed {tm.color('border')}; padding: 6px; border-radius: 4px;"
-
-        if not self.inp_name.isReadOnly():
-            self.inp_name.setStyleSheet(style)
-            self.inp_url.setStyleSheet(style)
-            self.inp_category.setStyleSheet(style)
-        else:
-            self.inp_name.setStyleSheet(disabled_style)
-            self.inp_url.setStyleSheet(disabled_style)
-            self.inp_category.setStyleSheet(disabled_style)
 
     def get_data(self):
         return {
@@ -355,16 +446,6 @@ class FeedLibraryDialog(BaseDialog):
         super()._apply_theme()
         tm = self.tm
         self.btn_add_custom.setIcon(tm.icon("add", "text_main"))  # Added SVG
-
-        self.table.setStyleSheet(f"""
-            QTableWidget {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; gridline-color: {tm.color('bg_main')}; outline: none; }}
-            QHeaderView::section {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_muted')}; border: none; padding: 6px; border-right: 1px solid {tm.color('border')}; border-bottom: 1px solid {tm.color('border')}; font-weight: bold; }}
-            QTableWidget::item:selected {{ background-color: {tm.color('btn_hover')}; }}
-        """)
-        self.combo_category.setStyleSheet(
-            f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
-        self.inp_search_lib.setStyleSheet(
-            f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
         self.lbl_status.setStyleSheet(f"color: {tm.color('text_muted')}; font-weight: bold;")
 
         self._render_table(self.combo_category.currentText())
@@ -661,12 +742,6 @@ class McpConfigDialog(BaseDialog):
         tm = self.tm
         self.form_widget.setStyleSheet(f"""
             QLabel {{ color: {tm.color('text_muted')}; font-size: 13px; border: none; }} 
-            QLineEdit, QComboBox {{ 
-                background-color: {tm.color('bg_input')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')}; 
-                border-radius: 4px; padding: 6px; selection-background-color: {tm.color('accent')}; selection-color: {tm.color('selection_fg')};
-            }} 
-            QLineEdit:focus, QComboBox:focus {{ border: 1px solid {tm.color('accent')}; }}
-            QLineEdit:disabled {{ background-color: {tm.color('bg_main')}; color: {tm.color('text_muted')}; }}
         """)
 
         self.lbl_desc_icon.setPixmap(tm.icon("help", "warning").pixmap(14, 14))
@@ -825,45 +900,6 @@ class SelectKBFileDialog(BaseDialog):
         super()._apply_theme()
         tm = self.tm
 
-        self.inp_search.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {tm.color('bg_input')};
-                color: {tm.color('text_main')};
-                border: 1px solid {tm.color('border')};
-                border-radius: 4px;
-                padding: 7px 10px;
-                font-size: 13px;
-                selection-background-color: {tm.color('accent')};
-                selection-color: {tm.color('selection_fg')};
-            }}
-            QLineEdit:focus {{ border: 1px solid {tm.color('accent')}; }}
-        """)
-
-        self.list_widget.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {tm.color('bg_card')};
-                color: {tm.color('text_main')};
-                border: 1px solid {tm.color('border')};
-                border-radius: 6px;
-                padding: 4px;
-                font-size: 13px;
-                outline: none;
-            }}
-            QListWidget::item {{
-                padding: 9px 8px;
-                border-radius: 4px;
-                border-bottom: 1px solid {tm.color('bg_main')};
-            }}
-            QListWidget::item:hover {{
-                background-color: {tm.color('btn_hover')};
-            }}
-            QListWidget::item:selected {{
-                background-color: {tm.color('accent')};
-                color: {tm.color('selection_fg')};
-                border-bottom: 1px solid {tm.color('accent')};
-            }}
-        """)
-
         self.lbl_status.setStyleSheet(
             f"color: {tm.color('text_muted')}; font-size: 12px; font-weight: bold;")
 
@@ -884,11 +920,6 @@ class AddModelDialog(BaseDialog):
 
         self._apply_theme()
 
-    def _apply_theme(self):
-        super()._apply_theme()
-        tm = self.tm
-        self.inp_name.setStyleSheet(
-            f"background: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
 
     def get_name(self):
         return self.inp_name.text().strip()
@@ -1250,8 +1281,6 @@ class ExportPasswordDialog(BaseDialog):
         self.inp_pass = QLineEdit()
         self.inp_pass.setEchoMode(QLineEdit.Password)
         self.inp_pass.setPlaceholderText("Min 6 chars (a-zA-Z0-9@_-+=!#$&^*)")
-        self.inp_pass.setStyleSheet(
-            f"background: {self.tm.color('bg_input')}; color: {self.tm.color('text_main')}; border: 1px solid {self.tm.color('border')}; padding: 6px; border-radius: 4px;")
 
         self.content_layout.addWidget(lbl)
         self.content_layout.addWidget(self.inp_pass)
@@ -1291,8 +1320,6 @@ class ImportPasswordDialog(BaseDialog):
         self.inp_pass = QLineEdit()
         self.inp_pass.setEchoMode(QLineEdit.Password)
         self.inp_pass.setPlaceholderText("Enter decryption password...")
-        self.inp_pass.setStyleSheet(
-            f"background: {self.tm.color('bg_input')}; color: {self.tm.color('text_main')}; border: 1px solid {self.tm.color('border')}; padding: 6px; border-radius: 4px;")
 
         self.content_layout.addWidget(lbl)
         self.content_layout.addWidget(self.inp_pass)
@@ -1373,14 +1400,11 @@ class ProjectEditorDialog(BaseDialog):
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
+
         self.form_widget.setStyleSheet(f"""
             QLabel {{ color: {tm.color('text_muted')}; font-size: 13px; border: none; }} 
-            QLineEdit, QTextEdit, QComboBox {{ 
-                background-color: {tm.color('bg_input')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')}; 
-                border-radius: 4px; padding: 5px; selection-background-color: {tm.color('accent')}; 
-            }} 
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{ border: 1px solid {tm.color('accent')}; }}
         """)
+
         if hasattr(self, 'model_warn'):
             self.model_warn.setStyleSheet(
                 f"color: {tm.color('warning')}; font-size: 11px; font-weight: bold; border: none;")
@@ -1529,17 +1553,12 @@ class ApiProvidersDialog(BaseDialog):
         self.table.setStyleSheet(f"""
             QTableWidget {{ 
                 background-color: transparent; 
-                color: {tm.color('text_main')}; 
                 border: none;
                 alternate-background-color: {tm.color('bg_input')};
             }}
             QHeaderView::section {{ 
                 background-color: {tm.color('bg_card')}; 
-                color: {tm.color('text_muted')}; 
-                padding: 10px; 
-                border: none;
                 border-bottom: 2px solid {tm.color('border')};
-                font-weight: bold;
             }}
             QTableWidget::item {{ 
                 padding: 12px; 
@@ -1735,22 +1754,15 @@ POSSIBILITY OF SUCH DAMAGE.
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
-        # 优化表格样式，使其融入主窗体
         self.table.setStyleSheet(f"""
             QTableWidget {{ 
                 background-color: transparent; 
-                color: {tm.color('text_main')}; 
                 border: none;
                 alternate-background-color: {tm.color('bg_input')};
             }}
             QHeaderView::section {{ 
                 background-color: {tm.color('bg_card')}; 
-                color: {tm.color('text_muted')}; 
-                padding: 10px; 
-                border: none;
                 border-bottom: 2px solid {tm.color('border')};
-                font-weight: bold;
-                font-family: 'Segoe UI';
             }}
             QTableWidget::item {{ 
                 padding: 12px; 
