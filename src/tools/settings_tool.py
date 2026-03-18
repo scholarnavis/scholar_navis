@@ -1564,6 +1564,11 @@ class SettingsTool(BaseTool):
         self._load_model_params_to_ui(conf, curr_real)
 
     def on_export_clicked(self):
+        if not self.check_unsaved_changes(proceed_callback=self._execute_export):
+            return
+        self._execute_export()
+
+    def _execute_export(self):
         # 1. 获取加密密码
         pwd_dlg = ExportPasswordDialog(self.widget)
         pwd_dlg.exec()
@@ -1624,7 +1629,11 @@ class SettingsTool(BaseTool):
 
 
     def on_import_clicked(self, auto_path=None):
+        if not self.check_unsaved_changes(proceed_callback=lambda: self._execute_import(auto_path)):
+            return
+        self._execute_import(auto_path)
 
+    def _execute_import(self, auto_path=None):
         # Support retry flow without opening file dialog twice
         path = auto_path
         if not path:
@@ -1680,7 +1689,20 @@ class SettingsTool(BaseTool):
             final_data = result.get("data", {})
 
             if "settings" in final_data:
-                self.config.user_settings = final_data.get("settings", {}).copy()
+                imported_settings = final_data.get("settings", {}).copy()
+
+                # Device compatibility validation
+                imported_device = imported_settings.get("inference_device", "auto")
+                if self.combo_device.findData(imported_device) < 0:
+                    fallback_dev = "cpu" if self.combo_device.findData("cpu") >= 0 else "auto"
+                    imported_settings["inference_device"] = fallback_dev
+                    ToastManager().show(
+                        f"Imported device '{imported_device}' is unavailable. Defaulting to {fallback_dev.upper()}.",
+                        "warning"
+                    )
+
+                self.config.user_settings = imported_settings
+
             if "mcp_servers" in final_data:
                 self.config.mcp_servers = final_data.get("mcp_servers", {}).copy()
             if "llm_configs" in final_data:
@@ -1694,6 +1716,7 @@ class SettingsTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Import application failed: {e}")
             StandardDialog(self.widget, "Import Error", f"Failed to apply settings to UI:\n{e}").exec()
+
 
     def _update_current_model_marker(self, real_name, mode):
         self.combo_llm_model.blockSignals(True)
