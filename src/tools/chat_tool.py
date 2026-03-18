@@ -751,7 +751,9 @@ class ChatWorker(QObject):
             if not context_str.strip():
                 context_str = "No local database documents provided."
 
-            external_chunks = getattr(self, 'external_context', [])
+                # 防止 API 层传入 None 导致解析崩溃
+            external_chunks = getattr(self, 'external_context', []) or []
+
             images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
                 ('.png', '.jpg', '.jpeg', '.webp'))]
             docs = [c for c in external_chunks if c not in images]
@@ -889,27 +891,13 @@ class ChatWorker(QObject):
             if self.use_mcp:
                 selected_tags = getattr(self, 'selected_mcp_tags', None)
 
-                # 1. 获取用户在 UI 层面允许的所有候选工具
-                all_raw_tools = mcp_mgr.get_all_tools_schema() or []
-                raw_mcp_tools = []
-
+                # 1. 获取用户在 UI/API 层面允许的所有候选工具
+                # (使用 mcp_manager 原生过滤，确保同时支持内建 [Tags] 以及外部 MCP Server 的动态 Tag)
                 if selected_tags is not None:
-                    import re
-                    for tool in all_raw_tools:
-                        desc = tool.get("function", {}).get("description", "")
-
-                        # 利用正则提取工具描述里的 [Tags: XXX, YYY]
-                        tags_match = re.search(r'\[Tags?:\s*(.*?)\]', desc, re.IGNORECASE)
-
-                        if tags_match:
-                            tool_tags = [t.strip() for t in tags_match.group(1).split(',')]
-                            if any(tt in selected_tags for tt in tool_tags):
-                                raw_mcp_tools.append(tool)
-                        else:
-                            # 对于没有打 Tag 标签的隐形基础工具，默认放行
-                            raw_mcp_tools.append(tool)
+                    raw_mcp_tools = mcp_mgr.get_tools_schema_by_tags(selected_tags)
                 else:
-                    raw_mcp_tools = all_raw_tools
+                    raw_mcp_tools = mcp_mgr.get_all_tools_schema() or []
+
 
                 # 2. RAG 动态路由：从候选池中挑出最匹配的 Top-K 给大模型
                 if raw_mcp_tools:

@@ -706,11 +706,11 @@ class SettingsTool(BaseTool):
         self.input_api_key.setText(self.config.user_settings.get("api_server_key", "navis-local-key"))
 
         # 监听变更
-        self.chk_api_enable.stateChanged.connect(self._mark_unsaved)
+        self.input_api_host.textChanged.connect(self._mark_unsaved)
         self.input_api_port.textChanged.connect(self._mark_unsaved)
         self.input_api_key.textChanged.connect(self._mark_unsaved)
 
-        layout.addRow("", self.chk_api_enable)
+        layout.addRow("Host Address:", self.input_api_host)
         layout.addRow("Server Port:", self.input_api_port)
         layout.addRow("Access Key:", self.input_api_key)
 

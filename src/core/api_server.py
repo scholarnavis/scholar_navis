@@ -95,11 +95,14 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     temperature: Optional[float] = None
 
-    # 自定义底层干预参数
+    provider_id: Optional[str] = None         # 主模型服务商ID
+    trans_provider_id: Optional[str] = None   # 翻译模型服务商ID
+    trans_model: Optional[str] = None         # 翻译模型名称
+
     kb_id: Optional[str] = "none"
     use_mcp: Optional[bool] = True
-    mcp_tags: Optional[List[str]] = None
-    force_translate: Optional[bool] = False
+    mcp_tags: Optional[List[str]] = None      # 过滤 MCP 工具的 Tag 列表
+    force_translate: Optional[bool] = None    # 强制翻译开关 (None时按GUI逻辑自动检测)
 
 
 class CompletionRequest(BaseModel):
@@ -117,16 +120,40 @@ class CompletionRequest(BaseModel):
 def _run_worker_through_queue(request_data, messages_dict):
     config = ConfigManager()
     setup_global_network_env()
-
-    llm_id = config.user_settings.get("chat_llm_id")
     llm_configs = config.load_llm_configs()
-    main_config = next((c for c in llm_configs if c.get("id") == llm_id), None)
 
-    trans_llm_id = config.user_settings.get("chat_trans_llm_id")
-    trans_config = next((c for c in llm_configs if c.get("id") == trans_llm_id), None)
+    # --- 1. 构造主模型配置 (支持API参数与GUI配置的无缝回退) ---
+    provider_id = request_data.provider_id or config.user_settings.get("chat_llm_id")
+    main_config = next((c.copy() for c in llm_configs if c.get("id") == provider_id), None)
 
     if not main_config:
-        raise HTTPException(status_code=500, detail="No active Main Model configured in UI.")
+        raise HTTPException(status_code=500, detail=f"No active Main Model provider found for '{provider_id}'.")
+
+    if request_data.model and request_data.model != "default":
+        main_config["model_name"] = request_data.model
+    else:
+        main_config["model_name"] = config.user_settings.get("chat_model_name", main_config.get("model_name"))
+
+    # --- 2. 构造翻译模型配置 ---
+    trans_provider_id = request_data.trans_provider_id or config.user_settings.get("chat_trans_llm_id")
+    trans_config = next((c.copy() for c in llm_configs if c.get("id") == trans_provider_id), None)
+
+    if trans_config:
+        if getattr(request_data, 'trans_model', None):
+            trans_config["model_name"] = request_data.trans_model
+        else:
+            trans_config["model_name"] = config.user_settings.get("chat_trans_model_name",
+                                                                  trans_config.get("model_name"))
+
+    # --- 3. 语言自动检测逻辑 (与 GUI ChatTool.process_send 完全对齐) ---
+    from src.core.lang_detect import detect_primary_language
+    last_user_msg = messages_dict[-1].get("content", "") if messages_dict else ""
+    is_english = detect_primary_language(last_user_msg) == 'en'
+
+    if getattr(request_data, 'force_translate', None) is not None:
+        requires_translation = request_data.force_translate
+    else:
+        requires_translation = (not is_english) and (trans_config is not None)
 
     api_queue = queue.Queue()
 
@@ -136,20 +163,29 @@ def _run_worker_through_queue(request_data, messages_dict):
         trans_config=trans_config,
         messages=messages_dict,
         kb_id=request_data.kb_id,
-        requires_translation=request_data.force_translate if hasattr(request_data, 'force_translate') else False,
+        requires_translation=requires_translation,
         external_context=None,
         use_mcp=request_data.use_mcp,
         api_queue=api_queue
     )
-    if hasattr(request_data, 'mcp_tags'):
+
+    # --- 4. GUI 同款 MCP 标签过滤逻辑 ---
+    if hasattr(request_data, 'mcp_tags') and request_data.mcp_tags is not None:
         worker.selected_mcp_tags = request_data.mcp_tags
+    else:
+        # 如果 API 没传 mcp_tags，则继承 GUI 当前配置的筛选项
+        try:
+            available = MCPManager.get_instance().get_available_tags()
+            deselected = config.mcp_servers.get("deselected_mcp_tags", [])
+            worker.selected_mcp_tags = [t for t in available if t not in deselected]
+        except Exception:
+            worker.selected_mcp_tags = None
 
     # 脱离 QThread，使用标准 Python 线程池执行
     thread = threading.Thread(target=worker.run)
     thread.start()
 
     return api_queue
-
 
 def _clean_ui_token(raw_token: str) -> str:
     """剥离专门给 UI 看的 HTML 装饰，并将其逆向转换为终端友好的纯净 Markdown"""
@@ -260,13 +296,13 @@ class APIStreamParser:
 def _validate_prerequisites(request: ChatCompletionRequest, config: ConfigManager):
     """Validates all required models and configurations before initiating the pipeline."""
 
-    # 1. Validate Main LLM Configuration
-    llm_id = config.user_settings.get("chat_llm_id")
+    # 1. Validate Main LLM Configuration (修改为支持 API 传入的 provider_id)
+    provider_id = request.provider_id or config.user_settings.get("chat_llm_id")
     llm_configs = config.load_llm_configs()
-    main_config = next((c for c in llm_configs if c.get("id") == llm_id), None)
+    main_config = next((c for c in llm_configs if c.get("id") == provider_id), None)
 
     if not main_config:
-        raise OpenAIException("No active Main Model configured. Please set an LLM in the Settings UI.", status_code=400,
+        raise OpenAIException(f"Main Model Provider '{provider_id}' not found.", status_code=400,
                               error_type="invalid_request_error")
 
     # 2. Validate RAG and Hardware Models if KB is requested
@@ -285,7 +321,7 @@ def _validate_prerequisites(request: ChatCompletionRequest, config: ConfigManage
         if not conf or conf.get('is_auto'):
             model_id = resolve_auto_model("embedding", target_device)
 
-        if not check_model_exists(model_id, "embedding"):
+        if not check_model_exists(model_id):
             raise OpenAIException(
                 f"Required Embedding model '{model_id}' for this KB is missing. Please download it via Settings.",
                 status_code=500,
@@ -298,7 +334,7 @@ def _validate_prerequisites(request: ChatCompletionRequest, config: ConfigManage
         if not conf_rerank or conf_rerank.get('is_auto'):
             rerank_id = resolve_auto_model("reranking", target_device)
 
-        if not check_model_exists(rerank_id, "reranking"):
+        if not check_model_exists(rerank_id):
             raise OpenAIException(
                 f"Required Reranker model '{rerank_id}' is missing. Hardware inference requires this model. Please download it via Settings.",
                 status_code=500,
