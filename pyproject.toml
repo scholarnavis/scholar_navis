@@ -36,6 +36,8 @@ dependencies = [
     "duckduckgo-search>=8.1.1",
     "beautifulsoup4>=4.14.3",
     "litellm>=1.82.1",
+    "fastapi>=0.135.1",
+    "uvicorn>=0.41.0",
 ]
 
 

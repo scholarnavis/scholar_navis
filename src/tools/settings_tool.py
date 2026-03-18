@@ -157,6 +157,8 @@ class SettingsTool(BaseTool):
         self.init_api_keys_section()
         self.init_mcp_section()
 
+        self.init_api_server_section()
+
         self.layout.addStretch()
         scroll.setWidget(scroll_content)
         main_layout.addWidget(scroll)
@@ -685,6 +687,41 @@ class SettingsTool(BaseTool):
         layout.addWidget(self.lbl_mcp_hint)
 
         self.layout.addWidget(group)
+
+    def init_api_server_section(self):
+        group = QGroupBox("Local API Server (OpenAI Compatible)")
+        layout = QFormLayout(group)
+        layout.setLabelAlignment(Qt.AlignRight)
+
+        self.input_api_host = QLineEdit()
+        self.input_api_host.setPlaceholderText("e.g., 127.0.0.1 or 0.0.0.0")
+        self.input_api_host.setText(str(self.config.user_settings.get("api_server_host", "127.0.0.1")))
+
+        self.input_api_port = QLineEdit()
+        self.input_api_port.setPlaceholderText("Default: 8000")
+        self.input_api_port.setText(str(self.config.user_settings.get("api_server_port", 8000)))
+
+        self.input_api_key = HoverRevealLineEdit()
+        self.input_api_key.setPlaceholderText("Set a custom API Key to secure your local endpoint (Optional)")
+        self.input_api_key.setText(self.config.user_settings.get("api_server_key", "navis-local-key"))
+
+        # 监听变更
+        self.chk_api_enable.stateChanged.connect(self._mark_unsaved)
+        self.input_api_port.textChanged.connect(self._mark_unsaved)
+        self.input_api_key.textChanged.connect(self._mark_unsaved)
+
+        layout.addRow("", self.chk_api_enable)
+        layout.addRow("Server Port:", self.input_api_port)
+        layout.addRow("Access Key:", self.input_api_key)
+
+        hint = QLabel(
+            "💡 <i>API Server runs in the background. It shares all active models, RAG, and MCP settings with the GUI. Restart the application to apply port changes.</i>")
+        ThemeManager().apply_class(hint, "hint")
+        hint.setWordWrap(True)
+        layout.addRow("", hint)
+
+        self.layout.addWidget(group)
+
 
     def _on_mcp_double_clicked(self, row, col):
         name_item = self.table_mcp.item(row, 1)
@@ -2156,6 +2193,11 @@ class SettingsTool(BaseTool):
         ThemeManager().set_theme(new_theme)
         qdarktheme.setup_theme(new_theme)
 
+        try:
+            api_port = int(self.input_api_port.text().strip())
+        except ValueError:
+            api_port = 8000
+
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
@@ -2171,7 +2213,10 @@ class SettingsTool(BaseTool):
             "s2_api_key": new_s2_key,
             "s2_rate_limit": s2_rate_text,
             "github_token": new_github_token,
-            "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked()
+            "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked(),
+            "api_server_host": self.input_api_host.text().strip(),
+            "api_server_port": api_port,
+            "api_server_key": self.input_api_key.text().strip(),
         })
 
         for old_key in ["external_mcp_enabled", "network_mcps", "network_mcp_enabled", "custom_network_models"]:

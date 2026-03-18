@@ -568,7 +568,7 @@ class ChatWorker(QObject):
     sig_translated = Signal(str)
 
     def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False, external_context=None,
-                 use_mcp=False):
+                 use_mcp=False, api_queue=None):
         super().__init__()
         self.logger = logging.getLogger("ChatWorker")
         self.main_config = main_config
@@ -581,11 +581,36 @@ class ChatWorker(QObject):
         self.db = DatabaseManager()
         self.kb_manager = KBManager()
         self.full_response_cache = ""
+        self.api_queue = api_queue
 
         # 实例长连接缓存
         self.main_llm = None
         self.trans_llm = None
         self.vision_llm = None
+
+    #  无头模式通信桥接方法
+    def _emit_token(self, token: str):
+        if self.api_queue:
+            self.api_queue.put({"type": "token", "data": token})
+        else:
+            self.sig_token.emit(token)
+
+    def _emit_error(self, msg: str):
+        if self.api_queue:
+            self.api_queue.put({"type": "error", "data": msg})
+        else:
+            self.sig_error.emit(msg)
+
+    def _emit_finished(self):
+        if self.api_queue:
+            self.api_queue.put({"type": "finished"})
+        else:
+            self.sig_finished.emit()
+
+    def _emit_translated(self, text: str):
+        if not self.api_queue:
+            self.sig_translated.emit(text)
+
 
     def cancel(self):
         self._is_cancelled = True
@@ -620,7 +645,7 @@ class ChatWorker(QObject):
 
             # Phase 1: Query Extraction & Translation (Cache Accelerated)
             if self.requires_translation:
-                self.sig_token.emit("<i>🌐 Translating your query to academic English for precise retrieval...</i>\n\n")
+                self._emit_token("<i>🌐 Translating your query to academic English for precise retrieval...</i>\n\n")
                 try:
                     trans_kwargs = {
                         "is_translation": True,
@@ -629,7 +654,7 @@ class ChatWorker(QObject):
                     search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm, **trans_kwargs)
                     self.sig_translated.emit(search_query)
                 except Exception as e:
-                    self.sig_error.emit(
+                    self._emit_error(
                         f"Translation model request failed. Please check your translation API configuration.\nDetails: {e}")
                     return
 
@@ -638,8 +663,8 @@ class ChatWorker(QObject):
             # Phase 2: Vector Retrieval & Reranking (Local KB)
             # ==========================================
             if self.kb_id and self.kb_id != "none":
-                self.sig_token.emit("[CLEAR_SEARCH]")
-                self.sig_token.emit("<i>📚 Searching local knowledge base and reranking documents...</i>\n\n")
+                self._emit_token("[CLEAR_SEARCH]")
+                self._emit_token("<i>📚 Searching local knowledge base and reranking documents...</i>\n\n")
 
                 time.sleep(0.05)
 
@@ -649,7 +674,7 @@ class ChatWorker(QObject):
                     self.logger.warning(f"Knowledge Base '{kb_info.get('name')}' is empty. Skipping vector retrieval.")
                     pass
                 elif kb_info:
-                    self.sig_token.emit("<i>Loading local vector model and retrieving literature...</i>\n\n")
+                    self._emit_token("<i>Loading local vector model and retrieving literature...</i>\n\n")
                     domain = kb_info.get('domain', 'General Academic')
                     model_id = kb_info.get('model_id', 'embed_auto')
 
@@ -664,10 +689,10 @@ class ChatWorker(QObject):
                     try:
                         embed_fn = _worker_load_model(self.kb_id, self.config)
                         if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
-                            self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
+                            self._emit_error(f"Failed to switch to Knowledge Base: {self.kb_id}")
                             return
                     except Exception as e:
-                        self.sig_error.emit(f"Critical Model Error: {str(e)}")
+                        self._emit_error(f"Critical Model Error: {str(e)}")
                         return
 
                     history_context = ""
@@ -735,7 +760,7 @@ class ChatWorker(QObject):
 
             # 3.1 处理上传的长文本 / PDF (启用 Reranker 降低幻觉)
             if docs:
-                self.sig_token.emit("<i>Filtering and reranking attached documents...</i>\n\n")
+                self._emit_token("<i>Filtering and reranking attached documents...</i>\n\n")
                 cand_docs = [{"content": d.get("content", ""),
                               "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
 
@@ -781,7 +806,7 @@ class ChatWorker(QObject):
                     active_vision_model = main_model_name
 
                 if need_pre_caption:
-                    self.sig_token.emit("<i>Extracting image contexts via vision model...</i>\n\n")
+                    self._emit_token("<i>Extracting image contexts via vision model...</i>\n\n")
                     try:
                         vision_cfg = self.main_config.copy()
                         vision_cfg["model_name"] = active_vision_model
@@ -817,7 +842,7 @@ class ChatWorker(QObject):
 
                     except Exception as e:
                         self.logger.warning(f"Vision pre-captioning failed: {e}")
-                        self.sig_token.emit(
+                        self._emit_token(
                             "<div style='color:#e6a23c;'>⚠️ Image parsing failed. The current model configuration might not support vision. Images will be ignored.</div><br>")
                         llm_content.append({"type": "text",
                                             "text": f"[System Warning: User uploaded an image, but the vision parser failed to read it.]"})
@@ -838,12 +863,12 @@ class ChatWorker(QObject):
                             })
 
             llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
-            self.sig_token.emit("[CLEAR_SEARCH]")
+            self._emit_token("[CLEAR_SEARCH]")
 
             # Phase 4: Low VRAM Release
             is_low_vram = self.config.user_settings.get("low_vram_mode", False)
             if is_low_vram:
-                self.sig_token.emit("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
+                self._emit_token("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
                 if hasattr(self, 'db') and self.db:
                     self.db.reload()
 
@@ -855,7 +880,7 @@ class ChatWorker(QObject):
             ## ==========================================
             # Phase 5: Agentic Generation
             # ==========================================
-            self.sig_token.emit("[START_LLM_NETWORK]")
+            self._emit_token("[START_LLM_NETWORK]")
 
             mcp_mgr = MCPManager.get_instance()
             mcp_tools = []
@@ -888,14 +913,14 @@ class ChatWorker(QObject):
 
                 # 2. RAG 动态路由：从候选池中挑出最匹配的 Top-K 给大模型
                 if raw_mcp_tools:
-                    self.sig_token.emit("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
+                    self._emit_token("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
                     time.sleep(0.05)
                     mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=8)
-                    self.sig_token.emit("[CLEAR_SEARCH]")
+                    self._emit_token("[CLEAR_SEARCH]")
 
                 # 3. 仅当真正启用了 MCP 且筛选出了工具时，才向模型发送系统提示和 UI 状态
                 if mcp_tools:
-                    self.sig_token.emit(
+                    self._emit_token(
                         "<i>⚙️ Analyzing query intent and filtering optimal MCP tools...</i>\n\n")
 
                     tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
@@ -926,8 +951,8 @@ class ChatWorker(QObject):
 
             dynamic_tool_prompt = ""
             if mcp_tools:
-                self.sig_token.emit("[CLEAR_SEARCH]")
-                self.sig_token.emit(
+                self._emit_token("[CLEAR_SEARCH]")
+                self._emit_token(
                     "<mcp_process>⚙️ Analyzing query intent and filtering optimal MCP tools...</mcp_process>")
 
                 tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
@@ -989,7 +1014,7 @@ class ChatWorker(QObject):
                     MAX_ITERATIONS = 12
                     for iteration in range(MAX_ITERATIONS):
                         if getattr(self, '_is_cancelled', False):
-                            self.sig_token.emit("\n\n[⛔ Generation halted by user.]")
+                            self._emit_token("\n\n[⛔ Generation halted by user.]")
                             break
 
                         response_msg = self.main_llm.chat(
@@ -1038,7 +1063,7 @@ class ChatWorker(QObject):
                                                  flags=re.DOTALL).strip()
 
                         if reasoning:
-                            self.sig_token.emit(f"<think>\n{reasoning}\n</think>\n\n")
+                            self._emit_token(f"<think>\n{reasoning}\n</think>\n\n")
 
                         # 处理 DeepSeek 的裸 <｜DSML｜invoke> 格式（容错机制）
                         if not tool_calls and "<｜DSML｜invoke" in content:
@@ -1096,13 +1121,13 @@ class ChatWorker(QObject):
 
                         if not tool_calls:
                             if content:
-                                self.sig_token.emit("[CLEAR_SEARCH]")
+                                self._emit_token("[CLEAR_SEARCH]")
                                 chunk_size = 5
                                 for i in range(0, len(content), chunk_size):
                                     if getattr(self, '_is_cancelled', False): break
                                     chunk = content[i:i + chunk_size]
                                     self.full_response_cache += chunk
-                                    self.sig_token.emit(chunk)
+                                    self._emit_token(chunk)
                                     time.sleep(0.015)
                                 final_response_obtained = True
                             break
@@ -1130,12 +1155,12 @@ class ChatWorker(QObject):
 
                                 if tool_name == "generate_image":
                                     prompt_text = tool_args.get("prompt", "")
-                                    self.sig_token.emit(
+                                    self._emit_token(
                                         f"<mcp_process>🎨 Generating image (Prompt: {prompt_text[:30]}...)</mcp_process>\n")
 
                                     try:
                                         img_url = self.main_llm.generate_image(prompt=prompt_text)
-                                        self.sig_token.emit(
+                                        self._emit_token(
                                             f"<br><img src='{img_url}' style='max-width: 100%; border-radius: 8px; border: 1px solid #444;' alt='Generated Image'/><br>\n\n")
                                         tool_result = f"Image generated successfully. URL: {img_url}"
                                     except Exception as img_e:
@@ -1147,7 +1172,7 @@ class ChatWorker(QObject):
                                     short_args = tool_args_str if len(tool_args_str) < 120 else tool_args_str[
                                                                                                     :120] + "..."
 
-                                    self.sig_token.emit(
+                                    self._emit_token(
                                         f"<mcp_process>📡 Requesting remote tool: <b>{tool_name}</b><br>"
                                         f"<span style='font-size:12px; color:#888;'>[Status: Executing] Args: {short_args}</span></mcp_process>\n"
                                     )
@@ -1222,15 +1247,15 @@ class ChatWorker(QObject):
                     else:
                         rag_messages.append({"role": "user", "content": silence_prompt})
 
-                self.sig_token.emit("[CLEAR_SEARCH]")
-                self.sig_token.emit("[START_LLM_NETWORK]")
+                self._emit_token("[CLEAR_SEARCH]")
+                self._emit_token("[START_LLM_NETWORK]")
 
                 stream_kwargs = {}
                 if mcp_tools:
                     stream_kwargs["tools"] = mcp_tools
                 for token in self.main_llm.stream_chat(rag_messages, **stream_kwargs):
                     self.full_response_cache += token
-                    self.sig_token.emit(token)
+                    self._emit_token(token)
 
 
             # ==========================================
@@ -1253,13 +1278,13 @@ class ChatWorker(QObject):
                         ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']}</a></div>"
                         displayed += 1
                 if displayed > 0:
-                    self.sig_token.emit(ref_html)
+                    self._emit_token(ref_html)
 
         except Exception as e:
             import traceback
-            self.sig_error.emit(f"Error: {str(e)}\n{traceback.format_exc()}")
+            self._emit_error(f"Error: {str(e)}\n{traceback.format_exc()}")
         finally:
-            self.sig_finished.emit()
+            self._emit_finished()
 
     def filter_tools_by_rag(self, user_query, raw_mcp_tools, top_k=8):
         """
@@ -1357,13 +1382,13 @@ class ChatWorker(QObject):
                             f"<i>* Continuing analysis with default document ordering.</i>"
                             f"</div><br>"
                         )
-                        self.sig_token.emit(warning_html)
+                        self._emit_token(warning_html)
                     break
             except q.Empty:
                 if not worker.is_alive():
                     self.logger.error("Rerank process died unexpectedly.")
                     if emit_warning:
-                        self.sig_token.emit(
+                        self._emit_token(
                             f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
                             f"⚠️ <b>Reranker Process Terminated</b><br><br>"
                             f"The background reranking process terminated unexpectedly. This is often caused by missing models or insufficient memory.<br><br>"

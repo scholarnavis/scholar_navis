@@ -474,8 +474,11 @@ class QuickTranslatorWindow(QWidget):
         self.move((screen.width() - self.width()) // 2, int((screen.height() - self.height()) // 2))
 
     def _clear_all(self):
-        if getattr(self, 'worker_thread', None) and self.worker_thread.isRunning():
-            self._stop_translation()
+        try:
+            if getattr(self, 'worker_thread', None) and self.worker_thread.isRunning():
+                self._stop_translation()
+        except RuntimeError:
+            self.worker_thread = None
 
         self.input_box.clear()
         self.output_box.clear()

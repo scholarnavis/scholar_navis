@@ -17,6 +17,36 @@ if len(sys.argv) > 1 and sys.argv[1] == "--run-builtin-mcp":
     mcp.run(transport='stdio')
     sys.exit(0)
 
+# 拦截 API Server 独立运行模式
+if len(sys.argv) > 1 and sys.argv[1] == "--api-server":
+    os.environ["SCARF_NO_ANALYTICS"] = "true"
+
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication(sys.argv)
+
+    from src.core.logger import setup_logger
+
+    global_logger = setup_logger()
+
+    from src.core.config_manager import ConfigManager
+    from src.core.network_worker import setup_global_network_env
+    from src.core.mcp_manager import MCPManager
+
+    # 初始化基础环境并读取配置
+    ConfigManager()
+    setup_global_network_env()
+
+    # 强制拉起 MCP 服务器
+    global_logger.info("Bootstrapping MCP Servers for API mode...")
+    MCPManager.get_instance().bootstrap_servers(force_all=True)
+
+    # 启动 API 服务器
+    from src.core.api_server import run_server
+
+    run_server()
+    sys.exit(0)
+
 is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
 if is_compiled:
@@ -207,7 +237,21 @@ class AppController(QObject):
         self.splash.close()
 
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
+        QTimer.singleShot(2500, self._start_api_server)
 
+    def _start_api_server(self):
+        from src.core.config_manager import ConfigManager
+        config = ConfigManager()
+
+        if config.user_settings.get("api_server_enabled", False):
+            self.logger.info("Initializing Local API Server...")
+            try:
+                # 假设 api_server.py 位于 src 目录下
+                from src.core.api_server import start_api_server_thread
+                # 保持线程引用，防止被垃圾回收
+                self.api_thread = start_api_server_thread()
+            except Exception as e:
+                self.logger.error(f"Failed to start API server: {e}")
 if __name__ == "__main__":
 
     import multiprocessing

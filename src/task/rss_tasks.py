@@ -283,18 +283,12 @@ class FetchRSSTask(BackgroundTask):
             return []
 
         def _detect_oa_for_article(article):
-            try:
-                if self.is_cancelled():
-                    return article
-            except RuntimeError:
-                return article
-
             time.sleep(random.uniform(0.2, 0.8))
 
             doi = article.get("doi")
             pdf_url = ""
             landing_url = article.get("link", "")
-            user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
+            user_email = os.environ.get("NCBI_API_EMAIL","")
 
             if doi:
                 ncbi_key = os.environ.get("NCBI_API_KEY", "").strip()
