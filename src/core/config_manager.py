@@ -167,7 +167,11 @@ class ConfigManager:
             "trans_source_lang": "Auto Detect",
             "trans_target_lang": "English",
             "quick_trans_model_name": "",
-            "quick_trans_llm_id": ""
+            "quick_trans_llm_id": "",
+            "chat_llm_id": "",
+            "chat_model_name": "",
+            "chat_trans_llm_id": "",
+            "chat_trans_model_name": ""
         }
 
         current_settings = self.load_json(self.SETTINGS_PATH, encrypt=True)

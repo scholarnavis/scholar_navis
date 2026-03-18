@@ -158,6 +158,34 @@ class QuickTranslatorWindow(QWidget):
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.connect(self.model_selector.load_llm_configs)
 
+    def reload_and_restore_configs(self):
+        self.model_selector.load_llm_configs()
+        self._force_restore_ui(self.model_selector, "quick_trans_llm_id", "quick_trans_model_name")
+
+    def _force_restore_ui(self, selector, id_key, name_key):
+        from PySide6.QtWidgets import QComboBox
+        combos = selector.findChildren(QComboBox)
+        if len(combos) >= 2:
+            provider_combo = combos[0]
+            model_combo = combos[1]
+
+            saved_id = self.cfg_mgr.user_settings.get(id_key, "")
+            saved_name = self.cfg_mgr.user_settings.get(name_key, "")
+
+            if saved_id:
+                idx = provider_combo.findData(saved_id)
+                if idx < 0:
+                    configs = self.cfg_mgr.load_llm_configs()
+                    target_name = next((c.get("name") for c in configs if c.get("id") == saved_id), "")
+                    idx = provider_combo.findText(target_name)
+                if idx >= 0:
+                    provider_combo.setCurrentIndex(idx)
+
+            if saved_name:
+                idx = model_combo.findText(saved_name)
+                if idx >= 0:
+                    model_combo.setCurrentIndex(idx)
+
     def _setup_ui(self):
         self.main_frame = QWidget(self)
         self.main_frame.setStyleSheet(
@@ -478,28 +506,36 @@ class QuickTranslatorWindow(QWidget):
         self.btn_trans.setVisible(False)
         self.btn_stop.setVisible(True)
 
-        trans_config = self.model_selector.get_current_config()
-        if trans_config:
-            trans_config = trans_config.copy()
-
+        def _extract_trans_config(selector, id_key, name_key):
             from PySide6.QtWidgets import QComboBox
-            combos = self.model_selector.findChildren(QComboBox)
-            if len(combos) >= 2:
-                raw_ui_trans = combos[1].currentText()
-            else:
-                raw_ui_trans = self.cfg_mgr.user_settings.get("quick_trans_model_name", "")
+            combos = selector.findChildren(QComboBox)
+            if not combos: return None
 
-            ui_selected_trans = raw_ui_trans
+            provider_id = combos[0].currentData()
+            provider_name = combos[0].currentText()
+            configs = self.cfg_mgr.load_llm_configs()
 
-            # 清理后缀，防止发给 API 导致 404
-            for suffix in [" (⚙️ Custom)", " (🚫 Closed)"]:
-                if ui_selected_trans.endswith(suffix):
-                    ui_selected_trans = ui_selected_trans[:-len(suffix)]
+            target = next((c for c in configs if c.get("id") == provider_id), None)
+            if not target:
+                target = next((c for c in configs if c.get("name") == provider_name), None)
 
-            if ui_selected_trans:
-                trans_config["model_name"] = ui_selected_trans
-                self.cfg_mgr.user_settings["quick_trans_model_name"] = raw_ui_trans
-                self.cfg_mgr.save_settings()
+            if target:
+                target = target.copy()
+                if len(combos) >= 2:
+                    raw_model = combos[1].currentText()
+                    clean_model = raw_model
+                    for s in [" [Custom]", " [Closed]"]:
+                        if clean_model.endswith(s):
+                            clean_model = clean_model[:-len(s)]
+                            break
+                    target["model_name"] = clean_model
+                    self.cfg_mgr.user_settings[id_key] = target.get("id", "")
+                    self.cfg_mgr.user_settings[name_key] = raw_model
+                    self.cfg_mgr.save_settings()
+                return target
+            return None
+
+        trans_config = _extract_trans_config(self.model_selector, "quick_trans_llm_id", "quick_trans_model_name")
 
         self.worker_thread = QThread()
         self.worker = TranslatorWorker(
@@ -585,7 +621,6 @@ class QuickTranslatorWindow(QWidget):
         else:
             self.output_box.setHtml(clean_text.replace('\n', '<br>'))
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
-
 
 
 

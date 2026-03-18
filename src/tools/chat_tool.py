@@ -1909,8 +1909,34 @@ class ChatTool(BaseTool):
     def load_llm_configs(self):
         if hasattr(self, 'model_selector'):
             self.model_selector.load_llm_configs()
+            self._force_restore_ui(self.model_selector, "chat_llm_id", "chat_model_name")
         if hasattr(self, 'trans_selector'):
             self.trans_selector.load_llm_configs()
+            self._force_restore_ui(self.trans_selector, "chat_trans_llm_id", "chat_trans_model_name")
+
+    def _force_restore_ui(self, selector, id_key, name_key):
+        from PySide6.QtWidgets import QComboBox
+        combos = selector.findChildren(QComboBox)
+        if len(combos) >= 2:
+            provider_combo = combos[0]
+            model_combo = combos[1]
+
+            saved_id = self.config.user_settings.get(id_key, "")
+            saved_name = self.config.user_settings.get(name_key, "")
+
+            if saved_id:
+                idx = provider_combo.findData(saved_id)
+                if idx < 0:
+                    configs = self.config.load_llm_configs()
+                    target_name = next((c.get("name") for c in configs if c.get("id") == saved_id), "")
+                    idx = provider_combo.findText(target_name)
+                if idx >= 0:
+                    provider_combo.setCurrentIndex(idx)
+
+            if saved_name:
+                idx = model_combo.findText(saved_name)
+                if idx >= 0:
+                    model_combo.setCurrentIndex(idx)
 
     def process_send(self, text):
         # 1. 获取并格式化 KB ID
@@ -2092,12 +2118,52 @@ class ChatTool(BaseTool):
             self.worker_thread = None
             self.worker = None
 
-        # 获取最新的主模型配置与翻译配置
-        main_config = self.model_selector.get_current_config()
-        trans_config = self.trans_selector.get_current_config()
+        def _extract_config(selector, id_key, name_key):
+            from PySide6.QtWidgets import QComboBox
+            combos = selector.findChildren(QComboBox)
+            if not combos: return None
+
+            provider_id = combos[0].currentData()
+            provider_name = combos[0].currentText()
+            configs = self.config.load_llm_configs()
+
+            target = next((c for c in configs if c.get("id") == provider_id), None)
+            if not target:
+                target = next((c for c in configs if c.get("name") == provider_name), None)
+
+            if target:
+                target = target.copy()
+                if len(combos) >= 2:
+                    raw_model = combos[1].currentText()
+                    clean_model = raw_model
+                    for s in [" [Custom]", " [Closed]"]:
+                        if clean_model.endswith(s):
+                            clean_model = clean_model[:-len(s)]
+                            break
+                    target["model_name"] = clean_model
+                    self.config.user_settings[id_key] = target.get("id", "")
+                    self.config.user_settings[name_key] = raw_model
+                    self.config.save_settings()
+                return target
+            return None
+
+        # Extract real-time UI selections directly, bypassing get_current_config()
+        main_config = _extract_config(self.model_selector, "chat_llm_id", "chat_model_name")
+        trans_config = _extract_config(self.trans_selector, "chat_trans_llm_id", "chat_trans_model_name")
+
         use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container,
                                                                                    'chk_mcp_enable') else False
         selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
+
+        if main_config:
+            actual_model = main_config.get("model_name", "").strip()
+            self.logger.info(
+                f" Starting AI response | Model: [{actual_model}] | Provider: [{main_config.get('name', 'Unknown')}]")
+
+        # 初始化聊天气泡与 UI 状态
+        self.current_ai_text = ""
+        self.current_ai_bubble = self.add_bubble("", is_user=False)
+
 
         def _clean_model_name(name):
             if not name: return ""
@@ -2117,6 +2183,7 @@ class ChatTool(BaseTool):
             if ui_model:
                 main_config["model_name"] = ui_model
                 self.config.user_settings["chat_model_name"] = raw_ui_model
+                self.config.user_settings["chat_llm_id"] = main_config.get("id", "")
                 self.config.save_settings()
 
         if trans_config:
@@ -2131,6 +2198,7 @@ class ChatTool(BaseTool):
             if ui_trans:
                 trans_config["model_name"] = ui_trans
                 self.config.user_settings["chat_trans_model_name"] = raw_ui_trans
+                self.config.user_settings["chat_trans_llm_id"] = trans_config.get("id", "")
                 self.config.save_settings()
 
         if main_config:
