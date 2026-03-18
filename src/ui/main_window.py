@@ -456,7 +456,7 @@ class MainWindow(QMainWindow):
     def switch_tool(self, index):
         current_index = self.tool_stack.currentIndex()
 
-        if index == current_index:
+        if index == current_index and self.tools[index] is not None:
             self.sidebar.blockSignals(True)
             self.sidebar.setCurrentRow(current_index)
             self.sidebar.blockSignals(False)
