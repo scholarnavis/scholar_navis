@@ -127,7 +127,7 @@ class QuickTranslatorWindow(QWidget):
 
         self.is_pinned = self.cfg_mgr.user_settings.get("quick_trans_is_pinned", True)
 
-        flags = Qt.Window | Qt.FramelessWindowHint | Qt.Tool
+        flags = Qt.Window | Qt.FramelessWindowHint
         if self.is_pinned:
             flags |= Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
@@ -151,6 +151,7 @@ class QuickTranslatorWindow(QWidget):
         ThemeManager().theme_changed.connect(self._apply_theme)
 
         self._apply_theme()
+        self.reload_and_restore_configs()
 
         if hasattr(GlobalSignals(), 'sig_invoke_translator'):
             GlobalSignals().sig_invoke_translator.connect(self.receive_and_translate)
@@ -324,6 +325,15 @@ class QuickTranslatorWindow(QWidget):
 
         self.current_out_text = ""
 
+        from PySide6.QtCore import QTimer
+        self.copy_timer = QTimer(self)
+        self.copy_timer.setSingleShot(True)
+        self.copy_timer.timeout.connect(self._reset_copy_btn)
+
+        self.clear_timer = QTimer(self)
+        self.clear_timer.setSingleShot(True)
+        self.clear_timer.timeout.connect(self._reset_clear_btn)
+
     def _save_markdown_setting(self, checked):
         """保存 Markdown 复选框的状态"""
         self.cfg_mgr.user_settings["quick_trans_markdown"] = checked
@@ -332,12 +342,12 @@ class QuickTranslatorWindow(QWidget):
     def _update_pin_ui(self):
         """仅更新置顶按钮的图标和 ToolTip"""
         if self.is_pinned:
-            self.btn_pin.setIcon(ThemeManager().icon("keep_off", "accent"))
+            self.btn_pin.setIcon(ThemeManager().icon("keep", "accent"))
             self.btn_pin.setToolTip("Unpin Window")
             self.btn_pin.setStyleSheet(
                 "QPushButton { background: transparent; color: #05B8CC; border: none; font-size: 15px; } QPushButton:hover { color: #fff; }")
         else:
-            self.btn_pin.setIcon(ThemeManager().icon("keep", "text_muted"))
+            self.btn_pin.setIcon(ThemeManager().icon("keep_off", "text_muted"))
             self.btn_pin.setToolTip("Pin to Top")
             self.btn_pin.setStyleSheet(
                 "QPushButton { background: transparent; color: #888; border: none; font-size: 15px; opacity: 0.6; } QPushButton:hover { color: #ccc; }")
@@ -470,6 +480,16 @@ class QuickTranslatorWindow(QWidget):
         self.input_box.clear()
         self.output_box.clear()
 
+        self.btn_clear.setText(" Cleared!")
+        self.clear_timer.start(2000)
+
+    def _reset_clear_btn(self):
+        self.btn_clear.setText(" Clear")
+        if hasattr(ThemeManager(), 'icon'):
+            self.btn_clear.setIcon(ThemeManager().icon("clear", "text_main"))
+
+
+
     def _start_translation(self):
         text = self.input_box.toPlainText().strip()
         if not text: return
@@ -573,32 +593,59 @@ class QuickTranslatorWindow(QWidget):
         self.input_box.setStyleSheet(input_style)
         self.output_box.setStyleSheet(input_style + " font-size: 14px;")
 
-        combo_style = f"background: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px;"
+        combo_style = f"""
+                    QComboBox {{
+                        background: {tm.color('bg_input')}; 
+                        color: {tm.color('text_main')}; 
+                        border: 1px solid {tm.color('border')}; 
+                        border-radius: 4px;
+                    }}
+                    QComboBox:hover {{
+                        border: 1px solid {tm.color('accent')};
+                    }}
+                """
         self.combo_src.setStyleSheet(combo_style)
         self.combo_tgt.setStyleSheet(combo_style)
+
+        self.chk_markdown.setStyleSheet(f"""
+                    QCheckBox {{
+                        background-color: transparent; 
+                    }}
+                    QCheckBox:hover {{
+                        color: {tm.color('accent')};
+                    }}
+                """)
 
         if hasattr(self, 'lbl_trans_icon'):
             self.lbl_trans_icon.setPixmap(tm.icon("language", "text_main").pixmap(16, 16))
 
-        # Apply Icons and Semantic Colors to Translator Buttons
         self.btn_trans.setText(" Translate / Polish")
         self.btn_trans.setIcon(tm.icon("send", "bg_main"))
-        self.btn_trans.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 6px; padding: 6px; font-weight: bold;")
+        self.btn_trans.setStyleSheet(f"""
+                    QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 6px; padding: 6px; font-weight: bold; }}
+                    QPushButton:hover {{ background-color: {tm.color('title_blue')}; }}
+                """)
 
         self.btn_stop.setText(" Stop")
         self.btn_stop.setIcon(tm.icon("close", "bg_main"))
-        self.btn_stop.setStyleSheet(f"background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; padding: 6px; font-weight: bold;")
+        self.btn_stop.setStyleSheet(f"""
+                    QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; padding: 6px; font-weight: bold; }}
+                    QPushButton:hover {{ background-color: #a32418; }}
+                """)
 
         self.btn_clear.setText(" Clear")
         self.btn_clear.setIcon(tm.icon("clear", "text_main"))
-        self.btn_clear.setStyleSheet(
-            f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px;")
+        self.btn_clear.setStyleSheet(f"""
+                    QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px; }}
+                    QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
+                """)
 
         self.btn_copy.setText(" Copy")
         self.btn_copy.setIcon(tm.icon("copy", "text_main"))
-        self.btn_copy.setStyleSheet(
-            f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px;")
-
+        self.btn_copy.setStyleSheet(f"""
+                    QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border-radius: 6px; padding: 6px; }}
+                    QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
+                """)
 
     def _copy_result(self):
         if not self.current_out_text: return
@@ -608,6 +655,14 @@ class QuickTranslatorWindow(QWidget):
         QApplication.clipboard().setText(clean_text)
         from src.ui.components.toast import ToastManager
         ToastManager().show("Translated text copied to clipboard.", "success")
+
+        self.btn_copy.setText(" Copied!")
+        self.copy_timer.start(2000)
+
+    def _reset_copy_btn(self):
+        self.btn_copy.setText(" Copy")
+        if hasattr(ThemeManager(), 'icon'):
+            self.btn_copy.setIcon(ThemeManager().icon("copy", "text_main"))
 
 
 

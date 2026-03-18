@@ -17,7 +17,7 @@ from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskState, TaskMode
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
-from src.task.rss_tasks import FetchRSSTask, SearchArticlesTask
+from src.task.rss_tasks import FetchRSSTask, SearchArticlesTask, ImportRssTask, ExportRssTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.RotatingSpinner import ModernSpinner
 from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog, StandardDialog
@@ -431,20 +431,17 @@ class RSSTool(BaseTool):
             self.btn_manage.setIcon(tm.icon("folder", "bg_main"))
             self.btn_manage.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;")
 
-        if hasattr(self, 'btn_edit'):
-            self.btn_edit.setIcon(tm.icon("edit", "text_main"))
-            self.btn_edit.setStyleSheet(f"background-color: {btn_bg}; color: {text_main}; padding: 6px 15px; border-radius: 4px; border: 1px solid {border};")
+        if hasattr(self, 'btn_more_actions'):
+            self.btn_more_actions.setIcon(tm.icon("settings", "text_main"))
+            self.btn_more_actions.setStyleSheet(
+                f"background-color: {btn_bg}; color: {text_main}; padding: 6px 15px; border-radius: 4px; border: 1px solid {border};")
 
-        if hasattr(self, 'btn_add'):
-            self.btn_add.setIcon(tm.icon("add", "bg_main"))
-            self.btn_add.setStyleSheet(
-                f"background-color: {tm.color('success')}; color: {tm.color('bg_main')}; "
-                f"padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;"
-            )
-
-        if hasattr(self, 'btn_unsub'):
-            self.btn_unsub.setIcon(tm.icon("delete", "bg_main"))
-            self.btn_unsub.setStyleSheet(f"background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; border: none;")
+        if hasattr(self, 'more_menu'):
+            self.more_menu.setStyleSheet(f"""
+                        QMenu {{ background-color: {bg_card}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 4px; }} 
+                        QMenu::item {{ padding: 6px 20px; }}
+                        QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
+                    """)
 
         if hasattr(self, 'btn_refresh'):
             self.btn_refresh.setIcon(tm.icon("sync", "bg_main"))
@@ -568,29 +565,43 @@ class RSSTool(BaseTool):
 
         toolbar = QHBoxLayout()
         self.btn_manage = QPushButton("Manage Subscriptions")
-        self.btn_manage.setStyleSheet("background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+        self.btn_manage.setStyleSheet(
+            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
         self.btn_manage.clicked.connect(self.open_subscription_manager)
 
-        self.btn_edit = QPushButton("Edit Source")
-        self.btn_edit.clicked.connect(self.edit_feed)
+        # 替换原有零散按钮，整合为下拉菜单
+        self.btn_more_actions = QPushButton(" Options")
+        self.more_menu = QMenu(self.btn_more_actions)
 
-        self.btn_unsub = QPushButton("Unsubscribe Selected")
-        self.btn_unsub.clicked.connect(lambda: self._batch_action("unsubscribe"))
+        self.action_add = self.more_menu.addAction("Add Custom Source")
+        self.action_add.triggered.connect(self.add_custom_feed)
+
+        self.action_edit = self.more_menu.addAction("Edit Source")
+        self.action_edit.triggered.connect(self.edit_feed)
+
+        self.action_unsub = self.more_menu.addAction("Unsubscribe Selected")
+        self.action_unsub.triggered.connect(lambda: self._batch_action("unsubscribe"))
+
+        self.more_menu.addSeparator()
+
+        self.action_import = self.more_menu.addAction("Import Feeds")
+        self.action_import.triggered.connect(self.import_feeds)
+
+        self.action_export = self.more_menu.addAction("Export Feeds")
+        self.action_export.triggered.connect(self.export_feeds)
+
+        self.btn_more_actions.setMenu(self.more_menu)
 
         self.lbl_time = QLabel("Last Fetched: Never")
         self.lbl_time.setStyleSheet("color: #888; font-style: italic; margin-left: 10px;")
 
         self.btn_refresh = QPushButton("Sync Selected")
-        self.btn_refresh.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
+        self.btn_refresh.setStyleSheet(
+            "background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
         self.btn_refresh.clicked.connect(lambda: self._batch_action("fetch"))
 
-        self.btn_add = QPushButton(" Add Custom Source")
-        self.btn_add.clicked.connect(self.add_custom_feed)
-
-
         toolbar.addWidget(self.btn_manage)
-        toolbar.addWidget(self.btn_edit)
-        toolbar.addWidget(self.btn_unsub)
+        toolbar.addWidget(self.btn_more_actions)
         toolbar.addWidget(self.lbl_time)
         toolbar.addStretch()
         toolbar.addWidget(self.btn_refresh)
@@ -619,7 +630,6 @@ class RSSTool(BaseTool):
                                 QPushButton:hover { background-color: #444; color: white; }
                             """)
 
-
         left_action_bar.addWidget(self.btn_feed_sel_all)
         left_action_bar.addWidget(self.btn_feed_sel_inv)
         left_action_bar.addStretch()
@@ -628,6 +638,7 @@ class RSSTool(BaseTool):
         self.btn_feed_sel_inv.clicked.connect(lambda: self._batch_select_feeds("invert"))
 
         self.feed_list = QListWidget()
+        self.feed_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.feed_list.itemDoubleClicked.connect(lambda item: self.edit_feed())
         self.feed_list.currentRowChanged.connect(self._on_feed_selected)
         self.feed_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -789,11 +800,67 @@ class RSSTool(BaseTool):
                 self._save_config()
                 self._refresh_feed_ui()
 
+
     def _filter_feed_list(self, text):
         text = text.lower()
         for i in range(self.feed_list.count()):
             item = self.feed_list.item(i)
-            item.setHidden(text not in item.text().lower())
+            feed_url = item.data(Qt.UserRole)
+            feed = next((f for f in self.feeds if f.get('url') == feed_url), {})
+
+            match = (text in feed.get('name', '').lower() or
+                     text in feed.get('category', '').lower() or
+                     text in feed.get('url', '').lower())
+            item.setHidden(not match)
+
+    def export_feeds(self):
+        path, _ = QFileDialog.getSaveFileName(self.widget, "Export RSS Feeds", "rss_feeds_export.json",
+                                              "JSON Files (*.json)")
+        if not path: return
+
+        self.task_mgr.sig_result.connect(self._on_export_done)
+        self.task_mgr.start_task(ExportRssTask, "rss_export", feeds=self.feeds, export_path=path, mode=TaskMode.THREAD)
+
+    def _on_export_done(self, result):
+        try:
+            self.task_mgr.sig_result.disconnect(self._on_export_done)
+        except:
+            pass
+
+        if result and result.get("success"):
+            ToastManager().show(f"Feeds exported successfully.", "success")
+        else:
+            ToastManager().show(f"Export failed: {result.get('error') if result else 'Unknown error'}", "error")
+
+    def import_feeds(self):
+        path, _ = QFileDialog.getOpenFileName(self.widget, "Import RSS Feeds", "", "JSON Files (*.json)")
+        if not path: return
+
+        self.task_mgr.sig_result.connect(self._on_import_done)
+        self.task_mgr.start_task(ImportRssTask, "rss_import", import_path=path, mode=TaskMode.THREAD)
+
+    def _on_import_done(self, result):
+        try:
+            self.task_mgr.sig_result.disconnect(self._on_import_done)
+        except:
+            pass
+
+        if result and result.get("success"):
+            new_feeds = result.get("feeds", [])
+            existing_urls = {f['url'] for f in self.feeds}
+            added = 0
+            for nf in new_feeds:
+                # 基于 URL 进行去重，避免重复导入
+                if isinstance(nf, dict) and 'url' in nf and nf['url'] not in existing_urls:
+                    self.feeds.append(nf)
+                    added += 1
+
+            self._save_config()
+            self._refresh_feed_ui()
+            ToastManager().show(f"Imported {added} new feeds successfully.", "success")
+        else:
+            ToastManager().show(f"Import failed: {result.get('error') if result else 'Unknown error'}", "error")
+
 
     def _show_feed_context_menu(self, pos):
         tm = ThemeManager()
@@ -878,10 +945,13 @@ class RSSTool(BaseTool):
         self.task_mgr.sig_state_changed.connect(self._on_fetch_done)
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
 
-        self.task_mgr.start_task(FetchRSSTask, "rss_fetch",
-                                 feeds=target_feeds,
-                                 mode=TaskMode.THREAD,
-                                 save_path=self.cache_file)
+        self.task_mgr.start_task(
+            FetchRSSTask,
+            "rss_fetch",
+            feeds=target_feeds,
+            mode=TaskMode.THREAD,
+            save_path=self.cache_file
+        )
 
     def _on_fetch_done(self, state, msg):
         try:
@@ -908,17 +978,14 @@ class RSSTool(BaseTool):
             self.pd.close_safe()
             ToastManager().show(f"Fetch failed: {msg}", "error")
 
-
     def _on_feed_selected(self, row):
         if row < 0: return
-
         feed = self.feeds[row]
-        if feed.get("is_default", False):
-            self.btn_edit.setEnabled(False)
-            self.btn_edit.setToolTip("Built-in Default Source (Cannot edit)")
-        else:
-            self.btn_edit.setEnabled(True)
-            self.btn_edit.setToolTip("Edit Custom Source")
+
+        is_default = feed.get("is_default", False)
+        if hasattr(self, 'action_edit'):
+            self.action_edit.setEnabled(not is_default)
+            self.action_edit.setToolTip("Built-in Default Source (Cannot edit)" if is_default else "Edit Custom Source")
 
         self._clear_articles()
 

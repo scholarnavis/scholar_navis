@@ -188,6 +188,12 @@ class MainWindow(QMainWindow):
         self.tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+        from src.core.signals import GlobalSignals
+        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
+            GlobalSignals().sig_send_to_chat.connect(self.route_to_chat)
+        if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
+            GlobalSignals().sig_route_to_chat_with_mcp.connect(self.route_to_chat_with_mcp)
+
         self.sidebar.setCurrentRow(0)
         self.switch_tool(0)
 
@@ -443,15 +449,31 @@ class MainWindow(QMainWindow):
                 sys.exit(0)
         return True
 
+    def route_to_chat(self, context_text, prompt_text=""):
+        chat_index = 1  # ChatTool 在侧边栏的索引是 1
+        self.sidebar.setCurrentRow(chat_index)  # 切换标签（此时会自动实例化 ChatTool）
+        chat_tool = self.tools[chat_index]
+        if chat_tool:
+            chat_tool.handle_external_send(context_text, prompt_text)
+
+        # 激活并前置主窗口
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def route_to_chat_with_mcp(self, context_text, prompt_text, target_tag):
+        chat_index = 1
+        self.sidebar.setCurrentRow(chat_index)
+        chat_tool = self.tools[chat_index]
+        if chat_tool:
+            chat_tool.handle_external_send_with_mcp(context_text, prompt_text, target_tag)
+
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def add_tool(self, tool):
         self.tools.append(tool)
-        widget = tool.get_ui_widget()
-        self.tool_stack.addWidget(widget)
-
-        icon_name = self.icon_map.get(tool.tool_name, "tag")
-        item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {tool.tool_name}")
-        self.sidebar.addItem(item)
 
     def switch_tool(self, index):
         current_index = self.tool_stack.currentIndex()

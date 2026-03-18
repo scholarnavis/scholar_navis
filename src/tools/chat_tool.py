@@ -194,19 +194,28 @@ class ChatInputContainer(QFrame):
         self.chk_mcp_enable.setChecked(True)
 
         self.btn_mcp_tags = QToolButton()
-        self.btn_mcp_tags = QPushButton("Filter Tools: Loading...")
+        self.btn_mcp_tags = QPushButton("Filter Tools: Loading...", self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
         self.btn_mcp_tags.setStyleSheet(
             "QPushButton { color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px; }"
             "QPushButton:hover { background: #333; }"
         )
-        self.btn_mcp_tags.setVisible(True)
 
         self.menu_mcp_tags = QMenu(self)
         self.menu_mcp_tags.setStyleSheet(
             "QMenu { background-color: #2b2b2b; border: 1px solid #555; border-radius: 6px; padding: 4px; }"
         )
+        self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
+
+        self.tag_actions = {}
+        self.user_deselected_tags = set()
+        self.known_tags = set()
+
+        self.btn_mcp_guide = QPushButton("Prompt guide", self)
+        self.btn_mcp_guide.setCursor(Qt.PointingHandCursor)
+        self.btn_mcp_guide.setStyleSheet(
+            "color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px;")
         self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
 
         self.tag_actions = {}
@@ -1391,11 +1400,6 @@ class ChatTool(BaseTool):
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.connect(self.load_llm_configs)
 
-        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
-            GlobalSignals().sig_send_to_chat.connect(self.handle_external_send)
-
-        if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
-            GlobalSignals().sig_route_to_chat_with_mcp.connect(self.handle_external_send_with_mcp)
 
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
@@ -2155,14 +2159,6 @@ class ChatTool(BaseTool):
                                                                                    'chk_mcp_enable') else False
         selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
 
-        if main_config:
-            actual_model = main_config.get("model_name", "").strip()
-            self.logger.info(
-                f" Starting AI response | Model: [{actual_model}] | Provider: [{main_config.get('name', 'Unknown')}]")
-
-        # 初始化聊天气泡与 UI 状态
-        self.current_ai_text = ""
-        self.current_ai_bubble = self.add_bubble("", is_user=False)
 
 
         def _clean_model_name(name):
@@ -2424,6 +2420,7 @@ class ChatTool(BaseTool):
             self.scroll_to_bottom()
 
     def handle_external_send_with_mcp(self, context_text, prompt_text, target_tag):
+        self.get_ui_widget()
 
         if hasattr(self, 'input_container') and hasattr(self.input_container, 'chk_mcp_enable'):
             if not self.input_container.chk_mcp_enable.isChecked():
@@ -2448,6 +2445,7 @@ class ChatTool(BaseTool):
         self.handle_external_send(context_text, prompt_text)
 
     def handle_external_send(self, context_text, prompt_text=""):
+        self.get_ui_widget()
 
         temp_dir = tempfile.gettempdir()
         temp_path = os.path.join(temp_dir, "scholar_navis_external_context.txt")
@@ -2475,25 +2473,6 @@ class ChatTool(BaseTool):
         if hasattr(self, 'input_container') and hasattr(self.input_container, 'chk_mcp_enable'):
             if not self.input_container.chk_mcp_enable.isChecked():
                 self.input_container.chk_mcp_enable.setChecked(True)
-
-        p = self.widget
-        while p:
-            if hasattr(p, 'setCurrentWidget'):
-                try:
-                    p.setCurrentWidget(self.widget)
-                    main_window = p.window()
-                    if hasattr(main_window, 'sidebar'):
-                        idx = p.indexOf(self.widget)
-                        if idx >= 0:
-                            main_window.sidebar.setCurrentRow(idx)
-                except:
-                    pass
-            p = p.parentWidget()
-
-        if self.widget.window():
-            self.widget.window().showNormal()
-            self.widget.window().raise_()
-            self.widget.window().activateWindow()
 
         if prompt_text:
             self.process_send(prompt_text)

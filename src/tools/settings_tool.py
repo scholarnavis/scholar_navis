@@ -237,8 +237,6 @@ class SettingsTool(BaseTool):
         self.combo_llm_preset.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_llm_model.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_model_param_strategy.currentIndexChanged.connect(self._mark_unsaved)
-        self.combo_trans_provider.currentIndexChanged.connect(self._mark_unsaved)
-        self.combo_trans_model.currentTextChanged.connect(self._mark_unsaved)
         self.editor_provider_params.sig_data_changed.connect(self._mark_unsaved)
         self.editor_model_params.sig_data_changed.connect(self._mark_unsaved)
 
@@ -274,7 +272,7 @@ class SettingsTool(BaseTool):
             self._get_btn_style(btn_type="success"))
 
         # Default styling for the rest
-        for btn_name in ['btn_help_params', 'btn_copy_params', 'btn_trans_refresh']:
+        for btn_name in ['btn_help_params', 'btn_copy_params']:
             if hasattr(self, btn_name):
                 getattr(self, btn_name).setStyleSheet(self._get_btn_style())
 
@@ -350,7 +348,6 @@ class SettingsTool(BaseTool):
 
         if hasattr(self, 'btn_help_params'): self.btn_help_params.setIcon(tm.icon("help", "text_main"))
         if hasattr(self, 'btn_copy_params'): self.btn_copy_params.setIcon(tm.icon("copy", "text_main"))
-        if hasattr(self, 'btn_trans_refresh'): self.btn_trans_refresh.setIcon(tm.icon("refresh", "text_main"))
 
         # 将这里的 btn_open_cache 后追加一行 test_device
         if hasattr(self, 'btn_open_cache'): self.btn_open_cache.setIcon(tm.icon("folder", "accent"))
@@ -405,11 +402,6 @@ class SettingsTool(BaseTool):
         if self.combo_llm_preset.count() > 0:
             self.combo_llm_preset.setCurrentIndex(idx_to_select)
             self._on_llm_preset_changed(idx_to_select)
-
-        trans_id = self.config.user_settings.get("trans_llm_id", None)
-        idx_trans = self.combo_trans_provider.findData(trans_id)
-        if idx_trans >= 0:
-            self.combo_trans_provider.setCurrentIndex(idx_trans)
 
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
@@ -1241,26 +1233,6 @@ class SettingsTool(BaseTool):
             lambda idx: self.model_param_container.setVisible(idx == 1)
         )
 
-        # --- 独立翻译层选择 ---
-        trans_group = QGroupBox("Translation Agent Configuration")
-        trans_layout = QFormLayout(trans_group)
-
-        trans_provider_layout = QHBoxLayout()
-        self.combo_trans_provider = BaseComboBox()
-        self.combo_trans_model = BaseComboBox()
-        self.btn_trans_refresh = QPushButton()
-        self.btn_trans_refresh.setIcon(ThemeManager().icon("refresh", "text_main"))
-        self.btn_trans_refresh.setToolTip("Refresh models from cache")
-
-        for conf in self.llm_configs:
-            self.combo_trans_provider.addItem(conf.get("name", "Unnamed Provider"), conf.get("id"))
-
-        trans_provider_layout.addWidget(self.combo_trans_provider, stretch=1)
-        trans_provider_layout.addWidget(self.btn_trans_refresh)
-
-        trans_layout.addRow("Translation Provider:", trans_provider_layout)
-        trans_layout.addRow("Translation Model:", self.combo_trans_model)
-
         layout.addRow("Service Provider:", header_layout)
         layout.addRow("Provider Name:", self.input_llm_name)
         layout.addRow("API Base URL:", self.input_llm_url)
@@ -1272,7 +1244,6 @@ class SettingsTool(BaseTool):
         layout.addRow("", self.model_param_container)
 
         self.layout.addWidget(group)
-        self.layout.addWidget(trans_group)
 
         self.combo_llm_preset.currentIndexChanged.connect(self._on_llm_preset_changed)
         self.input_llm_name.textChanged.connect(self._sync_llm_data)
@@ -1288,27 +1259,7 @@ class SettingsTool(BaseTool):
         self.combo_llm_preset.setCurrentIndex(idx_to_select)
         self._on_llm_preset_changed(idx_to_select)
 
-        trans_id = self.config.user_settings.get("trans_llm_id", None)
-        idx_trans = self.combo_trans_provider.findData(trans_id)
-        if idx_trans >= 0:
-            self.combo_trans_provider.setCurrentIndex(idx_trans)
 
-        self.combo_trans_provider.currentIndexChanged.connect(self._on_trans_provider_changed)
-        self.combo_trans_model.currentTextChanged.connect(self._sync_trans_model)
-        self.btn_trans_refresh.clicked.connect(self._on_trans_refresh_clicked)
-
-        self._on_trans_provider_changed(0)
-
-        self.combo_llm_model.currentTextChanged.connect(self.combo_llm_model.setToolTip)
-        self.combo_trans_model.currentTextChanged.connect(self.combo_trans_model.setToolTip)
-
-    def _on_trans_refresh_clicked(self):
-        self._refresh_trans_models_ui()
-        ToastManager().show("Translation models refreshed from cache.", "success")
-
-    def _on_trans_provider_changed(self, index):
-        if index < 0 or index >= len(self.llm_configs): return
-        self._refresh_trans_models_ui()
 
     def _on_manual_model_action(self, model_type, action):
 
@@ -1352,34 +1303,9 @@ class SettingsTool(BaseTool):
                     ToastManager().show("Model cache not found locally.", "info")
                     self.check_models_status()
 
-    def _refresh_trans_models_ui(self):
-        idx = self.combo_trans_provider.currentIndex()
-        if idx < 0: return
-        conf = self.llm_configs[idx]
 
-        curr_model = conf.get("trans_model_name", conf.get("model_name", "")).strip()
-        fetched = conf.get("fetched_models", [])
 
-        self.combo_trans_model.blockSignals(True)
-        self.combo_trans_model.clear()
 
-        items = [m for m in fetched if m.strip()]
-        if curr_model and curr_model not in items:
-            items.insert(0, curr_model)
-
-        self.combo_trans_model.addItems(items)
-        if curr_model:
-            self.combo_trans_model.setCurrentText(curr_model)
-        self.combo_trans_model.blockSignals(False)
-        self._sync_trans_model(self.combo_trans_model.currentText())
-
-    def _sync_trans_model(self, text):
-        idx = self.combo_trans_provider.currentIndex()
-        if idx >= 0:
-            self.llm_configs[idx]["trans_model_name"] = text.strip()
-            self._save_llm_config()
-            if hasattr(GlobalSignals(), 'llm_config_changed'):
-                GlobalSignals().llm_config_changed.emit()
 
     def _extract_real_model_name(self, display_text):
         for suffix in [" [Custom]", " [Closed]"]:
@@ -1832,13 +1758,6 @@ class SettingsTool(BaseTool):
         self.combo_llm_preset.blockSignals(True)
         self.combo_llm_preset.setItemText(idx, conf["name"])
         self.combo_llm_preset.blockSignals(False)
-        self.combo_trans_provider.blockSignals(True)
-
-        for i in range(1, self.combo_trans_provider.count()):
-            if self.combo_trans_provider.itemData(i) == self.llm_configs[idx]["id"]:
-                self.combo_trans_provider.setItemText(i, self.llm_configs[idx]["name"])
-                break
-        self.combo_trans_provider.blockSignals(False)
         self._update_current_model_marker(curr_real, mode)
 
     def _start_fetch_task(self):
@@ -2245,7 +2164,6 @@ class SettingsTool(BaseTool):
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
-            "trans_llm_id": self.combo_trans_provider.currentData(),
             "theme": self.combo_theme.currentText(),
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,
