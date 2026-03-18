@@ -1,78 +1,53 @@
 import os
 import re
 import time
+
 import psutil
 import torch
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QColor, QRegularExpressionValidator, QGuiApplication
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
-                               QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
-                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea,
-                               QAbstractScrollArea)
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QRegularExpressionValidator
+                               QSizePolicy, QHeaderView, QAbstractItemView, QTableWidget,
+                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea)
 
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import EMBEDDING_MODELS
-from src.ui.components.param_editor import ParamEditorWidget
 from src.core.theme_manager import ThemeManager
+from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
 
 class BaseDialog(QDialog):
     def __init__(self, parent=None, title="Dialog", width=450):
         super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+        self.setWindowTitle(title)
         self.setFixedWidth(width)
-        self._drag_pos = None
 
-        self.setWindowOpacity(0.0)
         self._is_closing = False
 
         self.tm = ThemeManager()
         self._tracked_buttons = []
 
-        self.main_frame = QFrame(self)
-        self.main_frame.setObjectName("MainFrame")
-
-        # 阴影
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(15)
-        shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(0, 0, 0, 80))
-        self.main_frame.setGraphicsEffect(shadow)
-
-        self.v_layout = QVBoxLayout(self.main_frame)
+        self.v_layout = QVBoxLayout(self)
         self.v_layout.setContentsMargins(0, 0, 0, 0)
         self.v_layout.setSpacing(0)
 
-        # --- 标题栏 ---
-        self.title_bar = QWidget()
-        self.title_bar.setFixedHeight(40)
-        title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(15, 0, 10, 0)
-
-        self.lbl_title = QLabel(title)
-        title_layout.addWidget(self.lbl_title)
-        title_layout.addStretch()
-
-        self.btn_close = QPushButton("✕")
-        self.btn_close.setFixedSize(30, 30)
-        self.btn_close.clicked.connect(self.reject)
-        title_layout.addWidget(self.btn_close)
-        self.v_layout.addWidget(self.title_bar)
-
-        # --- 内容区 ---
         self.content_widget = QWidget()
+        self.content_widget.setObjectName("ContentWidget")
+        self.content_widget.setAttribute(Qt.WA_StyledBackground, True)
+        self.content_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         self.content_layout = QVBoxLayout(self.content_widget)
-        self.content_layout.setContentsMargins(20, 20, 20, 20)
-        self.content_layout.setSpacing(15)
+        self.content_layout.setContentsMargins(24, 24, 24, 24)
+        self.content_layout.setSpacing(16)
+
         self.v_layout.addWidget(self.content_widget, 1)
 
-        # --- 底部按钮区 ---
         self.footer_widget = QWidget()
+        self.footer_widget.setAttribute(Qt.WA_StyledBackground, True)
         self.footer_widget.setFixedHeight(55)
 
         self.footer_layout = QHBoxLayout(self.footer_widget)
@@ -80,75 +55,73 @@ class BaseDialog(QDialog):
         self.footer_layout.addStretch()
         self.v_layout.addWidget(self.footer_widget)
 
-        window_layout = QVBoxLayout(self)
-        window_layout.setContentsMargins(10, 10, 10, 10)
-        window_layout.addWidget(self.main_frame)
-
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-
         self.tm.theme_changed.connect(self._apply_theme)
 
     def _apply_theme(self):
         tm = self.tm
 
-        self.main_frame.style().unpolish(self.main_frame)
-        self.title_bar.style().unpolish(self.title_bar)
+        bg_color = QColor(tm.color('bg_main'))
+        luminance = (0.299 * bg_color.red() + 0.587 * bg_color.green() + 0.114 * bg_color.blue())
 
-        self.main_frame.setStyleSheet(f"""
-            QFrame#MainFrame {{
+        if luminance > 128:
+            QGuiApplication.styleHints().setColorScheme(Qt.ColorScheme.Light)
+        else:
+            QGuiApplication.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+
+        self.setStyleSheet(f"""
+            QDialog {{
                 background-color: {tm.color('bg_main')};
-                border: 1px solid {tm.color('border')};
-                border-radius: 6px;
             }}
-        """)
-
-        self.title_bar.setStyleSheet(f"""
-            background-color: {tm.color('bg_card')}; 
-            border-top-left-radius: 6px; 
-            border-top-right-radius: 6px; 
-            border-bottom: 1px solid {tm.color('border')};
-        """)
-
-        self.lbl_title.setStyleSheet(f"""
-            color: {tm.color('text_main')}; font-weight: bold; font-family: 'Segoe UI'; font-size: 13px; border: none;
-        """)
-
-        self.btn_close.setStyleSheet(f"""
-            QPushButton {{ border: none; color: {tm.color('text_muted')}; background: transparent; font-weight: bold; font-size: 14px; }}
-            QPushButton:hover {{ color: {tm.color('bg_main')}; background-color: {tm.color('danger')}; border-radius: 4px; }}
+            QWidget#ContentWidget {{
+                background-color: {tm.color('bg_main')};
+            }}
         """)
 
         self.footer_widget.setStyleSheet(f"""
             background-color: {tm.color('bg_card')}; 
-            border-bottom-left-radius: 6px; 
-            border-bottom-right-radius: 6px; 
             border-top: 1px solid {tm.color('border')};
         """)
 
-        # 更新所有被跟踪的按钮样式
         for btn, b_type in self._tracked_buttons:
             self._update_button_style(btn, b_type)
 
     def _update_button_style(self, btn, b_type):
         tm = self.tm
-        base_style = "QPushButton { border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500; }"
 
         if b_type == "primary":
-            style = base_style + f"""
-                QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border: 1px solid {tm.color('accent')}; }}
+            style = f"""
+                QPushButton {{ 
+                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    background-color: {tm.color('accent')}; 
+                    color: {tm.color('bg_main')}; 
+                    border: 1px solid {tm.color('accent')}; 
+                }}
                 QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
             """
         elif b_type == "danger":
-            style = base_style + f"""
-                QPushButton {{ background-color: transparent; color: {tm.color('danger')}; border: 1px solid {tm.color('danger')}; }}
+            style = f"""
+                QPushButton {{ 
+                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    background-color: transparent; 
+                    color: {tm.color('danger')}; 
+                    border: 1px solid {tm.color('danger')}; 
+                }}
                 QPushButton:hover {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; }}
             """
         else:
-            style = base_style + f"""
-                QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; }}
+            style = f"""
+                QPushButton {{ 
+                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    background-color: {tm.color('btn_bg')}; 
+                    color: {tm.color('text_main')}; 
+                    border: 1px solid {tm.color('border')}; 
+                }}
                 QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
             """
+
         btn.setStyleSheet(style)
+
 
     def add_button(self, text, callback, is_primary=False, is_danger=False):
         btn = QPushButton(text)
@@ -165,63 +138,7 @@ class BaseDialog(QDialog):
         self.footer_layout.addWidget(btn)
         return btn
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            global_pos = event.globalPosition().toPoint()
-            if self.title_bar.geometry().contains(self.main_frame.mapFromGlobal(global_pos)):
-                self._drag_pos = global_pos - self.frameGeometry().topLeft()
-                event.accept()
-                return
-        super().mousePressEvent(event)
 
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton and self._drag_pos:
-            global_pos = event.globalPosition().toPoint()
-            self.move(global_pos - self._drag_pos)
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_pos = None
-        super().mouseReleaseEvent(event)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.fade_in = QPropertyAnimation(self, b"windowOpacity")
-        self.fade_in.setDuration(150)
-        self.fade_in.setStartValue(0.0)
-        self.fade_in.setEndValue(1.0)
-        self.fade_in.setEasingCurve(QEasingCurve.OutQuad)
-        self.fade_in.start()
-
-    def _do_accept(self):
-        super().accept()
-
-    def _do_reject(self):
-        super().reject()
-
-
-    def accept(self):
-        if getattr(self, '_is_closing', False): return
-        self._is_closing = True
-        self._close_with_animation(self._do_accept)
-
-
-    def reject(self):
-        if getattr(self, '_is_closing', False): return
-        self._is_closing = True
-        self._close_with_animation(self._do_reject)
-
-
-    def _close_with_animation(self, close_callback):
-        self.fade_out = QPropertyAnimation(self, b"windowOpacity")
-        self.fade_out.setDuration(150)
-        self.fade_out.setStartValue(self.windowOpacity())
-        self.fade_out.setEndValue(0.0)
-        self.fade_out.setEasingCurve(QEasingCurve.InQuad)
-        self.fade_out.finished.connect(close_callback)
-        self.fade_out.start()
 
 
 class StandardDialog(BaseDialog):
@@ -983,7 +900,8 @@ class ProgressDialog(BaseDialog):
     def __init__(self, parent=None, title="Processing", message="Please wait...", telemetry_config=None):
         super().__init__(parent, title=title, width=540)
         self.setWindowModality(Qt.ApplicationModal)
-        self.btn_close.setVisible(False)
+
+        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.CustomizeWindowHint)
 
         if telemetry_config is None:
             self.telemetry = {"cpu": True, "ram": True, "gpu": True, "net": False, "io": True}
@@ -1059,6 +977,7 @@ class ProgressDialog(BaseDialog):
         tm = self.tm
         self.lbl_message.setStyleSheet(
             f"font-size: 13px; color: {tm.color('text_main')}; margin-bottom: 5px; border: none;")
+
         self.pbar.setStyleSheet(f"""
             QProgressBar {{ 
                 border: 1px solid {tm.color('border')}; 
@@ -1234,7 +1153,12 @@ class ProgressDialog(BaseDialog):
         self.stalled_warning_widget.setVisible(False)
 
         self.pbar.setVisible(False)
-        self.lbl_title.setText(title)
+
+        self.setWindowTitle(title)
+
+        self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
+        self.show()
+
         self.lbl_message.setText(message)
         self.btn_cancel.setText("OK")
         self.btn_cancel.setEnabled(True)
