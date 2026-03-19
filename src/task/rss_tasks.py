@@ -151,9 +151,8 @@ class FetchRSSTask(BackgroundTask):
         except RuntimeError:
             pass
 
-    def _parse_feed(self, xml_string, base_session):
-        user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
-        if not user_email: user_email = "scholar.user@example.com"
+    def _parse_feed(self, xml_string, base_session, local_logs):
+        user_email = os.environ.get("NCBI_API_EMAIL", "")
 
         raw_articles = []
         try:
@@ -209,7 +208,7 @@ class FetchRSSTask(BackgroundTask):
                 if len(raw_articles) >= 40: break
 
         except Exception as e:
-            self.send_log("WARNING", f"XML parsing exception: {str(e)}")
+            local_logs.append(("WARNING", f"XML parsing exception: {str(e)}"))
             return []
 
         # Internal multi-threading to detect OA full-text status
@@ -254,7 +253,7 @@ class FetchRSSTask(BackgroundTask):
 
         return final_articles
 
-    def _parse_proxy_json(self, json_data):
+    def _parse_proxy_json(self, json_data, local_logs):
         """Specifically for handling data formats returned by the rss2json proxy"""
         raw_articles = []
         try:
@@ -279,7 +278,7 @@ class FetchRSSTask(BackgroundTask):
                 })
                 if len(raw_articles) >= 40: break
         except Exception as e:
-            self.send_log("WARNING", f"Proxy data parsing exception: {str(e)}")
+            local_logs.append(("WARNING", f"Proxy data parsing exception: {str(e)}"))
             return []
 
         def _detect_oa_for_article(article):
