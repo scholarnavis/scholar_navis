@@ -1,9 +1,7 @@
 import base64
 import csv
 import datetime
-import gc
 import hashlib
-import json
 import logging
 import os
 import re
@@ -12,8 +10,7 @@ import tempfile
 import time
 from urllib.parse import urlparse, parse_qs, quote
 
-import torch
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve, \
+from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve, \
     QEvent
 from PySide6.QtGui import QDesktopServices, QCursor, QAction, QPdfWriter, QTextDocument, QPageSize
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
@@ -23,16 +20,13 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode, TaskState
-from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.lang_detect import detect_primary_language
-from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
+from src.core.models_registry import get_model_conf, ModelManager
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
-from src.task.chat_tasks import ProcessAttachmentTask
-from src.task.kb_tasks import _worker_load_model
+from src.task.chat_tasks import ProcessAttachmentTask, ChatGenerationTask
 from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget, hex_to_rgba
@@ -561,718 +555,6 @@ class ChatInputContainer(QFrame):
         self.lbl_context_info.setText("📎 Context Attached")
 
 
-class ChatWorker(QObject):
-    sig_token = Signal(str)
-    sig_finished = Signal()
-    sig_error = Signal(str)
-    sig_translated = Signal(str)
-
-    def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False, external_context=None,
-                 use_mcp=False, api_queue=None):
-        super().__init__()
-        self.logger = logging.getLogger("ChatWorker")
-        self.main_config = main_config
-        self.trans_config = trans_config
-        self.messages = messages
-        self.kb_id = kb_id if kb_id != "none" else None
-        self.requires_translation = requires_translation
-        self.external_context = external_context
-        self.use_mcp = use_mcp
-        self.db = DatabaseManager()
-        self.kb_manager = KBManager()
-        self.full_response_cache = ""
-        self.api_queue = api_queue
-
-        # 实例长连接缓存
-        self.main_llm = None
-        self.trans_llm = None
-        self.vision_llm = None
-
-    #  无头模式通信桥接方法
-    def _emit_token(self, token: str):
-        if self.api_queue:
-            self.api_queue.put({"type": "token", "data": token})
-        else:
-            self.sig_token.emit(token)
-
-    def _emit_error(self, msg: str):
-        if self.api_queue:
-            self.api_queue.put({"type": "error", "data": msg})
-        else:
-            self.sig_error.emit(msg)
-
-    def _emit_finished(self):
-        if self.api_queue:
-            self.api_queue.put({"type": "finished"})
-        else:
-            self.sig_finished.emit()
-
-    def _emit_translated(self, text: str):
-        if not self.api_queue:
-            self.sig_translated.emit(text)
-
-
-    def cancel(self):
-        self._is_cancelled = True
-        if self.main_llm: self.main_llm.cancel()
-        if self.trans_llm: self.trans_llm.cancel()
-        if self.vision_llm: self.vision_llm.cancel()
-
-    def _init_llms(self):
-        """初始化主模型与翻译模型池"""
-        if self.main_config and not self.main_llm:
-            cfg = self.main_config.copy()
-            if "tools" not in cfg:
-                cfg["tools"] = []
-            self.main_llm = OpenAICompatibleLLM(cfg)
-
-        if self.requires_translation and self.trans_config and not self.trans_llm:
-            self.trans_llm = OpenAICompatibleLLM(self.trans_config)
-
-    def run(self):
-
-        time.sleep(0.1)
-
-        try:
-            self.config = ConfigManager()
-
-            self._init_llms()
-            original_user_query = self.messages[-1].get('display_text', self.messages[-1].get('content', ''))
-            search_query = original_user_query
-            domain = "General Academic"
-            context_str = ""
-            sources_map = {}
-
-            # Phase 1: Query Extraction & Translation (Cache Accelerated)
-            if self.requires_translation:
-                self._emit_token("<i>🌐 Translating your query to academic English for precise retrieval...</i>\n\n")
-                try:
-                    trans_kwargs = {
-                        "is_translation": True,
-                        "stream": False
-                    }
-                    search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm, **trans_kwargs)
-                    self.sig_translated.emit(search_query)
-                except Exception as e:
-                    self._emit_error(
-                        f"Translation model request failed. Please check your translation API configuration.\nDetails: {e}")
-                    return
-
-
-            # ==========================================
-            # Phase 2: Vector Retrieval & Reranking (Local KB)
-            # ==========================================
-            if self.kb_id and self.kb_id != "none":
-                self._emit_token("[CLEAR_SEARCH]")
-                self._emit_token("<i>📚 Searching local knowledge base and reranking documents...</i>\n\n")
-
-                time.sleep(0.05)
-
-                kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
-
-                if kb_info and kb_info.get('doc_count', 0) == 0:
-                    self.logger.warning(f"Knowledge Base '{kb_info.get('name')}' is empty. Skipping vector retrieval.")
-                    pass
-                elif kb_info:
-                    self._emit_token("<i>Loading local vector model and retrieving literature...</i>\n\n")
-                    domain = kb_info.get('domain', 'General Academic')
-                    model_id = kb_info.get('model_id', 'embed_auto')
-
-                    user_pref = self.config.user_settings.get("inference_device", "Auto")
-                    target_device = DeviceManager().parse_device_string(user_pref)
-
-                    conf = get_model_conf(model_id, "embedding")
-                    if not conf or conf.get('is_auto'):
-                        real_id = resolve_auto_model("embedding", target_device)
-                        conf = get_model_conf(real_id, "embedding")
-
-                    try:
-                        embed_fn = _worker_load_model(self.kb_id, self.config)
-                        if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
-                            self._emit_error(f"Failed to switch to Knowledge Base: {self.kb_id}")
-                            return
-                    except Exception as e:
-                        self._emit_error(f"Critical Model Error: {str(e)}")
-                        return
-
-                    history_context = ""
-                    if len(self.messages) >= 3:
-                        prev_assistant = self.messages[-2]['content'][:100]
-                        history_context = f" (Context: {prev_assistant})"
-
-                    expanded_queries = [
-                        search_query,
-                        f"{search_query}{history_context}",
-                        f"{domain} context: {search_query} research details"
-                    ]
-
-                    candidate_docs = []
-                    seen_contents = set()
-
-                    for eq in expanded_queries:
-                        raw_results = self.db.query(eq, n_results=20)
-                        if raw_results and raw_results.get('documents') and raw_results['documents'][0]:
-                            docs = raw_results['documents'][0]
-                            metas = raw_results['metadatas'][0]
-                            distances = raw_results.get('distances', [[0] * len(docs)])[0]
-
-                            for i, doc_text in enumerate(docs):
-                                clean_text = doc_text.strip()
-                                if clean_text not in seen_contents and len(clean_text) > 20:
-                                    seen_contents.add(clean_text)
-                                    candidate_docs.append({
-                                        "content": clean_text,
-                                        "metadata": metas[i],
-                                        "v_dist": distances[i]
-                                    })
-
-                    if candidate_docs:
-                        candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
-                        final_docs = self._process_rerank(search_query, candidate_docs, domain, 10)
-                        if final_docs is None:
-                            final_docs = candidate_docs[:10]
-
-                        current_ref_id = 1
-
-                        for doc in final_docs:
-                            sources_map[current_ref_id] = {
-                                "path": doc['metadata'].get('file_path', ''),
-                                "page": doc['metadata'].get('page', 1),
-                                "name": doc['metadata'].get('source', 'Local DB'),
-                                "search_text": doc['content'][:100]
-                            }
-                            context_str += (
-                                f"--- [Document {current_ref_id}] ---\n"
-                                f"Source: {doc['metadata'].get('source', 'Local')}\n"
-                                f"Content: {doc['content']}\n\n"
-                            )
-                            current_ref_id += 1
-
-            if not context_str.strip():
-                context_str = "No local database documents provided."
-
-                # 防止 API 层传入 None 导致解析崩溃
-            external_chunks = getattr(self, 'external_context', []) or []
-
-            images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
-                ('.png', '.jpg', '.jpeg', '.webp'))]
-            docs = [c for c in external_chunks if c not in images]
-
-            llm_content = []
-
-            # 3.1 处理上传的长文本 / PDF (启用 Reranker 降低幻觉)
-            if docs:
-                self._emit_token("<i>Filtering and reranking attached documents...</i>\n\n")
-                cand_docs = [{"content": d.get("content", ""),
-                              "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
-
-                if len(cand_docs) > 5:
-                    reranked_docs = self._process_rerank(search_query, cand_docs, "General", 8)
-                    if reranked_docs is not None:
-                        cand_docs = reranked_docs
-                    else:
-                        cand_docs = cand_docs[:8]
-
-                files_dict = {}
-                for doc in cand_docs:
-                    f_name = doc["metadata"]["name"]
-                    page = doc["metadata"]["page"]
-                    if f_name not in files_dict:
-                        files_dict[f_name] = ""
-                    files_dict[f_name] += f"\n[Page {page}]\n{doc['content']}"
-
-                docs_json = json.dumps(files_dict, ensure_ascii=False)
-                llm_content.append({"type": "text", "text": f"User Uploaded Files (JSON Format):\n{docs_json}\n\n"})
-
-
-            # 3.3 处理多图顺序挂载
-            if images:
-                vision_model_name = self.main_config.get("vision_model_name", "auto")
-                main_model_name = self.main_config.get("model_name", "").lower()
-
-                vision_keywords = ['image', 'vl', 'vision', 'llava', 'pixtral', 'gpt-4o', 'gpt-4-turbo', 'gemini-1.5',
-                                   'gemini-2.0', 'claude-3', 'qwen-vl']
-                main_supports_vision = any(kw in main_model_name for kw in vision_keywords)
-                if "deepseek" in main_model_name:
-                    main_supports_vision = False
-
-                need_pre_caption = False
-                active_vision_model = None
-
-                if vision_model_name != "auto":
-                    need_pre_caption = True
-                    active_vision_model = vision_model_name
-                elif not main_supports_vision:
-                    self.logger.info("Main model might not support vision, attempting pre-captioning fallback.")
-                    need_pre_caption = True
-                    active_vision_model = main_model_name
-
-                if need_pre_caption:
-                    self._emit_token("<i>Extracting image contexts via vision model...</i>\n\n")
-                    try:
-                        vision_cfg = self.main_config.copy()
-                        vision_cfg["model_name"] = active_vision_model
-                        vision_cfg.pop("tools", None)
-                        self.vision_llm = OpenAICompatibleLLM(vision_cfg)
-
-                        image_descriptions = []
-                        for img in images:
-                            if getattr(self, '_is_cancelled', False): break
-
-                            img_data = img.get("base64_url") or img.get("content")
-                            if not img_data.startswith("data:image"):
-                                ext = str(img.get("path", ".jpeg")).split('.')[-1]
-                                img_data = f"data:image/{ext};base64,{img_data}"
-
-                            vision_prompt = [{"role": "user", "content": [
-                                {"type": "text",
-                                 "text": "Please deeply analyze this image, extract all text (OCR), describe the charts/data, and detail its core contents. Output in pure text."},
-                                {"type": "image_url", "image_url": {"url": img_data}}
-                            ]}]
-
-                            desc_res = self.vision_llm.chat(vision_prompt)
-                            desc_content = desc_res.get('content', '') if isinstance(desc_res, dict) else str(desc_res)
-
-                            image_descriptions.append(
-                                f"[Image: {img.get('name', 'Unknown')}] Description:\n{desc_content}")
-
-                        # 解析成功，将图片化为纯文本喂给主模型
-                        if image_descriptions:
-                            llm_content.append({"type": "text",
-                                                "text": "The user uploaded images. Here are their detailed textual descriptions analyzed by the vision model:\n" + "\n".join(
-                                                    image_descriptions)})
-
-                    except Exception as e:
-                        self.logger.warning(f"Vision pre-captioning failed: {e}")
-                        self._emit_token(
-                            "<div style='color:#e6a23c;'>⚠️ Image parsing failed. The current model configuration might not support vision. Images will be ignored.</div><br>")
-                        llm_content.append({"type": "text",
-                                            "text": f"[System Warning: User uploaded an image, but the vision parser failed to read it.]"})
-                    finally:
-                        self.vision_llm = None
-
-                else:
-                    self.logger.info(f"Mounting images natively for vision-capable main model: [{main_model_name}]")
-                    for img in images:
-                        img_data = img.get("base64_url") or img.get("content")
-                        if img_data:
-                            if not img_data.startswith("data:image"):
-                                ext = str(img.get("path", ".jpeg")).split('.')[-1]
-                                img_data = f"data:image/{ext};base64,{img_data}"
-                            llm_content.append({
-                                "type": "image_url",
-                                "image_url": {"url": img_data}
-                            })
-
-            llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
-            self._emit_token("[CLEAR_SEARCH]")
-
-            # Phase 4: Low VRAM Release
-            is_low_vram = self.config.user_settings.get("low_vram_mode", False)
-            if is_low_vram:
-                self._emit_token("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
-                if hasattr(self, 'db') and self.db:
-                    self.db.reload()
-
-                gc.collect()
-
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-            ## ==========================================
-            # Phase 5: Agentic Generation
-            # ==========================================
-            self._emit_token("[START_LLM_NETWORK]")
-
-            mcp_mgr = MCPManager.get_instance()
-            mcp_tools = []
-            dynamic_tool_prompt = ""
-
-            if self.use_mcp:
-                selected_tags = getattr(self, 'selected_mcp_tags', None)
-
-                # 1. 获取用户在 UI/API 层面允许的所有候选工具
-                # (使用 mcp_manager 原生过滤，确保同时支持内建 [Tags] 以及外部 MCP Server 的动态 Tag)
-                if selected_tags is not None:
-                    raw_mcp_tools = mcp_mgr.get_tools_schema_by_tags(selected_tags)
-                else:
-                    raw_mcp_tools = mcp_mgr.get_all_tools_schema() or []
-
-
-                # 2. RAG 动态路由：从候选池中挑出最匹配的 Top-K 给大模型
-                if raw_mcp_tools:
-                    self._emit_token("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
-                    time.sleep(0.05)
-                    mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=8)
-                    self._emit_token("[CLEAR_SEARCH]")
-
-                # 3. 仅当真正启用了 MCP 且筛选出了工具时，才向模型发送系统提示和 UI 状态
-                if mcp_tools:
-                    self._emit_token(
-                        "<i>⚙️ Analyzing query intent and filtering optimal MCP tools...</i>\n\n")
-
-                    tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
-                    dynamic_tool_prompt = (
-                        f"### CRITICAL TOOL UTILIZATION RULE:\n"
-                        f"The Reranker engine has exclusively selected the following tools for this specific query: {', '.join(tool_names)}.\n"
-                        f"You MUST read the user's prompt carefully. If the user asks for multi-dimensional data (e.g., metadata AND protein interactions), you MUST use multiple tools to fulfill ALL parts of the request. DO NOT skip required tools. DO NOT answer partially.\n\n"
-                    )
-
-            # 无论 MCP 是否开启，均挂载内置的基础画图工具（不属于外部 MCP 范畴）
-            mcp_tools.append({
-                "type": "function",
-                "function": {
-                    "name": "generate_image",
-                    "description": "Generates an image based on a text prompt. Use this tool ONLY when the user explicitly asks to draw, create, or generate a picture/image.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "prompt": {
-                                "type": "string",
-                                "description": "A highly detailed English prompt describing the image to be generated."
-                            }
-                        },
-                        "required": ["prompt"]
-                    }
-                }
-            })
-
-            dynamic_tool_prompt = ""
-            if mcp_tools:
-                self._emit_token("[CLEAR_SEARCH]")
-                self._emit_token(
-                    "<mcp_process>⚙️ Analyzing query intent and filtering optimal MCP tools...</mcp_process>")
-
-                tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
-                dynamic_tool_prompt = (
-                    f"### CRITICAL TOOL UTILIZATION RULE:\n"
-                    f"The Reranker engine has exclusively selected the following tools for this specific query: {', '.join(tool_names)}.\n"
-                    f"You MUST read the user's prompt carefully. If the user asks for multi-dimensional data (e.g., metadata AND protein interactions), you MUST use multiple tools to fulfill ALL parts of the request. DO NOT skip required tools. DO NOT answer partially.\n\n"
-                )
-
-            system_prompt = (
-                f"You are a Senior Research Scientist specializing in {domain}. "
-                "Your goal is to provide high-density, evidence-based academic responses.\n\n"
-
-                f"{dynamic_tool_prompt}\n\n"
-
-                "### TOOL USE PROTOCOL (STRICT):\n"
-                "1. CRITICAL FOR CITATIONS: If the user's prompt asks for literature, references, citations, or a review, you MUST explicitly invoke academic search tools (like search_academic_literature) BEFORE generating your response. NEVER rely on your internal training data to generate citations, DOIs, or author lists.\n"
-                "2. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
-                "3. SILENT EXECUTION: Never output your reasoning process for choosing a tool. YOU MUST USE THE NATIVE TOOL CALLING API FORMAT.\n"
-                "4. FALLBACK TOOL CALLING (CRITICAL FOR REASONING MODELS): If your native function calling API is disabled (e.g., DeepSeek-R1), you MUST invoke tools manually by outputting exactly this XML block in your response text: <｜DSML｜invoke name=\"tool_name\"><｜DSML｜parameter name=\"arg_name\">value</｜DSML｜parameter></｜DSML｜invoke>\n"
-                "5. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
-                "6. If graphics need to be created, use mermaid uniformly.\n\n"
-                
-                "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
-                "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. This automatically generates a UI 'Cited Sources' block. NEVER claim facts without these bracketed numbers.\n"
-                "2. FORMAL BIBLIOGRAPHY (For the User): If the user explicitly requests 'references', 'citations', or a 'review', you MUST ALSO generate a standalone 'References' section at the very end of your main text (but BEFORE the [FOLLOW_UPS] section). \n"
-                "3. STRICT FORMATTING: The standalone 'References' section must strictly follow academic formatting (e.g., APA/Nature style: Authors. (Year). Title. Journal. DOI). DO NOT include conversational fluff like 'Cited for the role of...' in this formal list. List purely the bibliographic data.\n\n"
-                "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
-                
-                "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
-                "At the very end of your response, you MUST output the exact string [FOLLOW_UPS] followed by exactly 6 follow-up questions using this EXACT format:\n"
-                "[FOLLOW_UPS]\n"
-                "💡 Suggested Follow-ups:\n"
-                "   - [Deep Dive] <Question about specific details or mechanisms>\n"
-                "   - [Critical] <Question about limitations, alternatives, or weaknesses>\n"
-                "   - [Broader] <Question about implications or future trends>\n"
-                "   - [Brainstorm] <A creative brainstorming question or hypothetical \"What if\" scenario>\n"
-                "   - [Similar] <Question connecting to a similar or parallel topic/concept>\n"
-                "   - [Application] <Question about real-world applications or cross-disciplinary use>\n\n"
-
-                f"### CONTEXT:\n{context_str}"
-            )
-
-            clean_history = [
-                {k: v for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in
-                self.messages[:-1]]
-            rag_messages = [{"role": "system", "content": system_prompt}] + clean_history
-            rag_messages.append({"role": "user", "content": llm_content})
-
-            tool_executed = False
-            final_response_obtained = False
-
-            # MCP 循环
-            if mcp_tools:
-                try:
-                    import re
-                    import uuid
-
-                    MAX_ITERATIONS = 12
-                    for iteration in range(MAX_ITERATIONS):
-                        if getattr(self, '_is_cancelled', False):
-                            self._emit_token("\n\n[⛔ Generation halted by user.]")
-                            break
-
-                        response_msg = self.main_llm.chat(
-                            messages=rag_messages,
-                            tools=mcp_tools,
-                            tool_choice="auto"
-                        )
-
-                        # --- 1. 解析模型返回结果 ---
-                        tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
-                        content = response_msg.get("content", "") if isinstance(response_msg, dict) else ""
-                        reasoning = response_msg.get("reasoning_content", "") if isinstance(response_msg, dict) else ""
-
-                        # 处理 DeepSeek 的 <｜DSML｜function_calls> 标准格式
-                        if not tool_calls and "<｜DSML｜function_calls>" in content:
-                            dsml_matches = re.findall(
-                                r'<｜DSML｜invoke name=["\'](.*?)["\'](?:>(.*?)</｜DSML｜invoke>| />)',
-                                content, re.DOTALL)
-                            if dsml_matches:
-                                tool_calls = []
-                                for m_name, m_args_raw in dsml_matches:
-                                    arg_dict = {}
-                                    if m_args_raw:
-                                        p_matches = re.findall(
-                                            r'<｜DSML｜parameter name=["\'](.*?)["\'][^>]*>(.*?)</｜DSML｜parameter>',
-                                            m_args_raw,
-                                            re.DOTALL)
-                                        for p_name, p_val in p_matches:
-                                            p_val = p_val.strip()
-                                            if p_val.lower() == "true":
-                                                p_val = True
-                                            elif p_val.lower() == "false":
-                                                p_val = False
-                                            arg_dict[p_name] = p_val
-
-                                    tool_calls.append({
-                                        "id": f"call_{uuid.uuid4().hex[:12]}",
-                                        "type": "function",
-                                        "function": {
-                                            "name": m_name,
-                                            "arguments": json.dumps(arg_dict, ensure_ascii=False)
-                                        }
-                                    })
-                                # 修复核心：抹除整个 function_calls 块，绝对不能只删尖括号标签喵！
-                                content = re.sub(r'<｜DSML｜function_calls>.*?(?:</｜DSML｜function_calls>|$)', '', content,
-                                                 flags=re.DOTALL).strip()
-
-                        if reasoning:
-                            self._emit_token(f"<think>\n{reasoning}\n</think>\n\n")
-
-                        # 处理 DeepSeek 的裸 <｜DSML｜invoke> 格式（容错机制）
-                        if not tool_calls and "<｜DSML｜invoke" in content:
-                            dsml_matches = re.findall(
-                                r'<｜DSML｜invoke name=["\'](.*?)["\'](?:>(.*?)</｜DSML｜invoke>| />)',
-                                content, re.DOTALL)
-                            if dsml_matches:
-                                tool_calls = []
-                                for m_name, m_args_raw in dsml_matches:
-                                    arg_dict = {}
-                                    if m_args_raw:
-                                        p_matches = re.findall(
-                                            r'<｜DSML｜parameter name=["\'](.*?)["\'][^>]*>(.*?)</｜DSML｜parameter>',
-                                            m_args_raw,
-                                            re.DOTALL)
-                                        for p_name, p_val in p_matches:
-                                            p_val = p_val.strip()
-                                            if p_val.lower() == "true":
-                                                p_val = True
-                                            elif p_val.lower() == "false":
-                                                p_val = False
-                                            arg_dict[p_name] = p_val
-
-                                    tool_calls.append({
-                                        "id": f"call_{uuid.uuid4().hex[:12]}",
-                                        "type": "function",
-                                        "function": {
-                                            "name": m_name,
-                                            "arguments": json.dumps(arg_dict, ensure_ascii=False)
-                                        }
-                                    })
-                                # 修复核心：同样抹除所有的裸 invoke 块喵！
-                                content = re.sub(r'<｜DSML｜invoke.*?(?:</｜DSML｜invoke>|$)', '', content,
-                                                 flags=re.DOTALL).strip()
-
-                        # 处理通用 JSON 格式的 fallback...
-                        if not tool_calls and "```json" in content:
-                            json_blocks = re.findall(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
-                            for jb in json_blocks:
-                                try:
-                                    j_data = json.loads(jb)
-                                    if isinstance(j_data, dict) and "name" in j_data and "arguments" in j_data:
-                                        tool_calls = [{
-                                            "id": f"call_{uuid.uuid4().hex[:12]}",
-                                            "type": "function",
-                                            "function": {
-                                                "name": j_data["name"],
-                                                "arguments": json.dumps(j_data["arguments"], ensure_ascii=False) if isinstance(j_data["arguments"], dict) else j_data["arguments"]
-                                            }
-                                        }]
-                                        content = content.replace(f"```json\n{jb}\n```", "").strip()
-                                        break
-                                except:
-                                    pass
-
-                        if not tool_calls:
-                            if content:
-                                self._emit_token("[CLEAR_SEARCH]")
-                                chunk_size = 5
-                                for i in range(0, len(content), chunk_size):
-                                    if getattr(self, '_is_cancelled', False): break
-                                    chunk = content[i:i + chunk_size]
-                                    self.full_response_cache += chunk
-                                    self._emit_token(chunk)
-                                    time.sleep(0.015)
-                                final_response_obtained = True
-                            break
-
-                        tool_executed = True
-
-                        # --- 4. 构造助手消息追加到历史 ---
-                        assistant_msg = {
-                            "role": "assistant",
-                            "content": content or "",
-                            "tool_calls": tool_calls
-                        }
-                        if reasoning:
-                            assistant_msg["reasoning_content"] = reasoning
-
-                        rag_messages.append(assistant_msg)
-
-                        # --- 5. 执行 MCP 工具 ---
-                        for tool_call in tool_calls:
-                            if getattr(self, '_is_cancelled', False): break
-                            tool_name = tool_call['function']['name']
-                            try:
-                                raw_args = tool_call['function']['arguments']
-                                tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-
-                                if tool_name == "generate_image":
-                                    prompt_text = tool_args.get("prompt", "")
-                                    self._emit_token(
-                                        f"<mcp_process>🎨 Generating image (Prompt: {prompt_text[:30]}...)</mcp_process>\n")
-
-                                    try:
-                                        img_url = self.main_llm.generate_image(prompt=prompt_text)
-                                        self._emit_token(
-                                            f"<br><img src='{img_url}' style='max-width: 100%; border-radius: 8px; border: 1px solid #444;' alt='Generated Image'/><br>\n\n")
-                                        tool_result = f"Image generated successfully. URL: {img_url}"
-                                    except Exception as img_e:
-                                        self.logger.error(f"Internal Image Tool failed: {img_e}")
-                                        tool_result = f"Image generation failed: {str(img_e)}"
-
-                                else:
-                                    tool_args_str = json.dumps(tool_args, ensure_ascii=False)
-                                    short_args = tool_args_str if len(tool_args_str) < 120 else tool_args_str[
-                                                                                                    :120] + "..."
-
-                                    self._emit_token(
-                                        f"<mcp_process>📡 Requesting remote tool: <b>{tool_name}</b><br>"
-                                        f"<span style='font-size:12px; color:#888;'>[Status: Executing] Args: {short_args}</span></mcp_process>\n"
-                                    )
-
-                                    tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
-
-                                    try:
-                                        res_data = json.loads(tool_result)
-                                        if isinstance(res_data, dict) and "results" in res_data:
-                                            for item in res_data["results"]:
-
-                                                source_url = item.get("url") or item.get("pdf_url") or item.get(
-                                                    "landing_page_url")
-                                                source_title = item.get("title") or item.get("name") or item.get(
-                                                    "pref_name") or item.get("display_name") or item.get(
-                                                    "scientific_name") or f"Result from {tool_name}"
-
-                                                if source_url:
-                                                    mcp_ref_id = len(sources_map) + 101
-
-                                                    sources_map[mcp_ref_id] = {
-                                                        "path": source_url,  # 对于 Web，这里存 URL
-                                                        "page": 1,
-                                                        "name": f"[Online] {source_title}",
-                                                        "search_text": item.get("abstract", "")[:100]
-                                                    }
-                                                    item["_mcp_cite_id"] = mcp_ref_id
-
-                                            tool_result = json.dumps(res_data, ensure_ascii=False)
-                                    except:
-                                        pass
-
-                            except Exception as e:
-                                self.logger.error(f"MCP tool {tool_name} failed: {e}")
-                                tool_result = f"Tool execution failed: {str(e)}"
-
-                            # 确保内容为字符串，防止部分工具返回原始 JSON 崩溃
-                            if not isinstance(tool_result, str):
-                                tool_result = json.dumps(tool_result, ensure_ascii=False)
-
-                            if "API Key" in tool_result or "error" in tool_result.lower() or "missing" in tool_result.lower():
-                                tool_result = (
-                                    f"[TOOL EXECUTION FAILED] The tool '{tool_name}' returned an error:\n"
-                                    f"\"{tool_result}\"\n\n"
-                                    f"INSTRUCTION TO AI:\n"
-                                    f"1. DO NOT claim the article, website, or data does not exist. It likely exists but access was blocked (e.g., paywalled, 403 Forbidden) or your input parameter was improperly formatted (e.g., 400 Bad Request).\n"
-                                    f"2. Explain to the user EXACTLY why the access failed (e.g., 'Cell Press actively blocks automated access', or 'The tool received an incorrectly formatted ID').\n"
-                                    f"3. Ask the user to provide the abstract text directly, or switch to other tools like search_academic_literature to correct the ID."
-                                )
-
-                            rag_messages.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call['id'],
-                                "name": tool_name,
-                                "content": tool_result
-                            })
-
-                except Exception as e:
-                    self.logger.warning(f"Tool calling loop failed: {e}")
-
-            if not final_response_obtained:
-                if tool_executed:
-                    silence_prompt = (
-                        "\n\n[System Notification: Tool execution limit reached. "
-                        "Please analyze the tool results above and answer the user's original query.\n"
-                        "FINAL OUTPUT RULE: YOU MUST NOT INVOKE ANY MORE TOOLS. Output your final response directly in plain Markdown.]"
-                    )
-
-
-                    if rag_messages and rag_messages[-1]["role"] == "tool":
-                        rag_messages[-1]["content"] += silence_prompt
-                    else:
-                        rag_messages.append({"role": "user", "content": silence_prompt})
-
-                self._emit_token("[CLEAR_SEARCH]")
-                self._emit_token("[START_LLM_NETWORK]")
-
-                stream_kwargs = {}
-                if mcp_tools:
-                    stream_kwargs["tools"] = mcp_tools
-                for token in self.main_llm.stream_chat(rag_messages, **stream_kwargs):
-                    self.full_response_cache += token
-                    self._emit_token(token)
-
-
-            # ==========================================
-            # Phase 6: Dynamic Citation Mounting
-            # ==========================================
-            import re
-            has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
-            if sources_map and has_citation:
-                ref_html = "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'><b>📚 Cited Sources:</b><br>"
-                used_indices = set(int(ref) for ref in re.findall(r'\[(\d+)\]', self.full_response_cache))
-                displayed = 0
-                for rid, info in sources_map.items():
-                    if rid in used_indices:
-                        from urllib.parse import quote
-                        safe_path = quote(info['path'])
-                        safe_text = quote(info['search_text'])
-                        safe_name = quote(info['name'])
-
-                        link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}&name={safe_name}"
-                        ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']}</a></div>"
-                        displayed += 1
-                if displayed > 0:
-                    self._emit_token(ref_html)
-
-        except Exception as e:
-            import traceback
-            self._emit_error(f"Error: {str(e)}\n{traceback.format_exc()}")
-        finally:
-            self._emit_finished()
 
     def filter_tools_by_rag(self, user_query, raw_mcp_tools, top_k=8):
         """
@@ -1622,22 +904,26 @@ class ChatTool(BaseTool):
                 file_infos.append(item)
                 if item.get("name", "").lower().endswith('.doc'): has_legacy_doc = True
 
-        # 如果检测到 .doc，弹出 Toast 警告
         if has_legacy_doc:
-            ToastManager().show("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx", "warning")
+            ToastManager().show("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx",
+                                "warning")
 
-        # 防止用户重复狂点
         self.input_container.set_uploading(True)
-        self.input_container.show_context_preview("Loading files into memory...")
 
         if hasattr(self, 'attach_task_mgr'):
             self.attach_task_mgr.cancel_task()
 
+        # 引入标准的 ProgressDialog，满足在执行期间可取消的交互需求
+        from src.ui.components.dialog import ProgressDialog
+        self.attach_pd = ProgressDialog(self.widget, "Processing Attachments", "Parsing files into memory...")
+        self.attach_pd.show()
+
         self.attach_task_mgr = TaskManager()
 
-        self.attach_task_mgr.sig_progress.connect(
-            lambda p, m: self.input_container.show_context_preview(f"⏳ {m}")
-        )
+        # 进度信号与取消操作桥接
+        self.attach_task_mgr.sig_progress.connect(self.attach_pd.update_progress)
+        self.attach_pd.sig_canceled.connect(self.attach_task_mgr.cancel_task)
+
         self.attach_task_mgr.sig_result.connect(self._on_attachment_result)
         self.attach_task_mgr.sig_state_changed.connect(self._on_attachment_state_changed)
 
@@ -1679,10 +965,12 @@ class ChatTool(BaseTool):
                 self.scroll_to_bottom()
 
     def _on_attachment_state_changed(self, state, msg):
-        if state == TaskState.FAILED.value:
+        if state == TaskState.SUCCESS.value:
+            self.attach_pd.show_finish_state(True, "Attachment Complete", "Files successfully loaded into memory.")
+        elif state == TaskState.FAILED.value or state == TaskState.TERMINATED.value:
             self.input_container.set_uploading(False)
             self.input_container.hide_context_preview()
-            ToastManager().show(f"Attachment failed: {msg}", "error")
+            self.attach_pd.show_finish_state(False, "Attachment Halted", f"Task ended: {msg}")
 
     def _on_attachment_result(self, result):
         self.input_container.set_uploading(False)
@@ -2226,43 +1514,40 @@ class ChatTool(BaseTool):
         self._is_rendering_dirty = False
         self._render_timer.start()
 
-        # 实例化后台 Worker
-        self.worker_thread = QThread()
+        # Cleanly abort previous tasks if any exist
+        if getattr(self, 'chat_task_mgr', None):
+            self.chat_task_mgr.cancel_task()
 
-        self.worker = ChatWorker(
+        self.chat_task_mgr = TaskManager()
+        self.chat_task_mgr.sig_progress.connect(self._on_chat_progress)
+        self.chat_task_mgr.sig_state_changed.connect(self._on_chat_state_changed)
+        self.chat_task_mgr.sig_result.connect(self._on_chat_result)
+
+        try:
+            self.input_container.btn_stop.clicked.disconnect()
+        except Exception:
+            pass
+        self.input_container.btn_stop.clicked.connect(self.cancel_generation)
+
+        GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
+
+        self.chat_task_mgr.start_task(
+            ChatGenerationTask,
+            task_id="chat_generation",
+            mode=TaskMode.THREAD,
             main_config=main_config,
             trans_config=trans_config,
             messages=list(self.history),
             kb_id=kb_id,
             requires_translation=requires_translation,
             external_context=getattr(self, 'external_chunks', []),
-            use_mcp=use_mcp_tools
+            use_mcp=use_mcp_tools,
+            selected_mcp_tags=selected_mcp_tags
         )
 
-        self.worker.selected_mcp_tags = selected_mcp_tags
         self.external_chunks = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()
-        self.worker.moveToThread(self.worker_thread)
-
-        try:
-            self.input_container.btn_stop.clicked.disconnect()
-        except:
-            pass
-        self.input_container.btn_stop.clicked.connect(self.cancel_generation)
-
-        self.worker_thread.started.connect(self.worker.run)
-        self.worker.sig_token.connect(self.update_ai_bubble)
-        self.worker.sig_finished.connect(self.on_chat_finished)
-        self.worker.sig_error.connect(self.on_chat_error)
-        self.worker.sig_finished.connect(self.worker_thread.quit)
-        self.worker.sig_finished.connect(self.worker.deleteLater)
-        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
-        self.worker.sig_translated.connect(self._on_query_translated)
-
-        GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
-        self.worker.sig_finished.connect(self.worker_thread.quit)
-        self.worker_thread.start()
 
     def handle_edit_resend(self, index, new_text):
         if getattr(self, 'is_locked', False):
@@ -2354,57 +1639,27 @@ class ChatTool(BaseTool):
         self.start_ai_response(kb_id, requires_translation)
 
     def cancel_generation(self):
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.cancel()
-
-            # llm 关闭HTTP连接
-            if hasattr(self.worker, 'main_llm') and self.worker.main_llm:
-                self.worker.main_llm.cancel()
-
-            try:
-                self.worker.sig_token.disconnect()
-                self.worker.sig_finished.disconnect()
-                self.worker.sig_error.disconnect()
-                self.worker.sig_translated.disconnect()
-            except Exception:
-                pass
-
-        try:
-            if getattr(self, 'worker_thread', None) is not None and self.worker_thread.isRunning():
-                if not hasattr(self, '_orphaned_threads'): self._orphaned_threads = []
-                old_t, old_w = self.worker_thread, self.worker
-                old_t.quit()
-                self._orphaned_threads.append((old_t, old_w))
-                old_t.finished.connect(
-                    lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self,
-                                                                                                        '_orphaned_threads',
-                                                                                                        []) else None)
-        except RuntimeError:
-            pass
-
-        self.worker_thread = None
-        self.worker = None
+        if getattr(self, 'chat_task_mgr', None):
+            self.chat_task_mgr.cancel_task()
 
         if hasattr(self, '_render_timer'): self._render_timer.stop()
         self.set_controls_enabled(True)
+
+        self.input_container.btn_stop.setEnabled(False)
+        self.input_container.btn_stop.setText("Stopping...")
+        self.input_container.btn_stop.setToolTip("Waiting for background resources to safely release...")
 
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
 
         tm = ThemeManager()
-        self.current_ai_text += f"\n\n<div style='color:{tm.color('warning')}; font-weight:bold;'>[Generation Cancelled by User]</div>"
+        self.current_ai_text += f"\n\n<div style='color:{tm.color('warning')}; font-weight:bold;'>[Generation Cancelling... Please wait]</div>"
 
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)
             self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
 
-        self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_send.setVisible(True)
-
-        if hasattr(self, '_restore_last_input'):
-            self._restore_last_input()
-
-        self.logger.info("AI generation cancelled by user.")
+        self.logger.info("AI generation cancellation requested by user. Task manager is gracefully terminating.")
         self.scroll_to_bottom()
 
     def _trigger_follow_up(self, text):
@@ -2649,8 +1904,7 @@ class ChatTool(BaseTool):
 
         self.scroll_to_bottom()
 
-    def on_chat_finished(self):
-
+    def on_chat_finished(self, is_cancelled=False):
         if hasattr(self, '_render_timer'): self._render_timer.stop()
         self.set_controls_enabled(True)
 
@@ -2660,8 +1914,23 @@ class ChatTool(BaseTool):
         if not self.current_ai_bubble:
             return
 
+        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setEnabled(True)
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
+
+        # 检查是否是被主动中止的，履行“无论成功与否都要弹窗告知用户”的要求
+        is_cancelled = getattr(self.worker, '_is_cancelled', False)
+        if is_cancelled:
+            StandardDialog(self.widget, "Task Cancelled", "The AI generation has been safely stopped by the user.",
+                           show_cancel=False).exec()
+            if hasattr(self, '_restore_last_input'):
+                self._restore_last_input()
+            self.history.append({"role": "assistant", "content": self.current_ai_text})
+            self.current_ai_bubble = None
+            self.scroll_to_bottom()
+            return  # 提前返回，不再处理后续追问按钮逻辑
+
         try:
             self.input_container.btn_stop.clicked.disconnect()
         except Exception:
@@ -2969,6 +2238,23 @@ class ChatTool(BaseTool):
                 self.fade_anim.finished.connect(self.btn_scroll_bottom.hide)
 
                 self.fade_anim.start()
+
+    def _on_chat_progress(self, progress, msg):
+        if progress == -1:
+            self.update_ai_bubble(msg)
+
+    def _on_chat_state_changed(self, state, msg):
+        if state == TaskState.SUCCESS.value:
+            self.on_chat_finished()
+        elif state == TaskState.FAILED.value:
+            self.on_chat_error(msg)
+        elif state == TaskState.TERMINATED.value:
+            self.on_chat_finished(is_cancelled=True)
+
+    def _on_chat_result(self, payload):
+        if isinstance(payload, dict) and payload.get("event") == "translated":
+            self._on_query_translated(payload.get("text"))
+
 
     def _save_setting(self, key, value):
         self.config.user_settings[key] = value

@@ -296,10 +296,9 @@ class ImportFilesTask(BackgroundTask):
 
             # 5. 核心循环解析
             for i, (read_path, source_name) in enumerate(process_tasks):
-
                 if self.is_cancelled():
                     self.send_log("WARNING", "Task cancelled by user, safely aborting...")
-                    break
+                    raise InterruptedError("Task was safely terminated by the user.")
 
                 if not os.path.exists(read_path): continue
                 pct = int((i / total) * 100)
@@ -428,8 +427,11 @@ class DeleteFilesTask(BackgroundTask):
             try:
                 total = len(file_names)
                 for i, fname in enumerate(file_names):
+                    if self.is_cancelled():
+                        raise InterruptedError("Task was safely terminated by the user.")
                     self.update_progress(int((i / total) * 100), f"Deleting vectors for {fname}...")
                     db_mgr.delete_by_source(fname)
+
             finally:
                 if getattr(db_mgr, 'client', None):
                     try:
@@ -462,7 +464,10 @@ class RenameFilesTask(BackgroundTask):
             try:
                 total = len(renames)
                 for i, (old_name, new_name) in enumerate(renames.items()):
+                    if self.is_cancelled():
+                        raise InterruptedError("Task was safely terminated by the user.")
                     self.update_progress(int((i / total) * 100), f"Updating index: {old_name} -> {new_name}")
+
                     try:
                         existing = db_mgr.collection.get(where={"source": old_name}, include=['metadatas'])
                         if existing and existing['ids']:
@@ -492,15 +497,15 @@ class ExportKBTask(BackgroundTask):
         src_dir = os.path.join(kb_mgr.WORKSPACE_DIR, kb_id)
         if not os.path.exists(src_dir): raise FileNotFoundError("Not found")
         self.send_log("INFO", f"📦 Packing Knowledge Base {kb_id}...")
+
         with zipfile.ZipFile(dest_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(src_dir):
                 for file in files:
+                    if self.is_cancelled():
+                        raise InterruptedError("Export task was safely terminated by the user.")
                     if file.endswith('.lock') or file.endswith('.tmp'): continue
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, start=os.path.dirname(src_dir))
-                    zipf.write(file_path, arcname)
-                    self.update_progress(0, f"Packing: {file}")
-        self.send_log("INFO", f"✅ Export successful: {dest_path}")
+
+        self.send_log("INFO", f"Export successful: {dest_path}")
 
 
 class ImportExternalKBTask(BackgroundTask):

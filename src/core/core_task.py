@@ -159,7 +159,7 @@ class TaskManager(QObject):
     def _real_start(self, task_class, task_id: str, mode: TaskMode, kwargs: Dict):
 
         # 强制将已知会引发 GIL 锁死的重型任务转移到独立进程，无视工具组件的原始请求
-        heavy_tasks = ["VerifyModelsTask", "VersionCheckTask", "ExportConfigTask", "ImportConfigTask"]
+        heavy_tasks = []
         if task_class.__name__ in heavy_tasks:
             if mode == TaskMode.THREAD:
                 self.logger.warning(f"Intercepted {task_class.__name__}: Forcing PROCESS mode to prevent UI freeze.")
@@ -285,18 +285,22 @@ class TaskManager(QObject):
         if not self.worker:
             return
 
-        # 2. 尝试优雅取消
+        # 2. 尝试优雅取消 (通知 Python 层的 Task 实例)
         if hasattr(self.worker, 'task'):
             self.worker.task.cancel()
 
-        # 3. 暴力终止
+        # 3. 暴力终止与安全清理
         if self.current_mode == TaskMode.PROCESS and self.worker.is_alive():
             self._kill_process_tree(self.worker.pid)
-        elif self.current_mode == TaskMode.THREAD and self.worker.isRunning():
-            self.worker.deleteLater()
+            self.worker.join(timeout=1.0)  # 确保进程真正释放资源
 
-            # 4. 发出信号与清理
-        self.sig_state_changed.emit(TaskState.TERMINATED.value, "Manually halted.")
+        elif self.current_mode == TaskMode.THREAD and self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.worker.quit()
+            self.worker.wait(1000)  # 给予 C++ 底层 1 秒的事件循环处理时间，防止 0xC0000409
+
+        # 4. 发出信号与清理
+        self.sig_state_changed.emit(TaskState.TERMINATED.value, "Task has been terminated.")
         if self.hooks["terminate"]:
             self.hooks["terminate"]()
 
@@ -304,9 +308,18 @@ class TaskManager(QObject):
 
     def _cleanup_worker(self):
         self._queue_timer.stop()
-        if self.current_mode == TaskMode.THREAD and self.worker:
-            self.worker.deleteLater()
-        self.worker = None
+        if self.worker:
+            if self.current_mode == TaskMode.THREAD:
+                if self.worker.isRunning():
+                    # 如果线程仍在运行（例如强杀失败），安全地推迟删除
+                    self.worker.finished.connect(self.worker.deleteLater)
+                else:
+                    self.worker.deleteLater()
+            elif self.current_mode == TaskMode.PROCESS:
+                # 显式解除进程对象的引用，释放底层系统句柄
+                if self.worker.is_alive():
+                    self.worker.terminate()
+            self.worker = None
 
     @staticmethod
     def _kill_process_tree(pid: int):

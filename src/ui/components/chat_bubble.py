@@ -9,8 +9,10 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
+from src.core.core_task import TaskManager, TaskMode
 from src.core.network_worker import LightNetworkWorker
 from src.core.theme_manager import ThemeManager
+from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
@@ -48,11 +50,13 @@ class ChatBubbleWidget(QWidget):
         self.downloaded_images = {}
         self.downloading_urls = set()
         self.download_failed_urls = {}
-        self.image_threads = []
+        self.download_timeouts = {}
+        self.image_task_mgrs = {}
+
         self.image_loading_timer = QTimer(self)
         self.image_loading_timer.timeout.connect(self._animate_image_loading)
         self.image_loading_dots = 0
-        self.download_timeouts = {}
+
         self.init_ui()
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
@@ -592,36 +596,39 @@ class ChatBubbleWidget(QWidget):
         save_path = os.path.join(tempfile.gettempdir(), file_name)
 
         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-            self._on_image_downloaded(True, url, save_path)
+            self._on_image_downloaded({"success": True, "url": url, "path": save_path})
             return
 
-        thread = QThread(self)
-        worker = LightNetworkWorker()
-        thread.worker = worker
-        worker.moveToThread(thread)
+        task_mgr = TaskManager()
+        task_mgr.sig_result.connect(self._on_image_downloaded)
+        self.image_task_mgrs[url] = task_mgr
 
-        worker.img_url = url
-        worker.img_save_path = save_path
+        task_mgr.start_task(
+            DownloadImageTask,
+            task_id=f"dl_img_{hashlib.md5(url.encode()).hexdigest()[:8]}",
+            mode=TaskMode.THREAD,
+            url=url,
+            save_path=save_path
+        )
 
-        thread.started.connect(worker.do_download_image)
-        worker.sig_image_downloaded.connect(self._on_image_downloaded)
-        worker.sig_image_downloaded.connect(thread.quit)
-        worker.sig_image_downloaded.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda t=thread: self.image_threads.remove(t) if t in self.image_threads else None)
-        self.image_threads.append(thread)
-        thread.start()
+    def _on_image_downloaded(self, result):
+        success = result.get("success", False)
+        url = result.get("url")
+        result_path = result.get("path")
 
-    def _on_image_downloaded(self, success, url, result_path):
         if url in self.downloading_urls:
             self.downloading_urls.remove(url)
+
+        # 清理已完成的任务管理器实例
+        if url in self.image_task_mgrs:
+            del self.image_task_mgrs[url]
 
         if success:
             self.downloaded_images[url] = result_path
         else:
             if not hasattr(self, 'download_failed_urls'):
                 self.download_failed_urls = {}
-            self.download_failed_urls[url] = result_path
+            self.download_failed_urls[url] = result.get("msg", "Network transmission error")
             print(f"Failed to fetch image: {result_path}")
 
         if not self.downloading_urls and hasattr(self, 'image_loading_timer'):
@@ -722,3 +729,28 @@ class ChatBubbleWidget(QWidget):
 
         if new_text and new_text != self.original_text:
             self.sig_edit_confirmed.emit(self.index, new_text)
+
+
+
+def closeEvent(self, event):
+
+    # 1. 停止图片加载动画定时器
+    if hasattr(self, 'image_loading_timer') and self.image_loading_timer.isActive():
+        self.image_loading_timer.stop()
+        self.logger.debug("Image loading timer stopped.")
+
+    # 2. 遍历所有任务管理器，取消正在进行的下载任务
+    if hasattr(self, 'image_task_mgrs') and self.image_task_mgrs:
+
+        for url in list(self.image_task_mgrs.keys()):
+            task_mgr = self.image_task_mgrs[url]
+            task_mgr.cancel_task()
+
+            del self.image_task_mgrs[url]
+
+            self.logger.debug(f"Cancelled image download task for URL: {url[:30]}...")
+
+    if hasattr(self, 'downloading_urls'):
+        self.downloading_urls.clear()
+
+    super().closeEvent(event)

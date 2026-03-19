@@ -937,13 +937,18 @@ class RSSTool(BaseTool):
         if not target_feeds:
             return
 
+        self._is_cancelling = False  # Track the cancellation state
+
         telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
-        self.pd = ProgressDialog(self.widget, "Fetching Literature", f"Syncing {len(target_feeds)} feeds...", telemetry_config=telemetry_off)
+        self.pd = ProgressDialog(self.widget, "Fetching Literature", f"Syncing {len(target_feeds)} feeds...",
+                                 telemetry_config=telemetry_off)
         self.pd.show()
 
         self.task_mgr.sig_progress.connect(self.pd.update_progress)
         self.task_mgr.sig_state_changed.connect(self._on_fetch_done)
-        self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
+
+        # Connect to the new gentle cancellation wrapper instead of aggressive destruction
+        self.pd.sig_canceled.connect(self._safe_cancel_task)
 
         self.task_mgr.start_task(
             FetchRSSTask,
@@ -952,6 +957,26 @@ class RSSTool(BaseTool):
             mode=TaskMode.THREAD,
             save_path=self.cache_file
         )
+
+    def _safe_cancel_task(self):
+        self._is_cancelling = True
+
+        # 1. Freeze the foreground dialog and update status
+        if hasattr(self, 'pd') and self.pd:
+            self.pd.show()  # Force visibility if the dialog attempted to auto-close
+            self.pd.update_progress(100, "Cancelling... Waiting for tasks to safely terminate.")
+
+            self.pd.setWindowFlags(self.pd.windowFlags() & ~Qt.WindowCloseButtonHint)
+
+            for btn in self.pd.findChildren(QPushButton):
+                btn.setEnabled(False)
+
+            self.pd.show()  # Re-apply window flags to take effect
+
+        # 2. Transmit the termination signal to the background task (Thread or Process)
+        if self.task_mgr.worker and hasattr(self.task_mgr.worker, 'task'):
+            self.task_mgr.worker.task.cancel()
+
 
     def _on_fetch_done(self, state, msg):
         try:
@@ -963,8 +988,14 @@ class RSSTool(BaseTool):
         except:
             pass
 
+        # 统一替换为 show_finish_state 闭环强反馈
+        if hasattr(self, '_is_cancelling') and self._is_cancelling:
+            self.pd.show_finish_state(False, "Task Cancelled", "Background fetch task successfully terminated.")
+            self._is_cancelling = False
+            return
+
         if state == TaskState.SUCCESS.value:
-            self.pd.show_success_state("Complete", "Literature synced successfully.")
+            self.pd.show_finish_state(True, "Complete", "Literature synced successfully.")
             self._load_cache()
 
             if hasattr(self, 'article_widgets_cache'):
@@ -974,9 +1005,9 @@ class RSSTool(BaseTool):
                 self.article_widgets_cache.clear()
 
             self._on_feed_selected(self.feed_list.currentRow())
-        else:
-            self.pd.close_safe()
-            ToastManager().show(f"Fetch failed: {msg}", "error")
+        elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+            self.pd.show_finish_state(False, "Fetch Halted", f"Task ended: {msg}")
+
 
     def _on_feed_selected(self, row):
         if row < 0: return
@@ -1076,6 +1107,13 @@ class RSSTool(BaseTool):
         def on_cancel():
             self._cancel_export = True
 
+            pd.show()
+            pd.update_progress(100, "Cancelling export... cleaning up temp files...")
+            pd.setWindowFlags(pd.windowFlags() & ~Qt.WindowCloseButtonHint)
+            for btn in pd.findChildren(QPushButton):
+                btn.setEnabled(False)
+            pd.show()
+
         pd.sig_canceled.connect(on_cancel)
         QApplication.instance().processEvents()
 
@@ -1154,11 +1192,12 @@ class RSSTool(BaseTool):
                         time.sleep(0.1)
 
                 if cleaned or not os.path.exists(path):
-                    ToastManager().show("PDF export cancelled. Temporary file cleaned.", "warning")
+                    pd.show_finish_state(False, "Export Cancelled", "PDF export cancelled. Temporary file cleaned.")
                 else:
-                    ToastManager().show("Export cancelled, but partial file is locked by system.", "warning")
-
+                    pd.show_finish_state(False, "Export Cancelled",
+                                         "Export cancelled, but partial file is locked by system.")
                 return
+
 
             if page_idx > 0:
                 printer.newPage()
@@ -1188,7 +1227,7 @@ class RSSTool(BaseTool):
             QApplication.instance().processEvents()
 
         painter.end()
-        pd.show_success_state("Complete", f"Successfully exported {page_count} pages to PDF.")
+        pd.show_finish_state(True, "Complete", f"Successfully exported {page_count} pages to PDF.")
 
 
     def _load_config(self):

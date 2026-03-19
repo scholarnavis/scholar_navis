@@ -22,11 +22,15 @@ class ExportConfigTask(BackgroundTask):
             content_str = json.dumps(bundle, indent=4, ensure_ascii=False)
         except Exception as e:
             return {"success": False, "msg": f"Serialization failed: {str(e)}"}
+
         if password:
             self.update_progress(60, "Performing PBKDF2 encryption...")
+
+            if self.is_cancelled():
+                raise InterruptedError("Export safely terminated by user.")
+
             try:
                 service = SystemEncryptionService()
-                # export_data returns (encrypted_bytes, salt_bytes)
                 encrypted_blob, salt = service.export_data(content_str, password)
                 return {
                     "success": True,
@@ -71,6 +75,10 @@ class ImportConfigTask(BackgroundTask):
             if not password:
                 return {"success": False, "msg": "This file is encrypted. Password required."}
             self.update_progress(50, "Decrypting secure payload...")
+
+            if self.is_cancelled():
+                raise InterruptedError("Import safely terminated by user.")
+
             try:
                 encrypted_data = base64.b64decode(bundle["payload"])
                 salt = base64.b64decode(bundle["salt"])

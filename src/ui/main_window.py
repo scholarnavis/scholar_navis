@@ -528,22 +528,7 @@ class MainWindow(QMainWindow):
 
         self.tool_stack.setCurrentIndex(index)
 
-    def check_model_integrity(self):
-        cfg = ConfigManager()
 
-        embed_id = cfg.user_settings.get("current_model_id", "embed_auto")
-        rerank_id = cfg.user_settings.get("rerank_model_id", "rerank_auto")
-
-        self.integrity_task_mgr = TaskManager()
-        self.integrity_task_mgr.sig_result.connect(self._on_integrity_check_result)
-
-        self.integrity_task_mgr.start_task(
-            VerifyModelsTask,
-            task_id="startup_integrity_check",
-            mode=TaskMode.PROCESS,
-            embed_id=embed_id,
-            rerank_id=rerank_id
-        )
 
     def _on_integrity_check_result(self, result):
         to_download = result.get("to_download",[])

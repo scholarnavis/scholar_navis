@@ -5,7 +5,7 @@ import os
 import time
 
 import qdarktheme
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QEvent, QUrl
+from PySide6.QtCore import Qt, QObject, QTimer, QEvent, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QScrollArea, QHBoxLayout, QTableWidget,
@@ -24,7 +24,7 @@ from src.core.theme_manager import ThemeManager
 from src.task.common_task import VerifyModelsTask
 from src.task.config_task import ExportConfigTask, ImportConfigTask
 from src.task.hf_download_task import RealTimeHFDownloadTask
-from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask
+from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask, HWDetectTask, EmailVerifyTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
@@ -38,23 +38,6 @@ MINIMAX_DEFAULT_MODELS = [
     "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning"
 ]
 
-class HardwareAuthWorker(QObject):
-    sig_finished = Signal(bool)
-
-    def run(self):
-        import asyncio
-        from src.core.encryption_service import SystemEncryptionService
-        service = SystemEncryptionService()
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            res = loop.run_until_complete(service.verify_identity("Authorize configuration export"))
-            loop.close()
-            self.sig_finished.emit(res)
-        except Exception as e:
-            import logging
-            logging.getLogger("SettingsTool").warning(f"Hardware auth error: {e}")
-            self.sig_finished.emit(False)
 
 
 class ScrollInterceptTableWidget(QTableWidget):
@@ -77,50 +60,6 @@ class FloatingOverlayFilter(QObject):
         return super().eventFilter(obj, event)
 
 
-class EmailVerifyWorker(QObject):
-    sig_finished = Signal(bool, str)
-
-    def __init__(self, email):
-        super().__init__()
-        self.email = email
-
-    def run(self):
-        try:
-            if not self.email:
-                self.sig_finished.emit(True, "")
-                return
-
-            from src.core.email_check import verify_email_robust
-            res = verify_email_robust(self.email)
-
-            if not res.get("is_valid"):
-                detailed_error = res.get("error_msg", "Unknown email validation error.")
-
-                prompt_msg = (
-                    f"Email Validation Failed:\n"
-                    f"{detailed_error}\n\n"
-                    f"Please provide a valid email address or leave it completely empty (which will disable NCBI tools)."
-                )
-                self.sig_finished.emit(False, prompt_msg)
-            else:
-                self.sig_finished.emit(True, "")
-        except Exception as e:
-            self.sig_finished.emit(False, f"Email validation encountered a system error: {e}")
-
-
-class HWDetectThread(QThread):
-    sig_finished = Signal(dict, list)
-
-    def run(self):
-        try:
-            from src.core.device_manager import DeviceManager
-            dev_mgr = DeviceManager()
-            info = dev_mgr.get_sys_info()
-            info['gpu_info'] = dev_mgr.get_gpu_info()
-            devs = dev_mgr.get_available_devices()
-            self.sig_finished.emit(info, devs)
-        except Exception as e:
-            self.sig_finished.emit({"os": "Unknown OS", "error": str(e)}, [{"name": "Auto Detect", "id": "auto"}])
 
 
 class SettingsTool(BaseTool):
@@ -194,13 +133,17 @@ class SettingsTool(BaseTool):
         self.status_timer.start(5000)
 
         self._cached_hw_info = {}
-        self.hw_thread = HWDetectThread(self.widget)
-        self.hw_thread.sig_finished.connect(self._on_hw_detected)
-        self.hw_thread.start()
+
+        self.hw_task_mgr = TaskManager()
+        self.hw_task_mgr.sig_result.connect(self._on_hw_detected_result)
+        self.hw_task_mgr.start_task(HWDetectTask, "hw_detect", mode=TaskMode.THREAD)
 
         return self.widget
 
-    def _on_hw_detected(self, info, devs):
+    def _on_hw_detected_result(self, result):
+        info = result.get("info", {})
+        devs = result.get("devs", [{"name": "Auto Detect", "id": "auto"}])
+
         self._cached_hw_info = info
         self._update_hardware_html()
 
@@ -214,6 +157,7 @@ class SettingsTool(BaseTool):
         if idx_dev >= 0:
             self.combo_device.setCurrentIndex(idx_dev)
         self.combo_device.blockSignals(False)
+
 
     def _setup_change_listeners(self):
         """挂载全部输入组件变更事件，跟踪是否发生了改动"""
@@ -1075,17 +1019,11 @@ class SettingsTool(BaseTool):
         )
 
     def _on_test_device_finished(self, result):
-        if hasattr(self, 'test_dev_pd'):
-            self.test_dev_pd.close_safe()
+        if result.get("success"):
+            self.test_dev_pd.show_finish_state(True, "Test Passed", result["msg"])
+        else:
+            self.test_dev_pd.show_finish_state(False, "Test Failed", result["msg"])
 
-        def _show_result():
-            if result.get("success"):
-                StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
-            else:
-                ToastManager().show("Device Test Failed", "error")
-                StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
-
-        QTimer.singleShot(150, _show_result)
 
     def _load_llm_config(self):
         default_config = [
@@ -1569,26 +1507,16 @@ class SettingsTool(BaseTool):
     def _finalize_export(self, result, path, pd):
         """处理导出任务结果并持久化至磁盘"""
         self.btn_export.setEnabled(True)
-        pd.close_safe()
 
         if result.get("success"):
             try:
                 with open(path, 'w', encoding='utf-8') as f:
                     json.dump(result, f, indent=4, ensure_ascii=False)
-
-                StandardDialog(
-                    self.widget,
-                    "Export Successful",
-                    f"Configuration bundle has been securely saved to:\n{path}"
-                ).exec()
+                pd.show_finish_state(True, "Export Successful", f"Configuration bundle has been securely saved to:\n{path}")
             except Exception as e:
-                StandardDialog(self.widget, "Write Error", f"Failed to write file to disk: {e}").exec()
+                pd.show_finish_state(False, "Write Error", f"Failed to write file to disk: {e}")
         else:
-            StandardDialog(
-                self.widget,
-                "Export Failed",
-                result.get("msg", "An analytical error occurred during encryption.")
-            ).exec()
+            pd.show_finish_state(False, "Export Failed", result.get("msg", "An analytical error occurred during encryption."))
 
 
     def on_import_clicked(self, auto_path=None):
@@ -1632,10 +1560,10 @@ class SettingsTool(BaseTool):
 
     def _finalize_import(self, result, pd, path):
         self.btn_import.setEnabled(True)
-        pd.close_safe()
 
         if not result.get("success"):
             if "Decryption failed" in result.get("msg", ""):
+                pd.close_safe()
                 dlg = StandardDialog(
                     self.widget,
                     "Decryption Failed",
@@ -1645,9 +1573,8 @@ class SettingsTool(BaseTool):
                 if dlg.exec():
                     self.on_import_clicked(auto_path=path)
             else:
-                StandardDialog(self.widget, "Import Failed", result.get("msg", "Unknown error")).exec()
+                pd.show_finish_state(False, "Import Failed", result.get("msg", "Unknown error"))
             return
-
         try:
             final_data = result.get("data", {})
 
@@ -1843,22 +1770,17 @@ class SettingsTool(BaseTool):
 
 
     def _on_models_fetched(self, result):
-        self.net_pd.close_safe()
-
-        def _show_result():
-            if result.get("success"):
-                models = result["models"]
-                self.logger.info(f"Successfully fetched {len(models)} models from API.")
-                idx = self.combo_llm_preset.currentIndex()
-                if 0 <= idx < len(self.llm_configs):
-                    self.llm_configs[idx]["fetched_models"] = models
-                    self._refresh_model_combo(self.llm_configs[idx])
-                StandardDialog(self.widget, "Success", result["msg"]).exec()
-            else:
-                self.logger.warning(f"Failed to fetch models: {result['msg']}")
-                ToastManager().show(f"Fetch Models Failed: {result['msg']}", "error")
-
-        QTimer.singleShot(150, _show_result)
+        if result.get("success"):
+            models = result["models"]
+            self.logger.info(f"Successfully fetched {len(models)} models from API.")
+            idx = self.combo_llm_preset.currentIndex()
+            if 0 <= idx < len(self.llm_configs):
+                self.llm_configs[idx]["fetched_models"] = models
+                self._refresh_model_combo(self.llm_configs[idx])
+            self.net_pd.show_finish_state(True, "Success", result["msg"])
+        else:
+            self.logger.warning(f"Failed to fetch models: {result['msg']}")
+            self.net_pd.show_finish_state(False, "Fetch Failed", result['msg'])
 
     def _start_test_task(self):
         self._sync_llm_data()
@@ -1909,17 +1831,11 @@ class SettingsTool(BaseTool):
         )
 
     def _on_test_finished(self, result):
-        if hasattr(self, 'net_pd'):
-            self.net_pd.close_safe()
+        if result.get("success"):
+            self.net_pd.show_finish_state(True, "Test Passed", result["msg"])
+        else:
+            self.net_pd.show_finish_state(False, "Test Failed", result["msg"])
 
-        def _show_result():
-            if result.get("success"):
-                StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
-            else:
-                ToastManager().show(f"API Test Failed", "error")
-                StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
-
-        QTimer.singleShot(150, _show_result)
 
     def _add_llm_provider(self):
         new_id = f"custom_{int(time.time())}"
@@ -2114,25 +2030,25 @@ class SettingsTool(BaseTool):
 
         # 如果email没有发生修改或为空，跳过耗时的email验证
         if new_email == old_email or not new_email:
-            QTimer.singleShot(50, lambda: self._on_email_verified(True, ""))
+            QTimer.singleShot(50, lambda: self._on_email_verified_result(True, ""))
             return
 
-        self.email_thread = QThread()
-        self.email_worker = EmailVerifyWorker(new_email)
-        self.email_worker.moveToThread(self.email_thread)
+        self.email_task_mgr = TaskManager()
+        self.email_task_mgr.sig_result.connect(self._on_email_verified_result)
+        self.save_pd.sig_canceled.connect(self.email_task_mgr.cancel_task)
 
-        self.save_pd.sig_canceled.connect(self.email_thread.quit)
+        self.email_task_mgr.start_task(
+            EmailVerifyTask,
+            task_id="email_verify",
+            mode=TaskMode.THREAD,
+            email=new_email
+        )
 
-        self.email_thread.started.connect(self.email_worker.run)
-        self.email_worker.sig_finished.connect(self._on_email_verified)
-        self.email_worker.sig_finished.connect(self.email_thread.quit)
-        self.email_worker.sig_finished.connect(self.email_worker.deleteLater)
-        self.email_thread.finished.connect(self.email_thread.deleteLater)
+    def _on_email_verified_result(self, result):
+        success = result.get("success", False)
+        msg = result.get("msg", "")
 
-        self.email_thread.start()
-
-    def _on_email_verified(self, success, msg):
-        # Y邮箱验证成功后在执行保存等操作
+        # Email validation failure fallback
         if not success:
             if hasattr(self, 'save_pd'):
                 self.save_pd.close_safe()
@@ -2296,19 +2212,13 @@ class SettingsTool(BaseTool):
         )
 
     def _on_save_task_state_changed(self, state, msg):
-        if state == TaskState.FAILED.value:
+        if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
             if hasattr(self, 'save_pd'):
-                self.save_pd.close_safe()
-            self.logger.error(f"Save process failed: {msg}")
-            ToastManager().show(f"System Error: {msg}", "error")
+                self.save_pd.show_finish_state(False, "Process Halted", f"Save process ended: {msg}")
 
     def _on_save_task_result(self, result_dict):
         self._clear_unsaved()
 
-        if hasattr(self, 'save_pd'):
-            self.save_pd.close_safe()
-
-        # 启动 MCP
         def _bootstrap_mcp_async():
             try:
                 from src.core.mcp_manager import MCPManager
@@ -2322,20 +2232,19 @@ class SettingsTool(BaseTool):
 
         QTimer.singleShot(100, _bootstrap_mcp_async)
 
-        def _show_success_dialog():
-            msg = "Settings saved successfully."
-            if result_dict and result_dict.get("to_download"):
-                msg += "\n\nNote: Some selected models are missing locally. Please click 'Download' next to the models to fetch and convert them."
+        msg = "Settings saved successfully."
+        if result_dict and result_dict.get("to_download"):
+            msg += "\n\nNote: Some selected models are missing locally. Please click 'Download' next to the models to fetch and convert them."
 
-            StandardDialog(self.widget, "Settings Saved", msg).exec()
-            self.check_models_status()
+        if hasattr(self, 'save_pd'):
+            self.save_pd.show_finish_state(True, "Settings Saved", msg)
 
-            if hasattr(self, '_pending_route_callback') and self._pending_route_callback:
-                cb = self._pending_route_callback
-                self._pending_route_callback = None
-                cb()
+        self.check_models_status()
 
-        QTimer.singleShot(150, _show_success_dialog)
+        if hasattr(self, '_pending_route_callback') and self._pending_route_callback:
+            cb = self._pending_route_callback
+            self._pending_route_callback = None
+            cb()
 
     def _get_active_llm_id(self):
         idx = self.combo_llm_preset.currentIndex()
@@ -2352,7 +2261,7 @@ class SettingsTool(BaseTool):
 
     def _download_next(self):
         if not self.pending_downloads:
-            self.pd.show_success_state(title="Complete", message="All downloads finished.")
+            self.pd.show_finish_state(True, "Complete", "All downloads finished.")
             self.check_models_status()
             GlobalSignals().kb_list_changed.emit()
             return
@@ -2371,6 +2280,7 @@ class SettingsTool(BaseTool):
             repo_id=self.current_repo
         )
 
+
     def on_task_state_changed(self, state, msg):
         if state == TaskState.SUCCESS.value:
             if hasattr(self, 'task_mgr') and self.task_mgr:
@@ -2380,8 +2290,5 @@ class SettingsTool(BaseTool):
                 except:
                     pass
             QTimer.singleShot(500, self._download_next)
-        elif state == TaskState.FAILED.value:
-            self.pd.pbar.setRange(0, 100)
-            self.pd.lbl_message.setText(f"Failed to download {self.current_repo}:\n{msg}")
-            self.pd.btn_cancel.setText("Close")
-            self.pd.btn_cancel.setEnabled(True)
+        elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+            self.pd.show_finish_state(False, "Download Halted", f"Task ended: {msg}")

@@ -56,23 +56,31 @@ class FetchRSSTask(BackgroundTask):
         self.send_log("INFO",
                       f"Starting multi-threaded synchronization of {total} feeds with automated OA full-text sniffing...")
 
+        import threading
+        cancel_event = threading.Event()
+
         def process_single_feed(feed):
-            # 完全剥离对 self.is_cancelled() 的调用，规避悬垂指针风险
+            if cancel_event.is_set():
+                return None
+
             session = create_robust_session()
             url = feed.get('url')
             name = feed.get('name', 'Unknown')
             local_logs = []  # 建立局部日志缓冲队列
 
             try:
-                session.headers['User-Agent'] = 'Feedly/1.0 (+http://www.feedly.com/fetcher.html; like FeedFetcher-Google)'
+                session.headers[
+                    'User-Agent'] = 'Feedly/1.0 (+http://www.feedly.com/fetcher.html; like FeedFetcher-Google)'
 
                 resp = session.get(url, timeout=15)
                 resp.raise_for_status()
 
-                # 将日志缓冲队列下发至子解析函数
-                articles = self._parse_feed(resp.text, session, local_logs)
+                # 静态调用并传入 cancel_event
+                articles = FetchRSSTask._parse_feed(resp.text, session, local_logs, cancel_event)
                 oa_count = sum(1 for a in articles if a.get('pdf_url'))
-                return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count, "logs": local_logs}
+                return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count,
+                        "logs": local_logs}
+
             except Exception as e:
                 err_msg = str(e)
                 is_cf = False
@@ -97,14 +105,15 @@ class FetchRSSTask(BackgroundTask):
                     proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote(url)}"
                     proxy_resp = session.get(proxy_url, timeout=20)
                     proxy_resp.raise_for_status()
-
                     data = proxy_resp.json()
                     if data.get("status") != "ok":
                         raise ValueError("Proxy API returned error.")
 
-                    articles = self._parse_proxy_json(data, local_logs)
+                    articles = FetchRSSTask._parse_proxy_json(data, local_logs, cancel_event)
                     oa_count = sum(1 for a in articles if a.get('pdf_url'))
-                    return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count, "logs": local_logs}
+                    return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count,
+                            "logs": local_logs}
+
                 except Exception as proxy_e:
                     return {"success": False, "url": url, "name": name,
                             "error": f"Cloudflare interception persists and proxy failover failed: {str(proxy_e)}", "logs": local_logs}
@@ -118,6 +127,7 @@ class FetchRSSTask(BackgroundTask):
             for future in concurrent.futures.as_completed(future_to_feed):
                 if self.is_cancelled():
                     self.send_log("WARNING", "⚠️ Task cancelled by user. Terminating fetch pool.")
+                    cancel_event.set()
                     break
 
                 completed_count += 1
@@ -137,7 +147,8 @@ class FetchRSSTask(BackgroundTask):
 
                 self.update_progress(int((completed_count / total) * 100), f"Syncing... {completed_count}/{total}")
         finally:
-            executor.shutdown(wait=False)
+            cancel_event.set()
+            executor.shutdown(wait=True)
 
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
@@ -145,13 +156,15 @@ class FetchRSSTask(BackgroundTask):
 
             if self.is_cancelled():
                 self.send_log("INFO", "Sync interrupted by user; partial data saved.")
+                raise InterruptedError("RSS sync was safely terminated by user. Partial data saved.")
             else:
                 self.update_progress(100, f"Sync complete. Success: {success_count}/{total}")
                 self.send_log("INFO", f"RSS concurrent fetch task completed; data persisted to disk.")
         except RuntimeError:
             pass
 
-    def _parse_feed(self, xml_string, base_session, local_logs):
+    @staticmethod
+    def _parse_feed(xml_string, base_session, local_logs, cancel_event):
         user_email = os.environ.get("NCBI_API_EMAIL", "")
 
         raw_articles = []
@@ -207,16 +220,13 @@ class FetchRSSTask(BackgroundTask):
 
                 if len(raw_articles) >= 40: break
 
+
         except Exception as e:
             local_logs.append(("WARNING", f"XML parsing exception: {str(e)}"))
             return []
 
-        # Internal multi-threading to detect OA full-text status
         def _detect_oa_for_article(article):
-            try:
-                if self.is_cancelled():
-                    return article
-            except RuntimeError:
+            if cancel_event.is_set():
                 return article
 
             time.sleep(random.uniform(0.2, 0.8))
@@ -224,8 +234,8 @@ class FetchRSSTask(BackgroundTask):
             doi = article.get("doi")
             pdf_url = ""
             landing_url = article.get("link", "")
-
             if doi:
+
                 s2_key = os.environ.get("S2_API_KEY", "").strip()
                 ncbi_key = os.environ.get("NCBI_API_KEY", "").strip()
                 from src.core.oa import OAFetcher
@@ -253,8 +263,8 @@ class FetchRSSTask(BackgroundTask):
 
         return final_articles
 
-    def _parse_proxy_json(self, json_data, local_logs):
-        """Specifically for handling data formats returned by the rss2json proxy"""
+    @staticmethod
+    def _parse_proxy_json(json_data, local_logs, cancel_event):
         raw_articles = []
         try:
             for item in json_data.get('items', []):
@@ -282,6 +292,9 @@ class FetchRSSTask(BackgroundTask):
             return []
 
         def _detect_oa_for_article(article):
+            if cancel_event.is_set():
+                return article
+
             time.sleep(random.uniform(0.2, 0.8))
 
             doi = article.get("doi")
@@ -341,7 +354,7 @@ class SearchArticlesTask(BackgroundTask):
 
         for i, article in enumerate(all_articles):
             if self.is_cancelled():
-                break
+                raise InterruptedError("Search operation was safely terminated by the user.")
 
             if i % max(1, (total_articles // 20)) == 0:
                 self.update_progress(int((i / total_articles) * 100), f"Analyzing {i}/{total_articles}...")

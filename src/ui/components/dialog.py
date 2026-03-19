@@ -1206,20 +1206,18 @@ class ProgressDialog(BaseDialog):
             pass
         self.btn_cancel.clicked.connect(self.accept)
 
-
     def on_cancel_clicked(self):
-        self.lbl_message.setText("Stopping... forcing termination.")
-        self.btn_cancel.setEnabled(False)
+        # 1. 更新 UI 状态，隐藏取消按钮，提示用户等待
+        self.lbl_message.setText("Cancelling... waiting for background task to safely terminate.")
+        self.btn_cancel.setVisible(False)
+        self.stalled_warning_widget.setVisible(False)
 
-        # 1. 停止监控
+        # 2. 停止本地的性能监控器
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
         if hasattr(self, 'stall_timer'): self.stall_timer.stop()
 
-        # 2. 发送信号给 TaskManager 去杀进程
+        # 3. 发送取消请求给 TaskManager
         self.sig_canceled.emit()
-
-        # 3. 强制关闭窗口（不再无限等待后台）
-        QTimer.singleShot(500, self.reject)
 
     def close_safe(self):
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
@@ -1232,6 +1230,28 @@ class ProgressDialog(BaseDialog):
         if hasattr(self, 'stall_timer'): self.stall_timer.stop()
         super().closeEvent(event)
 
+    def show_finish_state(self, success: bool, title: str, message: str):
+        # 1. 清理监控器与隐藏旧 UI
+        if hasattr(self, 'metric_timer'): self.metric_timer.stop()
+        if hasattr(self, 'stall_timer'): self.stall_timer.stop()
+        self.lbl_metrics.setVisible(False)
+        self.stalled_warning_widget.setVisible(False)
+        self.pbar.setVisible(False)
+
+        # 2. 隐藏自身的弹窗界面，转而使用 StandardDialog 告知最终结果
+        self.hide()
+
+        # 3. 弹出最终结果对话框
+        from src.ui.components.dialog import StandardDialog
+        result_dialog = StandardDialog(
+            self.parent(),
+            title=title,
+            message=message,
+            show_cancel=False
+        )
+        result_dialog.exec()
+
+        self.accept()
 
 class UnsavedChangesDialog(BaseDialog):
     def __init__(self, parent):
@@ -1461,22 +1481,30 @@ class ApiProvidersDialog(BaseDialog):
         self.setMinimumHeight(600)
 
         self.providers = [
-            ("NCBI Entrez", "Genomics & Literature", "Access to PubMed, Taxonomy, SRA, GEO, and other core databases."),
-            ("Semantic Scholar", "Literature Search", "AI-backed academic search and citation graph traversal."),
-            ("OpenAlex", "Literature Search", "Open catalog of the global research system and citation metrics."),
+            ("AlphaFold DB", "Structural Biology",
+             "Comprehensive database of high-accuracy protein structure predictions developed by Google DeepMind."),
+            ("ChEBI", "Metabolomics",
+             "Dictionary and ontology of molecular entities focused on small chemical compounds of biological interest."),
+            ("ChEMBL", "Pharmacology", "Manually curated database of bioactive molecules with drug-like properties."),
             ("Crossref", "Literature Search", "Digital Object Identifier (DOI) registration and metadata tracking."),
-            ("UniProt", "Protein Database", "Comprehensive resource for protein sequences, annotations, and mapping."),
+            ("Ensembl", "Genomics", "Centralized resource for genetics, molecular biology, and genomic annotations."),
+            ("Europe PMC", "Preprints", "Access to life sciences publications and preprints (bioRxiv, medRxiv)."),
+            ("GBIF", "Ecology & Taxonomy",
+             "Global Biodiversity Information Facility providing open access to species occurrence and distribution data."),
+            ("GitHub API", "Code & Repositories", "Search for open-source bioinformatics pipelines and academic code."),
+            ("KEGG", "Pathways", "Database resource for understanding high-level functions of the biological system."),
+            ("NCBI Entrez", "Genomics & Literature", "Access to PubMed, Taxonomy, SRA, GEO, and other core databases."),
+            ("OpenAlex", "Literature Search", "Open catalog of the global research system and citation metrics."),
+            ("PubChem", "Cheminformatics", "World's largest collection of freely accessible chemical information."),
+            ("QuickGO", "Systems Biology",
+             "High-performance browser and API for Gene Ontology (GO) terms and functional annotations."),
             ("RCSB PDB", "Structural Biology",
              "Information about the 3D shapes of proteins, nucleic acids, and complexes."),
+            ("Semantic Scholar", "Literature Search", "AI-backed academic search and citation graph traversal."),
             ("STRING DB", "Systems Biology",
              "Protein-protein interaction networks and functional enrichment analysis."),
-            ("Ensembl", "Genomics", "Centralized resource for genetics, molecular biology, and genomic annotations."),
-            ("KEGG", "Pathways", "Database resource for understanding high-level functions of the biological system."),
-            ("PubChem", "Cheminformatics", "World's largest collection of freely accessible chemical information."),
-            ("ChEMBL", "Pharmacology", "Manually curated database of bioactive molecules with drug-like properties."),
-            ("Europe PMC", "Preprints", "Access to life sciences publications and preprints (bioRxiv, medRxiv)."),
-            ("Wikipedia", "General Knowledge", "Free online encyclopedia for quick concept and entity summaries."),
-            ("GitHub API", "Code & Repositories", "Search for open-source bioinformatics pipelines and academic code.")
+            ("UniProt", "Protein Database", "Comprehensive resource for protein sequences, annotations, and mapping."),
+            ("Wikipedia", "General Knowledge", "Free online encyclopedia for quick concept and entity summaries.")
         ]
 
         self.providers.sort(key=lambda item: item[0].lower())
@@ -1659,36 +1687,38 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
         """
 
-
         self.licenses = [
-            ("PySide6", "LGPL v3", "Official Python bindings for Qt."),
-            ("PyMuPDF / 4LLM", "AGPL v3", "High-performance PDF & Document parsing."),
-            ("ChromaDB", "Apache 2.0", "AI-native open-source vector database."),
-            ("LangChain / Splitters", "MIT", "Advanced text chunking and LLM framework."),
-            ("PyTorch", "BSD 3-Clause License", "Tensors and Dynamic neural networks."),
-            ("ONNX Runtime", "MIT", "Cross-platform AI model accelerator."),
-            ("Optimum / ONNX", "Apache 2.0", "Hardware-specific AI model optimization."),
-            ("Scikit-learn", "BSD-3-Clause", "Machine learning and data mining tools."),
-            ("BioPython", "Biopython", "Tools for biological computation."),
-            ("NetworkX", "BSD-3-Clause", "Study of complex networks and graphs."),
             ("BeautifulSoup4", "MIT", "Screen-scraping library for HTML/XML."),
-            ("DuckDuckGo Search", "MIT", "Search engine integration without tracking."),
-            ("Curl-cffi", "MIT", "Python binding for curl-impersonate."),
-            ("OpenAI", "Apache 2.0", "OpenAI Python API library."),
-            ("MCP SDK", "MIT", "Model Context Protocol Python SDK."),
-            ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
-            ("Psutil", "BSD-3-Clause", "Cross-platform process and system utilities."),
-            ("NVIDIA-ML-PY", "BSD-3-Clause", "Python bindings for NVIDIA Management Library."),
-            ("Keyring", "MIT", "Store and access credentials safely."),
-            ("Python-docx", "MIT", "Create and update Microsoft Word .docx files."),
-            ("Email-validator", "public domain", "Robust email syntax and deliverability validation."),
-            ("Ddisposable-email-domains", "MIT", "List of disposable email domains."),
-            ("Langdetect", "MIT", "Language detection library port."),
-            ("Markdown", "BSD-3-Clause", "Python implementation of Markdown."),
-            ("PyQtDarkTheme", "MIT", "Flat dark theme for PySide/PyQt."),
+            ("BioPython", "Biopython", "Tools for biological computation."),
             ("Chardet", "MIT", "Universal character encoding detector."),
+            ("ChromaDB", "Apache 2.0", "AI-native open-source vector database."),
+            ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
+            ("Curl-cffi", "MIT", "Python binding for curl-impersonate."),
+            ("Ddisposable-email-domains", "MIT", "List of disposable email domains."),
+            ("DuckDuckGo Search", "MIT", "Search engine integration without tracking."),
+            ("Email-validator", "public domain", "Robust email syntax and deliverability validation."),
+            ("FastAPI", "MIT", "Modern, high-performance web framework for building APIs."),
             ("hf_xet", "Apache Software License", "Efficient large-file storage for Hugging Face."),
+            ("Keyring", "MIT", "Store and access credentials safely."),
+            ("LangChain / Splitters", "MIT", "Advanced text chunking and LLM framework."),
+            ("Langdetect", "MIT", "Language detection library port."),
+            ("LiteLLM", "MIT", "Unified interface for integrating various Large Language Model (LLM) providers."),
+            ("Markdown", "BSD-3-Clause", "Python implementation of Markdown."),
+            ("MCP SDK", "MIT", "Model Context Protocol Python SDK."),
             ("Mermaid.js", "MIT", "Generation of diagrams and flowcharts."),
+            ("NetworkX", "BSD-3-Clause", "Study of complex networks and graphs."),
+            ("NVIDIA-ML-PY", "BSD-3-Clause", "Python bindings for NVIDIA Management Library."),
+            ("ONNX Runtime", "MIT", "Cross-platform AI model accelerator."),
+            ("OpenAI", "Apache 2.0", "OpenAI Python API library."),
+            ("Optimum / ONNX", "Apache 2.0", "Hardware-specific AI model optimization."),
+            ("Psutil", "BSD-3-Clause", "Cross-platform process and system utilities."),
+            ("PyQtDarkTheme", "MIT", "Flat dark theme for PySide/PyQt."),
+            ("PySide6", "LGPL v3", "Official Python bindings for Qt."),
+            ("PyTorch", "BSD 3-Clause License", "Tensors and Dynamic neural networks."),
+            ("Python-docx", "MIT", "Create and update Microsoft Word .docx files."),
+            ("PyMuPDF / 4LLM", "AGPL v3", "High-performance PDF & Document parsing."),
+            ("Scikit-learn", "BSD-3-Clause", "Machine learning and data mining tools."),
+            ("Uvicorn", "BSD-3-Clause", "High-speed ASGI server implementation for Python.")
         ]
 
         self.licenses.sort(key=lambda item: item[0].lower())

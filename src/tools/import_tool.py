@@ -699,15 +699,8 @@ class ImportTool(BaseTool):
 
         if state == TaskState.SUCCESS.value:
             if self.pd:
-                self.pd.close_safe()
+                self.pd.show_finish_state(True, "Success", "The library has been fully synchronized and indexed.")
                 self.pd = None
-
-            # 弹出普通通知窗口
-            StandardDialog(
-                self.widget,
-                "Success",
-                "The library has been fully synchronized and indexed."
-            ).exec()
 
             if self.current_kb_id:
                 self.kb_manager.set_kb_status(self.current_kb_id, "ready")
@@ -716,7 +709,7 @@ class ImportTool(BaseTool):
             if self.current_kb_id:
                 GlobalSignals().kb_modified.emit(self.current_kb_id)
 
-        elif state == TaskState.FAILED.value:
+        elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
             self._on_error(msg)
 
         try:
@@ -728,8 +721,6 @@ class ImportTool(BaseTool):
         self.kb_manager.set_kb_status(self.current_kb_id, "corrupted")
         self.logger.error(f"Knowledge Base task failed. Error: {msg}")
 
-        if self.pd: self.pd.close_safe()
-
         msg_lower = msg.lower()
         is_model_error = (
             "oserror" in msg_lower or
@@ -739,11 +730,17 @@ class ImportTool(BaseTool):
             "onnx" in msg_lower
         )
 
+        if self.pd:
+            self.pd.show_finish_state(False, "Process Halted", f"Operation ended: {msg}")
+            self.pd = None
+        else:
+            StandardDialog(self.widget, "Error", f"Operation failed: {msg}").exec()
+
         if is_model_error:
             dlg = StandardDialog(
                 self.widget,
                 title="Model Incomplete",
-                message="The required AI model files are missing or corrupted (e.g., .onnx file not found). Would you like to go to Settings to download them now?",
+                message="The required AI model files are missing or corrupted. Would you like to go to Settings to download them now?",
                 show_cancel=True
             )
             if dlg.exec():
@@ -751,8 +748,6 @@ class ImportTool(BaseTool):
                 data = self.combo_kb.currentData()
                 if data:
                     GlobalSignals().request_model_download.emit(data['model_id'], "embedding")
-        else:
-            StandardDialog(self.widget, "Error", f"Operation failed: {msg}").exec()
 
         for slot in [self._on_rename_done, self._on_del_done, self._on_final_done]:
             try:
@@ -852,13 +847,18 @@ class ImportTool(BaseTool):
         valid_files = []
         duplicate_count = 0
 
-        # 进度条对话框 (如果是大批量)
         pd = None
+        cancel_flag = [False]
+
         if len(files) > 50:
             pd = ProgressDialog(self.widget, "Checking Duplicates", "Scanning file signatures...", telemetry_config={})
+            pd.sig_canceled.connect(lambda: cancel_flag.__setitem__(0, True))  # 绑定取消事件
             pd.show()
 
         for i, incoming_path in enumerate(files):
+            if cancel_flag[0]:
+                break
+
             QApplication.processEvents()
             if pd: pd.update_progress(int((i / len(files)) * 100), f"Checking {os.path.basename(incoming_path)}...")
 
@@ -884,7 +884,12 @@ class ImportTool(BaseTool):
                 valid_files.append(incoming_path)
                 existing_map[incoming_size].append(incoming_path)
 
-        if pd: pd.close_safe()
+        if pd:
+            if cancel_flag[0]:
+                pd.show_finish_state(False, "Cancelled", "File scanning was cancelled by user.")
+                return
+            else:
+                pd.close_safe()
 
         if duplicate_count > 0:
             from src.ui.components.toast import ToastManager
@@ -981,21 +986,25 @@ class ImportTool(BaseTool):
             self.task_mgr.sig_state_changed.connect(self._on_export_done)
             self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
 
-            # 启动我们在 kb_tasks.py 里新写的后台任务
             from src.task.kb_tasks import ExportKBTask
             self.task_mgr.start_task(ExportKBTask, "export", kb_id=self.current_kb_id, dest_path=path)
 
+
     def _on_export_done(self, state, msg):
         if state == TaskState.SUCCESS.value:
-            self.pd.show_success_state("Export Success", "Project has been successfully exported.")
-        elif state == TaskState.FAILED.value:
-            self.pd.close_safe()
-            StandardDialog(self.widget, "Error", f"Export failed: {msg}").exec()
+            self.pd.show_finish_state(True, "Export Success", "Project has been successfully exported.")
+        elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+            self.pd.show_finish_state(False, "Export Halted", f"Task ended: {msg}")
 
-        try: self.task_mgr.sig_state_changed.disconnect(self._on_export_done)
-        except Exception: pass
-        try: self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception: pass
+        try:
+            self.task_mgr.sig_state_changed.disconnect(self._on_export_done)
+        except Exception:
+            pass
+        try:
+            self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
+        except Exception:
+            pass
+
 
     def import_external_kb(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1021,19 +1030,24 @@ class ImportTool(BaseTool):
             from src.task.kb_tasks import ImportExternalKBTask
             self.task_mgr.start_task(ImportExternalKBTask, "import", bundle_path=path)
 
+
     def _on_import_done(self, state, msg):
         if state == TaskState.SUCCESS.value:
-            self.pd.show_success_state("Import Success", "Project has been successfully imported.")
-            self.refresh_kb_list()  # 刷新下拉框显示新库
-        elif state == TaskState.FAILED.value:
-            self.pd.close_safe()
-            StandardDialog(self.widget, "Error", f"Import failed: {msg}").exec()
+            self.pd.show_finish_state(True, "Import Success", "Project has been successfully imported.")
+            self.refresh_kb_list()
+        elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+            self.pd.show_finish_state(False, "Import Halted", f"Task ended: {msg}")
 
-        try: self.task_mgr.sig_state_changed.disconnect(self._on_import_done)
-        except Exception: pass
-        try: self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception: pass
+        try:
+            self.task_mgr.sig_state_changed.disconnect(self._on_import_done)
+        except Exception:
+            pass
+        try:
+            self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
+        except Exception:
+            pass
         GlobalSignals().kb_list_changed.emit()
+
 
     def download_required_model(self):
         self.pd = ProgressDialog(

@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 
 from src.core.core_task import BackgroundTask
@@ -23,6 +25,10 @@ class FetchModelsTask(BackgroundTask):
             httpx_kwargs["trust_env"] = False
 
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+        if self.is_cancelled():
+            raise InterruptedError("API connection safely terminated by user.")
+
 
         try:
             with httpx.Client(**httpx_kwargs) as client:
@@ -149,6 +155,9 @@ class TestApiTask(BackgroundTask):
             if k not in ["model", "messages", "stream"]:
                 payload[k] = v
 
+        if self.is_cancelled():
+            raise InterruptedError("API test safely terminated by user.")
+
         try:
             with httpx.Client(**httpx_kwargs) as client:
                 response = client.post(url, headers=headers, json=payload)
@@ -168,3 +177,68 @@ class TestApiTask(BackgroundTask):
             return {"success": False, "msg": str(e)}
 
 
+class HardwareAuthTask(BackgroundTask):
+    """Background task for securely authorizing hardware identity."""
+
+    def _execute(self):
+        try:
+            from src.core.encryption_service import SystemEncryptionService
+            service = SystemEncryptionService()
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            res = loop.run_until_complete(service.verify_identity("Authorize configuration export"))
+            loop.close()
+
+            return {"success": res}
+        except Exception as e:
+            self.send_log("WARNING", f"Hardware auth error: {e}")
+            return {"success": False, "msg": str(e)}
+
+
+class EmailVerifyTask(BackgroundTask):
+    """Background task for robustly verifying user email addresses without blocking the UI."""
+
+    def _execute(self):
+        email = self.kwargs.get("email")
+        if not email:
+            return {"success": True, "msg": ""}
+
+        try:
+            from src.core.email_check import verify_email_robust
+            res = verify_email_robust(email)
+
+            if not res.get("is_valid"):
+                detailed_error = res.get("error_msg", "Unknown email validation error.")
+                prompt_msg = (
+                    f"Email Validation Failed:\n"
+                    f"{detailed_error}\n\n"
+                    f"Please provide a valid email address or leave it completely empty (which will disable NCBI tools)."
+                )
+                return {"success": False, "msg": prompt_msg}
+            else:
+                return {"success": True, "msg": ""}
+        except Exception as e:
+            return {"success": False, "msg": f"Email validation encountered a system error: {e}"}
+
+
+class HWDetectTask(BackgroundTask):
+    """Background task for safely probing system hardware and ORT providers."""
+
+    def _execute(self):
+        try:
+            from src.core.device_manager import DeviceManager
+            dev_mgr = DeviceManager()
+            info = dev_mgr.get_sys_info()
+            info['gpu_info'] = dev_mgr.get_gpu_info()
+            devs = dev_mgr.get_available_devices()
+
+            return {"success": True, "info": info, "devs": devs}
+        except Exception as e:
+            self.send_log("ERROR", f"Hardware detection failed: {e}")
+            return {
+                "success": False,
+                "info": {"os": "Unknown OS", "error": str(e)},
+                "devs": [{"name": "Auto Detect", "id": "auto"}],
+                "msg": str(e)
+            }

@@ -45,6 +45,9 @@ class VerifyModelsTask(BackgroundTask):
             return False
 
         for root, dirs, files in os.walk(model_dir):
+            if self.is_cancelled():
+                raise InterruptedError("Verification safely terminated by user.")
+
             if any(f.endswith('.onnx') for f in files):
                 self.logger.info(f"VerifyModelsTask: ONNX files successfully verified for '{repo_id}' at '{root}'")
                 return True
