@@ -4,13 +4,12 @@ import re
 import tempfile
 import time
 
-from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QThread
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
 from src.core.core_task import TaskManager, TaskMode
-from src.core.network_worker import LightNetworkWorker
 from src.core.theme_manager import ThemeManager
 from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import TextFormatter

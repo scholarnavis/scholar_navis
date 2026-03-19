@@ -17,6 +17,8 @@ class FetchModelsTask(BackgroundTask):
         proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
 
         url = f"{base_url.rstrip('/')}/models"
+        self.send_log("INFO", f"Fetching models from {url}")
+
         httpx_kwargs = {"timeout": 10.0}
 
         if proxy_url:
@@ -41,6 +43,7 @@ class FetchModelsTask(BackgroundTask):
                 raise ValueError("API returned an empty model list.")
 
             self.update_progress(100, "Done")
+            self.send_log("INFO", f"API response successful. Found {len(models)} models.")
             return {"success": True, "models": models, "msg": f"Successfully fetched {len(models)} models."}
         except Exception as e:
             return {"success": False, "models": [], "msg": str(e)}
@@ -128,6 +131,7 @@ class TestApiTask(BackgroundTask):
         model_name = self.kwargs.get("model_name", "")
         custom_params = self.kwargs.get("custom_params", {})
 
+        self.send_log("INFO", f"Testing connectivity for model: {model_name}")
         self.update_progress(30, f"Sending test prompt to {model_name}...")
         from src.core.config_manager import ConfigManager
         proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
@@ -172,6 +176,7 @@ class TestApiTask(BackgroundTask):
             raw_content = msg_obj.get("content") or "[Empty Response]"
 
             self.update_progress(100, "Done")
+            self.send_log("INFO", f"API test passed for {model_name}")
             return {"success": True, "msg": f"Connection excellent!\nModel replied: '{raw_content.strip()}'"}
         except Exception as e:
             return {"success": False, "msg": str(e)}

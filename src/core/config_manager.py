@@ -171,7 +171,12 @@ class ConfigManager:
             "chat_llm_id": "",
             "chat_model_name": "",
             "chat_trans_llm_id": "",
-            "chat_trans_model_name": ""
+            "chat_trans_model_name": "",
+
+            # API Server Configurations
+            "api_server_host": "127.0.0.1",
+            "api_server_port": 8000,
+            "api_server_key": "",
         }
 
         current_settings = self.load_json(self.SETTINGS_PATH, encrypt=True)

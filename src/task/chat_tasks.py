@@ -180,6 +180,7 @@ class ChatGenerationTask(BackgroundTask):
         self._emit_state(TaskState.PROCESSING, -1, "", payload={"event": "translated", "text": text})
 
     def _execute(self):
+        self.send_log("INFO", f"Chat task started. KB_ID: {self.kwargs.get('kb_id')}")
         time.sleep(0.1)
 
         self.main_config = self.kwargs.get('main_config')
@@ -210,6 +211,7 @@ class ChatGenerationTask(BackgroundTask):
 
         # Phase 1: Query Extraction & Translation (Cache Accelerated)
         if self.requires_translation:
+            self.send_log("INFO", f"Translating query: {original_user_query[:20]}...")
             self._emit_token("<i>🌐 Translating your query to academic English for precise retrieval...</i>\n\n")
             try:
                 trans_kwargs = {
@@ -223,6 +225,7 @@ class ChatGenerationTask(BackgroundTask):
 
         # Phase 2: Vector Retrieval & Reranking (Local KB)
         if self.kb_id:
+            self.send_log("INFO", "Initiating local Vector RAG retrieval...")
             self._emit_token("[CLEAR_SEARCH]")
             self._emit_token("<i>📚 Searching local knowledge base and reranking documents...</i>\n\n")
             time.sleep(0.05)
@@ -314,8 +317,9 @@ class ChatGenerationTask(BackgroundTask):
 
         llm_content = []
 
-        # Phase 3: External Attachments Integration
+        # Phase 3: External Attachments Integration(文件打分环节)
         if docs:
+            self.send_log("INFO", f"Detected {len(docs)} uploaded document chunks. Starting Reranker scoring...")
             self._emit_token("<i>Filtering and reranking attached documents...</i>\n\n")
             cand_docs = [{"content": d.get("content", ""),
                           "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
@@ -323,9 +327,15 @@ class ChatGenerationTask(BackgroundTask):
             if len(cand_docs) > 5:
                 reranked_docs = self._process_rerank(search_query, cand_docs, "General", 8)
                 if reranked_docs is not None:
+                    self.send_log("INFO",
+                                  f"Reranker finished: Reduced {len(cand_docs)} chunks to top 8 most relevant segments.")
                     cand_docs = reranked_docs
                 else:
+                    self.send_log("WARNING", "Reranker failed for files, falling back to top-k selection.")
                     cand_docs = cand_docs[:8]
+            else:
+                self.send_log("INFO",
+                              f"Small attachment size ({len(cand_docs)} chunks), skipping rerank and using all content.")
 
             files_dict = {}
             for doc in cand_docs:
@@ -433,6 +443,7 @@ class ChatGenerationTask(BackgroundTask):
         mcp_tools = []
         dynamic_tool_prompt = ""
 
+        # Phase 5: Agentic Generation (MCP 工具打分环节)
         if self.use_mcp:
             if self.selected_mcp_tags is not None:
                 raw_mcp_tools = mcp_mgr.get_tools_schema_by_tags(self.selected_mcp_tags)
@@ -440,6 +451,8 @@ class ChatGenerationTask(BackgroundTask):
                 raw_mcp_tools = mcp_mgr.get_all_tools_schema() or []
 
             if raw_mcp_tools:
+                self.send_log("INFO",
+                              f"MCP Enabled. Pool contains {len(raw_mcp_tools)} candidate tools. Starting intent-based filtering...")
                 self._emit_token("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
                 time.sleep(0.05)
                 mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=8)
@@ -746,9 +759,14 @@ class ChatGenerationTask(BackgroundTask):
                                                emit_warning=False)
             if ranked_docs is None:
                 return raw_mcp_tools
+
+            selected_names = [doc["metadata"]["tool_schema"]["function"]["name"] for doc in ranked_docs]
+            self.send_log("INFO",
+                          f"Reranker scoring complete. Selected Top {len(selected_names)} tools: {', '.join(selected_names)}")
+
             return [doc["metadata"]["tool_schema"] for doc in ranked_docs]
         except Exception as e:
-            self.logger.warning(f"Exception during tool reranking: {e}.")
+            self.send_log("ERROR", f"Exception during tool reranking: {str(e)}")
             return raw_mcp_tools
 
     def _process_rerank(self, query, docs, domain, top_k, emit_warning=True):

@@ -4,7 +4,7 @@ import time
 
 import psutil
 import torch
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, Signal, QTimer, QRegularExpression
 from PySide6.QtGui import QColor, QRegularExpressionValidator, QGuiApplication
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
@@ -12,9 +12,9 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QSizePolicy, QHeaderView, QAbstractItemView, QTableWidget,
                                QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea)
 
-from src.core.mcp_manager import MCPManager
 from src.core.models_registry import EMBEDDING_MODELS
 from src.core.theme_manager import ThemeManager
+from src.task.dialog_task import DialogTaskManager
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
@@ -627,6 +627,9 @@ class McpConfigDialog(BaseDialog):
         title = "Edit MCP Server" if server_config else "Add MCP Server"
         super().__init__(parent, title=title, width=660)
 
+        self.task_manager = DialogTaskManager()
+        self._setup_task_signals()
+
         self.form_widget = QWidget()
         self.form_layout = QFormLayout(self.form_widget)
         self.form_layout.setSpacing(15)
@@ -737,6 +740,59 @@ class McpConfigDialog(BaseDialog):
         self._apply_theme()
         self.adjustSize()
 
+    def _setup_task_signals(self):
+        self.task_manager.connect_signals(
+            finished_callback=self._on_test_finished,
+            error_callback=self._on_test_error,
+            progress_callback=self._on_test_progress
+        )
+
+    def _on_test_clicked(self):
+        """测试连接（使用TaskManager管理）"""
+        name, cfg = self.get_config()
+        if not name or (not cfg.get("command") and not cfg.get("url")):
+            StandardDialog(self, "Missing Info", "Please enter at least a Server ID and Command/URL.").exec()
+            return
+        # 取消现有任务
+        if self.task_manager.is_running():
+            self.task_manager.cancel_task()
+        self.btn_test.setEnabled(False)
+        self.pd = ProgressDialog(self, "Testing Connection", f"Connecting to [{name}]...\nPlease wait...")
+
+        self.pd.sig_canceled.connect(self.task_manager.cancel_task)
+
+        self.pd.show()
+        # 启动测试任务
+        self.task_manager.start_mcp_test(name, cfg)
+
+    def _on_test_finished(self, result: dict):
+        """测试完成回调"""
+        self.btn_test.setEnabled(True)
+
+        if not hasattr(self, 'pd') or not self.pd:
+            return
+
+        success = result.get("success", False)
+        msg = result.get("msg", "Unknown result")
+
+        if success:
+            self.pd.show_success_state("Connection Successful", msg)
+        else:
+            self.pd.show_finish_state(False, "Connection Failed", f"Unable to connect to server:\n{msg}")
+
+    def _on_test_error(self, error_msg: str):
+        """测试错误回调"""
+        self.btn_test.setEnabled(True)
+
+        if hasattr(self, 'pd') and self.pd:
+            self.pd.show_finish_state(False, "Connection Error", f"Error during connection test:\n{error_msg}")
+
+    def _on_test_progress(self, progress: int, msg: str):
+
+        if hasattr(self, 'pd') and self.pd:
+            self.pd.update_progress(progress, msg)
+
+
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
@@ -798,47 +854,6 @@ class McpConfigDialog(BaseDialog):
             if env_dict: cfg["headers"] = env_dict
 
         return name, cfg
-
-    def _on_test_clicked(self):
-        name, cfg = self.get_config()
-        if not name or (not cfg.get("command") and not cfg.get("url")):
-            StandardDialog(self, "Missing Info", "Please enter at least a Server ID and Command/URL.").exec()
-            return
-
-        self.btn_test.setEnabled(False)
-        self.pd = ProgressDialog(self, "Testing Connection", f"Connecting to [{name}]...\nPlease wait...")
-        self.pd.show()
-
-        self.test_thread = QThread()
-        self.test_worker = McpTestWorker(name, cfg)
-        self.test_worker.moveToThread(self.test_thread)
-        self.pd.sig_canceled.connect(self.test_thread.terminate)
-
-        def cleanup_test_mcp():
-            try:
-                MCPManager.get_instance().disconnect_server(f"test_{name}")
-            except Exception:
-                pass
-
-        self.pd.sig_canceled.connect(cleanup_test_mcp)
-
-        self.test_thread.started.connect(self.test_worker.run)
-        self.test_worker.sig_finished.connect(self._on_test_finished)
-        self.test_worker.sig_finished.connect(self.test_thread.quit)
-        self.test_worker.sig_finished.connect(self.test_worker.deleteLater)
-        self.test_thread.finished.connect(self.test_thread.deleteLater)
-
-        self.test_thread.start()
-
-    def _on_test_finished(self, success, msg):
-        self.btn_test.setEnabled(True)
-        self.pd.close_safe()
-        if success:
-            StandardDialog(self, "Connection Successful", f"{msg}").exec()
-        else:
-            err_dialog = StandardDialog(self, "Connection Failed", f"Unable to connect to server:\n{msg}")
-            err_dialog.setFixedWidth(500)
-            err_dialog.exec()
 
 
 
@@ -1440,39 +1455,6 @@ class ProjectEditorDialog(BaseDialog):
             "model_id": self.combo_model.currentData()
         }
 
-
-class McpTestWorker(QObject):
-    """后台测试 MCP 连接的线程，防止阻塞主 UI"""
-    sig_finished = Signal(bool, str)
-
-    def __init__(self, server_name, config):
-        super().__init__()
-        self.server_name = server_name
-        # 测试时强制起一个临时名字，防止污染实际的连接池
-        self.test_name = f"test_{server_name}"
-        self.config = config
-
-    def run(self):
-        try:
-            mgr = MCPManager.get_instance()
-
-            # 1. 尝试同步连接 (底层最多等待 10 秒)
-            success = mgr._sync_start(self.test_name, self.config)
-            status = mgr.get_server_status(self.test_name)
-
-            # 2. 获取加载的工具数量作为成功提示
-            if success:
-                tool_count = sum(1 for v in mgr.tool_map.values() if v == self.test_name)
-                msg = f"连接成功！共加载了 {tool_count} 个可用工具。"
-            else:
-                msg = status
-
-            # 3. 测试完毕后立即断开清理，不占用系统资源
-            mgr.disconnect_server(self.test_name)
-
-            self.sig_finished.emit(success, msg)
-        except Exception as e:
-            self.sig_finished.emit(False, str(e))
 
 
 class ApiProvidersDialog(BaseDialog):

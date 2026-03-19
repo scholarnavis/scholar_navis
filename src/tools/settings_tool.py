@@ -176,6 +176,11 @@ class SettingsTool(BaseTool):
         self.combo_theme.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_log.currentIndexChanged.connect(self._mark_unsaved)
 
+        # API Server listeners
+        self.input_api_host.textChanged.connect(self._mark_unsaved)
+        self.input_api_port.textChanged.connect(self._mark_unsaved)
+        self.input_api_key.textChanged.connect(self._mark_unsaved)
+
         # LLM listeners
         self.input_llm_name.textChanged.connect(self._mark_unsaved)
         self.input_llm_url.textChanged.connect(self._mark_unsaved)
@@ -309,6 +314,12 @@ class SettingsTool(BaseTool):
             self.config.load_settings()
             self.config.load_mcp_servers()
             self.llm_configs = self._load_llm_config()
+
+        # Load API Server settings into UI
+        self.input_api_host.setText(str(self.config.user_settings.get("api_server_host", "127.0.0.1")))
+        self.input_api_port.setText(str(self.config.user_settings.get("api_server_port", 8000)))
+        self.input_api_key.setText(self.config.user_settings.get("api_server_key", "navis-local-key"))
+
 
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
@@ -639,27 +650,19 @@ class SettingsTool(BaseTool):
 
         self.input_api_host = QLineEdit()
         self.input_api_host.setPlaceholderText("e.g., 127.0.0.1 or 0.0.0.0")
-        self.input_api_host.setText(str(self.config.user_settings.get("api_server_host", "127.0.0.1")))
 
         self.input_api_port = QLineEdit()
         self.input_api_port.setPlaceholderText("Default: 8000")
-        self.input_api_port.setText(str(self.config.user_settings.get("api_server_port", 8000)))
 
         self.input_api_key = HoverRevealLineEdit()
         self.input_api_key.setPlaceholderText("Set a custom API Key to secure your local endpoint (Optional)")
-        self.input_api_key.setText(self.config.user_settings.get("api_server_key", "navis-local-key"))
-
-        # 监听变更
-        self.input_api_host.textChanged.connect(self._mark_unsaved)
-        self.input_api_port.textChanged.connect(self._mark_unsaved)
-        self.input_api_key.textChanged.connect(self._mark_unsaved)
 
         layout.addRow("Host Address:", self.input_api_host)
         layout.addRow("Server Port:", self.input_api_port)
         layout.addRow("Access Key:", self.input_api_key)
 
         hint = QLabel(
-            "💡 <i>API Server runs in the background. It shares all active models, RAG, and MCP settings with the GUI. Restart the application to apply port changes.</i>")
+            "💡 <i>API Server runs in the background. It shares all active models, RAG, and MCP settings with the GUI. Restart the application to apply port/host changes.</i>")
         ThemeManager().apply_class(hint, "hint")
         hint.setWordWrap(True)
         layout.addRow("", hint)
@@ -1602,6 +1605,12 @@ class SettingsTool(BaseTool):
             self._mark_unsaved()
 
             mode = result.get("mode", "unknown")
+            pd.show_finish_state(
+                True,
+                "Import Successful",
+                f"Configuration bundle ({mode}) has been loaded into the interface.\n\n"
+                "Please click 'Save Settings' at the bottom to apply these changes permanently."
+            )
             ToastManager().show(f"Configuration imported to UI ({mode}). Please save to apply.", "success")
         except Exception as e:
             self.logger.error(f"Import application failed: {e}")
@@ -2030,7 +2039,7 @@ class SettingsTool(BaseTool):
 
         # 如果email没有发生修改或为空，跳过耗时的email验证
         if new_email == old_email or not new_email:
-            QTimer.singleShot(50, lambda: self._on_email_verified_result(True, ""))
+            QTimer.singleShot(50, lambda: self._on_email_verified_result({"success": True, "msg": ""}))
             return
 
         self.email_task_mgr = TaskManager()

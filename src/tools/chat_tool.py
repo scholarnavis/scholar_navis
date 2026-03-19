@@ -1920,7 +1920,7 @@ class ChatTool(BaseTool):
         self.input_container.btn_send.setVisible(True)
 
         # 检查是否是被主动中止的，履行“无论成功与否都要弹窗告知用户”的要求
-        is_cancelled = getattr(self.worker, '_is_cancelled', False)
+
         if is_cancelled:
             StandardDialog(self.widget, "Task Cancelled", "The AI generation has been safely stopped by the user.",
                            show_cancel=False).exec()
@@ -2245,7 +2245,7 @@ class ChatTool(BaseTool):
 
     def _on_chat_state_changed(self, state, msg):
         if state == TaskState.SUCCESS.value:
-            self.on_chat_finished()
+            self.on_chat_finished(is_cancelled=False)
         elif state == TaskState.FAILED.value:
             self.on_chat_error(msg)
         elif state == TaskState.TERMINATED.value:

@@ -2,50 +2,13 @@ import ctypes
 import os
 import sys
 import time
+import multiprocessing
 
-import qdarktheme
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar
-from src.version import __version__
 
-# 拦截来自 MCPManager 的子进程唤起请求，防止主 UI 被无限循环启动
-if len(sys.argv) > 1 and sys.argv[1] == "--run-builtin-mcp":
-    os.environ["SCARF_NO_ANALYTICS"] = "true"
-    from plugins.academic_mcp_server import mcp
-    mcp.run(transport='stdio')
-    sys.exit(0)
-
-# 拦截 API Server 独立运行模式
-if len(sys.argv) > 1 and sys.argv[1] == "--api-server":
-    os.environ["SCARF_NO_ANALYTICS"] = "true"
-
-    from PySide6.QtCore import QCoreApplication
-
-    app = QCoreApplication(sys.argv)
-
-    from src.core.logger import setup_logger
-
-    global_logger = setup_logger()
-
-    from src.core.config_manager import ConfigManager
-    from src.core.network_worker import setup_global_network_env
-    from src.core.mcp_manager import MCPManager
-
-    # 初始化基础环境并读取配置
-    ConfigManager()
-    setup_global_network_env()
-
-    # 强制拉起 MCP 服务器
-    global_logger.info("Bootstrapping MCP Servers for API mode...")
-    MCPManager.get_instance().bootstrap_servers(force_all=True)
-
-    # 启动 API 服务器
-    from src.core.api_server import run_server
-
-    run_server()
-    sys.exit(0)
 
 is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
@@ -54,7 +17,6 @@ if is_compiled:
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Disable telemetry for academic privacy
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["SCARF_NO_ANALYTICS"] = "true"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -106,7 +68,6 @@ class StartupWorker(QThread):
             time.sleep(0.1)
             cfg_mgr.load_mcp_servers()
 
-
             self.sig_progress.emit(80, "Pre-loading UI components & ML libraries...")
             time.sleep(0.1)
             from src.ui.main_window import MainWindow
@@ -139,7 +100,6 @@ class SplashScreen(QWidget):
         else:
             self.setWindowIcon(QIcon(png_path))
 
-
         bg_color = tm.color("bg_main")
         bg_card = tm.color("bg_card")
         text_main = tm.color("title_blue")
@@ -163,7 +123,8 @@ class SplashScreen(QWidget):
         layout.addWidget(self.logo, alignment=Qt.AlignCenter)
 
         self.title = QLabel("Scholar Navis")
-        self.title.setStyleSheet(f"color: {text_main}; font-size: 26px; font-weight: bold; border: none; letter-spacing: 1px;")
+        self.title.setStyleSheet(
+            f"color: {text_main}; font-size: 26px; font-weight: bold; border: none; letter-spacing: 1px;")
         self.title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title)
 
@@ -246,23 +207,61 @@ class AppController(QObject):
         if config.user_settings.get("api_server_enabled", False):
             self.logger.info("Initializing Local API Server...")
             try:
-                # 假设 api_server.py 位于 src 目录下
-                from src.core.api_server import start_api_server_thread
+                from src.api.api_server import run_server
                 # 保持线程引用，防止被垃圾回收
-                self.api_thread = start_api_server_thread()
+                self.api_thread = run_server()
             except Exception as e:
                 self.logger.error(f"Failed to start API server: {e}")
+
+
+
 if __name__ == "__main__":
 
-    import multiprocessing
-
     multiprocessing.freeze_support()
+
+    # 1. 拦截来自 MCPManager 的子进程唤起请求
+    if len(sys.argv) > 1 and sys.argv[1] == "--run-builtin-mcp":
+        os.environ["SCARF_NO_ANALYTICS"] = "true"
+        from plugins.academic_mcp_server import mcp
+
+        mcp.run(transport='stdio')
+        sys.exit(0)
+
+    # 2. 拦截 API Server 独立运行模式
+    if len(sys.argv) > 1 and sys.argv[1] == "--api-server":
+        os.environ["SCARF_NO_ANALYTICS"] = "true"
+
+        from PySide6.QtCore import QCoreApplication
+
+        app = QCoreApplication(sys.argv)
+
+        from src.core.logger import setup_logger
+
+        global_logger = setup_logger()
+
+        from src.core.config_manager import ConfigManager
+        from src.core.network_worker import setup_global_network_env
+        from src.core.mcp_manager import MCPManager
+
+        # 初始化基础环境并读取配置
+        ConfigManager()
+        setup_global_network_env()
+
+        # 强制拉起 MCP 服务器
+        global_logger.info("Bootstrapping MCP Servers for API mode...")
+        MCPManager.get_instance().bootstrap_servers(force_all=True)
+
+        # 启动 API 服务器
+        from src.api.api_server import run_server
+
+        run_server()
+        sys.exit(0)
+
+    #  GUI 启动流程
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QMessageBox
 
-
     from src.core.logger import setup_logger
-
 
     if sys.platform == "win32":
         try:
@@ -277,8 +276,6 @@ if __name__ == "__main__":
             pass
 
     app = QApplication(sys.argv)
-
-
 
     unique_server_name = "ScholarNavis_SingleInstance_Lock"
     socket = QLocalSocket()
@@ -299,8 +296,6 @@ if __name__ == "__main__":
     local_server = QLocalServer()
     QLocalServer.removeServer(unique_server_name)
     local_server.listen(unique_server_name)
-
-    from src.core.logger import setup_logger
 
     global_logger = setup_logger()
 

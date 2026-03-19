@@ -460,7 +460,7 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
                             "doi": doi_str,
                             "url": p.get("url", "")
                         })
-                print(parsed)
+
                 return json.dumps(
                     {"status": "success", "source": "Semantic Scholar", "direction": direction, "results": parsed})
             except Exception as e:
