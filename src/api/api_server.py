@@ -9,7 +9,7 @@ from typing import List, Dict, Optional, Any
 from fastapi import FastAPI, HTTPException, Request, Depends, Security, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 import multiprocessing as mp
 import queue as q
@@ -24,13 +24,27 @@ from src.core.network_worker import setup_global_network_env
 from src.task.chat_tasks import ChatGenerationTask
 from src.task.kb_tasks import RerankTask
 
-app = FastAPI(title="Scholar Navis Agentic API", version="1.0.0")
+app = FastAPI(
+    title="Scholar Navis Agentic API",
+    version="1.0.0",
+    description=(
+        "OpenAI-compatible chat and tooling API for Scholar Navis.\n\n"
+        "Supports streaming completions, knowledge-base RAG, MCP tool routing, "
+        "and multi-provider LLM selection."
+    ),
+    openapi_tags=[
+        {"name": "Chat", "description": "Chat completions (OpenAI-compatible)"},
+        {"name": "Models & Providers", "description": "List available models and providers"},
+        {"name": "MCP Tools", "description": "Model Context Protocol tool discovery and filtering"},
+        {"name": "Knowledge Bases", "description": "RAG knowledge-base management"},
+        {"name": "System", "description": "System state and health"},
+    ],
+)
 logger = logging.getLogger("API_Server")
 security = HTTPBearer(auto_error=False)
 
 
 class OpenAIException(Exception):
-    """Custom exception class to generate standard OpenAI error responses."""
     def __init__(self, message: str, status_code: int = 400, error_type: str = "invalid_request_error"):
         self.message = message
         self.status_code = status_code
@@ -39,7 +53,6 @@ class OpenAIException(Exception):
 
 @app.exception_handler(OpenAIException)
 async def openai_exception_handler(request: Request, exc: OpenAIException):
-    """Intercepts OpenAIException and formats it to strict OpenAI API JSON standards."""
     logger.error(f"API Exception Triggered -> Type: {exc.error_type} | Message: {exc.message}")
     return JSONResponse(
         status_code=exc.status_code,
@@ -55,13 +68,8 @@ async def openai_exception_handler(request: Request, exc: OpenAIException):
 
 
 def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    """
-    Evaluates the incoming Bearer token against the persistent configuration.
-    If no key is designated in the configuration, access is universally granted.
-    """
     config = ConfigManager()
     expected_key = config.user_settings.get("api_server_key", "").strip()
-
     if expected_key:
         if not credentials or credentials.credentials != expected_key:
             raise OpenAIException(
@@ -73,158 +81,323 @@ def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Depends
     return None
 
 
+# ==========================================
+# Response Models
+# ==========================================
+
 class ChoiceMessage(BaseModel):
-    role: str
-    content: str
-    reasoning_content: Optional[str] = None
-    follow_ups: Optional[List[str]] = None
-    cited_sources: Optional[List[str]] = None
+    role: str = Field(..., description="The role of the message author (e.g. 'assistant').")
+    content: str = Field(..., description="The main reply text.")
+    reasoning_content: Optional[str] = Field(None, description="Chain-of-thought reasoning tokens (if any).")
+    follow_ups: Optional[List[str]] = Field(None, description="Suggested follow-up questions.")
+    cited_sources: Optional[List[str]] = Field(None, description="List of cited source descriptions.")
+    translated_query: Optional[str] = Field(None, description="Translated version of the user query (when translation was triggered).")
+
 
 class Choice(BaseModel):
-    index: int
+    index: int = Field(..., description="Index of this choice in the list (always 0 for now).")
     message: ChoiceMessage
-    finish_reason: Optional[str] = None
+    finish_reason: Optional[str] = Field(None, description="Reason the model stopped generating. 'stop' means complete, 'length' means truncated.")
+
+
+class UsageInfo(BaseModel):
+    prompt_tokens: int = Field(0, description="Number of tokens in the prompt.")
+    completion_tokens: int = Field(0, description="Number of tokens in the completion.")
+    total_tokens: int = Field(0, description="Total tokens used.")
+
 
 class ChatCompletionResponse(BaseModel):
-    id: str
-    object: str = "chat.completion"
-    created: int
-    model: str
-    choices: List[Choice]
+    """Non-streaming response object matching OpenAI chat.completion format."""
+    id: str = Field(..., description="Unique identifier for this completion.")
+    object: str = Field("chat.completion", description="Object type, always 'chat.completion'.")
+    created: int = Field(..., description="Unix timestamp (seconds) of when the completion was created.")
+    model: str = Field(..., description="The model used for this completion.")
+    choices: List[Choice] = Field(..., description="List of completion choices.")
+    usage: Optional[UsageInfo] = Field(None, description="Token usage statistics.")
 
 
+class StreamChoiceDelta(BaseModel):
+    role: Optional[str] = Field(None, description="Role of the author (only in the first chunk).")
+    content: Optional[str] = Field(None, description="Incremental content token.")
+    reasoning_content: Optional[str] = Field(None, description="Incremental reasoning token.")
+    translated_query: Optional[str] = Field(None, description="Translated user query (chunk for translation event).")
+    cited_sources: Optional[List[str]] = Field(None, description="Cited sources (flushed in the final chunk).")
+    follow_ups: Optional[List[str]] = Field(None, description="Suggested follow-ups (flushed in the final chunk).")
+
+
+class StreamChoice(BaseModel):
+    index: int = Field(0, description="Choice index.")
+    delta: StreamChoiceDelta
+    finish_reason: Optional[str] = Field(None, description="'stop' on the final chunk, otherwise null.")
+
+
+class ChatCompletionChunk(BaseModel):
+    """A single server-sent event chunk during streaming."""
+    id: str = Field(..., description="Completion ID (unique per request).")
+    object: str = Field("chat.completion.chunk", description="Always 'chat.completion.chunk'.")
+    created: int = Field(..., description="Unix timestamp of creation.")
+    model: str = Field(..., description="Model name.")
+    choices: List[StreamChoice]
 
 
 # ==========================================
-# Pydantic Models (Chat & Completions)
+# Request Models
 # ==========================================
+
 class ChatMessage(BaseModel):
-    role: str
-    content: str
+    """A single message in the conversation history."""
+    role: str = Field(
+        ...,
+        description="The role of the message author.",
+        examples=["system", "user", "assistant"],
+    )
+    content: str = Field(
+        ...,
+        description="The text content of the message.",
+        examples=["Explain quantum entanglement in simple terms."],
+    )
 
-class MCPFilterRequest(BaseModel):
-    query: str
-    history_context: Optional[str] = ""
-    top_k: Optional[int] = 8
-    mcp_tags: Optional[List[str]] = None
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "default"
-    messages: List[ChatMessage]
-    stream: Optional[bool] = False
-    temperature: Optional[float] = None
-
-    provider_id: Optional[str] = None         # 主模型服务商ID
-    trans_provider_id: Optional[str] = None   # 翻译模型服务商ID
-    trans_model: Optional[str] = None         # 翻译模型名称
-
-    kb_id: Optional[str] = "none"
-    use_mcp: Optional[bool] = True
-    mcp_tags: Optional[List[str]] = None      # 过滤 MCP 工具的 Tag 列表
-    force_translate: Optional[bool] = None    # 强制翻译开关 (None时按GUI逻辑自动检测)
+    """
+    Request body for chat completions.
+    Compatible with the OpenAI /v1/chat/completions schema, with additional
+    Scholar Navis extensions for knowledge-base, translation, and MCP tool control.
+    """
+    model: str = Field(
+        "default",
+        description=(
+            "Model name to use. Pass 'default' to use the globally configured model. "
+            "You can also pass a specific model name from the provider's available models."
+        ),
+        examples=["default", "gpt-4o", "deepseek-chat"],
+    )
+    messages: List[ChatMessage] = Field(
+        ...,
+        description="The conversation history. The last 'user' message is treated as the query.",
+        min_length=1,
+    )
+    stream: Optional[bool] = Field(
+        False,
+        description="If true, tokens are streamed back as server-sent events (SSE).",
+    )
+    temperature: Optional[float] = Field(
+        None,
+        description="Sampling temperature (0.0–2.0). Higher values produce more random outputs.",
+        ge=0.0,
+        le=2.0,
+    )
+    provider_id: Optional[str] = Field(
+        None,
+        description=(
+            "ID of the LLM provider to use (e.g. 'openai', 'deepseek'). "
+            "Overrides the global setting."
+        ),
+        examples=["openai"],
+    )
+    trans_provider_id: Optional[str] = Field(
+        None,
+        description="Provider ID for the translation model. Overrides global translation provider.",
+    )
+    trans_model: Optional[str] = Field(
+        None,
+        description="Specific model name for translation, within the translation provider.",
+    )
+    kb_id: Optional[str] = Field(
+        "none",
+        description=(
+            "Knowledge-base ID for RAG retrieval. "
+            "Pass 'none' or omit to disable RAG entirely."
+        ),
+        examples=["none", "kb-abc123"],
+    )
+    use_mcp: Optional[bool] = Field(
+        True,
+        description="Whether to enable MCP tool invocation during the chat.",
+    )
+    mcp_tags: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Filter MCP tools by tags. If null and use_mcp is true, "
+            "the server uses the globally configured tag selection."
+        ),
+        examples=[["web-search", "code-execution"]],
+    )
+    force_translate: Optional[bool] = Field(
+        None,
+        description=(
+            "Force translation of the user query before LLM processing. "
+            "When null, translation is auto-detected based on language."
+        ),
+    )
 
 
 class CompletionRequest(BaseModel):
-    model: str = "default"
-    prompt: str
-    stream: Optional[bool] = False
-    temperature: Optional[float] = None
-    kb_id: Optional[str] = "none"
-    use_mcp: Optional[bool] = True
+    """Request body for legacy /completions-style (single prompt) generation."""
+    model: str = Field("default", description="Model name or 'default' for the global setting.")
+    prompt: str = Field(..., description="The raw prompt text.")
+    stream: Optional[bool] = Field(False, description="Enable SSE streaming.")
+    temperature: Optional[float] = Field(None, description="Sampling temperature.", ge=0.0, le=2.0)
+    kb_id: Optional[str] = Field("none", description="Knowledge-base ID for RAG, or 'none'.")
+    use_mcp: Optional[bool] = Field(True, description="Enable MCP tool usage.")
 
+
+class MCPFilterRequest(BaseModel):
+    """Request body for semantic MCP tool filtering."""
+    query: str = Field(
+        ...,
+        description="Natural-language query describing the user's intent.",
+        examples=["I need to search the web for recent papers"],
+    )
+    history_context: Optional[str] = Field(
+        "",
+        description="Optional conversation history for better contextual filtering.",
+    )
+    top_k: Optional[int] = Field(
+        8,
+        description="Maximum number of tools to return after ranking.",
+        ge=1,
+        le=50,
+    )
+    mcp_tags: Optional[List[str]] = Field(
+        None,
+        description="Pre-filter by tags before semantic ranking. Null means search all tools.",
+    )
+
+
+class ModelListPayload(BaseModel):
+    """Request body for listing models of a specific provider."""
+    provider: Optional[str] = Field(
+        None,
+        description="Provider ID whose models should be listed.",
+        examples=["openai", "deepseek"],
+    )
+
+
+# ==========================================
+# System State Response Models
+# ==========================================
+
+class SystemStateResponse(BaseModel):
+    active_device: str = Field(..., description="Currently configured inference device (e.g. 'cuda', 'cpu', 'auto').")
+    mcp_tools: int = Field(..., description="Number of registered MCP tools.")
+    kbs: int = Field(..., description="Number of available knowledge bases.")
+
+
+class ProviderInfo(BaseModel):
+    id: str = Field(..., description="Unique provider identifier.")
+    name: str = Field(..., description="Human-readable provider name.")
+    is_active: bool = Field(..., description="Whether this is the currently active provider.")
+    models: List[str] = Field(..., description="List of model names available from this provider.")
+    current_model: str = Field(..., description="The currently selected model for this provider.")
+
+
+class ProviderListResponse(BaseModel):
+    providers: List[ProviderInfo]
+
+
+class ModelInfo(BaseModel):
+    id: str = Field(..., description="Model identifier.")
+    object: str = Field("model", description="Object type, always 'model'.")
+    created: int = Field(..., description="Unix timestamp of retrieval.")
+    owned_by: str = Field(..., description="Provider or organization that owns this model.")
+
+
+class ModelListResponse(BaseModel):
+    object: str = Field("list", description="Always 'list'.")
+    data: List[ModelInfo]
+
+
+class MCPToolListResponse(BaseModel):
+    available_tags: List[str] = Field(..., description="All available MCP tool tags.")
+    tools_count: int = Field(..., description="Total number of MCP tools.")
+    tools: List[Dict[str, Any]] = Field(..., description="Full OpenAI-function-call tool schemas.")
+
+
+class MCPFilterResponse(BaseModel):
+    status: str = Field(..., description="'success', 'bypassed_insufficient_tools', or 'degraded_error'.")
+    original_count: Optional[int] = Field(None, description="Tool count before filtering.")
+    filtered_count: Optional[int] = Field(None, description="Tool count after filtering.")
+    filtered_tools: List[Dict[str, Any]] = Field(..., description="The filtered tool schemas.")
+    error: Optional[str] = Field(None, description="Error message if status is 'degraded_error'.")
+
+
+class KBInfo(BaseModel):
+    id: str = Field(..., description="Knowledge-base identifier.")
+    name: str = Field(..., description="Human-readable name.")
+    domain: str = Field(..., description="Domain or topic of the knowledge base.")
+    doc_count: int = Field(..., description="Number of indexed documents.")
+
+
+class KBListResponse(BaseModel):
+    knowledge_bases: List[KBInfo]
+
+
+# ==========================================
+# Helpers (unchanged logic, trimmed for brevity)
+# ==========================================
 
 def _clean_ui_token(raw_token: str) -> str:
-    """剥离专门给 UI 看的 HTML 装饰，并将其逆向转换为终端友好的纯净 Markdown"""
     if raw_token in ["[CLEAR_SEARCH]", "[START_LLM_NETWORK]"]:
         return ""
-
     clean = raw_token
-    # 1. 过滤掉顶部通知、MCP 执行状态和搜索进度的 UI 框
     clean = re.sub(r'<mcp_process.*?>.*?</mcp_process>\n*', '', clean, flags=re.IGNORECASE | re.DOTALL)
     clean = re.sub(r'<i.*?>.*?</i>\n*', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'<div.*?class=[\'"]header-.*?</div>\n*', '', clean, flags=re.IGNORECASE | re.DOTALL)
-
-    # 2. 将引用的内部 cite:// 协议，优雅地还原为标准的纯文本脚注，如 [1], [2]
-    # UI 的格式一般是: <a href='cite://...'><b>[1]</b> Source Name</a>
     clean = re.sub(r"<a[^>]*href=['\"]cite://[^>]*>.*?<b>\[(\d+)\]</b>.*?</a>", r"[\1]", clean, flags=re.IGNORECASE)
-
-    # 3. 将常见的 HTML 样式还原为终端支持的 Markdown 标记
     clean = re.sub(r'<br\s*/?>', '\n', clean, flags=re.IGNORECASE)
     clean = re.sub(r'<hr.*?>', '\n---\n', clean, flags=re.IGNORECASE)
     clean = re.sub(r'<b>(.*?)</b>', r'**\1**', clean, flags=re.IGNORECASE)
-
-    # 4. 兜底清理其他所有残留的非封闭 HTML div/span (如彩色警告块)
     clean = re.sub(r'<div.*?>', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'</div>', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'<span.*?>', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'</span>', '', clean, flags=re.IGNORECASE)
-
     return clean
 
 
 class APIStreamParser:
-    """State machine to route tokens to reasoning, content, sources, or follow-ups"""
-
     def __init__(self):
         self.is_thinking = False
-        self.current_section = "content"  # States: content, sources, follow_ups
+        self.current_section = "content"
         self.follow_up_buffer = ""
         self.cited_sources_buffer = ""
 
     def parse_token(self, raw_token: str):
-        """Returns (reasoning_chunk, content_chunk)"""
         token = _clean_ui_token(raw_token)
         if not token:
             return None, None
-
-        # Check for section headers and switch state
         if "📚 Cited Sources" in token or "[CITED_SOURCES]" in token:
             self.current_section = "sources"
             token = re.sub(r'(?i)(📚\s*Cited Sources|\[CITED_SOURCES\]|Cited Sources:?)', '', token)
-
         if "💡 Suggested Follow-ups" in token or "[FOLLOW_UPS]" in token:
             self.current_section = "follow_ups"
             token = re.sub(r'(?i)(💡\s*Suggested Follow-ups|\[FOLLOW_UPS\]|Suggested Follow-ups:?)', '', token)
-
-        # Route text to the appropriate buffer
         if self.current_section == "sources":
             self.cited_sources_buffer += token
             return None, None
         elif self.current_section == "follow_ups":
             self.follow_up_buffer += token
             return None, None
-
-        # Handle reasoning state transitions
         reasoning_chunk = ""
         content_chunk = ""
-
-        if "<think>" in token:
-            parts = token.split("<think>")
-            content_chunk += parts[0]
-            self.is_thinking = True
-            token = parts[1] if len(parts) > 1 else ""
-
-        if "</think>" in token:
+        if "" in token:
             parts = token.split("</think>")
             reasoning_chunk += parts[0]
             self.is_thinking = False
             token = parts[1] if len(parts) > 1 else ""
             content_chunk += token
             return reasoning_chunk, content_chunk
-
         if self.is_thinking:
             reasoning_chunk += token
         else:
             content_chunk += token
-
         return reasoning_chunk, content_chunk
 
     def extract_list_items(self, buffer: str) -> List[str]:
-        """Generic method to parse markdown lists into JSON arrays"""
         items = []
         for line in buffer.split('\n'):
             line = line.strip()
-            line = re.sub(r'^>\s*', '', line)  # Remove blockquotes
+            line = re.sub(r'^>\s*', '', line)
             if re.match(r'^([-*]|\d+\.)', line):
                 item = re.sub(r'^([-*\s]+|\d+\.\s*)', '', line).strip()
                 item = item.replace('**', '').strip()
@@ -240,78 +413,91 @@ class APIStreamParser:
 
 
 def _validate_prerequisites(request: ChatCompletionRequest, config: ConfigManager):
-    """Validates all required models and configurations before initiating the pipeline."""
-
-    # 1. Validate Main LLM Configuration (修改为支持 API 传入的 provider_id)
     provider_id = request.provider_id or config.user_settings.get("chat_llm_id")
     llm_configs = config.load_llm_configs()
     main_config = next((c for c in llm_configs if c.get("id") == provider_id), None)
-
     if not main_config:
-        raise OpenAIException(f"Main Model Provider '{provider_id}' not found.", status_code=400,
-                              error_type="invalid_request_error")
-
-    # 2. Validate RAG and Hardware Models if KB is requested
+        raise OpenAIException(f"Main Model Provider '{provider_id}' not found.", status_code=400, error_type="invalid_request_error")
     if request.kb_id and request.kb_id != "none":
         kb_info = KBManager().get_kb_by_id(request.kb_id)
         if not kb_info:
-            raise OpenAIException(f"Knowledge Base '{request.kb_id}' not found or deleted.", status_code=404,
-                                  error_type="invalid_request_error")
-
+            raise OpenAIException(f"Knowledge Base '{request.kb_id}' not found or deleted.", status_code=404, error_type="invalid_request_error")
         user_device = config.user_settings.get("inference_device", "Auto")
         target_device = DeviceManager().parse_device_string(user_device)
-
-        # Check Embedding Model Capability
         model_id = kb_info.get('model_id', 'embed_auto')
         conf = get_model_conf(model_id, "embedding")
         if not conf or conf.get('is_auto'):
             model_id = resolve_auto_model("embedding", target_device)
-
         if not check_model_exists(model_id):
-            raise OpenAIException(
-                f"Required Embedding model '{model_id}' for this KB is missing. Please download it via Settings.",
-                status_code=500,
-                error_type="model_missing_error"
-            )
-
-        # Check Reranker Model Capability
+            raise OpenAIException(f"Required Embedding model '{model_id}' for this KB is missing.", status_code=500, error_type="model_missing_error")
         rerank_id = config.user_settings.get("rerank_model_id", "rerank_auto")
         conf_rerank = get_model_conf(rerank_id, "reranking")
         if not conf_rerank or conf_rerank.get('is_auto'):
             rerank_id = resolve_auto_model("reranking", target_device)
-
         if not check_model_exists(rerank_id):
-            raise OpenAIException(
-                f"Required Reranker model '{rerank_id}' is missing. Hardware inference requires this model. Please download it via Settings.",
-                status_code=500,
-                error_type="model_missing_error"
-            )
+            raise OpenAIException(f"Required Reranker model '{rerank_id}' is missing.", status_code=500, error_type="model_missing_error")
 
 
 # ==========================================
 # Endpoints
 # ==========================================
-@app.post("/v1/chat/completions")
-async def chat_completions(body: ChatCompletionRequest):
-    """
-    OpenAI-compatible chat endpoint meticulously synchronized with ChatTool's internal logic.
-    It replicates the exact parameter construction, model verification, and task dispatching
-    found in `ChatTool.process_send` and `ChatTool.start_ai_response`.
-    """
-    config_mgr = ConfigManager()
 
-    # 1. Replicate Model Selection Logic (Mirroring ModelSelectorWidget)
+@app.post(
+    "/v1/chat/completions",
+    tags=["Chat"],
+    summary="Create chat completion",
+    description=(
+        "OpenAI-compatible chat completion endpoint. "
+        "Supports both streaming (SSE) and non-streaming modes. "
+        "Extends the standard schema with Scholar Navis parameters for "
+        "knowledge-base RAG, MCP tool routing, and automatic translation."
+    ),
+    responses={
+        200: {
+            "description": "Successful completion",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": "chatcmpl-abc123",
+                        "object": "chat.completion",
+                        "created": 1700000000,
+                        "model": "gpt-4o",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Quantum entanglement is...",
+                                    "cited_sources": [],
+                                    "follow_ups": []
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 42, "completion_tokens": 128, "total_tokens": 170}
+                    }
+                }
+            },
+        },
+        401: {"description": "Authentication failed (invalid or missing API key)"},
+        404: {"description": "Requested model provider or knowledge base not found"},
+        500: {"description": "Required model missing or internal server error"},
+    },
+)
+async def chat_completions(
+    body: ChatCompletionRequest,
+    api_key: str = Depends(verify_api_key),
+):
+    config_mgr = ConfigManager()
     provider_id = body.provider_id or config_mgr.user_settings.get("chat_llm_id")
     llm_configs = config_mgr.load_llm_configs()
     main_config = next((c.copy() for c in llm_configs if c.get("id") == provider_id), None)
 
     if not main_config:
-        raise OpenAIException(f"Main Model Provider '{provider_id}' not found. Please verify Global Settings.",
-                              status_code=404)
+        raise OpenAIException(f"Main Model Provider '{provider_id}' not found.", status_code=404)
     if body.model and body.model != "default":
         main_config["model_name"] = body.model
 
-    # 2. Replicate Translation Logic (Mirroring TransSelectorWidget & detect_primary_language)
     from src.core.lang_detect import detect_primary_language
 
     trans_provider_id = body.trans_provider_id or config_mgr.user_settings.get("chat_trans_llm_id")
@@ -328,7 +514,6 @@ async def chat_completions(body: ChatCompletionRequest):
     else:
         requires_translation = (not is_english) and (trans_config is not None)
 
-    # 3. Replicate MCP Tagging Logic (Mirroring _show_filter_menu & get_selected_tags)
     use_mcp_tools = body.use_mcp
     selected_mcp_tags = body.mcp_tags
     if use_mcp_tools and selected_mcp_tags is None:
@@ -336,34 +521,32 @@ async def chat_completions(body: ChatCompletionRequest):
         deselected_tags = config_mgr.mcp_servers.get("deselected_mcp_tags", [])
         selected_mcp_tags = [t for t in available_tags if t not in deselected_tags]
 
-    # 4. Replicate Task Initialization (Mirroring ChatTool.chat_task_mgr.start_task)
-    q = queue.Queue()
+    task_queue = queue.Queue()
     task_kwargs = {
         "main_config": main_config,
         "trans_config": trans_config,
         "messages": messages_dict,
         "kb_id": body.kb_id,
         "requires_translation": requires_translation,
-        "external_context": [],  # Real-time attachment parsing is bypassed in API mode
+        "external_context": [],
         "use_mcp": use_mcp_tools,
         "selected_mcp_tags": selected_mcp_tags
     }
 
     task_id = f"api-{uuid.uuid4().hex[:8]}"
-    worker = ChatGenerationTask(task_id, q, task_kwargs)
+    worker = ChatGenerationTask(task_id, task_queue, task_kwargs)
     threading.Thread(target=worker.run, daemon=True).start()
 
     def generate():
         created_time = int(time.time())
         parser = APIStreamParser()
-
         while True:
             try:
-                msg_data = q.get(timeout=180)
+                msg_data = task_queue.get(timeout=180)
                 state = msg_data.get("state")
                 msg_type = msg_data.get("type")
-
                 event_payload = msg_data.get("payload")
+
                 if isinstance(event_payload, dict) and event_payload.get("event") == "translated":
                     translated_text = event_payload.get("text")
                     if body.stream:
@@ -372,8 +555,7 @@ async def chat_completions(body: ChatCompletionRequest):
                             "object": "chat.completion.chunk",
                             "created": created_time,
                             "model": main_config.get("model_name", body.model),
-                            "choices": [
-                                {"index": 0, "delta": {"translated_query": translated_text}, "finish_reason": None}]
+                            "choices": [{"index": 0, "delta": {"translated_query": translated_text}, "finish_reason": None}]
                         }
                         yield f"data: {json.dumps(trans_chunk, ensure_ascii=False)}\n\n"
                     continue
@@ -382,10 +564,8 @@ async def chat_completions(body: ChatCompletionRequest):
                     if not body.stream:
                         raw_payload = msg_data.get("payload", "")
                         final_clean = _clean_ui_token(raw_payload)
-
                         temp_parser = APIStreamParser()
                         temp_parser.parse_token(final_clean)
-
                         response_dict = {
                             "id": f"chatcmpl-{uuid.uuid4()}",
                             "object": "chat.completion",
@@ -403,16 +583,10 @@ async def chat_completions(body: ChatCompletionRequest):
                             }],
                             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                         }
-
-                        if translated_text:
-                            response_dict["choices"][0]["message"]["translated_query"] = translated_text
-
                         yield json.dumps(response_dict)
                     else:
-                        # Flush buffered metadata as a discrete JSON chunk before stream termination
                         sources = parser.extract_cited_sources()
                         follow_ups = parser.extract_follow_ups()
-
                         if sources or follow_ups:
                             final_chunk = {
                                 "id": f"chatcmpl-{uuid.uuid4()}",
@@ -425,26 +599,22 @@ async def chat_completions(body: ChatCompletionRequest):
                                 final_chunk["choices"][0]["delta"]["cited_sources"] = sources
                             if follow_ups:
                                 final_chunk["choices"][0]["delta"]["follow_ups"] = follow_ups
-
                             yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
                     break
 
                 if state == TaskState.FAILED.value:
                     err_msg = msg_data.get("msg", "Internal Task Error")
-                    # Translating UI Toast errors to API JSON errors
                     if body.stream:
                         yield f"data: {json.dumps({'error': err_msg})}\n\n"
                     else:
                         yield json.dumps({"error": err_msg})
                     break
 
-                # --- Replicate Token Updates (Mirroring update_ai_bubble) ---
                 if msg_type == "state" and msg_data.get("progress") == -1:
                     token = msg_data.get("msg", "")
-                    if not token: continue
-
+                    if not token:
+                        continue
                     reasoning_chunk, content_chunk = parser.parse_token(token)
-
                     if body.stream:
                         chunk_dict = {
                             "id": f"chatcmpl-{uuid.uuid4()}",
@@ -453,7 +623,6 @@ async def chat_completions(body: ChatCompletionRequest):
                             "model": main_config.get("model_name", body.model),
                             "choices": [{"index": 0, "delta": {}, "finish_reason": None}]
                         }
-
                         has_data = False
                         if reasoning_chunk:
                             chunk_dict["choices"][0]["delta"]["reasoning_content"] = reasoning_chunk
@@ -461,7 +630,6 @@ async def chat_completions(body: ChatCompletionRequest):
                         if content_chunk:
                             chunk_dict["choices"][0]["delta"]["content"] = content_chunk
                             has_data = True
-
                         if has_data:
                             yield f"data: {json.dumps(chunk_dict, ensure_ascii=False)}\n\n"
 
@@ -481,61 +649,62 @@ async def chat_completions(body: ChatCompletionRequest):
         final_output = "".join(list(generate()))
         try:
             return JSONResponse(content=json.loads(final_output))
-        except:
-            return JSONResponse(content={"error": "Failed to parse model response", "raw": final_output},
-                                status_code=500)
+        except Exception:
+            return JSONResponse(content={"error": "Failed to parse model response", "raw": final_output}, status_code=500)
 
-@app.get("/api/state")
+
+@app.get(
+    "/api/state",
+    response_model=SystemStateResponse,
+    tags=["System"],
+    summary="Get system state",
+    description="Returns current device, MCP tool count, and knowledge-base count.",
+)
 def get_system_state():
-    """Endpoint for scripts to read current UI state and capabilities"""
     return {
         "active_device": ConfigManager().user_settings.get("inference_device", "auto"),
         "mcp_tools": len(MCPManager.get_instance().get_all_tools_schema()),
-        "kbs": len(KBManager().get_all_kbs())
+        "kbs": len(KBManager().get_all_kbs()),
     }
 
 
-# --- New Configuration and State Endpoints ---
-
-@app.post("/v1/models")
-def list_models(payload: dict = Body(...)):
-    """
-    Retrieves the list of available models for a specified provider,
-    compliant with the OpenAI API specification.
-    """
-    provider_id = payload.get("provider")
+@app.post(
+    "/v1/models",
+    response_model=ModelListResponse,
+    tags=["Models & Providers"],
+    summary="List models for a provider",
+    description="Returns available models for the specified LLM provider, OpenAI-compatible.",
+)
+def list_models(payload: ModelListPayload = Body(...)):
+    provider_id = payload.provider
     config = ConfigManager()
     llm_configs = config.load_llm_configs()
-
-    # Locate the configuration corresponding to the requested provider
     target_conf = next((c for c in llm_configs if c.get("id") == provider_id), {})
-
     models = target_conf.get("fetched_models", [])
     if target_conf.get("model_name") and target_conf.get("model_name") not in models:
         models.insert(0, target_conf.get("model_name"))
-
     data = []
     for m in models:
         data.append({
             "id": m,
             "object": "model",
             "created": int(time.time()),
-            "owned_by": target_conf.get("name", "custom")
+            "owned_by": target_conf.get("name", "custom"),
         })
-
     return {"object": "list", "data": data}
 
 
-@app.get("/api/providers")
+@app.get(
+    "/api/providers",
+    response_model=ProviderListResponse,
+    tags=["Models & Providers"],
+    summary="List all LLM providers",
+    description="Returns all configured providers with their models and active status.",
+)
 def list_all_providers():
-    """
-    Retrieves a comprehensive inventory of all configured LLM providers
-    and their associated model arrays.
-    """
     config = ConfigManager()
     configs = config.load_llm_configs()
     active_id = config.user_settings.get("active_llm_id", "openai")
-
     result = []
     for c in configs:
         result.append({
@@ -543,40 +712,44 @@ def list_all_providers():
             "name": c.get("name"),
             "is_active": c.get("id") == active_id,
             "models": c.get("fetched_models", []),
-            "current_model": c.get("model_name", "")
+            "current_model": c.get("model_name", ""),
         })
     return {"providers": result}
 
 
-@app.get("/api/mcp/tools")
+@app.get(
+    "/api/mcp/tools",
+    response_model=MCPToolListResponse,
+    tags=["MCP Tools"],
+    summary="List MCP tools and tags",
+    description="Returns all registered MCP tool schemas and available filtering tags.",
+)
 def list_mcp_tools():
-    """
-    Exposes the available Model Context Protocol (MCP) tools schema
-    and dynamic operational tags for client-side tool routing and filtering.
-    """
     mcp_mgr = MCPManager.get_instance()
     mcp_mgr.bootstrap_servers(force_all=False)
-
     tools = mcp_mgr.get_all_tools_schema()
-
     tags = mcp_mgr.get_available_tags()
-
     return {
         "available_tags": tags,
         "tools_count": len(tools),
-        "tools": tools
+        "tools": tools,
     }
 
-@app.post("/api/mcp/filter")
+
+@app.post(
+    "/api/mcp/filter",
+    response_model=MCPFilterResponse,
+    tags=["MCP Tools"],
+    summary="Semantic MCP tool filter",
+    description=(
+        "Ranks and filters MCP tools based on a natural-language query using a reranker model. "
+        "Supports optional tag pre-filtering and conversation history context."
+    ),
+)
 def semantic_filter_mcp_tools(payload: MCPFilterRequest):
-    """
-    Filters MCP tools dynamically based on user intent utilizing a Reranker model.
-    This provides advanced contextual routing identical to the GUI's RAG pipeline.
-    """
     mcp_mgr = MCPManager.get_instance()
     mcp_mgr.bootstrap_servers(force_all=False)
 
-    # 1. Apply preliminary tag-based filtering if specified
     if payload.mcp_tags is not None:
         raw_tools = mcp_mgr.get_tools_schema_by_tags(payload.mcp_tags)
     else:
@@ -585,35 +758,28 @@ def semantic_filter_mcp_tools(payload: MCPFilterRequest):
     if not raw_tools or len(raw_tools) <= payload.top_k:
         return {"filtered_tools": raw_tools, "status": "bypassed_insufficient_tools"}
 
-    # 2. Construct document representations for the Reranker
     candidate_docs = []
     for tool in raw_tools:
         func = tool.get("function", {})
         content = f"Tool Name: {func.get('name', '')}. Description: {func.get('description', '')}"
-        candidate_docs.append({
-            "content": content,
-            "metadata": {"tool_schema": tool}
-        })
+        candidate_docs.append({"content": content, "metadata": {"tool_schema": tool}})
 
     context_str = f" Previous Context: {payload.history_context}" if payload.history_context else ""
     rerank_query = f"User Intent: {payload.query}.{context_str} Find the most appropriate API tools to fulfill this request."
 
-    # 3. Dispatch the isolated multiprocessing task
-    queue = mp.Queue()
+    mp_queue = mp.Queue()
     worker = RunnerProcess(
-        RerankTask, "api_rerank_sync", queue,
+        RerankTask, "api_rerank_sync", mp_queue,
         {"query": rerank_query, "docs": candidate_docs, "domain": "Tool Selection", "top_k": payload.top_k}
     )
     worker.start()
 
     ranked = None
     error_msg = None
-
     while True:
         try:
-            data = queue.get(timeout=0.2)
+            data = mp_queue.get(timeout=0.2)
             state = data.get("state")
-
             if state == TaskState.SUCCESS.value:
                 ranked = data.get("payload") or candidate_docs[:payload.top_k]
                 break
@@ -629,9 +795,8 @@ def semantic_filter_mcp_tools(payload: MCPFilterRequest):
                 error_msg = str(e)
                 break
 
-    # 4. Handle degradation or successful extraction
     if error_msg:
-        logger.warning(f"API Tool reranking failed: {error_msg}. Silently degrading to full toolset.")
+        logger.warning(f"API Tool reranking failed: {error_msg}. Falling back to full toolset.")
         return {"filtered_tools": raw_tools, "status": "degraded_error", "error": error_msg}
 
     best_tools = [doc["metadata"]["tool_schema"] for doc in ranked]
@@ -639,18 +804,20 @@ def semantic_filter_mcp_tools(payload: MCPFilterRequest):
         "status": "success",
         "original_count": len(raw_tools),
         "filtered_count": len(best_tools),
-        "filtered_tools": best_tools
+        "filtered_tools": best_tools,
     }
 
-@app.get("/api/kbs")
+
+@app.get(
+    "/api/kbs",
+    response_model=KBListResponse,
+    tags=["Knowledge Bases"],
+    summary="List knowledge bases",
+    description="Returns all indexed, ready-to-use knowledge bases for RAG.",
+)
 def list_knowledge_bases():
-    """
-    Retrieves the indexed vector databases (Knowledge Bases) currently
-    available for Retrieval-Augmented Generation (RAG).
-    """
     kb_manager = KBManager()
     kbs = kb_manager.get_all_kbs()
-
     result = []
     for kb in kbs:
         if kb.get('status') == 'ready':
@@ -658,7 +825,7 @@ def list_knowledge_bases():
                 "id": kb.get("id"),
                 "name": kb.get("name"),
                 "domain": kb.get("domain", "General Academic"),
-                "doc_count": kb.get("doc_count", 0)
+                "doc_count": kb.get("doc_count", 0),
             })
     return {"knowledge_bases": result}
 
@@ -669,18 +836,14 @@ def list_knowledge_bases():
 def run_server():
     config_mgr = ConfigManager()
     host = config_mgr.user_settings.get("api_server_host", "127.0.0.1")
-
     try:
         port = int(config_mgr.user_settings.get("api_server_port", 8000))
     except (ValueError, TypeError):
         port = 8000
-
     api_key = config_mgr.user_settings.get("api_server_key", "").strip()
-
     logger.info(f"Starting Standalone API Server on {host}:{port}")
     if api_key:
-        logger.info("API Key authentication is ENABLED. Requests must include the Bearer token.")
+        logger.info("API Key authentication is ENABLED.")
     else:
-        logger.warning("API Key authentication is DISABLED (No key set in Global Settings).")
-
+        logger.warning("API Key authentication is DISABLED.")
     uvicorn.run(app, host=host, port=port, log_level="warning")
