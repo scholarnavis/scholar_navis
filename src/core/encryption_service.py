@@ -97,8 +97,9 @@ class SystemEncryptionService:
             new_key = os.urandom(32)
 
             if SYSTEM == "Windows" and win32crypt:
-                # Protect using DPAPI
                 final_blob = win32crypt.CryptProtectData(new_key, "ScholarNavis Key", None, None, None, 0)
+            elif SYSTEM == "Darwin":
+                final_blob = new_key
             else:
                 final_blob = new_key
 

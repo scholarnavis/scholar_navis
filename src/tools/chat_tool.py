@@ -628,6 +628,9 @@ class ChatInputContainer(QFrame):
         while True:
             if getattr(self, '_is_cancelled', False):
                 worker.terminate()
+                worker.join(timeout=0.5)
+                queue.close()
+                queue.cancel_join_thread()
                 break
             try:
                 data = queue.get(timeout=0.2)
@@ -1531,19 +1534,26 @@ class ChatTool(BaseTool):
 
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
 
-        self.chat_task_mgr.start_task(
-            ChatGenerationTask,
-            task_id="chat_generation",
-            mode=TaskMode.THREAD,
-            main_config=main_config,
-            trans_config=trans_config,
-            messages=list(self.history),
-            kb_id=kb_id,
-            requires_translation=requires_translation,
-            external_context=getattr(self, 'external_chunks', []),
-            use_mcp=use_mcp_tools,
-            selected_mcp_tags=selected_mcp_tags
-        )
+        current_external_chunks = getattr(self, 'external_chunks', [])
+
+        QApplication.processEvents()
+
+        def _launch_task():
+            self.chat_task_mgr.start_task(
+                ChatGenerationTask,
+                task_id="chat_generation",
+                mode=TaskMode.THREAD,
+                main_config=main_config,
+                trans_config=trans_config,
+                messages=list(self.history),
+                kb_id=kb_id,
+                requires_translation=requires_translation,
+                external_context=current_external_chunks,
+                use_mcp=use_mcp_tools,
+                selected_mcp_tags=selected_mcp_tags
+            )
+
+        QTimer.singleShot(100, _launch_task)
 
         self.external_chunks = []
         self.external_context_html = ""

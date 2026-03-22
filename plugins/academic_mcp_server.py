@@ -564,7 +564,7 @@ def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", ma
 )
 @simple_retry()
 def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein"] = "nuccore") -> str:
-    logger.info(f"Task: FASTA Download | ID: {accession_id} | DB: {db_type}")
+    logger.info(f"Task: Sequence Fetch | ID: {accession_id} | DB: {db_type}")
 
     if not is_ncbi_enabled():
         return json.dumps({"status": "error", "message": "NCBI tools are disabled..."})
@@ -690,14 +690,14 @@ def search_gbif_occurrences(scientific_name: str, limit: int = 5) -> str:
 @mcp.tool(
     name="universal_ncbi_summary",
     description=(
-            "A universal search tool for ANY NCBI database. "
-            "Use this to query specialized NCBI databases like 'gene', 'protein', 'nuccore', 'clinvar', 'omim', 'biosample', etc. "
-            "It returns structured metadata and summary records. "
-            "CRITICAL WARNING: 'database' MUST be a valid, exact NCBI database name in lowercase (e.g., 'gene', not 'Gene')."
+            "A universal search tool for specialized NCBI databases. "
+            "Returns structured metadata and summary records. "
+            "CRITICAL WARNING: The 'database' MUST be one of the explicitly defined literals (all lowercase). "
+            "For example, use 'nuccore' for nucleotide sequences, 'assembly' for genomes, and 'gene' for specific gene records."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def universal_ncbi_summary(database: str, query: str, max_results: int = 3) -> str:
+def universal_ncbi_summary(query: str, database: Literal["gene", "protein", "nuccore", "clinvar", "omim", "biosample", "taxonomy", "assembly", "sra"] = "gene", max_results: int = 3) -> str:
     logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query}")
 
     if not is_ncbi_enabled():
@@ -805,20 +805,27 @@ def search_web(query: str, engine: Literal["duckduckgo", "google", "bing", "baid
         safe_query = urllib.parse.quote(query)
 
         if engine == "duckduckgo":
-            url = "https://lite.duckduckgo.com/lite/"
-            data = {"q": query, "kl": "wt-wt"}
-            headers.update({"Origin": "https://lite.duckduckgo.com", "Referer": "https://lite.duckduckgo.com/",
+            # 使用 DuckDuckGo HTML 端点替代 Lite 端点以绕过部分限制
+            url = "https://html.duckduckgo.com/html/"
+            data = {"q": query}
+            headers.update({"Origin": "https://html.duckduckgo.com", "Referer": "https://html.duckduckgo.com/",
                             "Content-Type": "application/x-www-form-urlencoded"})
             res = mcp_request("POST", url, data=data, headers=headers, timeout=10)
             res.raise_for_status()
             soup = BeautifulSoup(res.text, 'html.parser')
-            for a in soup.find_all('a', class_='result-url'):
+
+            # 更新针对 HTML 端点的 CSS 类名解析逻辑
+            for div in soup.find_all('div', class_=re.compile(r'result ')):
                 if len(results) >= max_results: break
-                title = a.get_text(strip=True)
+                a = div.find('a', class_='result__url')
+                if not a: continue
+
+                title_elem = div.find('h2', class_='result__title')
+                title = title_elem.get_text(strip=True) if title_elem else a.get_text(strip=True)
                 link = a.get('href', '')
-                tr = a.find_parent('tr')
-                snippet_td = tr.find_next_sibling('tr', class_='result-snippet') if tr else None
-                snippet = snippet_td.get_text(separator=" ", strip=True) if snippet_td else "No abstract."
+                snippet_div = div.find('a', class_='result__snippet')
+                snippet = snippet_div.get_text(separator=" ", strip=True) if snippet_div else "No abstract."
+
                 if link and not link.startswith(('/', 'duckduckgo.com')):
                     results.append(
                         {"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
@@ -973,210 +980,80 @@ def search_github_repos(query: str, max_results: int = 5) -> str:
 
 
 @mcp.tool(
-    name="fetch_ensembl_gene",
+    name="query_kegg_database",
     description=(
-            "[Tags: Genomics, Systems Biology] Lookup a gene in Ensembl to get its location, biotype, and description. "
-            "CRITICAL WARNING: The default species is 'arabidopsis_thaliana'. If querying other species, "
-            "you MUST explicitly provide the correct species name (e.g., 'homo_sapiens', 'mus_musculus', 'oryza_sativa'). "
-            "The 'symbol' MUST be a canonical gene symbol (e.g., 'BRCA1', 'Trp53'). "
-            "Do NOT use NCBI RefSeq accessions (like 'NM_100001.5')."
+            "[Tags: Function, Systems Biology] A unified tool to search and fetch records from the KEGG database. "
+            "The 'action' parameter strictly defines the tool's behavior:\n"
+            " - 'search_pathway': Searches for pathway maps using a keyword (e.g., 'glycolysis'). You MUST provide an exact 3-4 letter 'organism_code' (e.g., 'ath' for Arabidopsis, 'hsa' for Human).\n"
+            " - 'get_record': Fetches detailed structural metadata for a specific KEGG identifier (e.g., a KO number like 'K01803' or a pathway map like 'map00010').\n"
+            "CRITICAL: The 'query' parameter acts as the keyword for 'search_pathway', but acts as the precise KEGG ID for 'get_record'."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def fetch_ensembl_gene(symbol: str, species: str = "arabidopsis_thaliana") -> str:
-    # 自动清洗大模型可能传入的错误物种格式 (如 "Homo Sapiens" -> "homo_sapiens")
-    safe_species = species.strip().lower().replace(" ", "_")
-    logger.info(f"Task: Ensembl Gene Fetch | Symbol: '{symbol}' | Species: '{safe_species}'")
+def query_kegg_database(query: str, action: Literal["search_pathway", "get_record"] = "search_pathway",
+                        organism_code: str = "ath") -> str:
+    logger.info(f"Task: KEGG Query | Action: '{action}' | Query: '{query}' | Organism: '{organism_code}'")
+    safe_query = urllib.parse.quote(query.strip())
 
     try:
-        url = f"https://rest.ensembl.org/lookup/symbol/{safe_species}/{symbol}?expand=1"
-        res = mcp_request("GET", url, headers={"Content-Type": "application/json"}, timeout=15)
+        if action == "search_pathway":
+            safe_org_code = organism_code.strip().lower()
+            url = f"https://rest.kegg.jp/find/pathway/{safe_query}"
+            res = mcp_request("GET", url, timeout=15)
 
-        if res.status_code == 400:
-            return json.dumps({
-                "status": "error",
-                "message": f"HTTP 400: Gene '{symbol}' not found in '{safe_species}'. "
-                           f"Ensembl requires EXACT canonical symbols (e.g., 'Trp53' instead of 'Tp53' for mice) "
-                           f"and strict lowercase_underscore species names. Ensure the species exists in Ensembl."
-            })
-        res.raise_for_status()
+            if res.status_code == 400 or not res.text.strip():
+                return json.dumps({"status": "success",
+                                   "message": f"0 results found for '{query}'. Verify if organism code '{safe_org_code}' is correct."})
+            res.raise_for_status()
 
-        data = res.json()
+            results = []
+            for line in res.text.strip().split('\n'):
+                if not line: continue
+                parts = line.split('\t', 1)
+                if len(parts) == 2 and (
+                        parts[0].startswith(f"path:{safe_org_code}") or parts[0].startswith("path:map")):
+                    results.append({"pathway_id": parts[0], "description": parts[1]})
 
-        synonyms = data.get("synonyms", [])
-        synonyms_str = ", ".join(synonyms) if synonyms else "None"
-
-        result = {
-            "id": data.get("id"),
-            "display_name": data.get("display_name"),
-            "synonyms": synonyms_str,
-            "species": data.get("species"),
-            "biotype": data.get("biotype"),
-            "description": data.get("description"),
-            "assembly_name": data.get("assembly_name"),
-            "location": f"{data.get('seq_region_name')}:{data.get('start')}-{data.get('end')} ({'forward' if data.get('strand') == 1 else 'reverse'})",
-            "transcript_count": len(data.get("Transcript", [])),
-            "url": f"https://plants.ensembl.org/{safe_species}/Gene/Summary?g={data.get('id')}"
-        }
-        return json.dumps({"status": "success", "results": [result]}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool(
-    name="fetch_ensembl_homologs",
-    description=(
-            "[Tags: Genomics] Fetch homologous genes (orthologs) across different species using the Ensembl REST API. "
-            "CRITICAL: 'species' is the source species (e.g., 'arabidopsis_thaliana'). 'symbol' is the gene symbol (e.g., 'FT', 'sh4'). "
-            "Provide 'target_species' (e.g., 'oryza_sativa', 'homo_sapiens', 'zea_mays') to explicitly filter results. "
-            "Extremely useful for finding equivalent genes in other organisms."
-    )
-)
-@simple_retry(max_attempts=2, delay=1)
-def fetch_ensembl_homologs(symbol: str, species: str = "arabidopsis_thaliana",
-                           target_species: str = "oryza_sativa") -> str:
-    logger.info(f"Task: Ensembl Homology Fetch | Symbol: '{symbol}' | From: '{species}' | To: '{target_species}'")
-    try:
-        safe_species = species.strip().lower().replace(" ", "_")
-        safe_target = target_species.strip().lower().replace(" ", "_")
-
-        url = f"https://rest.ensembl.org/homology/symbol/{safe_species}/{symbol}?target_species={safe_target}&sequence=none"
-        headers = {"Content-Type": "application/json"}
-
-        res = mcp_request("GET", url, headers=headers, timeout=15)
-
-        if res.status_code == 400:
             return json.dumps(
-                {"status": "error", "message": f"HTTP 400: Gene '{symbol}' not found in '{safe_species}'."})
-        res.raise_for_status()
+                {"status": "success", "action": "search_pathway", "organism": safe_org_code, "results": results[:10]},
+                ensure_ascii=False)
 
-        data = res.json()
-        results = []
+        elif action == "get_record":
+            url = f"https://rest.kegg.jp/get/{safe_query}"
+            res = mcp_request("GET", url, timeout=15)
 
-        for item in data.get("data", []):
-            for h in item.get("homologies", []):
-                target = h.get("target", {})
-                results.append({
-                    "homology_type": h.get("type", ""),
-                    "target_species": target.get("species", ""),
-                    "target_gene_id": target.get("id", ""),
-                    "target_protein_id": target.get("protein_id", ""),
-                    "query_identity_percent": h.get("source", {}).get("perc_id", 0),
-                    "target_identity_percent": target.get("perc_id", 0)
-                })
+            if res.status_code in [400, 404] or not res.text.strip():
+                return json.dumps(
+                    {"status": "error", "message": f"KEGG record '{query}' not found. Ensure valid identifier."})
+            res.raise_for_status()
 
-        if not results:
-            return json.dumps({"status": "success", "message": f"No orthologs found for {symbol} in {target_species}."})
+            parsed_data = {}
+            current_key = None
+            for line in res.text.split("\n"):
+                if not line: continue
+                if not line.startswith(" "):
+                    current_key = line[:12].strip()
+                    parsed_data[current_key] = [line[12:].strip()]
+                elif current_key:
+                    parsed_data[current_key].append(line[12:].strip())
 
-        # 按相似度降序排列，取前 10 个最相关的同源基因
-        results = sorted(results, key=lambda x: x["target_identity_percent"], reverse=True)[:10]
+            summary = {
+                "identifier": query.strip(),
+                "name": ", ".join(parsed_data.get("NAME", [])),
+                "definition": " ".join(parsed_data.get("DEFINITION", [])),
+                "pathways": parsed_data.get("PATHWAY", []),
+                "genes": parsed_data.get("GENES", [])[:5]
+            }
+            return json.dumps({"status": "success", "action": "get_record", "record": summary}, ensure_ascii=False)
 
-        return json.dumps({
-            "status": "success",
-            "source_gene": symbol,
-            "source_species": safe_species,
-            "homologs": results
-        }, ensure_ascii=False)
+        else:
+            return json.dumps(
+                {"status": "error", "message": "Invalid action. Must be 'search_pathway' or 'get_record'."})
 
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-
-@mcp.tool(
-    name="search_kegg_pathway",
-    description=(
-            "[Tags: Function, Systems Biology] Search KEGG database for pathways. "
-            "CRITICAL WARNING: The default 'organism_code' is 'ath' (Arabidopsis thaliana). "
-            "For other species, you MUST change it to the exact 3-4 letter KEGG code! "
-            "Examples: 'hsa' (Human), 'mmu' (Mouse), 'dosa' (Oryza sativa/Rice), 'sly' (Tomato), or 'map' (Global reference). "
-            "Note: KEGG only contains strict biochemical pathways (e.g., 'glycolysis', 'MAPK'), not broad terms like 'drought stress'."
-    )
-)
-@simple_retry(max_attempts=2, delay=1)
-def search_kegg_pathway(query: str, organism_code: str = "ath") -> str:
-    safe_org_code = organism_code.strip().lower()
-    logger.info(f"Task: KEGG Pathway Search | Query: '{query}' | Organism: '{safe_org_code}'")
-
-    try:
-        safe_query = urllib.parse.quote(query.strip())
-        url = f"https://rest.kegg.jp/find/pathway/{safe_query}"
-        res = mcp_request("GET", url, timeout=15)
-
-        if res.status_code == 400 or not res.text.strip():
-            return json.dumps({
-                "status": "success",
-                "message": f"0 results found for '{query}'. KEGG database only maps specific biochemical pathways. "
-                           f"Also, verify if you used the correct organism code (you used: '{safe_org_code}')."
-            }, ensure_ascii=False)
-
-        res.raise_for_status()
-
-        results = []
-        for line in res.text.strip().split('\n'):
-            if not line: continue
-            parts = line.split('\t', 1)
-            # 严格匹配当前生物体前缀或全局 map 前缀
-            if len(parts) == 2 and (parts[0].startswith(f"path:{safe_org_code}") or parts[0].startswith("path:map")):
-                results.append({"pathway_id": parts[0], "description": parts[1]})
-
-        if not results:
-            return json.dumps({
-                "status": "success",
-                "message": f"Results found for '{query}' globally, but NONE specific to organism '{safe_org_code}'. "
-                           f"Are you sure you used the correct 3-4 letter KEGG code?"
-            })
-
-        return json.dumps({"status": "success", "organism": safe_org_code, "results": results[:10]}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool(
-    name="query_kegg_record",
-    description=(
-            "[Tags: Function, Systems Biology] Fetch detailed database records for a specific KEGG identifier. "
-            "CRITICAL: Use this to parse exact metadata for a KEGG Orthology (KO) number (e.g., 'K01803') or a pathway map (e.g., 'map00010'). "
-            "Returns orthologous group definitions, EC numbers, and linked pathways."
-    )
-)
-@simple_retry(max_attempts=2, delay=1)
-def query_kegg_record(kegg_id: str) -> str:
-    safe_id = kegg_id.strip()
-    logger.info(f"Task: KEGG Record Fetch | ID: '{safe_id}'")
-    try:
-        url = f"https://rest.kegg.jp/get/{urllib.parse.quote(safe_id)}"
-        res = mcp_request("GET", url, timeout=15)
-
-        if res.status_code in [400, 404] or not res.text.strip():
-            return json.dumps({
-                "status": "error",
-                "message": f"KEGG record '{safe_id}' not found. Ensure you are using a valid identifier (e.g., K01803)."
-            })
-        res.raise_for_status()
-
-        parsed_data = {}
-        current_key = None
-        for line in res.text.split("\n"):
-            if not line: continue
-            if not line.startswith(" "):
-                current_key = line[:12].strip()
-                parsed_data[current_key] = [line[12:].strip()]
-            elif current_key:
-                parsed_data[current_key].append(line[12:].strip())
-
-        summary = {
-            "identifier": safe_id,
-            "name": ", ".join(parsed_data.get("NAME", [])),
-            "definition": " ".join(parsed_data.get("DEFINITION", [])),
-            "pathways": [p for p in parsed_data.get("PATHWAY", [])] if "PATHWAY" in parsed_data else [],
-            "modules": [m for m in parsed_data.get("MODULE", [])] if "MODULE" in parsed_data else [],
-            "genes": [g for g in parsed_data.get("GENES", [])][:5]  # Limit gene output to prevent token overflow
-        }
-
-        return json.dumps({"status": "success", "source": "KEGG", "record": summary}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
 
 
 @mcp.tool(
@@ -1218,47 +1095,6 @@ def fetch_go_annotations(uniprot_id: str, limit: int = 10) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="fetch_pubchem_compound",
-    description=(
-        "[Tags: Phytochemistry, Metabolomics] Fetch detailed chemical properties (Molecular Weight, Formula, SMILES, XLogP, etc.) of a molecule from PubChem. "
-        "CRITICAL: You MUST use the exact common English chemical name or IUPAC name (e.g., 'Aspirin', 'Quercetin', 'Paclitaxel'). "
-        "If the first query returns a 404, try using a widely known synonym."
-    )
-)
-@simple_retry(max_attempts=2, delay=1)
-def fetch_pubchem_compound(compound_name: str) -> str:
-    logger.info(f"Task: PubChem Compound Fetch | Name: '{compound_name}'")
-    try:
-        safe_name = urllib.parse.quote(compound_name.strip())
-
-        properties = "MolecularWeight,MolecularFormula,CanonicalSMILES,IsomericSMILES,IUPACName,XLogP,ExactMass,TPSA,Complexity,Charge,HBondDonorCount,HBondAcceptorCount"
-        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{safe_name}/property/{properties}/JSON"
-
-        res = mcp_request("GET", url, timeout=15)
-
-        if res.status_code == 404:
-            return json.dumps({"status": "error", "message": f"Compound '{compound_name}' not found."})
-
-        res.raise_for_status()
-
-        props = res.json().get("PropertyTable", {}).get("Properties", [])
-        if not props:
-            return json.dumps({"status": "error", "message": "No properties returned."})
-
-        cid = props[0].get("CID", "")
-        props[0]["url"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
-        props[0]["name"] = compound_name
-
-        return json.dumps({"status": "success", "results": [props[0]]}, ensure_ascii=False)
-
-    except Exception as e:
-        err_str = str(e)
-        if "404" in err_str:
-            return json.dumps({"status": "error", "message": f"Compound '{compound_name}' not found."})
-        return json.dumps({"status": "error", "message": err_str})
-
-
 
 @mcp.tool(
     name="search_chembl_target",
@@ -1289,7 +1125,9 @@ def search_chembl_target(query: str, max_results: int = 5) -> str:
     description=(
             "[Tags: ID Mapping] "
             "Map identifiers from one database to another using UniProt's ID Mapping service. "
-            "Common parameters: 'from_db' (e.g., 'UniProtKB_AC-ID', 'HGNC'), 'to_db' (e.g., 'Ensembl', 'PDB'), and a comma-separated list of 'ids'. Note: 'Gene_Name' is NOT a valid from_db; use 'HGNC' or 'EntrezGene' instead."
+            "CRITICAL STRING FORMATS: You MUST use exact UniProt database abbreviations for 'from_db' and 'to_db'. "
+            "Common reliable values: 'UniProtKB_AC-ID' (UniProt Accession), 'HGNC' (Human Gene), 'TAIR' (Arabidopsis), 'Ensembl_Plants', 'Ensembl', 'PDB', 'RefSeq_Protein'. "
+            "CRITICAL EXCEPTION: 'Gene_Name' is ONLY valid as a 'to_db' destination. It is completely invalid as a 'from_db' source. If starting from a gene symbol, use species-specific DBs like 'HGNC' or 'TAIR'."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
@@ -1666,73 +1504,118 @@ def query_pdb_structure(query: str, action: Literal["search", "details"] = "sear
 
 
 @mcp.tool(
-    name="query_string_database",
+    name="query_metabolite_database",
     description=(
-            "[Tags: Interaction, Systems Biology] "
-            "Use this tool ONLY when the user asks for 'protein-protein interactions' (PPI), 'protein networks', 'interacting partners', or 'functional enrichment' of a protein list. "
-            "CRITICAL: If the user provides a protein symbol (e.g., 'CRY1') but doesn't specify an organism, prioritize using 'fetch_taxonomy_info' first to get the TaxID (e.g., 9606 for Human, 3702 for Arabidopsis). "
-            "This tool is the ONLY source for calculating statistical enrichment of biological pathways for a group of genes."
+            "[Tags: Phytochemistry, Metabolomics] Fetch detailed chemical properties and ontology for biological metabolites. "
+            "Action 'pubchem' fetches molecular weight, formula, SMILES, and CID from PubChem. "
+            "Action 'chebi' searches the ChEBI database for structural ontology and exact biological roles. "
+            "CRITICAL: Use the exact common English chemical name or IUPAC name (e.g., 'Quercetin', 'Paclitaxel')."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def query_string_database(identifiers: str, action: Literal["interactions", "enrichment"] = "interactions",
-                           species: int = 9606, limit: int = 15) -> str:
-    logger.info(
-        f"Task: Unified STRING DB | Action: '{action}' | Identifiers: '{identifiers[:30]}' | Species: {species}")
+def query_metabolite_database(query: str, database: Literal["pubchem", "chebi"] = "pubchem") -> str:
+    logger.info(f"Task: Metabolite Query | Database: '{database}' | Query: '{query}'")
+    safe_query = urllib.parse.quote(query.strip())
+
     try:
-        # 喵：自动清理多余的空格，防止 STRING API 不认
-        clean_identifiers = "\r".join([x.strip() for x in identifiers.split(",") if x.strip()])
+        if database == "pubchem":
+            properties = "MolecularWeight,MolecularFormula,CanonicalSMILES,IsomericSMILES,IUPACName,ExactMass"
+            url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{safe_query}/property/{properties}/JSON"
+            res = mcp_request("GET", url, timeout=15)
+
+            if res.status_code == 404:
+                return json.dumps({"status": "error", "message": f"Compound '{query}' not found in PubChem."})
+            res.raise_for_status()
+
+            props = res.json().get("PropertyTable", {}).get("Properties", [])
+            if not props: return json.dumps({"status": "error", "message": "No properties returned."})
+
+            props[0]["url"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{props[0].get('CID', '')}"
+            return json.dumps({"status": "success", "database": "PubChem", "results": [props[0]]}, ensure_ascii=False)
+
+        elif database == "chebi":
+            ols_url = f"https://www.ebi.ac.uk/ols4/api/search?q={safe_query}&ontology=chebi&exact=false&rows=5"
+            res = mcp_request("GET", ols_url, timeout=15)
+            res.raise_for_status()
+
+            results = [{"chebi_id": item.get("obo_id", ""), "name": item.get("label", ""),
+                        "description": item.get("description", [""])[0]} for item in
+                       res.json().get("response", {}).get("docs", [])]
+
+            if not results: return json.dumps(
+                {"status": "success", "message": f"No metabolites found in ChEBI for '{query}'."})
+            return json.dumps({"status": "success", "database": "ChEBI", "results": results}, ensure_ascii=False)
+
+        else:
+            return json.dumps({"status": "error", "message": "Invalid database. Must be 'pubchem' or 'chebi'."})
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(
+    name="analyze_systems_network",
+    description=(
+            "[Tags: Interaction, Systems Biology, Enrichment] "
+            "A unified tool to analyze protein-protein interactions (PPI) or perform advanced functional enrichment. "
+            "Use action='interactions' (via STRING DB) to find interacting partners. "
+            "Use action='enrichment' (via g:Profiler) for robust GO/KEGG/Reactome pathway enrichment, highly optimized for plants and non-mammalian models. "
+            "CRITICAL: 'identifiers' must be a comma-separated list of gene symbols or IDs. "
+            "For 'interactions', 'species_id' is the NCBI TaxID (e.g., 3702 for Arabidopsis, 9606 for Human). "
+            "For 'enrichment', 'organism' MUST be a valid g:Profiler code (e.g., 'athaliana', 'osativa', 'zmaize', 'hsapiens')."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def analyze_systems_network(identifiers: str, action: Literal["interactions", "enrichment"] = "interactions",
+                            species_id: int = 3702, organism: str = "athaliana", limit: int = 15) -> str:
+    logger.info(f"Task: Systems Network | Action: '{action}' | Identifiers: '{identifiers[:30]}'...")
+    try:
+        clean_identifiers = [x.strip() for x in identifiers.split(",") if x.strip()]
 
         if action == "interactions":
             url = "https://string-db.org/api/json/interaction_partners"
-            payload = {"identifiers": clean_identifiers, "species": species, "limit": limit,
+            payload = {"identifiers": "\r".join(clean_identifiers), "species": species_id, "limit": limit,
                        "caller_identity": "ScholarNavis"}
             res = mcp_request("POST", url, data=payload, timeout=15)
 
             if res.status_code in [400, 404]:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"HTTP {res.status_code}. STRING DB failed to find interactions for '{identifiers}'. "
-                               f"Did you use the wrong species ID? You used '{species}'. For Arabidopsis thaliana, you MUST use 3702!"
-                })
-
+                return json.dumps(
+                    {"status": "error", "message": f"STRING DB failed for '{identifiers}'. Check TaxID {species_id}."})
             res.raise_for_status()
+
             results = [{"protein_A": item.get("preferredName_A", ""), "protein_B": item.get("preferredName_B", ""),
                         "score": item.get("score", 0), "annotation_A": item.get("annotation_A", ""),
                         "annotation_B": item.get("annotation_B", "")} for item in res.json()]
 
-            if not results:
-                return json.dumps(
-                    {"status": "success", "message": "No interactions found. Check identifiers and species ID."})
-
             results = sorted(results, key=lambda x: x["score"], reverse=True)
-            return json.dumps({"status": "success", "action": "interactions", "species": species, "results": results},
+            return json.dumps({"status": "success", "action": "interactions", "database": "STRING", "results": results},
                               ensure_ascii=False)
 
         elif action == "enrichment":
-            url = "https://string-db.org/api/json/enrichment"
-            payload = {"identifiers": clean_identifiers, "species": species, "caller_identity": "ScholarNavis"}
-            res = mcp_request("POST", url, data=payload, timeout=20)
-
-            if res.status_code in [404, 400]:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"HTTP {res.status_code}. Enrichment failed. You used species ID '{species}'. Ensure this is correct for your organism."
-                })
-
+            url = "https://biit.cs.ut.ee/gprofiler/api/gost/profile/"
+            payload = {
+                "organism": organism.lower(),
+                "query": clean_identifiers,
+                "sources": ["GO:BP", "GO:MF", "GO:CC", "KEGG", "REAC"],
+                "significance_threshold_method": "fdr",
+                "user_threshold": 0.05
+            }
+            res = mcp_request("POST", url, json=payload, timeout=20)
             res.raise_for_status()
-            data = res.json()
-            if not data: return json.dumps(
-                {"status": "success", "message": "No enrichment found for the provided network."})
+            data = res.json().get("result", [])
 
-            results = [{"category": item.get("category", ""), "term": item.get("term", ""),
-                        "description": item.get("description", ""), "number_of_genes": item.get("number_of_genes", 0),
-                        "fdr": item.get("fdr", 1.0)} for item in data if item.get("fdr", 1.0) <= 0.05]
+            if not data:
+                return json.dumps(
+                    {"status": "success", "message": f"No significant enrichment found for organism '{organism}'."})
 
-            results = sorted(results, key=lambda x: x["fdr"])[:limit]
+            results = [{"source": item.get("source", ""), "term_id": item.get("native", ""),
+                        "description": item.get("name", ""), "p_value": item.get("p_value", 1.0),
+                        "intersection_size": item.get("intersection_size", 0)} for item in data]
+
+            results = sorted(results, key=lambda x: x["p_value"])[:limit]
             return json.dumps(
-                {"status": "success", "action": "enrichment", "species": species, "enriched_terms": results},
-                ensure_ascii=False)
+                {"status": "success", "action": "enrichment", "database": "g:Profiler", "organism": organism,
+                 "enriched_terms": results}, ensure_ascii=False)
 
         else:
             return json.dumps({"status": "error", "message": "Invalid action. Must be 'interactions' or 'enrichment'."})
@@ -1741,16 +1624,92 @@ def query_string_database(identifiers: str, action: Literal["interactions", "enr
         return json.dumps({"status": "error", "message": str(e)})
 
 
+
+@mcp.tool(
+    name="query_plant_multiomics",
+    description=(
+            "[Tags: Transcriptomics, Genomics] Fetch deep plant-specific gene annotations and baseline expression datasets. "
+            "Action 'annotation' uses MyGene.info to aggregate deep TAIR/Phytozome/Ensembl metadata for plant genes. "
+            "Action 'expression' searches the EBI Expression Atlas for transcriptomic datasets related to the gene. "
+            "CRITICAL: 'gene_id' MUST be a canonical Gene ID or Symbol (e.g., 'AT1G01010', 'FLC', 'Os01g0101000')."
+    )
+)
+@simple_retry(max_attempts=2, delay=1)
+def query_plant_multiomics(gene_id: str, action: Literal["annotation", "expression"] = "annotation") -> str:
+    logger.info(f"Task: Plant Multiomics | Action: '{action}' | Gene: '{gene_id}'")
+    try:
+        safe_id = urllib.parse.quote(gene_id.strip())
+
+        if action == "annotation":
+            url = f"https://mygene.info/v3/query?q={safe_id}&fields=symbol,name,taxid,ensembl,tair,entrezgene,summary,go,pathway&species=all"
+            res = mcp_request("GET", url, timeout=15)
+            res.raise_for_status()
+
+            hits = res.json().get("hits", [])
+            if not hits:
+                return json.dumps({"status": "success", "message": f"No deep annotations found for '{gene_id}'."})
+
+            result = hits[0]
+            parsed_data = {
+                "query_id": gene_id,
+                "symbol": result.get("symbol", ""),
+                "name": result.get("name", ""),
+                "taxid": result.get("taxid", ""),
+                "tair_id": result.get("tair", ""),
+                "ncbi_gene_id": result.get("entrezgene", ""),
+                "summary": result.get("summary", "No summary available"),
+            }
+            return json.dumps(
+                {"status": "success", "action": "annotation", "source": "MyGene/TAIR", "results": parsed_data},
+                ensure_ascii=False)
+
+
+        elif action == "expression":
+            url = f"https://www.ebi.ac.uk/ebisearch/ws/rest/atlas-experiments?query={safe_id}&format=json&fields=name,species"
+
+            res = mcp_request("GET", url, timeout=15)
+
+            res.raise_for_status()
+
+            entries = res.json().get("entries", [])
+
+            if not entries:
+                return json.dumps(
+                    {"status": "success", "message": f"No EBI Expression Atlas datasets found for '{gene_id}'."})
+
+            results = [{"experiment_id": item.get("id", ""),
+
+                        "name": item.get("fields", {}).get("name", [""])[0],
+
+                        "species": item.get("fields", {}).get("species", [""])[0],
+
+                        "url": f"https://www.ebi.ac.uk/gxa/experiments/{item.get('id')}"} for item in entries[:5]]
+
+            return json.dumps(
+                {"status": "success", "action": "expression", "source": "EBI Expression Atlas", "datasets": results},
+                ensure_ascii=False)
+
+
+        else:
+
+            return json.dumps({"status": "error", "message": "Invalid action. Must be 'annotation' or 'expression'."})
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+
+
 @mcp.tool(
     name="search_jaspar_motifs",
     description=(
             "[Tags: Regulatory Genomics] Search JASPAR database for Transcription Factor binding motifs (DNA profiles). "
             "Use this to find motif IDs (e.g., 'MA0001.1') and sequence logos for promoter analysis. "
-            "Default tax_group is 'plants'. Use 'collection' to filter (e.g., 'CORE')."
+            "CRITICAL: The 'tax_group' MUST strictly be one of the provided literal values. Do not hallucinate taxonomic groups like 'mammals' or 'dicots'."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def search_jaspar_motifs(query: str, tax_group: str = "plants") -> str:
+def search_jaspar_motifs(query: str, tax_group: Literal["plants", "vertebrates", "insects", "nematodes", "fungi", "urochordates"] = "plants") -> str:
     logger.info(f"Task: JASPAR Motif Search | Query: '{query}'")
     try:
         clean_query = query.strip().split()[0]
@@ -1784,54 +1743,90 @@ def search_jaspar_motifs(query: str, tax_group: str = "plants") -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
+
+
+
+
 @mcp.tool(
-    name="search_chebi_metabolite",
+    name="query_ensembl_database",
     description=(
-            "[Tags: Phytochemistry, Metabolomics] Search the ChEBI database for biological metabolites and phytochemicals. "
-            "Returns detailed structural ontology and taxonomy, serving as a robust complement to HMDB."
+            "[Tags: Genomics, Systems Biology] A unified tool to query the Ensembl REST API. "
+            "Action 'lookup' fetches gene location, biotype, and description. "
+            "Action 'homology' fetches homologous genes (orthologs) across different species. "
+            "CRITICAL: The default species is 'arabidopsis_thaliana'. If querying other species, "
+            "you MUST explicitly provide the correct lowercase_underscore species name (e.g., 'homo_sapiens', 'oryza_sativa'). "
+            "The 'symbol' MUST be a canonical gene symbol (e.g., 'FT', 'BRCA1')."
     )
 )
 @simple_retry(max_attempts=2, delay=1)
-def search_chebi_metabolite(query: str) -> str:
-    logger.info(f"Task: ChEBI Metabolite Search | Query: '{query}'")
+def query_ensembl_database(symbol: str, action: Literal["lookup", "homology"] = "lookup",
+                           species: str = "arabidopsis_thaliana", target_species: str = "oryza_sativa") -> str:
+    safe_species = species.strip().lower().replace(" ", "_")
+    logger.info(f"Task: Ensembl Query | Action: '{action}' | Symbol: '{symbol}' | Species: '{safe_species}'")
+
     try:
-        safe_query = urllib.parse.quote(query.strip())
+        if action == "lookup":
+            url = f"https://rest.ensembl.org/lookup/symbol/{safe_species}/{symbol}?expand=1"
+            res = mcp_request("GET", url, headers={"Content-Type": "application/json"}, timeout=15)
 
-        ols_url = f"https://www.ebi.ac.uk/ols4/api/search?q={safe_query}&ontology=chebi&exact=false&rows=5"
+            if res.status_code == 400:
+                return json.dumps({"status": "error",
+                                   "message": f"HTTP 400: Gene '{symbol}' not found in '{safe_species}'. Ensure exact canonical symbol."})
+            res.raise_for_status()
 
-        res = mcp_request("GET", ols_url, timeout=15)
-        res.raise_for_status()
+            data = res.json()
+            synonyms_str = ", ".join(data.get("synonyms", [])) or "None"
+            result = {
+                "id": data.get("id"), "display_name": data.get("display_name"), "synonyms": synonyms_str,
+                "species": data.get("species"), "biotype": data.get("biotype"), "description": data.get("description"),
+                "location": f"{data.get('seq_region_name')}:{data.get('start')}-{data.get('end')}",
+                "url": f"https://plants.ensembl.org/{safe_species}/Gene/Summary?g={data.get('id')}"
+            }
+            return json.dumps({"status": "success", "action": "lookup", "results": [result]}, ensure_ascii=False)
 
-        results = []
-        for item in res.json().get("response", {}).get("docs", []):
-            results.append({
-                "chebi_id": item.get("obo_id", ""),
-                "name": item.get("label", ""),
-                "description": item.get("description", [""])[0],
-                "ontology_iri": item.get("iri", "")
-            })
+        elif action == "homology":
+            safe_target = target_species.strip().lower().replace(" ", "_")
+            url = f"https://rest.ensembl.org/homology/symbol/{safe_species}/{symbol}?target_species={safe_target}&sequence=none"
+            res = mcp_request("GET", url, headers={"Content-Type": "application/json"}, timeout=15)
 
-        if not results:
-            return json.dumps({"status": "success", "message": f"No metabolites found in ChEBI for '{query}'."})
+            if res.status_code == 400:
+                return json.dumps(
+                    {"status": "error", "message": f"HTTP 400: Gene '{symbol}' not found in '{safe_species}'."})
+            res.raise_for_status()
 
-        return json.dumps({"status": "success", "database": "ChEBI", "results": results}, ensure_ascii=False)
+            results = []
+            for item in res.json().get("data", []):
+                for h in item.get("homologies", []):
+                    target = h.get("target", {})
+                    results.append({
+                        "homology_type": h.get("type", ""), "target_species": target.get("species", ""),
+                        "target_gene_id": target.get("id", ""),
+                        "query_identity_percent": h.get("source", {}).get("perc_id", 0),
+                        "target_identity_percent": target.get("perc_id", 0)
+                    })
+
+            if not results: return json.dumps(
+                {"status": "success", "message": f"No orthologs found in {target_species}."})
+            results = sorted(results, key=lambda x: x["target_identity_percent"], reverse=True)[:10]
+            return json.dumps({"status": "success", "action": "homology", "homologs": results}, ensure_ascii=False)
+
+        else:
+            return json.dumps({"status": "error", "message": "Invalid action. Must be 'lookup' or 'homology'."})
+
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
-
 
 if __name__ == "__main__":
     import sys
     import time
 
-    # If the '--test' argument is passed, run the diagnostic test suite instead of starting the server.
     if len(sys.argv) > 1 and sys.argv[1] == "--test":
         logger.info("Initializing Comprehensive MCP Tool Test Suite...")
 
         # Define standard academic test parameters for every registered tool
         test_suite = [
             (search_academic_literature, {"query": "CRISPR", "max_results": 1, "source": "openalex"}),
-            (traverse_citation_graph,
-             {"doi": "10.1038/nature11577", "direction": "references", "max_results": 1}),
+            (traverse_citation_graph, {"doi": "10.1038/nature11577", "direction": "references", "max_results": 1}),
             (fetch_open_access_pdf, {"doi": "10.1038/nature11577"}),
             (search_omics_datasets, {"query": "breast cancer", "db_type": "geo", "max_results": 1}),
             (fetch_sequence_fasta, {"accession_id": "NM_001322051", "db_type": "nuccore"}),
@@ -1843,17 +1838,27 @@ if __name__ == "__main__":
             (search_preprints, {"query": "COVID-19", "max_results": 1}),
             (fetch_wikipedia_summary, {"query": "Gene expression"}),
             (search_github_repos, {"query": "single cell RNA seq pipeline", "max_results": 1}),
-            (fetch_ensembl_gene, {"symbol": "BRCA1", "species": "homo_sapiens"}),
-            (fetch_ensembl_homologs,
-             {"symbol": "FT", "species": "arabidopsis_thaliana", "target_species": "oryza_sativa"}),
-            (search_kegg_pathway, {"query": "glycolysis", "organism_code": "ath"}),
-            (fetch_go_annotations, {"uniprot_id": "P04637", "limit": 1}),
-            (fetch_pubchem_compound, {"compound_name": "Quercetin"}),
+
+            # --- Updated & Merged Tools ---
+            (query_ensembl_database, {"symbol": "BRCA1", "action": "lookup", "species": "homo_sapiens"}),
+            (query_ensembl_database, {"symbol": "FT", "action": "homology", "species": "arabidopsis_thaliana",
+                                      "target_species": "oryza_sativa"}),
+            (query_metabolite_database, {"query": "Quercetin", "database": "pubchem"}),
+            (query_metabolite_database, {"query": "Quercetin", "database": "chebi"}),
+            (analyze_systems_network,
+             {"identifiers": "CRY1", "action": "interactions", "species_id": 3702, "limit": 1}),
+            (analyze_systems_network,
+             {"identifiers": "CRY1,PHYA", "action": "enrichment", "organism": "athaliana", "limit": 1}),
+            (query_plant_multiomics, {"gene_id": "AT1G01010", "action": "annotation"}),
+            (query_plant_multiomics, {"gene_id": "AT1G01010", "action": "expression"}),
+            # ------------------------------
+
+            (query_kegg_database, {"query": "glycolysis", "action": "search_pathway", "organism_code": "ath"}),
+            (query_kegg_database, {"query": "map00010", "action": "get_record"}),            (fetch_go_annotations, {"uniprot_id": "P04637", "limit": 1}),
             (search_chembl_target, {"query": "EGFR", "max_results": 1}),
             (query_uniprot_database, {"query": "P04637", "db_type": "uniprotkb", "max_results": 1}),
             (fetch_alphafold_structure, {"uniprot_id": "P04637"}),
             (query_pdb_structure, {"query": "1U3C", "action": "details"}),
-            (query_string_database, {"identifiers": "CRY1", "action": "interactions", "species": 3702, "limit": 1}),
             (search_jaspar_motifs, {"query": "MADS", "tax_group": "plants"}),
             (uniprot_id_mapping, {"from_db": "UniProtKB_AC-ID", "to_db": "Ensembl", "ids": "P04637"})
         ]

@@ -787,6 +787,9 @@ class ChatGenerationTask(BackgroundTask):
         while True:
             if self.is_cancelled():
                 worker.terminate()
+                worker.join(timeout=0.5)
+                queue.close()
+                queue.cancel_join_thread()
                 break
             try:
                 data = queue.get(timeout=0.2)

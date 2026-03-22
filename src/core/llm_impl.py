@@ -208,7 +208,6 @@ class OpenAICompatibleLLM:
         base = self.base_url.lower() if self.base_url else ""
 
         # 智能路由 1：处理几个规矩特殊、需要走原生协议的官方 API
-        print("basebasebasebasebasebase: ", base)
         if "api.anthropic.com" in base or "api.minimaxi.com/anthropic" in base:
             kwargs["custom_llm_provider"] = "anthropic"
             if not self.model_name.startswith("anthropic/"):
@@ -221,6 +220,10 @@ class OpenAICompatibleLLM:
             kwargs["custom_llm_provider"] = "gemini"
             if not self.model_name.startswith("gemini/"):
                 kwargs["model"] = f"gemini/{self.model_name}"
+        elif "xiaomimimo.com" in base:
+            kwargs["custom_llm_provider"] = "openai"
+            if not self.model_name.startswith("openai/"):
+                kwargs["model"] = f"openai/{self.model_name}"
         else:
             kwargs["custom_llm_provider"] = "openai"
             if not self.model_name.startswith("openai/"):

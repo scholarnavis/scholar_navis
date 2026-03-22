@@ -1038,7 +1038,8 @@ class SettingsTool(BaseTool):
              "model_name": "MiniMax-M2.5", "api_key": "",
              "fetched_models": [
                  "MiniMax-M2", "M2-her", "MiniMax-M2.1",
-                 "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning"
+                 "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning",
+                 "MiniMax-M2.7"
              ]},
 
             {"id": "gemini", "name": "Google Gemini",
@@ -1050,6 +1051,9 @@ class SettingsTool(BaseTool):
              "model_name": "", "api_key": ""},
             {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
              "model_name": "", "api_key": ""},
+            {"id": "mimo", "name": "Xiaomi MiMo", "base_url": "https://api.xiaomimimo.com/v1",
+             "model_name": "mimo-v2-pro", "api_key": "",
+             "fetched_models": ["mimo-v1", "mimo-v2", "mimo-v2-pro"]},
             {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
              "model_name": "", "api_key": ""},
             {"id": "siliconflow", "name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1",
@@ -1672,7 +1676,7 @@ class SettingsTool(BaseTool):
         self.input_llm_key.blockSignals(False)
         self.combo_model_param_strategy.blockSignals(False)
 
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow",
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow","mimo",
                        "lmstudio", "ollma", "minimax"]
         self.btn_del_llm.setEnabled(conf.get("id") not in default_ids)
 
@@ -1689,8 +1693,7 @@ class SettingsTool(BaseTool):
             self.btn_fetch_models.setIcon(tm.icon("api", "bg_main"))
             self.btn_fetch_models.setToolTip("")
 
-        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen", "minimax", "deepseek", "openai"]
-
+        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen", "minimax", "deepseek", "openai", "mimo"]
         is_native = conf.get("id") in hide_url_providers
 
         form_layout = self.input_llm_url.parentWidget().layout()
@@ -1864,7 +1867,7 @@ class SettingsTool(BaseTool):
         idx = self.combo_llm_preset.currentIndex()
         if idx < 0: return
         conf = self.llm_configs[idx]
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow",
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow","mimo",
                        "lmstudio", "local"]
         if conf.get("id") in default_ids:
             StandardDialog(

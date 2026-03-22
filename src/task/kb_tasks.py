@@ -308,12 +308,11 @@ class ImportFilesTask(BackgroundTask):
                 try:
                     # PDF 智能分流
                     if source_name.lower().endswith('.pdf') and pdf_engine:
-                        # 制造物理替身欺骗 LangChain
+
                         temp_pdf_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}_{source_name}")
                         shutil.copy2(read_path, temp_pdf_path)
 
                         try:
-                            # 动态参数注入 process_pdf
                             chunks_count = pdf_engine.process_pdf(
                                 temp_pdf_path,
                                 real_filename=source_name,
@@ -326,13 +325,6 @@ class ImportFilesTask(BackgroundTask):
                             else:
                                 self.send_log("WARNING", f"{source_name} extracted 0 characters.")
                         finally:
-
-                            if getattr(db_mgr, 'client', None):
-                                try:
-                                    db_mgr.client._system.stop()
-                                except Exception:
-                                    pass
-
                             # 清理替身
                             if os.path.exists(temp_pdf_path):
                                 os.remove(temp_pdf_path)

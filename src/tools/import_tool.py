@@ -645,43 +645,36 @@ class ImportTool(BaseTool):
             self.task_mgr.sig_state_changed.connect(self._on_rename_done)
             self.task_mgr.start_task(RenameFilesTask, "ren", kb_id=self.current_kb_id, renames=self.staged_rename)
         elif self.staged_del:
-            self._on_rename_done(TaskState.SUCCESS.value, "")  # 直接跳到删除环节
+            self._on_rename_done(TaskState.SUCCESS.value, "")
         elif self.staged_add or self.rebuild_required:
-            self._on_del_done(TaskState.SUCCESS.value, "")  # 直接跳到导入/重建环节
+            self._on_del_done(TaskState.SUCCESS.value, "")
 
     def _on_rename_done(self, state, msg):
-
         try:
-            self.task_mgr.sig_state_changed.disconnect()
+            self.task_mgr.sig_state_changed.disconnect(self._on_rename_done)
         except Exception:
             pass
 
-        if state == TaskState.FAILED.value: return self._on_error(msg)
+        if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+            return self._on_error(msg)
+
         if state == TaskState.SUCCESS.value:
             if self.staged_del:
-                try:
-                    self.task_mgr.sig_state_changed.disconnect(self._on_rename_done)
-                except Exception:
-                    pass
                 self.task_mgr.sig_state_changed.connect(self._on_del_done)
                 self.task_mgr.start_task(DeleteFilesTask, "del", kb_id=self.current_kb_id, file_names=self.staged_del)
             else:
                 self._on_del_done(TaskState.SUCCESS.value, "")
 
     def _on_del_done(self, state, msg):
-
         try:
-            self.task_mgr.sig_state_changed.disconnect()
+            self.task_mgr.sig_state_changed.disconnect(self._on_del_done)
         except Exception:
             pass
 
+        if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+            return self._on_error(msg)
 
-        if state == TaskState.FAILED.value: return self._on_error(msg)
         if state == TaskState.SUCCESS.value:
-            try:
-                self.task_mgr.sig_state_changed.disconnect(self._on_del_done)
-            except Exception:
-                pass
             self.task_mgr.sig_state_changed.connect(self._on_final_done)
 
             if self.rebuild_required:
@@ -691,10 +684,16 @@ class ImportTool(BaseTool):
             else:
                 self._on_final_done(TaskState.SUCCESS.value, "")
 
+
     def _on_final_done(self, state, msg):
+        # 1. Disconnect immediately to prevent duplicate triggers or warnings
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except:
+        except Exception:
+            pass
+        try:
+            self.task_mgr.sig_state_changed.disconnect(self._on_final_done)
+        except Exception:
             pass
 
         if state == TaskState.SUCCESS.value:
@@ -711,11 +710,6 @@ class ImportTool(BaseTool):
 
         elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
             self._on_error(msg)
-
-        try:
-            self.task_mgr.sig_state_changed.disconnect(self._on_final_done)
-        except:
-            pass
 
     def _on_error(self, msg):
         self.kb_manager.set_kb_status(self.current_kb_id, "corrupted")
@@ -748,12 +742,6 @@ class ImportTool(BaseTool):
                 data = self.combo_kb.currentData()
                 if data:
                     GlobalSignals().request_model_download.emit(data['model_id'], "embedding")
-
-        for slot in [self._on_rename_done, self._on_del_done, self._on_final_done]:
-            try:
-                self.task_mgr.sig_state_changed.disconnect(slot)
-            except:
-                pass
 
         self._clear_staging_state()
         self.refresh_kb_list()
@@ -1059,28 +1047,26 @@ class ImportTool(BaseTool):
         self.task_mgr.sig_progress.connect(self.pd.update_progress)
 
         def on_download_state_changed(state, msg):
-            if state == TaskState.SUCCESS.value:
-                self.pd.show_success_state("Complete", "Model downloaded successfully.")
-                self.refresh_kb_list()  # 下载完刷新一下状态
-            elif state == TaskState.FAILED.value:
-                self.pd.close_safe()
-                StandardDialog(self.widget, "Download Failed", f"Network error: {msg}").exec()
-
             try:
                 self.task_mgr.sig_state_changed.disconnect(on_download_state_changed)
             except Exception:
                 pass
 
+            if state == TaskState.SUCCESS.value:
+                self.pd.show_success_state("Complete", "Model downloaded successfully.")
+                self.refresh_kb_list()  # 下载完刷新一下状态
+            elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+                self.pd.close_safe()
+                err_text = msg if state == TaskState.FAILED.value else "Download task was cancelled."
+                StandardDialog(self.widget, "Download Halted", f"Status: {err_text}").exec()
+
         self.task_mgr.sig_state_changed.connect(on_download_state_changed)
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
         self.task_mgr.start_task(SwitchKBTask, "dl", kb_id=self.current_kb_id)
 
-
     def _handle_open(self, rows):
-        """修复混淆后的文件打开逻辑"""
         kb_data = self.kb_manager.get_kb_by_id(self.current_kb_id)
         file_map = kb_data.get('file_map', {})
-        # 反向映射：真名 -> UUID
         reverse_map = {v: k for k, v in file_map.items()}
 
         for r in rows:
