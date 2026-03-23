@@ -1,3 +1,4 @@
+import asyncio
 import time
 import json
 import uuid
@@ -537,12 +538,12 @@ async def chat_completions(
     worker = ChatGenerationTask(task_id, task_queue, task_kwargs)
     threading.Thread(target=worker.run, daemon=True).start()
 
-    def generate():
+    async def generate():
         created_time = int(time.time())
         parser = APIStreamParser()
         while True:
             try:
-                msg_data = task_queue.get(timeout=180)
+                msg_data = await asyncio.to_thread(task_queue.get, True, 180)
                 state = msg_data.get("state")
                 msg_type = msg_data.get("type")
                 event_payload = msg_data.get("payload")
@@ -646,11 +647,16 @@ async def chat_completions(
     if body.stream:
         return StreamingResponse(generate(), media_type="text/event-stream")
     else:
-        final_output = "".join(list(generate()))
+        final_output_chunks = []
+        async for chunk in generate():
+            final_output_chunks.append(chunk)
+        final_output = "".join(final_output_chunks)
+
         try:
             return JSONResponse(content=json.loads(final_output))
         except Exception:
-            return JSONResponse(content={"error": "Failed to parse model response", "raw": final_output}, status_code=500)
+            return JSONResponse(content={"error": "Failed to parse model response", "raw": final_output},
+                                status_code=500)
 
 
 @app.get(

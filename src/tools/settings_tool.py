@@ -172,7 +172,6 @@ class SettingsTool(BaseTool):
         self.combo_embed.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_rerank.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_device.currentIndexChanged.connect(self._mark_unsaved)
-        self.chk_low_vram.stateChanged.connect(self._mark_unsaved)
         self.combo_theme.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_log.currentIndexChanged.connect(self._mark_unsaved)
 
@@ -236,8 +235,6 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'lbl_rerank_status'):
             self.lbl_rerank_status.setStyleSheet(
                 f"color: {tm.color('text_muted')}; font-size: 11px; margin-bottom: 5px;")
-        if hasattr(self, 'chk_low_vram'):
-            self.chk_low_vram.setStyleSheet(f"color: {tm.color('warning')}; font-weight: bold; margin-top: 10px;")
 
         if hasattr(self, 'table_mcp'):
             for row in range(self.table_mcp.rowCount()):
@@ -344,9 +341,6 @@ class SettingsTool(BaseTool):
         curr_device = self.config.user_settings.get("inference_device", "auto")
         idx_dev = self.combo_device.findData(curr_device)
         if idx_dev >= 0: self.combo_device.setCurrentIndex(idx_dev)
-
-        if hasattr(self, 'chk_low_vram'):
-            self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
 
         self.combo_llm_preset.blockSignals(True)
         self.combo_llm_preset.clear()
@@ -964,18 +958,6 @@ class SettingsTool(BaseTool):
         self.btn_test_device.clicked.connect(self._test_compute_device)
         layout.addRow("", self.btn_test_device)
 
-        self.chk_low_vram = QCheckBox("Low VRAM Mode (Release RAG models after search)")
-        self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
-        self.chk_low_vram.setToolTip(
-            "Enable this to prevent OOM errors. It will unload Embedding and Reranker models before the LLM starts generating.")
-
-        self.lbl_vram_desc = QLabel()
-        self.lbl_vram_desc.setWordWrap(True)
-        self.lbl_vram_desc.setTextFormat(Qt.RichText)
-        self._update_vram_html()
-
-        layout.addRow("", self.chk_low_vram)
-        layout.addRow("", self.lbl_vram_desc)
 
         self.layout.addWidget(group)
         QTimer.singleShot(50, self.check_models_status)
@@ -2141,7 +2123,6 @@ class SettingsTool(BaseTool):
             "s2_api_key": new_s2_key,
             "s2_rate_limit": s2_rate_text,
             "github_token": new_github_token,
-            "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked(),
             "api_server_host": self.input_api_host.text().strip(),
             "api_server_port": api_port,
             "api_server_key": self.input_api_key.text().strip(),

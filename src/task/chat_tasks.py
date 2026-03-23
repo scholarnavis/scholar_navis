@@ -425,16 +425,6 @@ class ChatGenerationTask(BackgroundTask):
         llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
         self._emit_token("[CLEAR_SEARCH]")
 
-        # Phase 4: Low VRAM Release
-        is_low_vram = self.config.user_settings.get("low_vram_mode", False)
-        if is_low_vram:
-            self._emit_token("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
-            if hasattr(self, 'db') and self.db:
-                self.db.reload()
-            gc.collect()
-            import torch
-            if 'torch' in sys.modules and torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
         # Phase 5: Agentic Generation
         self._emit_token("[START_LLM_NETWORK]")

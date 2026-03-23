@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 from typing import Generator, List, Dict, Optional
 
 import httpx
@@ -12,15 +13,18 @@ from src.core.config_manager import ConfigManager
 from src.core.network_worker import _get_explicit_proxy_kwargs
 
 
-
+_translation_lock = threading.Lock()
 _TRANSLATION_CACHE = {}
+
 def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs):
     if not llm_instance: return text
 
     # 使用方向和文本的哈希作为唯一键，彻底与 llm_instance 实例解耦
     cache_key = f"{direction}_{hash(text)}"
-    if cache_key in _TRANSLATION_CACHE:
-        return _TRANSLATION_CACHE[cache_key]
+
+    with _translation_lock:
+        if cache_key in _TRANSLATION_CACHE:
+            return _TRANSLATION_CACHE[cache_key]
 
     if direction == "to_en":
         prompt = (
@@ -86,12 +90,6 @@ class OpenAICompatibleLLM:
 
         # 配置代理环境供 LiteLLM 内部的 HTTP 请求使用
         proxy_cfg = _get_explicit_proxy_kwargs()
-        if "proxy" in proxy_cfg:
-            # LiteLLM 支持环境变量，通常 network_worker 已设置。这里显式配置增加健壮性
-            import os
-            os.environ["HTTP_PROXY"] = proxy_cfg["proxy"]
-            os.environ["HTTPS_PROXY"] = proxy_cfg["proxy"]
-
         self.logger.info(f"Initialized Unified LLM Provider via LiteLLM: [{self.model_name}] @ {self.base_url}")
 
         applied_params = self._get_payload_kwargs()

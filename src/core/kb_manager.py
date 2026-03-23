@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import traceback
 import uuid
 import datetime
@@ -294,6 +295,7 @@ class DatabaseManager:
             cls._instance.client = None
             cls._instance.collection = None
             cls._instance.embed_fn = None
+            cls._instance._db_lock = threading.Lock()
             cls._instance.logger.debug(f"Instantiated new DatabaseManager! Memory address: {id(cls._instance)}")
         return cls._instance
 
@@ -384,11 +386,12 @@ class DatabaseManager:
                     sanitized_metadatas.append(clean_meta)
 
                 self.logger.debug("Calling ChromaDB underlying write API...")
-                self.collection.add(
-                    documents=documents,
-                    metadatas=sanitized_metadatas, # 使用清洗后的元数据
-                    ids=ids
-                )
+                with self._db_lock:
+                    self.collection.add(
+                        documents=documents,
+                        metadatas=sanitized_metadatas,
+                        ids=ids
+                    )
                 self.logger.debug(f"Write successful! Current total in DB: {self.collection.count()}")
             except Exception as e:
                 self.logger.error(f"Failed to add documents: {e}\n{traceback.format_exc()}")
@@ -399,7 +402,8 @@ class DatabaseManager:
     def query(self, query_text, n_results=5):
         if self.collection:
             try:
-                return self.collection.query(query_texts=[query_text], n_results=n_results)
+                with self._db_lock:
+                    return self.collection.query(query_texts=[query_text], n_results=n_results)
             except Exception as e:
                 self.logger.error(f"Query failed: {e}\n{traceback.format_exc()}")
                 return None
