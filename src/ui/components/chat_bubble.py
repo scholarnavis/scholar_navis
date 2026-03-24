@@ -27,16 +27,28 @@ def hex_to_rgba(hex_color, alpha):
 
 
 class ChatBubbleWidget(QWidget):
+    # --- 1. 新增消息类型常量 (请放在类属性最顶端) ---
+    MSG_USER = 1
+    MSG_AI = 2
+    MSG_ERROR = 3
+
     sig_edit_confirmed = Signal(int, str)
     sig_link_clicked = Signal(str)
     sig_retry_clicked = Signal(int)
 
-    def __init__(self, text, is_user, index, context_html=None, parent=None):
+    # --- 2. 完整的 __init__ 方法 ---
+    def __init__(self, text, is_user, index, context_html=None, parent=None, msg_type=None):
         super().__init__(parent)
         self.original_text = text
         self.is_user = is_user
         self.index = index
         self.context_html = context_html
+
+        if msg_type is not None:
+            self.msg_type = msg_type
+        else:
+            self.msg_type = self.MSG_USER if is_user else self.MSG_AI
+
         self.is_editing = False
         self._can_edit = True
 
@@ -45,7 +57,6 @@ class ChatBubbleWidget(QWidget):
         self.loading_dots = 0
         self.is_loading = False
 
-        # 异步图片下载管理队列
         self.downloaded_images = {}
         self.downloading_urls = set()
         self.download_failed_urls = {}
@@ -60,6 +71,7 @@ class ChatBubbleWidget(QWidget):
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+    # --- 3. 完整的 init_ui 方法 ---
     def init_ui(self):
         tm = ThemeManager()
 
@@ -82,7 +94,6 @@ class ChatBubbleWidget(QWidget):
 
         font_family = tm.font_family()
 
-        # 附件上下文框 (现在支持 AI 和 User 双方)
         if self.context_html:
             self.ctx_frame = QFrame()
             self.ctx_frame.setObjectName("ContextFrame")
@@ -107,7 +118,6 @@ class ChatBubbleWidget(QWidget):
             ctx_layout.addWidget(self.ctx_content)
             self.content_layout.addWidget(self.ctx_frame)
 
-        # 正文文本框
         self.lbl_text = QTextBrowser()
         self.lbl_text.setOpenExternalLinks(False)
         self.lbl_text.setOpenLinks(False)
@@ -119,9 +129,14 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
         self.lbl_text.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
 
-
         self.lbl_text.document().documentLayout().documentSizeChanged.connect(self._adjust_browser_height)
-        if self.is_user:
+
+        # 布局逻辑：MSG_ERROR 靠左（类似 AI 气泡）
+        if self.msg_type == self.MSG_ERROR:
+            self.main_layout.addWidget(self.content_container)
+            self.main_layout.addWidget(self.spacer)
+            btn_alignment = Qt.AlignLeft
+        elif self.is_user:
             self.main_layout.addWidget(self.spacer)
             self.main_layout.addWidget(self.content_container)
             btn_alignment = Qt.AlignRight
@@ -130,9 +145,8 @@ class ChatBubbleWidget(QWidget):
             self.main_layout.addWidget(self.spacer)
             btn_alignment = Qt.AlignLeft
 
-        self.set_content(self.original_text)
+        self.set_content(self.original_text, msg_type=self.msg_type)
 
-        # 编辑输入框
         self.edit_input = QTextEdit()
         self.edit_input.setVisible(False)
         self.edit_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -142,7 +156,6 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.addWidget(self.lbl_text)
         self.content_layout.addWidget(self.edit_input)
 
-        # 底部按钮栏 (Copy, Edit, Retry 等)
         self.btn_widget = QWidget()
         self.btn_layout = QHBoxLayout(self.btn_widget)
         self.btn_layout.setContentsMargins(0, 0, 5, 0)
@@ -156,12 +169,12 @@ class ChatBubbleWidget(QWidget):
         self.btn_layout.addWidget(self.btn_copy)
 
         self.btn_copy_md = QPushButton(" Copy MD")
-        self.btn_copy_md.setIcon(tm.icon("markdown_copy", "text_muted"))  # Using a distinct icon for Markdown
+        self.btn_copy_md.setIcon(tm.icon("markdown_copy", "text_muted"))
         self.btn_copy_md.setCursor(Qt.PointingHandCursor)
         self.btn_copy_md.clicked.connect(self.copy_markdown)
         self.btn_layout.addWidget(self.btn_copy_md)
 
-        if not self.is_user:
+        if not self.is_user and self.msg_type != self.MSG_ERROR:
             self.btn_bubble_retry = QPushButton(" Retry")
             self.btn_bubble_retry.setIcon(tm.icon("refresh", "warning"))
             self.btn_bubble_retry.setCursor(Qt.PointingHandCursor)
@@ -182,7 +195,6 @@ class ChatBubbleWidget(QWidget):
 
         self.content_layout.addWidget(self.btn_widget)
 
-        # 编辑确认栏 (仅用户侧有)
         if self.is_user:
             self.edit_btn_widget = QWidget()
             self.edit_btn_layout = QHBoxLayout(self.edit_btn_widget)
@@ -289,21 +301,41 @@ class ChatBubbleWidget(QWidget):
         tm = ThemeManager()
         font_family = tm.font_family()
 
-        if self.is_user:
+        if self.msg_type == self.MSG_ERROR:
+            # 【关键修复】让外层的 QWidget 来承担背景色和红色左边框，这样就不会出现文字底纹了
+            danger_color = tm.color('danger')
+            is_dark = tm.current_theme == 'dark'
+            bg_color = hex_to_rgba(danger_color, 0.1) if is_dark else hex_to_rgba(danger_color, 0.05)
+
+            self.content_container.setStyleSheet(f"""
+                QWidget#BubbleWrapper {{
+                    background-color: {bg_color};
+                    border: 1px solid {tm.color('border')};
+                    border-left: 4px solid {danger_color};
+                    border-radius: 4px; 
+                }}
+            """)
+        elif self.is_user:
             bg_color = hex_to_rgba(tm.color('success'), 0.15) if tm.current_theme == 'dark' else hex_to_rgba(
                 tm.color('success'), 0.1)
             border_color = tm.color('success')
+            self.content_container.setStyleSheet(f"""
+                QWidget#BubbleWrapper {{
+                    background-color: {bg_color};
+                    border: 1px solid {border_color};
+                    border-radius: 8px;
+                }}
+            """)
         else:
             bg_color = tm.color('bg_card')
             border_color = tm.color('border')
-
-        self.content_container.setStyleSheet(f"""
-            QWidget#BubbleWrapper {{
-                background-color: {bg_color};
-                border: 1px solid {border_color};
-                border-radius: 8px;
-            }}
-        """)
+            self.content_container.setStyleSheet(f"""
+                QWidget#BubbleWrapper {{
+                    background-color: {bg_color};
+                    border: 1px solid {border_color};
+                    border-radius: 8px;
+                }}
+            """)
 
         self.lbl_text.setStyleSheet(f"""
                     QTextBrowser {{
@@ -331,11 +363,10 @@ class ChatBubbleWidget(QWidget):
 
         btn_style = f"QPushButton {{ background-color: transparent; border: none; color: {tm.color('text_muted')}; font-size: 12px; padding: 2px 4px; border-radius: 4px; }} QPushButton:hover {{ color: {tm.color('text_main')}; background-color: {tm.color('btn_hover')}; }}"
         self.btn_copy.setStyleSheet(btn_style)
-        if hasattr(self, 'btn_copy_md'): self.btn_copy_md.setStyleSheet(btn_style)  # Apply style to the new button
+        if hasattr(self, 'btn_copy_md'): self.btn_copy_md.setStyleSheet(btn_style)
         if hasattr(self, 'btn_edit'): self.btn_edit.setStyleSheet(btn_style)
         if hasattr(self, 'btn_cancel'): self.btn_cancel.setStyleSheet(btn_style)
 
-        # 动态更新附件的 Theme (支持日夜间模式)
         if hasattr(self, 'ctx_frame'):
             self.ctx_frame.setStyleSheet(f"""
                 QFrame#ContextFrame {{ background-color: {hex_to_rgba(tm.color('bg_input'), 0.5)}; border-left: 3px solid {tm.color('accent')}; border-radius: 4px; }}
@@ -349,9 +380,8 @@ class ChatBubbleWidget(QWidget):
         self.is_loading = loading
         if loading:
             self.loading_dots = 0
-            self.btn_widget.hide()  # 隐藏底部按钮（复制、编辑等）
+            self.btn_widget.hide()
 
-            # 只有在没有任何文本时，才启动默认的 Thinking 动画
             if not self.original_text.strip():
                 self.lbl_text.setText("Thinking")
                 self.loading_timer.start(500)
@@ -370,8 +400,37 @@ class ChatBubbleWidget(QWidget):
         self.loading_dots = (self.loading_dots + 1) % 4
         self.lbl_text.setText("Thinking" + "." * self.loading_dots)
 
-    def set_content(self, text):
+
+    # --- 5. 完整的 set_content 方法 ---
+    def set_content(self, text, msg_type=None):
         self.original_text = text
+        if msg_type is not None:
+            self.msg_type = msg_type
+
+        if self.msg_type == self.MSG_ERROR:
+            import json
+            tm = ThemeManager()
+            try:
+                error_data = json.loads(text)
+                title = error_data.get('title', 'Error')
+                body = error_data.get('body', text)
+            except json.JSONDecodeError:
+                title = "Generation Terminated"
+                body = text
+
+            danger_color = tm.color('danger')
+
+            html = (
+                f"<div style='margin: 0px; padding: 4px 6px;'>"
+                f"<div style='color: {danger_color}; font-weight: bold; font-size: 14px; margin-bottom: 8px;'>"
+                f"⚠️ {title}</div>"
+                f"<div style='font-size: 13px; font-family: {tm.font_family()}; line-height: 1.5;'>"
+                f"{body.replace(chr(10), '<br>')}</div>"
+                f"</div>"
+            )
+            self.lbl_text.setText(html)
+            self._adjust_browser_height()
+            return
 
         if self.is_loading:
             if not text.strip():
@@ -396,7 +455,6 @@ class ChatBubbleWidget(QWidget):
             html = html.replace('<th>',
                                 f'<th style="background-color: {bg_header}; font-weight: bold; text-align: left;">')
 
-            # ---------------------------------------------
             def repl_img(match):
                 raw_src_url = match.group(1)
                 src_url = raw_src_url.replace("&amp;", "&")
@@ -406,9 +464,12 @@ class ChatBubbleWidget(QWidget):
                         header, encoded = src_url.split(",", 1)
                         ext = header.split(";")[0].split("/")[1] if "/" in header else "png"
                         import base64
+                        import hashlib
+                        import os
+                        import tempfile
+
                         img_data = base64.b64decode(encoded)
 
-                        # 生成唯一临时文件名
                         file_name = f"navis_base64_{hashlib.md5(img_data).hexdigest()[:12]}.{ext}"
                         local_path = os.path.join(tempfile.gettempdir(), file_name)
 
@@ -417,12 +478,9 @@ class ChatBubbleWidget(QWidget):
                                 f.write(img_data)
 
                         self.downloaded_images[src_url] = local_path
-
-                        # 转换为操作系统友好的本地 URI
                         local_uri = f"file:///{local_path.replace(os.sep, '/')}"
                         new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{local_uri}" title="Click to view full image" />'
                         return f'<a href="{local_uri}">{new_img_tag}</a>'
-
                     except Exception as e:
                         print(f"Base64 image decode failed: {e}")
                         return f'<img width="420" style="max-width: 100%;" src="{src_url}" />'
@@ -431,7 +489,6 @@ class ChatBubbleWidget(QWidget):
                     new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{src_url}" title="Click to view full image" />'
                     return f'<a href="{src_url}">{new_img_tag}</a>'
 
-                # 处理网络链接
                 if src_url.startswith("http"):
                     if src_url in self.downloaded_images:
                         local_path = self.downloaded_images[src_url].replace('\\', '/')
@@ -448,6 +505,7 @@ class ChatBubbleWidget(QWidget):
                         return f'<div style="color:#ff6b6b; padding: 15px; border: 2px dashed #ff6b6b; border-radius: 8px; width: 400px; margin-top: 5px;">❌ <b>Image download failed.</b><br><span style="font-size: 12px;">{error_msg}</span></div>'
 
                     else:
+                        import time
                         if src_url not in self.downloading_urls:
                             self.downloading_urls.add(src_url)
                             self.download_timeouts[src_url] = time.time() + 30
@@ -471,7 +529,6 @@ class ChatBubbleWidget(QWidget):
 
         except Exception as e:
             self.lbl_text.setText(text)
-
             self.lbl_text.adjustSize()
             self.content_container.adjustSize()
             self.adjustSize()

@@ -10,7 +10,7 @@ from src.tools.base_tool import BaseTool
 from src.core.theme_manager import ThemeManager
 from src.core.core_task import TaskManager, TaskMode
 from src.ui.components.dialog import LicenseDialog, ApiProvidersDialog
-from src.version import __version__, __app_name__, __description__, __website__, __github__, __dl__
+from src.core.version import __version__, __app_name__, __description__, __website__, __github__, __dl__
 
 
 class AboutTool(BaseTool):

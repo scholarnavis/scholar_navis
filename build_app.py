@@ -10,7 +10,7 @@ import zipfile
 import boto3
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
-from src.version import __version__, __app_name__, __description__, __company__
+from src.core.version import __version__, __app_name__
 
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"

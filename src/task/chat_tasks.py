@@ -165,6 +165,11 @@ class ChatGenerationTask(BackgroundTask):
             cfg = self.main_config.copy()
             if "tools" not in cfg:
                 cfg["tools"] = []
+
+            if "extra_params" not in cfg:
+                cfg["extra_params"] = {}
+            cfg["extra_params"]["timeout"] = 600.0
+            cfg["timeout"] = 600.0
             self.main_llm = OpenAICompatibleLLM(cfg)
 
         if self.requires_translation and self.trans_config and not getattr(self, 'trans_llm', None):
@@ -210,9 +215,11 @@ class ChatGenerationTask(BackgroundTask):
         sources_map = {}
 
         # Phase 1: Query Extraction & Translation (Cache Accelerated)
+        # Phase 1: Query Extraction & Translation (Cache Accelerated)
         if self.requires_translation:
             self.send_log("INFO", f"Translating query: {original_user_query[:20]}...")
-            self._emit_token("<i>🌐 Translating your query to academic English for precise retrieval...</i>\n\n")
+            self._emit_token(
+                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>🌐 Translating your query to academic English for precise retrieval...</div>\n\n")
             try:
                 trans_kwargs = {
                     "is_translation": True,
@@ -227,14 +234,16 @@ class ChatGenerationTask(BackgroundTask):
         if self.kb_id:
             self.send_log("INFO", "Initiating local Vector RAG retrieval...")
             self._emit_token("[CLEAR_SEARCH]")
-            self._emit_token("<i>📚 Searching local knowledge base and reranking documents...</i>\n\n")
+            self._emit_token(
+                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>📚 Searching local knowledge base and reranking documents...</div>\n\n")
             time.sleep(0.05)
 
             kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
             if kb_info and kb_info.get('doc_count', 0) == 0:
                 self.logger.warning(f"Knowledge Base '{kb_info.get('name')}' is empty. Skipping vector retrieval.")
             elif kb_info:
-                self._emit_token("<i>Loading local vector model and retrieving literature...</i>\n\n")
+                self._emit_token(
+                    "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Loading local vector model and retrieving literature...</div>\n\n")
                 domain = kb_info.get('domain', 'General Academic')
                 model_id = kb_info.get('model_id', 'embed_auto')
 
@@ -320,7 +329,8 @@ class ChatGenerationTask(BackgroundTask):
         # Phase 3: External Attachments Integration(文件打分环节)
         if docs:
             self.send_log("INFO", f"Detected {len(docs)} uploaded document chunks. Starting Reranker scoring...")
-            self._emit_token("<i>Filtering and reranking attached documents...</i>\n\n")
+            self._emit_token(
+                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Filtering and reranking attached documents...</div>\n\n")
             cand_docs = [{"content": d.get("content", ""),
                           "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
 
@@ -369,7 +379,8 @@ class ChatGenerationTask(BackgroundTask):
                 active_vision_model = main_model_name
 
             if need_pre_caption:
-                self._emit_token("<i>Extracting image contexts via vision model...</i>\n\n")
+                self._emit_token(
+                    "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Extracting image contexts via vision model...</div>\n\n")
                 try:
                     vision_cfg = self.main_config.copy()
                     vision_cfg["model_name"] = active_vision_model
@@ -443,7 +454,8 @@ class ChatGenerationTask(BackgroundTask):
             if raw_mcp_tools:
                 self.send_log("INFO",
                               f"MCP Enabled. Pool contains {len(raw_mcp_tools)} candidate tools. Starting intent-based filtering...")
-                self._emit_token("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
+                self._emit_token(
+                    "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Filtering ideal MCP tools based on query intent...</div>\n\n")
                 time.sleep(0.05)
                 mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=8)
                 self._emit_token("[CLEAR_SEARCH]")
@@ -707,9 +719,30 @@ class ChatGenerationTask(BackgroundTask):
             stream_kwargs = {}
             if mcp_tools:
                 stream_kwargs["tools"] = mcp_tools
+
+            # --- 新增：截获底层流式错误的逻辑 ---
+            error_buffer = ""
             for token in self.main_llm.stream_chat(rag_messages, **stream_kwargs):
+                if self.is_cancelled():
+                    break
+
+                # 检查是否是底层异常前缀
+                if error_buffer or "[API Request Error" in token or "[System Error" in token or "[Context Exceeded Error]" in token or "[Rate Limit Error]" in token or "[Timeout Error]" in token:
+                    error_buffer += token
+                    continue
+
                 self.full_response_cache += token
                 self._emit_token(token)
+
+            if error_buffer:
+                prefix_match = re.match(r'^\s*\[(.*?)\]\s*\n*(.*)', error_buffer, re.DOTALL)
+                if prefix_match:
+                    title = prefix_match.group(1).strip()
+                    body = prefix_match.group(2).strip()
+                    self._emit_error(json.dumps({"title": title, "body": body}))
+                else:
+                    self._emit_error(json.dumps({"title": "Provider Error", "body": error_buffer.strip()}))
+                return
 
         # Phase 6: Dynamic Citation Mounting
         has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))

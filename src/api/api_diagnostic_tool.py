@@ -64,8 +64,17 @@ def interactive_parameter_configuration(providers, kbs, mcp_tags):
         "force_translate": False,
         "kb_id": "none",
         "use_mcp": False,
-        "mcp_tags": []
+        "mcp_tags": [],
+        "is_error_test": False
     }
+
+    print("\n[ Execution Mode ]")
+    print("  1. Normal Execution (Standard Diagnostic)")
+    print("  2. Error Handling Test (Force an upstream error to verify standard formatting)")
+    mode_choice = input("Select Mode (1/2): ").strip()
+    if mode_choice == "2":
+        config["is_error_test"] = True
+        print("\n[!] Error Handling Test Mode Enabled. A deliberate invalid model request will be sent.")
 
     # --- Main Model Selection ---
     print("\n[ Primary LLM Provider ]")
@@ -79,10 +88,15 @@ def interactive_parameter_configuration(providers, kbs, mcp_tags):
     for idx, m in enumerate(models):
         print(f"  {idx + 1}. {m}")
     m_idx = int(input("Select Model (Number): ")) - 1
-    config["model"] = models[m_idx]
 
-    # --- Pre-Translation Module ---
+    # 如果是错误测试模式，故意使用一个不存在的模型名
+    if config["is_error_test"]:
+        config["model"] = "intentional-error-trigger-model-999"
+    else:
+        config["model"] = models[m_idx]
+
     enable_trans = input("\nEnable Pre-translation Module? (y/n): ").strip().lower() == 'y'
+
     if enable_trans:
         config["force_translate"] = True
 
@@ -210,7 +224,9 @@ def stream_chat_execution(config):
 
     try:
         response = requests.post(f"{BASE_URL}/v1/chat/completions", json=payload, headers=HEADERS, stream=True)
-        response.raise_for_status()
+
+        if response.status_code != 200:
+            print(f"[!] Server responded with non-200 status code: {response.status_code}")
 
         has_printed_content_header = False
         cited_sources_data = []
@@ -227,8 +243,17 @@ def stream_chat_execution(config):
 
                     try:
                         chunk = json.loads(data_str)
+
                         if "error" in chunk:
-                            print(f"\n[API Runtime Error]: {chunk['error']}")
+                            print("\n\n" + "!" * 40)
+                            print("🚨 STANDARD API ERROR CAUGHT 🚨")
+                            print("!" * 40)
+                            err = chunk["error"]
+                            print(f"Type   : {err.get('type')}")
+                            print(f"Code   : {err.get('code')}")
+                            print(f"Param  : {err.get('param')}")
+                            print(f"Message:\n{err.get('message')}")
+                            print("!" * 40 + "\n")
                             return
 
                         delta = chunk.get("choices", [{}])[0].get("delta", {})

@@ -2,6 +2,7 @@ import base64
 import csv
 import datetime
 import hashlib
+import json
 import logging
 import os
 import re
@@ -1812,7 +1813,13 @@ class ChatTool(BaseTool):
 
         if token == "[CLEAR_SEARCH]":
             self.current_ai_text = re.sub(
-                r'(?:<br>\s*)*<i>(?:Translating|Loading|Filtering|\[Low VRAM).*?</i>\s*(?:<br>\s*)*(?:\n)*',
+                r"<div class=['\"]status-msg['\"].*?>.*?</div>\s*(?:<br>\s*)*(?:\n)*",
+                '',
+                self.current_ai_text,
+                flags=re.DOTALL | re.IGNORECASE
+            )
+            self.current_ai_text = re.sub(
+                r'(?:<br>\s*)*<i>(?:🌐\s*|📚\s*)?(?:Translating|Loading|Filtering|Extracting|\[Low VRAM).*?</i>\s*(?:<br>\s*)*(?:\n)*',
                 '',
                 self.current_ai_text,
                 flags=re.DOTALL | re.IGNORECASE
@@ -1888,30 +1895,75 @@ class ChatTool(BaseTool):
         if hasattr(self, '_render_timer'): self._render_timer.stop()
         self.set_controls_enabled(True)
 
-        # --- 翻译或生成失败处理 ---
-        # 显示重试按钮
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
         self._restore_last_input()
 
-        display_error = msg
+
+        error_title = "Generation Terminated"
+        display_msg = str(msg).strip()
+
+        try:
+            parsed = json.loads(display_msg)
+            error_title = parsed.get("title", error_title)
+            display_msg = parsed.get("body", display_msg)
+        except json.JSONDecodeError:
+            prefix_match = re.match(r'^\s*\[(.*?)\]\s*\n*(.*)', display_msg, re.DOTALL)
+            if prefix_match:
+                raw_title = prefix_match.group(1).strip()
+                display_msg = prefix_match.group(2).strip()
+
+                if "API Request Error" in raw_title:
+                    error_title = "Provider API Error"
+                    if "404" in raw_title and "404" not in display_msg:
+                        display_msg += "\n\nSuggestion: The selected model may not exist or your API endpoint path (e.g., /v1) is incorrect."
+                    elif ("401" in raw_title or "key" in display_msg.lower()) and "verify" not in display_msg.lower():
+                        error_title = "Authentication Required"
+                        display_msg += "\n\nSuggestion: Please verify your API Key in the Global Settings."
+                elif "Context Exceeded" in raw_title:
+                    error_title = "Context Window Exceeded"
+                elif "Rate Limit" in raw_title:
+                    error_title = "Rate Limit Reached"
+                elif "Timeout" in raw_title:
+                    error_title = "Connection Timeout"
+
+        # 处理特定的顶层网络拦截
         if "translation" in msg.lower() or "translator" in msg.lower():
-            ToastManager().show(f"Translation model error; conversation terminated: {msg}", "error")
-            display_error = f"Translation model error: {msg}"
+            error_title = "Translation Module Failure"
+            ToastManager().show("Translation model error. Please check your translator settings.", "error")
         elif "time" in msg.lower() or "connect" in msg.lower():
-            ToastManager().show("Network connection failed. Please check your API configuration or proxy settings.",
-                                "error")
-            display_error = "Network connection failed."
+            ToastManager().show("Network connection failed. Please check your API configuration or proxy.", "error")
 
-        if self.current_ai_bubble and self.current_ai_bubble.is_loading:
-            self.current_ai_bubble.set_loading(False)
-
-        self.current_ai_text += f"\n\n<div style='color:#ff6b6b; font-weight:bold;'>[AI Error]</div>\n<div style='color:#888; font-size:12px;'>{display_error}</div>"
+        error_json_str = json.dumps({"title": error_title, "body": display_msg})
 
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)
-            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
 
+            # 如果 AI 完全没有正常输出过内容，删掉它，换上错误气泡
+            if not self.current_ai_text.strip():
+                self.chat_layout.removeWidget(self.current_ai_bubble)
+                self.current_ai_bubble.deleteLater()
+
+                error_bubble = ChatBubbleWidget(
+                    text=error_json_str,
+                    is_user=False,
+                    index=idx,
+                    msg_type=ChatBubbleWidget.MSG_ERROR
+                )
+                self.chat_layout.addWidget(error_bubble)
+            else:
+                self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
+
+                idx += 1
+                error_bubble = ChatBubbleWidget(
+                    text=error_json_str,
+                    is_user=False,
+                    index=idx,
+                    msg_type=ChatBubbleWidget.MSG_ERROR
+                )
+                self.chat_layout.addWidget(error_bubble)
+
+        self.current_ai_bubble = None
         self.scroll_to_bottom()
 
     def on_chat_finished(self, is_cancelled=False):

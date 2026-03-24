@@ -18,7 +18,7 @@ from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, RunnerProcess
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
-from src.core.lang_detect import detect_primary_language
+from src.core.version import __version__
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import check_model_exists, get_model_conf, resolve_auto_model
 from src.core.network_worker import setup_global_network_env
@@ -27,7 +27,7 @@ from src.task.kb_tasks import RerankTask
 
 app = FastAPI(
     title="Scholar Navis Agentic API",
-    version="1.0.0",
+    version=__version__,
     description=(
         "OpenAI-compatible chat and tooling API for Scholar Navis.\n\n"
         "Supports streaming completions, knowledge-base RAG, MCP tool routing, "
@@ -343,6 +343,7 @@ def _clean_ui_token(raw_token: str) -> str:
         return ""
     clean = raw_token
     clean = re.sub(r'<mcp_process.*?>.*?</mcp_process>\n*', '', clean, flags=re.IGNORECASE | re.DOTALL)
+    clean = re.sub(r'<div class=[\'"]status-msg[\'"].*?>.*?</div>\n*', '', clean, flags=re.IGNORECASE | re.DOTALL)
     clean = re.sub(r'<i.*?>.*?</i>\n*', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'<div.*?class=[\'"]header-.*?</div>\n*', '', clean, flags=re.IGNORECASE | re.DOTALL)
     clean = re.sub(r"<a[^>]*href=['\"]cite://[^>]*>.*?<b>\[(\d+)\]</b>.*?</a>", r"[\1]", clean, flags=re.IGNORECASE)
@@ -543,7 +544,7 @@ async def chat_completions(
         parser = APIStreamParser()
         while True:
             try:
-                msg_data = await asyncio.to_thread(task_queue.get, True, 180)
+                msg_data = await asyncio.to_thread(task_queue.get, True, 600)
                 state = msg_data.get("state")
                 msg_type = msg_data.get("type")
                 event_payload = msg_data.get("payload")
@@ -605,10 +606,18 @@ async def chat_completions(
 
                 if state == TaskState.FAILED.value:
                     err_msg = msg_data.get("msg", "Internal Task Error")
+                    error_payload = {
+                        "error": {
+                            "message": err_msg,
+                            "type": "upstream_server_error",
+                            "param": None,
+                            "code": 500
+                        }
+                    }
                     if body.stream:
-                        yield f"data: {json.dumps({'error': err_msg})}\n\n"
+                        yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
                     else:
-                        yield json.dumps({"error": err_msg})
+                        yield json.dumps(error_payload, ensure_ascii=False)
                     break
 
                 if msg_type == "state" and msg_data.get("progress") == -1:
@@ -634,11 +643,27 @@ async def chat_completions(
                         if has_data:
                             yield f"data: {json.dumps(chunk_dict, ensure_ascii=False)}\n\n"
 
+
             except queue.Empty:
                 logger.warning(f"API Task {task_id} timed out waiting for queue message.")
                 break
+
             except Exception as e:
                 logger.error(f"Error in API generate loop: {e}")
+                error_payload = {
+                    "error": {
+                        "message": f"Internal API Server Error: {str(e)}",
+                        "type": "internal_server_error",
+                        "param": None,
+                        "code": 500
+                    }
+                }
+
+                if body.stream:
+                    yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+                else:
+                    yield json.dumps(error_payload, ensure_ascii=False)
+
                 break
 
         if body.stream:
@@ -653,10 +678,23 @@ async def chat_completions(
         final_output = "".join(final_output_chunks)
 
         try:
-            return JSONResponse(content=json.loads(final_output))
+            parsed_response = json.loads(final_output)
+            # 如果解析结果包含 OpenAI 标准错误体，则抛出 500 状态码
+            status_code = 500 if "error" in parsed_response else 200
+            return JSONResponse(content=parsed_response, status_code=status_code)
         except Exception:
-            return JSONResponse(content={"error": "Failed to parse model response", "raw": final_output},
-                                status_code=500)
+            return JSONResponse(
+                content={
+                    "error": {
+                        "message": "Failed to parse model response.",
+                        "type": "parse_error",
+                        "param": None,
+                        "code": 500
+                    },
+                    "raw": final_output
+                },
+                status_code=500
+            )
 
 
 @app.get(

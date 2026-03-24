@@ -1,13 +1,12 @@
 import json
 import logging
-import re
 import threading
 from typing import Generator, List, Dict, Optional
 
-import httpx
 import litellm
 from litellm import completion, image_generation
-from litellm.exceptions import APIError, APIConnectionError, ContextWindowExceededError, RateLimitError, Timeout
+from litellm.exceptions import APIError, APIConnectionError, ContextWindowExceededError, RateLimitError, Timeout, \
+    AuthenticationError, ServiceUnavailableError, BadRequestError, NotFoundError
 
 from src.core.config_manager import ConfigManager
 from src.core.network_worker import _get_explicit_proxy_kwargs
@@ -344,23 +343,47 @@ class OpenAICompatibleLLM:
             if is_thinking:
                 yield "\n</think>\n"
 
+
         except ContextWindowExceededError as e:
+
             self.logger.error(f"Context window exceeded: {e}")
+
             yield f"\n\n[Context Exceeded Error]\nThe input text or document is too long for this model. Please clear history or use a model with a larger context window.\n"
 
+
         except RateLimitError as e:
+
             self.logger.error(f"Rate limit hit: {e}")
+
             yield f"\n\n[Rate Limit Error]\nToo many requests or insufficient quota. Please try again later.\n"
+
+
         except Timeout as e:
             self.logger.error(f"Request timeout: {e}")
             yield f"\n\n[Timeout Error]\nThe model took too long to respond. Please check your network or try a different provider.\n"
+        except AuthenticationError as e:
+            self.logger.error(f"Authentication Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[API Request Error: HTTP 401]\n{err_msg}\n"
+        except NotFoundError as e:
+            self.logger.error(f"Not Found Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[API Request Error: HTTP 404]\n{err_msg}\n"
+        except BadRequestError as e:
+            self.logger.error(f"Bad Request Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[API Request Error: HTTP 400]\n{err_msg}\n💡 Tip: This might happen if you sent an image to a text-only model or provided invalid parameters.\n"
+        except ServiceUnavailableError as e:
+            self.logger.error(f"Service Unavailable Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[API Request Error: HTTP 503]\nThe API service is currently overloaded or down. Please try again later.\nDetails: {err_msg}\n"
+        except APIConnectionError as e:
+            self.logger.error(f"API Connection Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[System Error: Connection Failed]\nFailed to connect to the API endpoint. Please check your proxy settings or local network.\nDetails: {err_msg}\n"
         except APIError as e:
             self.logger.error(f"API Error ({e.status_code}): {e.message}")
-            friendly_msg = ""
-            if e.status_code == 400:
-                # 400 错误通常是因为参数不支持，比如传了图片但模型是纯文本的
-                friendly_msg = "\n💡 Tip: This might happen if you sent an image to a text-only model. Try selecting a specific Vision Model in the settings."
-            yield f"\n\n[API Request Error: HTTP {e.status_code}]\n{e.message}{friendly_msg}\n"
+            yield f"\n\n[API Request Error: HTTP {e.status_code}]\n{e.message}\n"
         except Exception as e:
             if self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
                 yield "\n\n[⛔ Generation halted by user.]"
