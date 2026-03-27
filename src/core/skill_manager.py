@@ -151,14 +151,23 @@ class SkillManager:
 
     def _load_external_skills_from_config(self):
         """
-         从配置中动态加载外部传入的 Python 脚本作为 External Skills。
+        从配置中动态加载外部传入的 Python 脚本作为 External Skills。
         约定：外部脚本必须暴露 `execute` 函数和 `SCHEMA` 字典。
         """
         from src.core.config_manager import ConfigManager
         config_mgr = ConfigManager()
         external_scripts = config_mgr.mcp_servers.get("external_skills", {})
 
-        for skill_name, script_path in external_scripts.items():
+        for skill_name, script_info in external_scripts.items():
+            # 新版逻辑：兼容携带 enabled 开关的对象
+            if isinstance(script_info, dict):
+                if not script_info.get("enabled", True):
+                    continue  # 用户如果取消勾选，则不在内存中加载
+                script_path = script_info.get("command", "")
+            else:
+                # 兼容你的老版本纯路径字符串
+                script_path = script_info
+
             if not os.path.exists(script_path):
                 logger.warning(f"External skill script missing: {script_path}")
                 continue

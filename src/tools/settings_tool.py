@@ -1,5 +1,4 @@
 import json
-import json
 import logging
 import os
 import time
@@ -20,6 +19,7 @@ from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, resolve_auto_model, get_onnx_cache_dir)
 from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
+from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager
 from src.task.common_task import VerifyModelsTask
 from src.task.config_task import ExportConfigTask, ImportConfigTask
@@ -28,8 +28,8 @@ from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, AddModelDialog, \
-    UnsavedChangesDialog, ExportPasswordDialog, ImportPasswordDialog
+from src.ui.components.dialog import ProgressDialog, StandardDialog, AddModelDialog, \
+    UnsavedChangesDialog, ExportPasswordDialog, ImportPasswordDialog, SkillConfigDialog, McpConfigDialog
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
@@ -440,13 +440,19 @@ class SettingsTool(BaseTool):
 
     def _refresh_mcp_status(self):
         try:
+
             tm = ThemeManager()
             mcp_mgr = MCPManager.get_instance()
+            skill_mgr = SkillManager.get_instance()
 
             for row in range(self.table_mcp.rowCount()):
                 name_item = self.table_mcp.item(row, 1)
                 if not name_item: continue
                 name = name_item.text()
+
+                # 获取该行的工具类型 (SKILL 还是 stdio/sse)
+                cfg = name_item.data(Qt.UserRole)
+                tool_type = cfg.get("type", "stdio")
 
                 status_lbl = self.table_mcp.cellWidget(row, 5)
                 if not status_lbl: continue
@@ -456,23 +462,36 @@ class SettingsTool(BaseTool):
                 is_enabled = chk.isChecked() if chk else False
 
                 if is_enabled:
-                    status = mcp_mgr.get_server_status(name)
-                    if status == "connected":
-                        status_lbl.setText("Connected")
-                        status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
-                    elif "error" in status:
-                        status_lbl.setText("Error")
-                        status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
-                        status_lbl.setToolTip(status)
+                    # 分支 1: 处理 Native SKILL 的状态
+                    if tool_type == "SKILL":
+                        if skill_mgr.is_skill_available(name):
+                            status_lbl.setText("Ready (Native)")
+                            status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
+                        else:
+                            status_lbl.setText("Not Loaded")
+                            status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
+                            status_lbl.setToolTip("Script not found or failed to load. Check logs.")
+
+                    # 分支 2: 处理 MCP 服务的状态
                     else:
-                        status_lbl.setText(status.capitalize())
-                        status_lbl.setStyleSheet(f"color: {tm.color('warning')};")
+                        status = mcp_mgr.get_server_status(name)
+                        if status == "connected":
+                            status_lbl.setText("Connected")
+                            status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
+                        elif "error" in status:
+                            status_lbl.setText("Error")
+                            status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
+                            status_lbl.setToolTip(status)
+                        else:
+                            status_lbl.setText(status.capitalize())
+                            status_lbl.setStyleSheet(f"color: {tm.color('warning')};")
                 else:
                     status_lbl.setText("Disabled")
                     status_lbl.setStyleSheet(f"color: {tm.color('text_muted')};")
 
         except Exception as e:
             self.logger.error(f"Status refresh failed: {e}")
+
 
     def refresh_model_combos(self):
         curr_embed = self.combo_embed.currentData()
@@ -682,22 +701,41 @@ class SettingsTool(BaseTool):
         self._on_edit_mcp_clicked(row)
 
     def _load_mcp_servers_to_ui(self):
-        servers = self.config.mcp_servers.get("mcpServers", {})
         self.table_mcp.setRowCount(0)
+
+        servers = self.config.mcp_servers.get("mcpServers", {})
+        dirty = False
+        for bad_name in ["built-in", "Academic Tool"]:
+            if bad_name in servers:
+                del servers[bad_name]
+                dirty = True
+        if dirty:
+            self.config.save_mcp_servers()
+
         for name, cfg in servers.items():
             self._add_mcp_row(name, cfg)
+
+        skills = self.config.mcp_servers.get("external_skills", {})
+        if isinstance(skills, dict) and "scripts" not in skills:
+            for name, info in skills.items():
+                if isinstance(info, str):
+                    cfg = {"type": "SKILL", "command": info, "enabled": True, "description": "Native Python Script"}
+                else:
+                    cfg = info
+                self._add_mcp_row(name, cfg)
 
     def _on_refresh_mcp_clicked(self):
         try:
             mcp_mgr = MCPManager.get_instance()
             mcp_mgr.bootstrap_servers(force_all=False)
+
             from src.ui.components.toast import ToastManager
-            ToastManager().show("Retrying offline MCP servers...", "info")
+            ToastManager().show("Refreshing external tool states...", "info")
             self._refresh_mcp_status()
         except Exception as e:
-            self.logger.error(f"Refresh MCP clicked failed: {e}")
+            self.logger.error(f"Refresh clicked failed: {e}")
 
-    def _add_mcp_row(self, name, cfg):
+    def _add_mcp_row(self, name, cfg, is_hardcoded=False):
         row = self.table_mcp.rowCount()
         self.table_mcp.insertRow(row)
 
@@ -707,9 +745,15 @@ class SettingsTool(BaseTool):
         # 0. Enabled Checkbox
         chk = QCheckBox()
         chk.setChecked(is_enabled)
-        if always_on:
+
+
+        if always_on or is_hardcoded:
             chk.setEnabled(False)
-            chk.setToolTip("Core service must remain enabled.")
+            if always_on:
+                chk.setToolTip("Core service must remain enabled.")
+            if is_hardcoded:
+                chk.setChecked(True)  # 强制勾选
+                chk.setToolTip("Built-in Academic Tools cannot be disabled here.")
 
         if hasattr(self, '_mark_unsaved'):
             chk.stateChanged.connect(self._mark_unsaved)
@@ -724,21 +768,29 @@ class SettingsTool(BaseTool):
         name_item = QTableWidgetItem(name)
         name_item.setData(Qt.UserRole, cfg)
         name_item.setFlags(name_item.flags() ^ Qt.ItemIsEditable)
+        if is_hardcoded:
+            name_item.setForeground(Qt.gray)
         self.table_mcp.setItem(row, 1, name_item)
 
         desc_str = cfg.get("description", "")
         desc_item = QTableWidgetItem(desc_str)
         desc_item.setFlags(desc_item.flags() ^ Qt.ItemIsEditable)
+        if is_hardcoded:
+            desc_item.setForeground(Qt.gray)
         self.table_mcp.setItem(row, 2, desc_item)
 
         stype = cfg.get("type", "stdio")
         type_item = QTableWidgetItem(stype)
         type_item.setFlags(type_item.flags() ^ Qt.ItemIsEditable)
+        if is_hardcoded:
+            type_item.setForeground(Qt.gray)
         self.table_mcp.setItem(row, 3, type_item)
 
         target = cfg.get("command", "") if stype == "stdio" else cfg.get("url", "")
         target_item = QTableWidgetItem(target)
         target_item.setFlags(target_item.flags() ^ Qt.ItemIsEditable)
+        if is_hardcoded:
+            target_item.setForeground(Qt.gray)
         self.table_mcp.setItem(row, 4, target_item)
 
         status_lbl = QLabel("Checking...")
@@ -750,7 +802,14 @@ class SettingsTool(BaseTool):
         al.setContentsMargins(0, 0, 0, 0)
         tm = ThemeManager()
 
-        if name != "builtin":
+        # 锁定 Academic Tool 和历史遗留的 builtin，不给编辑和删除按钮
+        if is_hardcoded or name == "builtin" or name == "Academic Tool":
+            lbl_lock = QLabel()
+            lbl_lock.setPixmap(tm.icon("lock", "text_muted").pixmap(16, 16))
+            lbl_lock.setAlignment(Qt.AlignCenter)
+            lbl_lock.setToolTip("Core system service (Read-only)")
+            al.addWidget(lbl_lock)
+        else:
             btn_edit = QPushButton()
             btn_edit.setIcon(tm.icon("edit", "accent"))
             btn_edit.setCursor(Qt.PointingHandCursor)
@@ -765,10 +824,11 @@ class SettingsTool(BaseTool):
                 btn_del.setStyleSheet("background: transparent; border: none;")
 
                 def delete_mcp_row(srv_name):
+                    from src.ui.components.dialog import StandardDialog
                     dlg = StandardDialog(
                         self.widget,
                         "Confirm Delete",
-                        f"Are you sure you want to delete MCP Server '{srv_name}'?\nThis will disconnect it immediately.",
+                        f"Are you sure you want to delete tool '{srv_name}'?\nThis will disconnect it immediately.",
                         show_cancel=True
                     )
 
@@ -786,12 +846,6 @@ class SettingsTool(BaseTool):
 
                 btn_del.clicked.connect(lambda _, n=name: delete_mcp_row(n))
                 al.addWidget(btn_del)
-        else:
-            lbl_lock = QLabel()
-            lbl_lock.setPixmap(tm.icon("lock", "text_muted").pixmap(16, 16))
-            lbl_lock.setAlignment(Qt.AlignCenter)
-            lbl_lock.setToolTip("Core system service (Read-only)")
-            al.addWidget(lbl_lock)
 
         self.table_mcp.setCellWidget(row, 6, action_widget)
 
@@ -805,15 +859,21 @@ class SettingsTool(BaseTool):
             "Do you understand the risks and wish to proceed?"
         )
 
+        from src.ui.components.dialog import StandardDialog, McpConfigDialog
+
         dlg = StandardDialog(self.widget, "Security Warning", warning_msg, show_cancel=True)
         if not dlg.exec():
             return
 
-        # 用户同意后，才弹出真正的配置界面
         config_dlg = McpConfigDialog(self.widget)
         if config_dlg.exec():
             name, cfg = config_dlg.get_config()
             if not name: return
+
+            if name in ["builtin", "Academic Tool","built-in"]:
+                ToastManager().show(f"The name '{name}' is reserved for core system usage.", "error")
+                return
+
             cfg["enabled"] = True
             self._add_mcp_row(name, cfg)
 
@@ -829,24 +889,19 @@ class SettingsTool(BaseTool):
             "<i>Only import scripts from absolutely trusted sources. Do you accept all risks and wish to proceed?</i>"
         )
 
+
         dlg = StandardDialog(self.widget, "⚠️ HIGH RISK OPERATION", warning_msg, show_cancel=True)
         if not dlg.exec():
             return
 
-        path, _ = QFileDialog.getOpenFileName(
-            self.widget, "Import Native Skill Script", "", "Python Scripts (*.py)"
-        )
-        if not path:
-            return
+        skill_dlg = SkillConfigDialog(self.widget)
+        if skill_dlg.exec():
+            name, path = skill_dlg.get_data()
+            if not name or not path: return
 
-        if "external_skills" not in self.config.user_settings:
-            self.config.user_settings["external_skills"] = {}
-        if "scripts" not in self.config.user_settings["external_skills"]:
-            self.config.user_settings["external_skills"]["scripts"] = []
-
-        if path not in self.config.user_settings["external_skills"]["scripts"]:
-            self.config.user_settings["external_skills"]["scripts"].append(path)
-            self._mark_unsaved()
+            if name in ["built-in", "Academic Tool","builtin"]:
+                ToastManager().show(f"The name '{name}' is reserved for core system usage.", "error")
+                return
 
             cfg = {
                 "description": "User Imported Native Python Script",
@@ -854,9 +909,9 @@ class SettingsTool(BaseTool):
                 "command": path,
                 "enabled": True
             }
-            name = f"[SKILL] {os.path.basename(path)}"
-            self._add_mcp_row(name, cfg)
 
+            self._add_mcp_row(name, cfg)
+            self._mark_unsaved()
 
     def _on_edit_mcp_clicked(self, row):
         name_item = self.table_mcp.item(row, 1)
@@ -865,21 +920,50 @@ class SettingsTool(BaseTool):
         old_name = name_item.text()
         old_cfg = name_item.data(Qt.UserRole)
 
-        dlg = McpConfigDialog(self.widget, server_name=old_name, server_config=old_cfg)
-        if dlg.exec():
-            new_name, new_cfg = dlg.get_config()
-            new_cfg["always_on"] = old_cfg.get("always_on", False)
-            new_cfg["enabled"] = old_cfg.get("enabled", True)
+        if old_cfg.get("type") == "SKILL":
+            from src.ui.components.dialog import SkillConfigDialog
+            dlg = SkillConfigDialog(self.widget, skill_name=old_name, script_path=old_cfg.get("command", ""))
+            if dlg.exec():
+                new_name, new_path = dlg.get_data()
 
-            name_item.setText(new_name)
-            name_item.setData(Qt.UserRole, new_cfg)
-            self.table_mcp.item(row, 2).setText(new_cfg.get("description", ""))
-            self.table_mcp.item(row, 3).setText(new_cfg.get("type", "stdio"))
-            target = new_cfg.get("command", "") if new_cfg.get("type", "stdio") == "stdio" else new_cfg.get("url", "")
-            self.table_mcp.item(row, 4).setText(target)
+                if new_name != old_name and new_name in ["built-in", "Academic Tool","builtin"]:
+                    ToastManager().show(f"The name '{new_name}' is reserved for core system usage.", "error")
+                    return
 
-            if hasattr(self, '_mark_unsaved'):
-                self._mark_unsaved()
+                new_cfg = old_cfg.copy()
+                new_cfg["command"] = new_path
+
+                name_item.setText(new_name)
+                name_item.setData(Qt.UserRole, new_cfg)
+                self.table_mcp.item(row, 4).setText(new_path)
+
+                if hasattr(self, '_mark_unsaved'):
+                    self._mark_unsaved()
+
+        else:
+            dlg = McpConfigDialog(self.widget, server_name=old_name, server_config=old_cfg)
+            if dlg.exec():
+                new_name, new_cfg = dlg.get_config()
+
+                # 名称拦截
+                if new_name != old_name and new_name in ["built-in", "Academic Tool","builtin"]:
+                    ToastManager().show(f"The name '{new_name}' is reserved for core system usage.", "error")
+                    return
+
+                new_cfg["always_on"] = old_cfg.get("always_on", False)
+                new_cfg["enabled"] = old_cfg.get("enabled", True)
+
+                name_item.setText(new_name)
+                name_item.setData(Qt.UserRole, new_cfg)
+                self.table_mcp.item(row, 2).setText(new_cfg.get("description", ""))
+                self.table_mcp.item(row, 3).setText(new_cfg.get("type", "stdio"))
+
+                target = new_cfg.get("command", "") if new_cfg.get("type", "stdio") == "stdio" else new_cfg.get("url",
+                                                                                                                "")
+                self.table_mcp.item(row, 4).setText(target)
+
+                if hasattr(self, '_mark_unsaved'):
+                    self._mark_unsaved()
 
     def init_network_section(self):
         group = QGroupBox("Network Proxy")
@@ -1321,8 +1405,6 @@ class SettingsTool(BaseTool):
         return display_text
 
     def _on_copy_params_clicked(self):
-        from src.ui.components.dialog import StandardDialog
-        from src.ui.components.toast import ToastManager
 
         provider_params = self.editor_provider_params.extract_data()
         if not provider_params:
@@ -1802,7 +1884,6 @@ class SettingsTool(BaseTool):
         conf["fetched_models"] = current_models
         self._refresh_model_combo(conf)
 
-        from src.ui.components.toast import ToastManager
         ToastManager().show("MiniMax model list refreshed (defaults restored).", "success")
 
 
@@ -2106,12 +2187,17 @@ class SettingsTool(BaseTool):
         self._save_llm_config()
 
         new_mcp_servers = {}
+        new_external_skills = {}
         if hasattr(self, 'table_mcp'):
             for row in range(self.table_mcp.rowCount()):
                 name_item = self.table_mcp.item(row, 1)
                 if not name_item: continue
 
                 name = name_item.text()
+
+                if name == "Academic Tool":
+                    continue
+
                 cfg = name_item.data(Qt.UserRole).copy()
 
                 chk_widget = self.table_mcp.cellWidget(row, 0)
@@ -2119,9 +2205,13 @@ class SettingsTool(BaseTool):
                     chk = chk_widget.layout().itemAt(0).widget()
                     cfg["enabled"] = chk.isChecked()
 
-                new_mcp_servers[name] = cfg
+                if cfg.get("type") == "SKILL":
+                    new_external_skills[name] = cfg
+                else:
+                    new_mcp_servers[name] = cfg
 
             self.config.mcp_servers["mcpServers"] = new_mcp_servers
+            self.config.mcp_servers["external_skills"] = new_external_skills
             self.config.save_mcp_servers()
 
         new_key = self.input_ncbi_api_key.text().strip()

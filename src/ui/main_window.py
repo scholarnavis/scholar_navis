@@ -177,7 +177,6 @@ class MainWindow(QMainWindow):
             self.tool_stack.addWidget(dummy_widget)
 
         self.clean_old_logs()
-        self._setup_mcp_status_bar()
         QTimer.singleShot(300, self.perform_startup_checks)
 
         # 把原本这里的 translator_dialog 等初始化保留
@@ -213,7 +212,6 @@ class MainWindow(QMainWindow):
 
         self.sidebar.setCurrentRow(0)
         self.clean_old_logs()
-        self._setup_mcp_status_bar()
         QTimer.singleShot(300, self.perform_startup_checks)
 
     def toggle_quick_translator(self):
@@ -293,31 +291,7 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-    def _setup_mcp_status_bar(self):
-        status_widget = QWidget()
-        status_layout = QHBoxLayout(status_widget)
-        status_layout.setContentsMargins(5, 2, 15, 2)
-        status_layout.addStretch()
 
-        status_layout.addWidget(QLabel("MCP Servers:"))
-
-        # 内置MCP状态
-        builtin_status = QLabel("Built-in: Running")
-        builtin_status.setStyleSheet("color: #4caf50; font-weight: bold;")
-        status_layout.addWidget(builtin_status)
-
-        status_layout.addSpacing(10)
-
-        # 网络/自定义 MCP 状态
-        self.custom_status_label = QLabel("Custom: 0 Active")
-        self.custom_status_label.setStyleSheet("color: #888;")
-        status_layout.addWidget(self.custom_status_label)
-
-        self.statusBar().addPermanentWidget(status_widget)
-
-        self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self._update_mcp_status)
-        self.status_timer.start(5000)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -326,38 +300,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(10, lambda: set_window_titlebar_theme(self.winId(), is_dark))
 
 
-    def _update_mcp_status(self):
-        mcp_mgr = MCPManager.get_instance()
-        config_mgr = ConfigManager()
-        mcp_config = config_mgr.mcp_servers.get("mcpServers", {})
 
-        connected_count = 0
-        starting_count = 0
-        error_count = 0
-
-        for name, cfg in mcp_config.items():
-            if name != "builtin":
-                if cfg.get("enabled", False) or cfg.get("always_on", False):
-                    status = mcp_mgr.get_server_status(name)
-                    if status == "connected":
-                        connected_count += 1
-                    elif status in ["starting", "connecting"]:
-                        starting_count += 1
-                    elif "error" in status:
-                        error_count += 1
-
-        if starting_count > 0:
-            self.custom_status_label.setText(f"Custom: {starting_count} Starting...")
-            self.custom_status_label.setStyleSheet("color: #ffb86c; font-weight: bold;")
-        elif error_count > 0:
-            self.custom_status_label.setText(f"Custom: {connected_count} Active, {error_count} Error")
-            self.custom_status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
-        elif connected_count > 0:
-            self.custom_status_label.setText(f"Custom: {connected_count} Active")
-            self.custom_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
-        else:
-            self.custom_status_label.setText("Custom: 0 Active")
-            self.custom_status_label.setStyleSheet("color: #888;")
 
     def clean_old_logs(self):
         base_dir = ThemeManager.get_resource_path()

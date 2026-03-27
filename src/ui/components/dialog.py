@@ -1456,6 +1456,110 @@ class ProjectEditorDialog(BaseDialog):
         }
 
 
+class SkillConfigDialog(BaseDialog):
+    def __init__(self, parent=None, skill_name="", script_path=""):
+        super().__init__(parent, title="Native Skill Configuration", width=550)
+
+        tm = ThemeManager()
+        self.tm = tm
+
+        self.input_name = QLineEdit(skill_name)
+        self.input_name.setPlaceholderText("e.g., fetch_arxiv_summary (Press Ctrl+Z to undo text)")
+        self.input_name.setMinimumHeight(32)
+
+        self.input_path = QLineEdit(script_path)
+        self.input_path.setPlaceholderText("Select a Python (.py) script...")
+        self.input_path.setMinimumHeight(32)
+
+        self.btn_browse = QPushButton()
+        self.btn_browse.setIcon(tm.icon("folder", "accent"))
+        self.btn_browse.setToolTip("Browse and select a .py script...")
+        self.btn_browse.setCursor(Qt.PointingHandCursor)
+        self.btn_browse.setStyleSheet("background: transparent; border: none; padding: 4px;")
+
+        self.btn_clear = QPushButton()
+        self.btn_clear.setIcon(tm.icon("delete", "danger"))
+        self.btn_clear.setToolTip("Clear selected path.")
+        self.btn_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_clear.setStyleSheet("background: transparent; border: none; padding: 4px;")
+
+        path_layout = QHBoxLayout()
+        path_layout.addWidget(self.input_path, stretch=1)
+        path_layout.addWidget(self.btn_browse)
+        path_layout.addWidget(self.btn_clear)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.setSpacing(4)
+
+        form = QFormLayout()
+        form.addRow("Tool Name:", self.input_name)
+        form.addRow("Script Path:", path_layout)
+
+        if hasattr(self, 'content_layout'):
+            self.content_layout.addLayout(form)
+        else:
+            self.v_layout.insertLayout(0, form)
+
+        self.add_button("Cancel", self.reject)
+        self.btn_ok = self.add_button("Confirm", self._validate_and_accept, is_primary=True)
+
+        self.btn_browse.clicked.connect(self._browse_file)
+        self.btn_clear.clicked.connect(self.input_path.clear)
+
+        self._apply_theme()
+
+    def _apply_inputs_theme(self, tm):
+        t = tm.themes
+        input_style = f"""
+            QLineEdit {{
+                border: 1px solid {t.get("border", "#D5D6DC")};
+                border-radius: 4px;
+                padding: 6px 10px;
+                background: white;
+                color: black;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {t.get("accent", "#FFDD33")};
+            }}
+        """
+        self.input_name.setStyleSheet(input_style)
+        self.input_path.setStyleSheet(input_style)
+
+    def _browse_file(self):
+        from PySide6.QtWidgets import QFileDialog
+        import importlib.util
+        from src.ui.components.toast import ToastManager
+
+        path, _ = QFileDialog.getOpenFileName(self, "Select Native Skill Script", "", "Python Scripts (*.py)")
+        if path:
+            self.input_path.setText(path)
+            # 如果名称为空，则尝试静默加载脚本并提取预设名称
+            if not self.input_name.text().strip():
+                try:
+                    spec = importlib.util.spec_from_file_location("temp_module", path)
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                        if hasattr(module, "SCHEMA"):
+                            name = module.SCHEMA.get("function", {}).get("name", "")
+                            if name:
+                                self.input_name.setText(name)
+                except Exception:
+                    # 静默失败，让用户手动填写
+                    pass
+
+    def _validate_and_accept(self):
+        from src.ui.components.toast import ToastManager
+        if not self.input_name.text().strip():
+            ToastManager().show("Please enter a Tool Name.", "warning")
+            return
+        if not self.input_path.text().strip():
+            ToastManager().show("Please select a Script Path.", "warning")
+            return
+        self.accept()
+
+    def get_data(self):
+        return self.input_name.text().strip(), self.input_path.text().strip()
+
 
 class ApiProvidersDialog(BaseDialog):
     def __init__(self, parent=None):
@@ -1558,23 +1662,25 @@ class ApiProvidersDialog(BaseDialog):
         self._apply_theme()
 
     def _apply_theme(self):
+        # 先让 BaseDialog 渲染背景和底部按钮
         super()._apply_theme()
         tm = self.tm
-        self.table.setStyleSheet(f"""
-            QTableWidget {{ 
-                background-color: transparent; 
-                border: none;
-                alternate-background-color: {tm.color('bg_input')};
+
+        # 使用动态获取的 ThemeManager 颜色变量渲染输入框
+        input_style = f"""
+            QLineEdit {{
+                border: 1px solid {tm.color('border')};
+                border-radius: 4px;
+                padding: 6px 10px;
+                background: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
             }}
-            QHeaderView::section {{ 
-                background-color: {tm.color('bg_card')}; 
-                border-bottom: 2px solid {tm.color('border')};
+            QLineEdit:focus {{
+                border: 1px solid {tm.color('accent')};
             }}
-            QTableWidget::item {{ 
-                padding: 12px; 
-                border: none;
-            }}
-        """)
+        """
+        self.input_name.setStyleSheet(input_style)
+        self.input_path.setStyleSheet(input_style)
 
 class LicenseDialog(BaseDialog):
     def __init__(self, parent=None):
