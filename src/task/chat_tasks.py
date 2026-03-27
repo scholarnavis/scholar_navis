@@ -195,8 +195,12 @@ class ChatGenerationTask(BackgroundTask):
         if self.kb_id == "none": self.kb_id = None
         self.requires_translation = self.kwargs.get('requires_translation', False)
         self.external_context = self.kwargs.get('external_context', [])
-        self.use_mcp = self.kwargs.get('use_mcp', False)
-        self.selected_mcp_tags = self.kwargs.get('selected_mcp_tags', [])
+        self.use_academic_agent = self.kwargs.get('use_academic_agent', True)
+        self.academic_tags = self.kwargs.get('academic_tags', [])
+
+        self.use_external_tools = self.kwargs.get('use_external_tools', False)
+        self.external_tool_names = self.kwargs.get('external_tool_names',
+                                                   [])
 
         self.db = DatabaseManager()
         self.kb_manager = KBManager()
@@ -214,7 +218,6 @@ class ChatGenerationTask(BackgroundTask):
         context_str = ""
         sources_map = {}
 
-        # Phase 1: Query Extraction & Translation (Cache Accelerated)
         # Phase 1: Query Extraction & Translation (Cache Accelerated)
         if self.requires_translation:
             self.send_log("INFO", f"Translating query: {original_user_query[:20]}...")
@@ -436,31 +439,47 @@ class ChatGenerationTask(BackgroundTask):
         llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
         self._emit_token("[CLEAR_SEARCH]")
 
-
         # Phase 5: Agentic Generation
         self._emit_token("[START_LLM_NETWORK]")
 
         mcp_mgr = MCPManager.get_instance()
-        mcp_tools = []
+        from src.core.skill_manager import SkillManager
+        skill_mgr = SkillManager.get_instance()
+
+        combined_tools = []
+        raw_tools = []
         dynamic_tool_prompt = ""
 
-        # Phase 5: Agentic Generation (MCP 工具打分环节)
-        if self.use_mcp:
-            if self.selected_mcp_tags is not None:
-                raw_mcp_tools = mcp_mgr.get_tools_schema_by_tags(self.selected_mcp_tags)
-            else:
-                raw_mcp_tools = mcp_mgr.get_all_tools_schema() or []
+        # 1. 内部学术 Agent
+        if self.use_academic_agent:
+            raw_academic = skill_mgr.get_academic_schemas(self.academic_tags)
+            if raw_academic:
+                raw_tools.extend(raw_academic)
 
-            if raw_mcp_tools:
-                self.send_log("INFO",
-                              f"MCP Enabled. Pool contains {len(raw_mcp_tools)} candidate tools. Starting intent-based filtering...")
-                self._emit_token(
-                    "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Filtering ideal MCP tools based on query intent...</div>\n\n")
-                time.sleep(0.05)
-                mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=8)
-                self._emit_token("[CLEAR_SEARCH]")
+        # 2. 外部工具组合 (External SKILLS + External MCP)
+        if self.use_external_tools:
+            # 2.1 提取外部 SKILL
+            ext_skills = skill_mgr.get_external_schemas(self.external_tool_names)
+            if ext_skills:
+                raw_tools.extend(ext_skills)
 
-        mcp_tools.append({
+            # 2.2 提取外部 MCP，并根据 Server 过滤
+            mcp_tools = mcp_mgr.get_all_tools_schema() or []
+            for schema in mcp_tools:
+                server_name = schema.get("server", "Unknown Server")
+                if not self.external_tool_names or server_name in self.external_tool_names:
+                    raw_tools.append(schema)
+
+        if raw_tools:
+            self.send_log("INFO",
+                          f"Enabled tool pool contains {len(raw_tools)} candidate tools (MCP + Skills). Starting intent-based filtering...")
+            self._emit_token(
+                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Filtering optimal tools based on query intent...</div>\n\n")
+            time.sleep(0.05)
+            combined_tools = self.filter_tools_by_rag(search_query, raw_tools, top_k=8)
+            self._emit_token("[CLEAR_SEARCH]")
+
+        combined_tools.append({
             "type": "function",
             "function": {
                 "name": "generate_image",
@@ -478,9 +497,9 @@ class ChatGenerationTask(BackgroundTask):
             }
         })
 
-        if mcp_tools:
+        if combined_tools:
             self._emit_token("<mcp_process>⚙️ Analyzing query intent and filtering optimal MCP tools...</mcp_process>")
-            tool_names = [t.get("function", {}).get("name", "Unknown") for t in mcp_tools]
+            tool_names = [t.get("function", {}).get("name", "Unknown") for t in combined_tools]
             dynamic_tool_prompt = (
                 f"### CRITICAL TOOL UTILIZATION RULE:\n"
                 f"The Reranker engine has exclusively selected the following tools for this specific query: {', '.join(tool_names)}.\n"
@@ -525,7 +544,7 @@ class ChatGenerationTask(BackgroundTask):
         tool_executed = False
         final_response_obtained = False
 
-        if mcp_tools:
+        if combined_tools:
             try:
                 MAX_ITERATIONS = 12
                 for iteration in range(MAX_ITERATIONS):
@@ -535,7 +554,7 @@ class ChatGenerationTask(BackgroundTask):
 
                     response_msg = self.main_llm.chat(
                         messages=rag_messages,
-                        tools=mcp_tools,
+                        tools=combined_tools,
                         tool_choice="auto"
                     )
 
@@ -658,11 +677,36 @@ class ChatGenerationTask(BackgroundTask):
                                 except Exception as img_e:
                                     self.logger.error(f"Internal Image Tool failed: {img_e}")
                                     tool_result = f"Image generation failed: {str(img_e)}"
-                            else:
+
+
+
+
+
+                            elif skill_mgr.is_skill_available(tool_name):
                                 tool_args_str = json.dumps(tool_args, ensure_ascii=False)
                                 short_args = tool_args_str if len(tool_args_str) < 120 else tool_args_str[:120] + "..."
+
+                                if hasattr(skill_mgr, 'academic_skills') and tool_name in skill_mgr.academic_skills:
+                                    prefix = "[ACADEMIC]"
+                                    self.send_log("INFO", f"{prefix} Executing internal skill: {tool_name}")
+
+                                else:
+                                    prefix = "[SKILL]"
+                                    self.send_log("INFO", f"{prefix} Executing external skill script: {tool_name}")
                                 self._emit_token(
-                                    f"<mcp_process>📡 Requesting remote tool: <b>{tool_name}</b><br>"
+                                    f"<mcp_process><b>{prefix} {tool_name}</b><br>"
+                                    f"<span style='font-size:12px; color:#888;'>[Status: Executing] Args: {short_args}</span></mcp_process>\n"
+                                )
+
+                                tool_result = skill_mgr.call_skill(tool_name, tool_args)
+
+                            elif self.use_external_tools and mcp_mgr.is_tool_available(tool_name):
+                                tool_args_str = json.dumps(tool_args, ensure_ascii=False)
+                                short_args = tool_args_str if len(tool_args_str) < 120 else tool_args_str[:120] + "..."
+                                prefix = "[MCP]"
+                                self.send_log("INFO", f"{prefix} Requesting external MCP service: {tool_name}")
+                                self._emit_token(
+                                    f"<mcp_process><b>{prefix} {tool_name}</b><br>"
                                     f"<span style='font-size:12px; color:#888;'>[Status: Executing] Args: {short_args}</span></mcp_process>\n"
                                 )
 
@@ -717,8 +761,8 @@ class ChatGenerationTask(BackgroundTask):
             self._emit_token("[START_LLM_NETWORK]")
 
             stream_kwargs = {}
-            if mcp_tools:
-                stream_kwargs["tools"] = mcp_tools
+            if combined_tools:
+                stream_kwargs["tools"] = combined_tools
 
             # --- 新增：截获底层流式错误的逻辑 ---
             error_buffer = ""
@@ -763,13 +807,14 @@ class ChatGenerationTask(BackgroundTask):
 
         return self.full_response_cache
 
-    def filter_tools_by_rag(self, user_query, raw_mcp_tools, top_k=8):
-        if not raw_mcp_tools or len(raw_mcp_tools) <= top_k:
-            return raw_mcp_tools
+    def filter_tools_by_rag(self, user_query, candidate_tools, top_k=8):
+        if not candidate_tools or len(candidate_tools) <= top_k:
+            self.send_log("INFO", f"Skipping Reranker: {len(candidate_tools)} candidate tools is <= top_k ({top_k}).")
+            return candidate_tools
 
         try:
             candidate_docs = []
-            for tool in raw_mcp_tools:
+            for tool in candidate_tools:
                 func = tool.get("function", {})
                 content = f"Tool Name: {func.get('name', '')}. Description: {func.get('description', '')}"
                 candidate_docs.append({"content": content, "metadata": {"tool_schema": tool}})
@@ -778,19 +823,38 @@ class ChatGenerationTask(BackgroundTask):
                 self.messages) >= 2 else ""
             rerank_query = f"User Intent: {user_query}.{history_context} Find the most appropriate API tools to fulfill this request."
 
-            ranked_docs = self._process_rerank(rerank_query, candidate_docs, domain="Tool Selection", top_k=top_k,
-                                               emit_warning=False)
+            self.send_log("DEBUG", f"Reranker Query constructed: {rerank_query}")
+            self.send_log("DEBUG", f"Sending {len(candidate_tools)} tools to Reranker engine for scoring...")
+
+            ranked_docs = self._process_rerank(rerank_query, candidate_docs, domain="Tool Selection", top_k=len(candidate_docs), emit_warning=False)
+
             if ranked_docs is None:
-                return raw_mcp_tools
+                self.send_log("WARNING", "Reranker returned None. Bypassing tool filtering.")
+                return candidate_tools
 
-            selected_names = [doc["metadata"]["tool_schema"]["function"]["name"] for doc in ranked_docs]
-            self.send_log("INFO",
-                          f"Reranker scoring complete. Selected Top {len(selected_names)} tools: {', '.join(selected_names)}")
+            log_lines = ["\n[--- Reranker Tool Scoring Report ---]"]
+            for idx, doc in enumerate(ranked_docs):
+                tool_name = doc["metadata"]["tool_schema"]["function"]["name"]
+                score = doc.get("score", 0.0)
+                status = "✅ [SELECTED]" if idx < top_k else "❌ [REJECTED]"
+                log_lines.append(f"{idx+1:02d}. {status} Score: {score:.4f} | Tool: {tool_name}")
 
-            return [doc["metadata"]["tool_schema"] for doc in ranked_docs]
+                if idx >= top_k and any(kw in tool_name.lower() for kw in ['search', 'literature', 'pubmed', 'crossref']):
+                    self.send_log("WARNING", f"Critical tool '{tool_name}' was rejected with score ({score:.4f}). Check if its Schema Description matches the prompt intent.")
+
+            log_lines.append("[------------------------------------]\n")
+            self.send_log("INFO", "\n".join(log_lines))
+
+            top_ranked_docs = ranked_docs[:top_k]
+            selected_names = [doc["metadata"]["tool_schema"]["function"]["name"] for doc in top_ranked_docs]
+
+            self.send_log("INFO", f"Reranker scoring complete. Final Top {len(selected_names)} tools: {', '.join(selected_names)}")
+
+            return [doc["metadata"]["tool_schema"] for doc in top_ranked_docs]
+
         except Exception as e:
             self.send_log("ERROR", f"Exception during tool reranking: {str(e)}")
-            return raw_mcp_tools
+            return candidate_tools
 
     def _process_rerank(self, query, docs, domain, top_k, emit_warning=True):
         if not docs: return []

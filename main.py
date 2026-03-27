@@ -181,7 +181,6 @@ class AppController(QObject):
 
     @Slot()
     def on_startup_finished(self):
-        # 1. 设置 100% 状态
         self.splash.progress.setValue(100)
         self.splash.lbl_status.setText("Ready. Initializing workspace...")
         QApplication.processEvents()
@@ -198,7 +197,6 @@ class AppController(QObject):
         self.splash.close()
 
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
-        QTimer.singleShot(2500, self._start_api_server)
 
     def _start_api_server(self):
         from src.core.config_manager import ConfigManager
@@ -219,15 +217,8 @@ if __name__ == "__main__":
 
     multiprocessing.freeze_support()
 
-    # 1. 拦截来自 MCPManager 的子进程唤起请求
-    if len(sys.argv) > 1 and sys.argv[1] == "--run-builtin-mcp":
-        os.environ["SCARF_NO_ANALYTICS"] = "true"
-        from plugins.academic_mcp_server import mcp
 
-        mcp.run(transport='stdio')
-        sys.exit(0)
-
-    # 2. 拦截 API Server 独立运行模式
+    # 拦截 API Server 独立运行模式
     if len(sys.argv) > 1 and sys.argv[1] == "--api-server":
         os.environ["SCARF_NO_ANALYTICS"] = "true"
 
@@ -264,11 +255,6 @@ if __name__ == "__main__":
     from src.core.logger import setup_logger
 
     if sys.platform == "win32":
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-
         try:
             myappid = ctypes.c_wchar_p("scholar.navis.app")
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)

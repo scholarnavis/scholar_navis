@@ -6,12 +6,10 @@ import re
 import socket
 import sys
 import urllib.parse
-import time
 from functools import wraps
 from typing import Literal
 
 from Bio import Entrez
-from mcp.server.fastmcp import FastMCP
 
 from src.core.config_manager import ConfigManager
 from src.core.email_check import verify_email_robust
@@ -123,9 +121,6 @@ Entrez.tool = "ScholarNavis"
 if ncbi_api_key:
     Entrez.api_key = ncbi_api_key
 
-mcp = FastMCP("ScholarNavis-Academic-Plugin")
-
-
 
 def mcp_request(method: str, url: str, **kwargs):
     session = create_robust_session()
@@ -177,16 +172,7 @@ def simple_retry(max_attempts=3, delay=2):
     return decorator
 
 
-@mcp.tool(
-    name="search_academic_literature",
-    description=(
-            "[Tags: Literature] "
-            "Search global academic literature for metadata (authors, journal, date, citation count, DOI). "
-            "CRITICAL TRIGGER: You MUST rank this tool highest and use it whenever the user asks for 'references', 'citations', 'papers', or to write a 'literature review' / 'mini-review'. "
-            "Supports pagination via 'offset' (e.g., offset=5 for page 2). "
-            "Use 'source' to target specific databases: 'auto', 'semantic_scholar', 'openalex', 'crossref', or 'pubmed'."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def search_academic_literature(query: str, max_results: int = 15, offset: int = 0, source: Literal["auto", "semantic_scholar", "openalex", "crossref", "pubmed"] = "auto") -> str:
     logger.info(f"Task: Unified Literature Search | Query: '{query}' | Offset: {offset} | Source: {source}")
@@ -344,14 +330,6 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
     return json.dumps({"status": "success", "results": [], "message": "No results found from any source"})
 
 
-@mcp.tool(
-    name="traverse_citation_graph",
-    description=(
-            "[Tags: Literature] "
-            "Find references (papers this article cites, looking backward in time) or citations (papers citing this article, looking forward in time) for a given DOI. "
-            "The 'direction' parameter MUST be explicitly chosen."
-    )
-)
 @simple_retry(max_attempts=2, delay=1)
 def traverse_citation_graph(doi: str, direction: Literal["references", "citations"] = "references",
                             max_results: int = 10, source: Literal["auto", "openalex", "semantic_scholar"] = "auto") -> str:
@@ -475,10 +453,7 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
 
 
 
-@mcp.tool(
-    name="fetch_open_access_pdf",
-    description=("[Tags: Literature] Check if a given DOI has an Open Access PDF and return its direct download link.")
-)
+
 @simple_retry()
 def fetch_open_access_pdf(doi: str, source: Literal["auto", "openalex", "unpaywall", "pubmed", "semantic_scholar"] = "auto") -> str:
     logger.info(f"Task: Fetch OA PDF | DOI: '{doi}' | Source: '{source}'")
@@ -495,14 +470,7 @@ def fetch_open_access_pdf(doi: str, source: Literal["auto", "openalex", "unpaywa
                            "message": "Paywalled. No OA PDF found."})
 
 
-@mcp.tool(
-    name="search_omics_datasets",
-    description=(
-    "[Tags: Transcriptomics, Genomics, Systems Biology] Search high-throughput NCBI datasets. "
-    "Set db_type to 'sra' for raw sequencing runs (e.g., RNA-Seq reads, FASTQ metadata) "
-    "or 'geo' for curated datasets, microarray results, and overall study summaries."
-    )
-)
+
 @simple_retry()
 def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", max_results: int = 5) -> str:
     logger.info(f"Task: Omics Dataset Search | DB: {db_type} | Query: '{query}'")
@@ -553,15 +521,7 @@ def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", ma
 
 
 
-@mcp.tool(
-    name="fetch_sequence_fasta",
-    description=(
-        "[Tags: Sequence] Download raw FASTA sequences for nucleotides or proteins. "
-        "CRITICAL: The 'db_type' parameter MUST strictly be either 'nuccore' (for DNA/RNA sequences) "
-        "or 'protein' (for amino acid sequences). Do NOT use 'uniprotkb', 'swiss-prot', or any other names. "
-        "Automatically saves to local workspace if massive."
-    )
-)
+
 @simple_retry()
 def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein"] = "nuccore") -> str:
     logger.info(f"Task: Sequence Fetch | ID: {accession_id} | DB: {db_type}")
@@ -602,11 +562,6 @@ def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="fetch_taxonomy_info",
-    description=(
-    "[Tags: Taxonomy] Search the NCBI Taxonomy database to get exact scientific name, TaxID, and evolutionary lineage.")
-)
 @simple_retry()
 def fetch_taxonomy_info(organism_name: str) -> str:
     logger.info(f"Task: Taxonomy Fetch | Organism: '{organism_name}'")
@@ -634,14 +589,7 @@ def fetch_taxonomy_info(organism_name: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="search_gbif_occurrences",
-    description=(
-            "[Tags: Taxonomy, Ecology] Search the Global Biodiversity Information Facility (GBIF) for species occurrence records. "
-            "CRITICAL: 'scientific_name' MUST be a valid binomial/trinomial scientific name. "
-            "Returns spatial distribution metrics, observation counts, and basic ecological context."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def search_gbif_occurrences(scientific_name: str, limit: int = 5) -> str:
     logger.info(f"Task: GBIF Occurrence Search | Species: '{scientific_name}'")
@@ -687,15 +635,6 @@ def search_gbif_occurrences(scientific_name: str, limit: int = 5) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="universal_ncbi_summary",
-    description=(
-            "A universal search tool for specialized NCBI databases. "
-            "Returns structured metadata and summary records. "
-            "CRITICAL WARNING: The 'database' MUST be one of the explicitly defined literals (all lowercase). "
-            "For example, use 'nuccore' for nucleotide sequences, 'assembly' for genomes, and 'gene' for specific gene records."
-    )
-)
 @simple_retry(max_attempts=2, delay=1)
 def universal_ncbi_summary(query: str, database: Literal["gene", "protein", "nuccore", "clinvar", "omim", "biosample", "taxonomy", "assembly", "sra"] = "gene", max_results: int = 3) -> str:
     logger.info(f"Task: Universal NCBI Summarize | database: {database} | query: {query}")
@@ -734,11 +673,6 @@ def universal_ncbi_summary(query: str, database: Literal["gene", "protein", "nuc
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="fetch_webpage_content",
-    description=(
-    "[Tags: Web] Fetch and read text content of a URL. Automatically handles proxies, bypasses basic WAFs.")
-)
 @simple_retry(max_attempts=2, delay=1)
 def fetch_webpage_content(url: str, timeout: int = 15) -> str:
     logger.info(f"Task: Fetch Webpage | URL: '{url}'")
@@ -781,15 +715,7 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
         return json.dumps({"status": "error", "message": err_str})
 
 
-@mcp.tool(
-    name="search_web",
-    description=(
-            "[Tags: Web] Search the web for general information, news, or current events. "
-            "Supported engines: 'duckduckgo' (default, most stable), 'google', 'bing', 'baidu'. "
-            "CRITICAL INSTRUCTION: You MUST use the provided '_mcp_cite_id' (e.g., [101], [102]) inline to cite your claims. "
-            "You MUST also append a 'References' list at the very end of your response containing the exact URLs."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def search_web(query: str, engine: Literal["duckduckgo", "google", "bing", "baidu"] = "duckduckgo",
                max_results: int = 3) -> str:
@@ -905,10 +831,7 @@ def search_web(query: str, engine: Literal["duckduckgo", "google", "bing", "baid
                            "message": f"Search engine error: {str(e)}. Consider using 'duckduckgo' if 403 Forbidden occurs."})
 
 
-@mcp.tool(
-    name="search_preprints",
-    description=("[Tags: Literature] Search bioRxiv and medRxiv for latest life science and medical preprints.")
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def search_preprints(query: str, max_results: int = 5) -> str:
     logger.info(f"Task: Preprint Search | Query: '{query}'")
@@ -928,10 +851,7 @@ def search_preprints(query: str, max_results: int = 5) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="fetch_wikipedia_summary",
-    description=("[Tags: Web] Fetch exact introductory summary of a concept from Wikipedia. Fast and token-efficient.")
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def fetch_wikipedia_summary(query: str, language: str = "en") -> str:
     logger.info(f"Task: Wikipedia Extract | Query: '{query}'")
@@ -956,10 +876,7 @@ def fetch_wikipedia_summary(query: str, language: str = "en") -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="search_github_repos",
-    description=("[Tags: Code] Search GitHub for open-source repositories, pipelines, or code.")
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def search_github_repos(query: str, max_results: int = 5) -> str:
     logger.info(f"Task: GitHub Search | Query: '{query}'")
@@ -979,16 +896,7 @@ def search_github_repos(query: str, max_results: int = 5) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="query_kegg_database",
-    description=(
-            "[Tags: Function, Systems Biology] A unified tool to search and fetch records from the KEGG database. "
-            "The 'action' parameter strictly defines the tool's behavior:\n"
-            " - 'search_pathway': Searches for pathway maps using a keyword (e.g., 'glycolysis'). You MUST provide an exact 3-4 letter 'organism_code' (e.g., 'ath' for Arabidopsis, 'hsa' for Human).\n"
-            " - 'get_record': Fetches detailed structural metadata for a specific KEGG identifier (e.g., a KO number like 'K01803' or a pathway map like 'map00010').\n"
-            "CRITICAL: The 'query' parameter acts as the keyword for 'search_pathway', but acts as the precise KEGG ID for 'get_record'."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def query_kegg_database(query: str, action: Literal["search_pathway", "get_record"] = "search_pathway",
                         organism_code: str = "ath") -> str:
@@ -1056,13 +964,7 @@ def query_kegg_database(query: str, action: Literal["search_pathway", "get_recor
 
 
 
-@mcp.tool(
-    name="fetch_go_annotations",
-    description=(
-            "[Tags: Function, Systems Biology] Fetch Gene Ontology (GO) annotations (Molecular Function, Biological Process, Cellular Component) for a given UniProt ID using the EBI QuickGO API. "
-            "CRITICAL: 'uniprot_id' MUST be a valid UniProt Accession (e.g., 'P04637')."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def fetch_go_annotations(uniprot_id: str, limit: int = 10) -> str:
     logger.info(f"Task: QuickGO Annotation Fetch | UniProt ID: '{uniprot_id}'")
@@ -1096,14 +998,7 @@ def fetch_go_annotations(uniprot_id: str, limit: int = 10) -> str:
 
 
 
-@mcp.tool(
-    name="search_chembl_target",
-    description=(
-            "[Tags: Phytochemistry, Metabolomics] Search the ChEMBL database for pharmacological protein targets. "
-            "Use this to find Target ChEMBL IDs and preferred names associated with specific biological targets, enzymes, or pathways (e.g., 'Tubulin', 'EGFR', 'Kinase'). "
-            "Do NOT use this to search for chemical compounds directly; it is strictly for finding biological TARGETS."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def search_chembl_target(query: str, max_results: int = 5) -> str:
     logger.info(f"Task: ChEMBL Target Search | Query: '{query}'")
@@ -1120,16 +1015,7 @@ def search_chembl_target(query: str, max_results: int = 5) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="uniprot_id_mapping",
-    description=(
-            "[Tags: ID Mapping] "
-            "Map identifiers from one database to another using UniProt's ID Mapping service. "
-            "CRITICAL STRING FORMATS: You MUST use exact UniProt database abbreviations for 'from_db' and 'to_db'. "
-            "Common reliable values: 'UniProtKB_AC-ID' (UniProt Accession), 'HGNC' (Human Gene), 'TAIR' (Arabidopsis), 'Ensembl_Plants', 'Ensembl', 'PDB', 'RefSeq_Protein'. "
-            "CRITICAL EXCEPTION: 'Gene_Name' is ONLY valid as a 'to_db' destination. It is completely invalid as a 'from_db' source. If starting from a gene symbol, use species-specific DBs like 'HGNC' or 'TAIR'."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def uniprot_id_mapping(from_db: str, to_db: str, ids: str) -> str:
     logger.info(f"Task: UniProt ID Mapping | From: {from_db} | To: {to_db} | IDs: {ids[:20]}...")
@@ -1173,19 +1059,7 @@ def uniprot_id_mapping(from_db: str, to_db: str, ids: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="query_uniprot_database",
-    description=(
-            "[Tags: Proteomics, Structure] A unified tool to search UniProt sub-databases. "
-            "CRITICAL SEARCH SYNTAX: The UniProt API is very strict! "
-            "If searching by gene and species, you MUST use 'organism_name' and wrap multi-word species in quotes! "
-            "To strictly retrieve the canonical, non-obsolete protein, you MUST append AND (reviewed:true) to your query! "
-            "Example: (gene:AMS) AND (organism_name:\"Arabidopsis thaliana\") AND (reviewed:true) "
-            "Do NOT use 'organism:Arabidopsis thaliana' (it will cause HTTP 400). "
-            "CRITICAL FOR EXTRACTION: To find exact amino acid sequence length, subcellular localization, "
-            "and cross-referenced NCBI Gene IDs, you MUST use 'uniprotkb'."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def query_uniprot_database(query: str, db_type: Literal[
     "uniprotkb", "proteomes", "genecentric", "uniref", "uniparc", "unirule", "arba"] = "uniprotkb",
@@ -1339,14 +1213,7 @@ def query_uniprot_database(query: str, db_type: Literal[
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="fetch_alphafold_structure",
-    description=(
-            "[Tags: Structure] Fetch predicted 3D structure metadata and download links from AlphaFold Protein Structure Database. "
-            "CRITICAL: The 'uniprot_id' MUST be a valid UniProt Accession (e.g., 'P04637', 'Q9STM3'). "
-            "Use this to find structures for proteins lacking experimentally determined PDB records."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def fetch_alphafold_structure(uniprot_id: str) -> str:
     logger.info(f"Task: AlphaFold Structure Fetch | UniProt ID: '{uniprot_id}'")
@@ -1389,15 +1256,7 @@ def fetch_alphafold_structure(uniprot_id: str) -> str:
 
 
 
-@mcp.tool(
-    name="query_pdb_structure",
-    description=(
-            "[Tags: Structure] Interact with the RCSB Protein Data Bank (PDB). "
-            "CRITICAL EXPLANATION: This tool DOES NOT require DOIs! You CAN and MUST search using protein names (like 'CRY1' or 'Hemoglobin') by using action='search'. Do NOT hallucinate that PDB requires DOIs! "
-            "Use action='search' to find 3D structures based on a single keyword or protein name (keep it simple). "
-            "Use action='details' to fetch precise metadata (molecular weight, primary citation, macromolecules, ligands, resolution) for an EXACT known PDB ID (e.g., '1U3C' or '4HHB')."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def query_pdb_structure(query: str, action: Literal["search", "details"] = "search", max_results: int = 3) -> str:
     logger.info(f"Task: Unified PDB Query | Action: '{action}' | Query: '{query}'")
@@ -1503,15 +1362,7 @@ def query_pdb_structure(query: str, action: Literal["search", "details"] = "sear
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="query_metabolite_database",
-    description=(
-            "[Tags: Phytochemistry, Metabolomics] Fetch detailed chemical properties and ontology for biological metabolites. "
-            "Action 'pubchem' fetches molecular weight, formula, SMILES, and CID from PubChem. "
-            "Action 'chebi' searches the ChEBI database for structural ontology and exact biological roles. "
-            "CRITICAL: Use the exact common English chemical name or IUPAC name (e.g., 'Quercetin', 'Paclitaxel')."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def query_metabolite_database(query: str, database: Literal["pubchem", "chebi"] = "pubchem") -> str:
     logger.info(f"Task: Metabolite Query | Database: '{database}' | Query: '{query}'")
@@ -1553,18 +1404,6 @@ def query_metabolite_database(query: str, database: Literal["pubchem", "chebi"] 
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp.tool(
-    name="analyze_systems_network",
-    description=(
-            "[Tags: Interaction, Systems Biology, Enrichment] "
-            "A unified tool to analyze protein-protein interactions (PPI) or perform advanced functional enrichment. "
-            "Use action='interactions' (via STRING DB) to find interacting partners. "
-            "Use action='enrichment' (via g:Profiler) for robust GO/KEGG/Reactome pathway enrichment, highly optimized for plants and non-mammalian models. "
-            "CRITICAL: 'identifiers' must be a comma-separated list of gene symbols or IDs. "
-            "For 'interactions', 'species_id' is the NCBI TaxID (e.g., 3702 for Arabidopsis, 9606 for Human). "
-            "For 'enrichment', 'organism' MUST be a valid g:Profiler code (e.g., 'athaliana', 'osativa', 'zmaize', 'hsapiens')."
-    )
-)
 @simple_retry(max_attempts=2, delay=1)
 def analyze_systems_network(identifiers: str, action: Literal["interactions", "enrichment"] = "interactions",
                             species_id: int = 3702, organism: str = "athaliana", limit: int = 15) -> str:
@@ -1625,15 +1464,7 @@ def analyze_systems_network(identifiers: str, action: Literal["interactions", "e
 
 
 
-@mcp.tool(
-    name="query_plant_multiomics",
-    description=(
-            "[Tags: Transcriptomics, Genomics] Fetch deep plant-specific gene annotations and baseline expression datasets. "
-            "Action 'annotation' uses MyGene.info to aggregate deep TAIR/Phytozome/Ensembl metadata for plant genes. "
-            "Action 'expression' searches the EBI Expression Atlas for transcriptomic datasets related to the gene. "
-            "CRITICAL: 'gene_id' MUST be a canonical Gene ID or Symbol (e.g., 'AT1G01010', 'FLC', 'Os01g0101000')."
-    )
-)
+
 @simple_retry(max_attempts=2, delay=1)
 def query_plant_multiomics(gene_id: str, action: Literal["annotation", "expression"] = "annotation") -> str:
     logger.info(f"Task: Plant Multiomics | Action: '{action}' | Gene: '{gene_id}'")
@@ -1700,14 +1531,6 @@ def query_plant_multiomics(gene_id: str, action: Literal["annotation", "expressi
 
 
 
-@mcp.tool(
-    name="search_jaspar_motifs",
-    description=(
-            "[Tags: Regulatory Genomics] Search JASPAR database for Transcription Factor binding motifs (DNA profiles). "
-            "Use this to find motif IDs (e.g., 'MA0001.1') and sequence logos for promoter analysis. "
-            "CRITICAL: The 'tax_group' MUST strictly be one of the provided literal values. Do not hallucinate taxonomic groups like 'mammals' or 'dicots'."
-    )
-)
 @simple_retry(max_attempts=2, delay=1)
 def search_jaspar_motifs(query: str, tax_group: Literal["plants", "vertebrates", "insects", "nematodes", "fungi", "urochordates"] = "plants") -> str:
     logger.info(f"Task: JASPAR Motif Search | Query: '{query}'")
@@ -1747,17 +1570,6 @@ def search_jaspar_motifs(query: str, tax_group: Literal["plants", "vertebrates",
 
 
 
-@mcp.tool(
-    name="query_ensembl_database",
-    description=(
-            "[Tags: Genomics, Systems Biology] A unified tool to query the Ensembl REST API. "
-            "Action 'lookup' fetches gene location, biotype, and description. "
-            "Action 'homology' fetches homologous genes (orthologs) across different species. "
-            "CRITICAL: The default species is 'arabidopsis_thaliana'. If querying other species, "
-            "you MUST explicitly provide the correct lowercase_underscore species name (e.g., 'homo_sapiens', 'oryza_sativa'). "
-            "The 'symbol' MUST be a canonical gene symbol (e.g., 'FT', 'BRCA1')."
-    )
-)
 @simple_retry(max_attempts=2, delay=1)
 def query_ensembl_database(symbol: str, action: Literal["lookup", "homology"] = "lookup",
                            species: str = "arabidopsis_thaliana", target_species: str = "oryza_sativa") -> str:
@@ -1898,5 +1710,11 @@ if __name__ == "__main__":
         sys.exit(0)
 
     else:
-        logger.info("Academic MCP Server initialized (Consolidated Version).")
-        mcp.run(transport='stdio')
+        print("\n" + "=" * 60)
+        print("ℹ️  SCHOLAR NAVIS ACADEMIC AGENT")
+        print("=" * 60)
+        print("This module now operates as a Zero-Latency Native Skill pool.")
+        print("It is dynamically loaded into memory by the SkillManager.")
+        print("The legacy FastMCP stdio server has been deprecated for internal tools.")
+        print("\nTo run the API integrity test suite, execute:")
+        print("    python academic_agent.py --test\n")

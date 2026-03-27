@@ -108,29 +108,7 @@ class MCPManager:
             safe_base_env.pop("http_proxy", None)
             safe_base_env.pop("https_proxy", None)
 
-        builtin_env = safe_base_env.copy()
-        if user_cfg.get("ncbi_email"):
-            builtin_env["NCBI_API_EMAIL"] = user_cfg.get("ncbi_email")
-        else:
-            builtin_env.pop("NCBI_API_EMAIL", None)
-
-        if user_cfg.get("ncbi_api_key"):
-            builtin_env["NCBI_API_KEY"] = user_cfg.get("ncbi_api_key")
-        else:
-            builtin_env.pop("NCBI_API_KEY", None)
-
-        if user_cfg.get("s2_api_key"):
-            builtin_env["S2_API_KEY"] = user_cfg.get("s2_api_key")
-        else:
-            builtin_env.pop("S2_API_KEY", None)
-
-        if user_cfg.get("github_token"):
-            builtin_env["GITHUB_TOKEN"] = user_cfg.get("github_token")
-        else:
-            builtin_env.pop("GITHUB_TOKEN", None)
-
         if hasattr(self, 'log_port'):
-            builtin_env["MCP_LOG_PORT"] = str(self.log_port)
             safe_base_env["MCP_LOG_PORT"] = str(self.log_port)
 
         delay_ms = 500
@@ -141,7 +119,6 @@ class MCPManager:
 
             if is_enabled or always_on:
                 if not force_all:
-
                     status = self.server_status.get(server_name, "")
                     if status == "connected":
                         continue
@@ -149,37 +126,24 @@ class MCPManager:
                 self.server_status[server_name] = "starting"
                 run_cfg = dict(srv_cfg)
 
-                if server_name == "builtin":
-                    logger.info(f"Bootstrapping Core MCP Server: [{server_name}] immediately.")
-                    is_frozen = getattr(sys, 'frozen', False) or not sys.executable.endswith('python.exe')
-                    run_cfg['command'] = sys.executable
-                    if is_frozen:
-                        run_cfg['args'] =["--run-builtin-mcp"]
-                    else:
-                        run_cfg['args'] =["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
+                logger.info(f"Scheduled Lazy Load for External MCP Server: [{server_name}] in {delay_ms}ms")
 
-                    run_cfg['env'] = builtin_env
-                    self._async_start(server_name, run_cfg)
+                if run_cfg.get('type') == 'stdio' and run_cfg.get('command') == 'python':
+                    ext_py = config_mgr.user_settings.get("external_python_path", "")
+                    run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
 
-                else:
-                    logger.info(f"Scheduled Lazy Load for External MCP Server:[{server_name}] in {delay_ms}ms")
+                if run_cfg.get('type') == 'stdio':
+                    custom_env = safe_base_env.copy()
+                    user_defined_env = run_cfg.get('env', {})
+                    if isinstance(user_defined_env, dict):
+                        custom_env.update({k: str(v) for k, v in user_defined_env.items()})
+                    run_cfg['env'] = custom_env
 
-                    if run_cfg.get('type') == 'stdio' and run_cfg.get('command') == 'python':
-                        ext_py = config_mgr.user_settings.get("external_python_path", "")
-                        run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
+                def start_lazy_server(name=server_name, cfg=run_cfg):
+                    self._async_start(name, cfg)
 
-                    if run_cfg.get('type') == 'stdio':
-                        custom_env = safe_base_env.copy()
-                        user_defined_env = run_cfg.get('env', {})
-                        if isinstance(user_defined_env, dict):
-                            custom_env.update({k: str(v) for k, v in user_defined_env.items()})
-                        run_cfg['env'] = custom_env
-
-                    def start_lazy_server(name=server_name, cfg=run_cfg):
-                        self._async_start(name, cfg)
-
-                    self._loop.call_later(delay_ms / 1000.0, start_lazy_server)
-                    delay_ms += 2000
+                self._loop.call_later(delay_ms / 1000.0, start_lazy_server)
+                delay_ms += 2000
 
             else:
                 if server_name in self.sessions or server_name in self.server_status:
@@ -333,27 +297,17 @@ class MCPManager:
             GlobalSignals().mcp_status_changed.emit()
 
 
-
-
-    def get_available_tags(self) -> list:
+    def get_available_mcp(self) -> list:
         """供 UI 获取所有可选标签"""
         tags = set()
         for schema in self.tool_schemas.values():
-            tags.update(self._get_tool_effective_tags(schema))
+            tags.update(self.get_external_mcp(schema))
         return sorted(list(tags))
 
-    def _get_tool_effective_tags(self, schema: dict) -> list:
+    def get_external_mcp(self, schema: dict) -> list:
         server_name = schema.get("server", "")
-        desc = schema.get("function", {}).get("description", "")
+        return [server_name] if server_name else ["Unknown Server"]
 
-        if server_name == "builtin":
-            import re
-            match = re.search(r"\[Tags:\s*(.*?)\]", str(desc), re.IGNORECASE)
-            if match:
-                return [t.strip() for t in match.group(1).split(",")]
-            return ["General Tools"]
-        else:
-            return [server_name] if server_name else ["Unknown Server"]
 
     def get_tools_schema_by_tags(self, selected_tags: list) -> list:
         if selected_tags is None:
@@ -364,7 +318,7 @@ class MCPManager:
 
         filtered_tools = []
         for schema in self.tool_schemas.values():
-            tool_tags = self._get_tool_effective_tags(schema)
+            tool_tags = self.get_external_mcp(schema)
             if any(tag in selected_tags for tag in tool_tags):
                 filtered_tools.append({
                     "type": schema.get("type", "function"),
@@ -405,8 +359,7 @@ class MCPManager:
             raise ValueError(f"Tool '{tool_name}' not found in any connected MCP server.")
 
         session = self.sessions.get(server_name)
-        is_trusted = server_name == "builtin"
-        timeout = 120.0 if is_trusted else self.TOOL_TIMEOUT
+        timeout = self.TOOL_TIMEOUT
 
         logger.info(f"Executing [{tool_name}] on [{server_name}] (Timeout: {timeout}s)")
 

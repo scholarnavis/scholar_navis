@@ -268,15 +268,10 @@ class ConfigManager:
         py_path = sys.executable
 
         default_mcp_servers = {
-            "mcpServers": {
-                "builtin": {
-                    "type": "stdio",
-                    "command": py_path,
-                    "args": ["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"],
-                    "enabled": True, "always_on": True, "description": "Core Tools"
-                },
-            },
-            "deselected_mcp_tags": []
+            "mcpServers": {},
+            "external_skills": {},
+            "deselected_mcp_tags": [],
+            "deselected_external_tools": []
         }
 
         current_servers = self.load_json(self.MCP_SERVERS_PATH, encrypt=True)
@@ -286,16 +281,19 @@ class ConfigManager:
             current_servers = default_mcp_servers.copy()
             is_modified = True
         else:
+            legacy_academic_keys = ["academic_agent", "builtin_academic", "scholar_navis_internal"]
+            mcp_configs = current_servers.get("mcpServers", {})
 
-            if "builtin" not in current_servers["mcpServers"]:
-                current_servers["mcpServers"]["builtin"] = default_mcp_servers["mcpServers"]["builtin"]
-                is_modified = True
-            else:
-                current_servers["mcpServers"]["builtin"]["command"] = py_path
+            for legacy_key in legacy_academic_keys:
+                if legacy_key in mcp_configs:
+                    self.logger.info(f"Detected legacy MCP academic tool: {legacy_key}. Removing for SKILL migration.")
+                    del mcp_configs[legacy_key]
+                    is_modified = True
 
-            if "deselected_mcp_tags" not in current_servers:
-                current_servers["deselected_mcp_tags"] = []
-                is_modified = True
+            for key in ["external_skills", "deselected_mcp_tags", "deselected_external_tools"]:
+                if key not in current_servers:
+                    current_servers[key] = {} if key == "external_skills" else []
+                    is_modified = True
 
         self.mcp_servers = current_servers
         if is_modified:

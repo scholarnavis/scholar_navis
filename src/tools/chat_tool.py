@@ -26,6 +26,7 @@ from src.core.lang_detect import detect_primary_language
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, ModelManager
 from src.core.signals import GlobalSignals
+from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager
 from src.task.chat_tasks import ProcessAttachmentTask, ChatGenerationTask
 from src.tools.base_tool import BaseTool
@@ -184,12 +185,20 @@ class ChatInputContainer(QFrame):
         main_layout.addWidget(self.context_banner)
 
         self.mcp_toolbar = QHBoxLayout()
-        self.chk_mcp_enable = QCheckBox("Enable advanced search (MCP Tools - Requires model support)")
-        self.chk_mcp_enable.setStyleSheet("color: #05B8CC; font-weight: bold;")
-        self.chk_mcp_enable.setChecked(True)
+        # 1. 学术 Agent 开关
+        self.chk_academic_agent = QCheckBox("Academic Agent")
+        self.chk_academic_agent.setStyleSheet("color: #05B8CC; font-weight: bold;")
+        self.chk_academic_agent.setChecked(True)
+        self.chk_academic_agent.setToolTip("Enable built-in native academic skills (Zero Latency)")
+
+        # 2. 外部 Tools 开关
+        self.chk_external_tools = QCheckBox("External Tools")
+        self.chk_external_tools.setStyleSheet("color: #05B8CC; font-weight: bold;")
+        self.chk_external_tools.setChecked(False)
+        self.chk_external_tools.setToolTip("Enable external MCP servers and custom Python scripts")
 
         self.btn_mcp_tags = QToolButton()
-        self.btn_mcp_tags = QPushButton("Filter Tools: Loading...", self)
+        self.btn_mcp_tags = QPushButton("Filter Tools", self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
         self.btn_mcp_tags.setStyleSheet(
@@ -228,13 +237,14 @@ class ChatInputContainer(QFrame):
             "color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px;")
         self.btn_mcp_guide.setVisible(True)
 
-        self.mcp_toolbar.addWidget(self.chk_mcp_enable)
+        self.mcp_toolbar.addWidget(self.chk_academic_agent)
+        self.mcp_toolbar.addWidget(self.chk_external_tools)
         self.mcp_toolbar.addWidget(self.btn_mcp_tags)
         self.mcp_toolbar.addWidget(self.btn_mcp_guide)
         self.mcp_toolbar.addStretch()
         main_layout.insertLayout(1, self.mcp_toolbar)
 
-        self.chk_mcp_enable.toggled.connect(self._on_mcp_enable_toggled)
+        self.chk_external_tools.toggled.connect(self._on_external_tools_toggled)
         self.menu_mcp_guide = QMenu(self)
 
         prompts = [
@@ -313,9 +323,9 @@ class ChatInputContainer(QFrame):
 
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
-
-        if self.chk_mcp_enable.isChecked():
-            self.refresh_mcp_tags()
+        QTimer.singleShot(100, self.refresh_mcp)
+        if self.chk_external_tools.isChecked():
+            self.refresh_mcp()
 
     def _apply_theme(self):
         tm = ThemeManager()
@@ -421,7 +431,7 @@ class ChatInputContainer(QFrame):
 
     def _on_mcp_status_changed(self):
         if self.chk_mcp_enable.isChecked():
-            self.refresh_mcp_tags()
+            self.refresh_mcp()
 
     def _on_tag_toggled(self, tag, checked):
         if hasattr(self.config, 'toggle_mcp_tag'):
@@ -441,19 +451,17 @@ class ChatInputContainer(QFrame):
 
         self._update_tag_button_text()
 
-    def _on_mcp_enable_toggled(self, checked):
-        """当用户勾选/取消勾选 MCP 开关时触发"""
-        self.btn_mcp_guide.setVisible(checked)
+    def _on_external_tools_toggled(self, checked):
         self.btn_mcp_tags.setVisible(checked)
+        self.btn_mcp_guide.setVisible(checked)
         if checked:
-            # 只要开启，就立刻主动刷新一次标签，而不是傻等用户点击菜单
-            self.refresh_mcp_tags()
+            self.refresh_mcp()
 
     def _show_filter_menu(self):
         self.btn_mcp_tags.setText("Filter Tools: Fetching...")
         QApplication.processEvents()
 
-        self.refresh_mcp_tags()
+        self.refresh_mcp()
 
         pos = self.btn_mcp_tags.mapToGlobal(self.btn_mcp_tags.rect().topLeft())
         menu_height = self.menu_mcp_tags.sizeHint().height()
@@ -461,11 +469,40 @@ class ChatInputContainer(QFrame):
 
         self.menu_mcp_tags.popup(pos)
 
-    def refresh_mcp_tags(self):
+    def get_all_available_tags(self) -> list:
+        """Fetch and aggregate tags from both MCP servers and internal/external SkillManagers."""
+        tags = set()
         try:
-            mcp_mgr = MCPManager.get_instance()
+            skill_mgr = SkillManager.get_instance()
+            import re
 
-            available_tags = mcp_mgr.get_available_tags()
+            # 1. Fetch Academic Skills with [ACADEMIC] prefix
+            for schema in skill_mgr.academic_schemas.values():
+                desc = schema.get("function", {}).get("description", "")
+                match = re.search(r"\[Tags:\s*(.*?)\]", desc)
+                if match:
+                    for t in match.group(1).split(","):
+                        tags.add(f"[ACADEMIC] {t.strip().title()}")
+
+            # 2. Fetch External Skills with [External] prefix
+            for schema in skill_mgr.external_schemas.values():
+                name = schema.get("function", {}).get("name", "Unknown")
+                tags.add(f"[External] {name}")
+
+            # 3. Fetch external MCP Server tags with [External] prefix
+            mcp_mgr = MCPManager.get_instance()
+            for server in mcp_mgr.get_available_mcp():
+                tags.add(f"[External] {server}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to fetch combined tags from SkillManager and MCPManager: {e}", exc_info=True)
+
+        return sorted(list(tags))
+
+
+    def refresh_mcp(self):
+        try:
+            available_tags = self.get_all_available_tags()
             deselected_tags = self.config.mcp_servers.get("deselected_mcp_tags", [])
 
             self.menu_mcp_tags.clear()
@@ -475,31 +512,37 @@ class ChatInputContainer(QFrame):
             if not available_tags:
                 self.btn_mcp_tags.setText("🏷️ Filter Tools: None")
                 from PySide6.QtGui import QAction
-                dummy = QAction("⏳ No active MCP servers...", self)
+                dummy = QAction("⏳ No active skills or MCP servers...", self)
                 dummy.setEnabled(False)
                 self.menu_mcp_tags.addAction(dummy)
                 return
 
-            tm = ThemeManager()
+            # 修改：使用统一容器包装 CheckBox，避免点击间隙关闭菜单
+            from PySide6.QtWidgets import QWidget, QVBoxLayout, QWidgetAction
+            self.menu_container = QWidget()
+            self.menu_layout = QVBoxLayout(self.menu_container)
+            self.menu_layout.setContentsMargins(6, 6, 6, 6)
+            self.menu_layout.setSpacing(4)
+
             for tag in available_tags:
                 chk = QCheckBox(f"  {tag}")
-
                 chk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 chk.setChecked(tag not in deselected_tags)
                 chk.setCursor(Qt.PointingHandCursor)
                 chk.toggled.connect(lambda checked, t=tag: self._on_tag_toggled(t, checked))
 
-                wa = QWidgetAction(self)
-                wa.setDefaultWidget(chk)
-                self.menu_mcp_tags.addAction(wa)
-
+                self.menu_layout.addWidget(chk)
                 self.tag_actions[tag] = chk
                 self.known_tags.add(tag)
+
+            wa = QWidgetAction(self)
+            wa.setDefaultWidget(self.menu_container)
+            self.menu_mcp_tags.addAction(wa)
 
             self._update_tag_button_text()
 
         except Exception as e:
-            self.logger.error(f"Error fetching MCP tags: {e}", exc_info=True)
+            self.logger.error(f"Error refreshing skill and tool tags: {e}", exc_info=True)
             self.btn_mcp_tags.setText("Filter Tools: Error")
 
     def _update_tag_button_text(self):
@@ -514,10 +557,11 @@ class ChatInputContainer(QFrame):
 
     def get_selected_tags(self) -> list:
         try:
-            available = MCPManager.get_instance().get_available_tags()
+            available = self.get_all_available_tags()
             deselected = self.config.mcp_servers.get("deselected_mcp_tags", [])
             return [t for t in available if t not in deselected]
-        except:
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve selected user tags: {e}")
             return []
 
     def _emit_send(self):
@@ -1460,47 +1504,14 @@ class ChatTool(BaseTool):
         main_config = _extract_config(self.model_selector, "chat_llm_id", "chat_model_name")
         trans_config = _extract_config(self.trans_selector, "chat_trans_llm_id", "chat_trans_model_name")
 
-        use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container,
-                                                                                   'chk_mcp_enable') else False
-        selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
+        use_academic_agent = self.input_container.chk_academic_agent.isChecked() if hasattr(self.input_container,
+                                                                                            'chk_academic_agent') else True
+        use_external_tools = self.input_container.chk_external_tools.isChecked() if hasattr(self.input_container,
+                                                                                            'chk_external_tools') else False
 
-
-
-        def _clean_model_name(name):
-            if not name: return ""
-            for suffix in [" [Custom]", " [Closed]"]:
-                if name.endswith(suffix): return name[:-len(suffix)]
-            return name
-
-        if main_config:
-            main_config = main_config.copy()
-            combos_main = self.model_selector.findChildren(QComboBox)
-            if len(combos_main) >= 2:
-                raw_ui_model = combos_main[1].currentText()
-            else:
-                raw_ui_model = self.config.user_settings.get("chat_model_name", "")
-
-            ui_model = _clean_model_name(raw_ui_model)
-            if ui_model:
-                main_config["model_name"] = ui_model
-                self.config.user_settings["chat_model_name"] = raw_ui_model
-                self.config.user_settings["chat_llm_id"] = main_config.get("id", "")
-                self.config.save_settings()
-
-        if trans_config:
-            trans_config = trans_config.copy()
-            combos_trans = self.trans_selector.findChildren(QComboBox)
-            if len(combos_trans) >= 2:
-                raw_ui_trans = combos_trans[1].currentText()
-            else:
-                raw_ui_trans = self.config.user_settings.get("chat_trans_model_name", "")
-
-            ui_trans = _clean_model_name(raw_ui_trans)
-            if ui_trans:
-                trans_config["model_name"] = ui_trans
-                self.config.user_settings["chat_trans_model_name"] = raw_ui_trans
-                self.config.user_settings["chat_trans_llm_id"] = trans_config.get("id", "")
-                self.config.save_settings()
+        selected_tags = self.input_container.get_selected_tags()
+        academic_tags = [t.replace("[ACADEMIC]", "").strip() for t in selected_tags if t.startswith("[ACADEMIC]")]
+        external_names = [t.replace("[External]", "").strip() for t in selected_tags if t.startswith("[External]")]
 
         if main_config:
             actual_model = main_config.get("model_name", "").strip()
@@ -1550,8 +1561,10 @@ class ChatTool(BaseTool):
                 kb_id=kb_id,
                 requires_translation=requires_translation,
                 external_context=current_external_chunks,
-                use_mcp=use_mcp_tools,
-                selected_mcp_tags=selected_mcp_tags
+                use_academic_agent=use_academic_agent,
+                academic_tags=academic_tags if use_academic_agent else [],
+                use_external_tools=use_external_tools,
+                external_tool_names=external_names if use_external_tools else []
             )
 
         QTimer.singleShot(100, _launch_task)
@@ -1706,7 +1719,7 @@ class ChatTool(BaseTool):
                 self.input_container.chk_mcp_enable.setChecked(True)
 
         config_mgr = ConfigManager()
-        available_tags = MCPManager.get_instance().get_available_tags()
+        available_tags = MCPManager.get_instance().get_available_mcp()
 
         deselected = set(self.config.mcp_servers.get("deselected_mcp_tags", []))
         for tag in available_tags:
@@ -1719,7 +1732,7 @@ class ChatTool(BaseTool):
         self.config.save_mcp_servers()
 
         if hasattr(self, 'input_container') and hasattr(self.input_container, 'refresh_mcp_tags'):
-            self.input_container.refresh_mcp_tags()
+            self.input_container.refresh_mcp()
 
         self.handle_external_send(context_text, prompt_text)
 

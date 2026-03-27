@@ -94,7 +94,7 @@ class SettingsTool(BaseTool):
         self.init_llm_section()
         self.init_model_section()
         self.init_api_keys_section()
-        self.init_mcp_section()
+        self.init_agent_tool_section()
 
         self.init_api_server_section()
 
@@ -600,21 +600,26 @@ class SettingsTool(BaseTool):
         """
         self.lbl_hw_info.setText(html)
 
-    def init_mcp_section(self):
+    def init_agent_tool_section(self):
         tm = ThemeManager()
-        group = QGroupBox("MCP Servers (Unified)")
+        group = QGroupBox("AI Agent & External Tools")
         layout = QVBoxLayout(group)
 
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("<b>Manage Local & Remote Tools:</b>"))
         header_layout.addStretch()
 
-        self.btn_add_mcp = QPushButton(" Add Server")
+        self.btn_add_mcp = QPushButton(" Add MCP Server")
         self.btn_add_mcp.clicked.connect(self._on_add_mcp_clicked)
+
+        self.btn_import_skill = QPushButton(" Import Native Skill")
+        self.btn_import_skill.clicked.connect(self._on_import_skill_clicked)
+        self.btn_import_skill.setStyleSheet(self._get_btn_style(btn_type="warning"))
 
         self.btn_refresh_mcp = QPushButton(" Refresh Status")
         self.btn_refresh_mcp.clicked.connect(self._on_refresh_mcp_clicked)
 
+        header_layout.addWidget(self.btn_import_skill)
         header_layout.addWidget(self.btn_add_mcp)
         header_layout.addWidget(self.btn_refresh_mcp)
         layout.addLayout(header_layout)
@@ -814,6 +819,44 @@ class SettingsTool(BaseTool):
 
             if hasattr(self, '_mark_unsaved'):
                 self._mark_unsaved()
+
+    def _on_import_skill_clicked(self):
+        warning_msg = (
+            "<b>🚨 CRITICAL SECURITY WARNING: NATIVE SKILL IMPORT</b><br><br>"
+            "You are attempting to import a Native Python Skill (`.py` script) directly into the main process of Scholar Navis.<br><br>"
+            "<span style='color:#ff6b6b; font-weight:bold;'>1. ARBITRARY CODE EXECUTION:</span> These scripts run with the EXACT SAME privileges as the main application. Malicious scripts can steal your data, delete files, or compromise your system.<br>"
+            "<span style='color:#ff6b6b; font-weight:bold;'>2. STRICT SANDBOXING:</span> The script MUST ONLY import Python Standard Library modules (e.g., `os`, `json`, `urllib`). Importing third-party pip packages (like `requests`, `pandas`) that are not packaged with Navis will instantly crash the agent with a `ModuleNotFoundError`.<br><br>"
+            "<i>Only import scripts from absolutely trusted sources. Do you accept all risks and wish to proceed?</i>"
+        )
+
+        dlg = StandardDialog(self.widget, "⚠️ HIGH RISK OPERATION", warning_msg, show_cancel=True)
+        if not dlg.exec():
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self.widget, "Import Native Skill Script", "", "Python Scripts (*.py)"
+        )
+        if not path:
+            return
+
+        if "external_skills" not in self.config.user_settings:
+            self.config.user_settings["external_skills"] = {}
+        if "scripts" not in self.config.user_settings["external_skills"]:
+            self.config.user_settings["external_skills"]["scripts"] = []
+
+        if path not in self.config.user_settings["external_skills"]["scripts"]:
+            self.config.user_settings["external_skills"]["scripts"].append(path)
+            self._mark_unsaved()
+
+            cfg = {
+                "description": "User Imported Native Python Script",
+                "type": "SKILL",
+                "command": path,
+                "enabled": True
+            }
+            name = f"[SKILL] {os.path.basename(path)}"
+            self._add_mcp_row(name, cfg)
+
 
     def _on_edit_mcp_clicked(self, row):
         name_item = self.table_mcp.item(row, 1)

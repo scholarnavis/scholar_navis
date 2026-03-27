@@ -86,12 +86,12 @@ class DialogTaskManager:
     """
 
     def __init__(self):
-        from src.core.core_task import TaskManager, TaskMode
+        from src.core.core_task import TaskManager
         self._task_manager = TaskManager()
         self._task_manager.register_hooks(
             pre=self._on_task_pre,
             post=self._on_task_post,
-            terminate=self._on_task_terminate
+            on_terminate=self._on_task_terminate
         )
         self.logger = logging.getLogger("DialogTaskManager")
 

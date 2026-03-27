@@ -212,17 +212,21 @@ class ChatCompletionRequest(BaseModel):
         ),
         examples=["none", "kb-abc123"],
     )
-    use_mcp: Optional[bool] = Field(
+    use_academic_agent: Optional[bool] = Field(
         True,
-        description="Whether to enable MCP tool invocation during the chat.",
+        description="Whether to enable the internal academic agent (Native Skills).",
     )
-    mcp_tags: Optional[List[str]] = Field(
+    academic_tags: Optional[List[str]] = Field(
         None,
-        description=(
-            "Filter MCP tools by tags. If null and use_mcp is true, "
-            "the server uses the globally configured tag selection."
-        ),
-        examples=[["web-search", "code-execution"]],
+        description="Filter internal academic tools by tags. Null means use all.",
+    )
+    use_external_tools: Optional[bool] = Field(
+        False,
+        description="Whether to enable external tools (MCP + Custom Scripts).",
+    )
+    external_tool_names: Optional[List[str]] = Field(
+        None,
+        description="Exact identifiers of enabled external tools (e.g., '[MCP] web_search'). Null means use all.",
     )
     force_translate: Optional[bool] = Field(
         None,
@@ -243,27 +247,25 @@ class CompletionRequest(BaseModel):
     use_mcp: Optional[bool] = Field(True, description="Enable MCP tool usage.")
 
 
-class MCPFilterRequest(BaseModel):
-    """Request body for semantic MCP tool filtering."""
-    query: str = Field(
-        ...,
-        description="Natural-language query describing the user's intent.",
-        examples=["I need to search the web for recent papers"],
-    )
-    history_context: Optional[str] = Field(
-        "",
-        description="Optional conversation history for better contextual filtering.",
-    )
-    top_k: Optional[int] = Field(
-        8,
-        description="Maximum number of tools to return after ranking.",
-        ge=1,
-        le=50,
-    )
-    mcp_tags: Optional[List[str]] = Field(
-        None,
-        description="Pre-filter by tags before semantic ranking. Null means search all tools.",
-    )
+class SemanticFilterRequest(BaseModel):
+    """Request body for semantic Agent tool filtering."""
+    query: str = Field(..., description="Natural-language query describing the user's intent.")
+    history_context: Optional[str] = Field("", description="Optional conversation history.")
+    top_k: Optional[int] = Field(8, description="Maximum number of tools to return after ranking.")
+    use_academic_agent: Optional[bool] = Field(True, description="Include internal academic agent tools.")
+    academic_tags: Optional[List[str]] = Field(None, description="Pre-filter academic tools by tags.")
+    use_external_tools: Optional[bool] = Field(False, description="Include external MCPs and Skills.")
+    external_tool_names: Optional[List[str]] = Field(None, description="Pre-filter external tools by identifiers.")
+
+class SemanticFilterResponse(BaseModel):
+    status: str = Field(..., description="'success', 'bypassed_insufficient_tools', or 'degraded_error'.")
+    original_count: Optional[int] = Field(None, description="Tool count before filtering.")
+    filtered_count: Optional[int] = Field(None, description="Tool count after filtering.")
+    filtered_tools: List[Dict[str, Any]] = Field(..., description="The filtered tool schemas.")
+    error: Optional[str] = Field(None, description="Error message if status is 'degraded_error'.")
+
+class AgentFilterPayload(BaseModel):
+    deselected_external_tools: List[str] = Field(..., description="List of deselected external tool identifiers.")
 
 
 class ModelListPayload(BaseModel):
@@ -516,12 +518,10 @@ async def chat_completions(
     else:
         requires_translation = (not is_english) and (trans_config is not None)
 
-    use_mcp_tools = body.use_mcp
-    selected_mcp_tags = body.mcp_tags
-    if use_mcp_tools and selected_mcp_tags is None:
-        available_tags = MCPManager.get_instance().get_available_tags()
-        deselected_tags = config_mgr.mcp_servers.get("deselected_mcp_tags", [])
-        selected_mcp_tags = [t for t in available_tags if t not in deselected_tags]
+    acad_tags = [t.replace("[ACADEMIC]", "").strip() for t in body.academic_tags if
+                 isinstance(t, str)] if body.academic_tags else []
+    ext_tags = [t.replace("[External]", "").strip() for t in body.external_tool_names if
+                isinstance(t, str)] if body.external_tool_names else []
 
     task_queue = queue.Queue()
     task_kwargs = {
@@ -531,8 +531,10 @@ async def chat_completions(
         "kb_id": body.kb_id,
         "requires_translation": requires_translation,
         "external_context": [],
-        "use_mcp": use_mcp_tools,
-        "selected_mcp_tags": selected_mcp_tags
+        "use_academic_agent": body.use_academic_agent,
+        "academic_tags": acad_tags,
+        "use_external_tools": body.use_external_tools,
+        "external_tool_names": ext_tags
     }
 
     task_id = f"api-{uuid.uuid4().hex[:8]}"
@@ -762,44 +764,127 @@ def list_all_providers():
 
 
 @app.get(
-    "/api/mcp/tools",
-    response_model=MCPToolListResponse,
-    tags=["MCP Tools"],
-    summary="List MCP tools and tags",
-    description="Returns all registered MCP tool schemas and available filtering tags.",
+    "/api/agent/tools",
+    tags=["Agent & Tools"],
+    summary="List all available Agent tools",
+    description="Returns separated lists: Academic tags for internal tools, and exact identifiers for external tools."
 )
-def list_mcp_tools():
+def list_agent_tools():
+    from src.core.skill_manager import SkillManager
+    from src.core.mcp_manager import MCPManager
+    import re
+
+    skill_mgr = SkillManager.get_instance()
     mcp_mgr = MCPManager.get_instance()
-    mcp_mgr.bootstrap_servers(force_all=False)
-    tools = mcp_mgr.get_all_tools_schema()
-    tags = mcp_mgr.get_available_tags()
+
+    # 1. Parse unique tags from Academic Skills
+    academic_tags = set()
+    for schema in skill_mgr.get_academic_schemas():
+        desc = schema.get("function", {}).get("description", "")
+        match = re.search(r"\[Tags:\s*(.*?)\]", desc)
+        if match:
+            for t in match.group(1).split(","):
+                academic_tags.add(f"[ACADEMIC] {t.strip().title()}")
+
+    # 2. Collect all External Tools with standardized identifiers
+    external_tools = []
+
+    for schema in skill_mgr.get_external_schemas():
+        name = schema.get("function", {}).get("name", "Unknown")
+        external_tools.append({
+            "identifier": f"[External] {name}",
+            "name": name,
+            "type": "native_skill"
+        })
+
+    for schema in mcp_mgr.get_all_tools_schema():
+        server_name = schema.get("server", "Unknown Server")
+        if server_name not in [et["name"] for et in external_tools if et["type"] == "mcp_server"]:
+            external_tools.append({
+                "identifier": f"[External] {server_name}",
+                "name": server_name,
+                "type": "mcp_server"
+            })
+
     return {
-        "available_tags": tags,
-        "tools_count": len(tools),
-        "tools": tools,
+        "academic_tags": sorted(list(academic_tags)),
+        "external_tools": external_tools
     }
 
 
 @app.post(
-    "/api/mcp/filter",
-    response_model=MCPFilterResponse,
-    tags=["MCP Tools"],
-    summary="Semantic MCP tool filter",
-    description=(
-        "Ranks and filters MCP tools based on a natural-language query using a reranker model. "
-        "Supports optional tag pre-filtering and conversation history context."
-    ),
+    "/api/agent/filter",
+    tags=["Agent & Tools"],
+    summary="Save disabled external tools filter",
+    description="Receives a list of disabled external tool identifiers from the frontend and saves them to ConfigManager."
 )
-def semantic_filter_mcp_tools(payload: MCPFilterRequest):
-    mcp_mgr = MCPManager.get_instance()
-    mcp_mgr.bootstrap_servers(force_all=False)
+def save_agent_filter(payload: AgentFilterPayload):
+    config_mgr = ConfigManager()
+    if "external_skills" not in config_mgr.user_settings:
+        config_mgr.user_settings["external_skills"] = {}
+    config_mgr.user_settings["external_skills"]["deselected_external_tools"] = payload.deselected_external_tools
+    config_mgr.save_settings()
+    return {"status": "success"}
 
-    if payload.mcp_tags is not None:
-        raw_tools = mcp_mgr.get_tools_schema_by_tags(payload.mcp_tags)
-    else:
-        raw_tools = mcp_mgr.get_all_tools_schema()
+
+@app.post(
+    "/api/agent/semantic_filter",
+    response_model=SemanticFilterResponse,
+    tags=["Agent & Tools"],
+    summary="Semantic Agent tool filter",
+    description="Aggregates internal SKILL and external MCP/SKILL schemas based on dual-track toggles, and ranks them against user intent."
+)
+def semantic_filter_agent_tools(payload: SemanticFilterRequest):
+    from src.core.skill_manager import SkillManager
+    from src.core.mcp_manager import MCPManager
+    skill_mgr = SkillManager.get_instance()
+    mcp_mgr = MCPManager.get_instance()
+
+    # 修改：清洗 API 请求参数的前缀
+    acad_tags = [t.replace("[ACADEMIC]", "").strip() for t in payload.academic_tags if isinstance(t, str)] if payload.academic_tags else []
+    ext_names = [t.replace("[External]", "").strip() for t in payload.external_tool_names if isinstance(t, str)] if payload.external_tool_names else []
+
+    logger.warning("\n" + "=" * 50)
+    logger.warning("🔍 [RERANKER DEBUG] Starting Semantic Filter Tool Selection")
+    logger.warning(f"-> Query Intent: {payload.query}")
+    logger.warning(f"-> Academic Agent Enabled: {payload.use_academic_agent}")
+    logger.warning(f"-> Cleaned Academic Tags Filter: {acad_tags}")
+    logger.warning(f"-> External Tools Enabled: {payload.use_external_tools}")
+    logger.warning(f"-> Cleaned External Names Filter: {ext_names}")
+
+    raw_tools = []
+
+    # 1. Gather Internal Academic Tools
+    if payload.use_academic_agent:
+        raw_academic = skill_mgr.get_academic_schemas(acad_tags)
+        if raw_academic:
+            raw_tools.extend(raw_academic)
+            logger.warning(f"-> Pulled {len(raw_academic)} Academic Tools based on tags.")
+
+    # 2. Gather External Tools (SKILL + MCP)
+    if payload.use_external_tools:
+        ext_skills = skill_mgr.get_external_schemas(ext_names)
+        if ext_skills:
+            raw_tools.extend(ext_skills)
+            logger.warning(f"-> Pulled {len(ext_skills)} External Skills.")
+
+        mcp_tools = mcp_mgr.get_all_tools_schema() or []
+        mcp_added_count = 0
+        for schema in mcp_tools:
+            server_name = schema.get("server", "Unknown Server")
+            if not ext_names or any(server_name in str(name) for name in ext_names):
+                raw_tools.append(schema)
+                mcp_added_count += 1
+        logger.warning(f"-> Pulled {mcp_added_count} MCP Tools based on names.")
+
+    logger.warning(f"✅ Total Candidate Tools before Reranking: {len(raw_tools)}")
+    if raw_tools:
+        names = [t.get("function", {}).get("name", "Unknown") for t in raw_tools]
+        logger.warning(f"-> Candidate Names: {', '.join(names)}")
 
     if not raw_tools or len(raw_tools) <= payload.top_k:
+        logger.warning(f"⏭ Bypassed Reranker: Candidate count ({len(raw_tools)}) <= Top-K ({payload.top_k}).")
+        logger.warning("=" * 50 + "\n")
         return {"filtered_tools": raw_tools, "status": "bypassed_insufficient_tools"}
 
     candidate_docs = []
@@ -840,10 +925,17 @@ def semantic_filter_mcp_tools(payload: MCPFilterRequest):
                 break
 
     if error_msg:
-        logger.warning(f"API Tool reranking failed: {error_msg}. Falling back to full toolset.")
+        logger.warning(f"❌ Reranker failed: {error_msg}. Falling back to full toolset.")
+        logger.warning("=" * 50 + "\n")
         return {"filtered_tools": raw_tools, "status": "degraded_error", "error": error_msg}
 
     best_tools = [doc["metadata"]["tool_schema"] for doc in ranked]
+    best_names = [t.get("function", {}).get("name", "Unknown") for t in best_tools]
+
+    logger.warning(f"🏆 Reranker Success! Filtered down to Top {len(best_tools)}.")
+    logger.warning(f"-> Selected Names: {', '.join(best_names)}")
+    logger.warning("=" * 50 + "\n")
+
     return {
         "status": "success",
         "original_count": len(raw_tools),

@@ -33,12 +33,14 @@ def execute_automated_health_checks():
         kbs = res_kbs.get("knowledge_bases", [])
         print(f"[✔] Knowledge Bases: {len(kbs)} ready for RAG operations")
 
-        # 4. MCP Tools Schema
-        res_mcp = requests.get(f"{BASE_URL}/api/mcp/tools", headers=HEADERS).json()
-        mcp_tags = res_mcp.get("available_tags", [])
-        print(f"[✔] MCP Tools      : {res_mcp.get('tools_count', 0)} tools registered across tags: {mcp_tags}")
+        # 4. Agent Tools (Academic & External)
+        res_agent = requests.get(f"{BASE_URL}/api/agent/tools", headers=HEADERS).json()
+        academic_tags = res_agent.get("academic_tags", [])
+        external_tools = res_agent.get("external_tools", [])
+        print(
+            f"[✔] Agent Tools    : {len(academic_tags)} Academic Tags, {len(external_tools)} External Tools registered")
 
-        return providers, kbs, mcp_tags
+        return providers, kbs, academic_tags, external_tools
 
     except requests.exceptions.ConnectionError:
         print(f"[✘] Connection Refused: Ensure the API server is running at {BASE_URL}")
@@ -48,7 +50,7 @@ def execute_automated_health_checks():
         sys.exit(1)
 
 
-def interactive_parameter_configuration(providers, kbs, mcp_tags):
+def interactive_parameter_configuration(providers, kbs, academic_tags, external_tools):
     """
     Facilitates interactive terminal selection for the generation payload.
     """
@@ -63,8 +65,10 @@ def interactive_parameter_configuration(providers, kbs, mcp_tags):
         "trans_model": None,
         "force_translate": False,
         "kb_id": "none",
-        "use_mcp": False,
-        "mcp_tags": [],
+        "use_academic_agent": False,
+        "academic_tags": None,
+        "use_external_tools": False,
+        "external_tool_names": None,
         "is_error_test": False
     }
 
@@ -123,50 +127,76 @@ def interactive_parameter_configuration(providers, kbs, mcp_tags):
         if kb_idx > 0:
             config["kb_id"] = kbs[kb_idx - 1]["id"]
 
-    # --- MCP Tool Routing ---
-    if mcp_tags:
-        print("\n[ MCP Tool Tags (Filter Tools) ]")
-        print("  0. None (Disable MCP entirely)")
-        print("  A. All (Enable all available tools)")
-        for idx, tag in enumerate(mcp_tags):
+    # --- Academic Agent (Internal Skills) ---
+    if academic_tags:
+        print("\n[ Academic Agent (Internal Skills) ]")
+        print("  0. Disable Academic Agent entirely")
+        print("  A. Enable All Academic Tags")
+        for idx, tag in enumerate(academic_tags):
             print(f"  {idx + 1}. {tag}")
 
-        mcp_input = input("Select Tags (comma-separated numbers, e.g., 1,3 or 'A' or '0'): ").strip().upper()
+        acad_input = input("Select Academic Tags (comma-separated numbers, 'A' for all, or '0'): ").strip().upper()
 
-        if mcp_input == 'A':
-            config["use_mcp"] = True
-            config["mcp_tags"] = mcp_tags
-        elif mcp_input and mcp_input != "0":
-            config["use_mcp"] = True
+        if acad_input == 'A':
+            config["use_academic_agent"] = True
+            config["academic_tags"] = academic_tags
+        elif acad_input and acad_input != "0":
+            config["use_academic_agent"] = True
             try:
-                indices = [int(i.strip()) - 1 for i in mcp_input.split(",")]
-                config["mcp_tags"] = [mcp_tags[i] for i in indices if 0 <= i < len(mcp_tags)]
+                indices = [int(i.strip()) - 1 for i in acad_input.split(",")]
+                config["academic_tags"] = [academic_tags[i] for i in indices if 0 <= i < len(academic_tags)]
             except ValueError:
-                print("[!] Invalid input. Defaulting to no MCP tools.")
-                config["use_mcp"] = False
+                print("[!] Invalid input. Defaulting to no Academic tags.")
+                config["use_academic_agent"] = False
+
+    # --- External Tools (MCP Servers & External Skills) ---
+    if external_tools:
+        print("\n[ External Tools (MCP Servers & External Skills) ]")
+        print("  0. Disable External Tools entirely")
+        print("  A. Enable All External Tools")
+        for idx, tool in enumerate(external_tools):
+            print(f"  {idx + 1}. {tool['identifier']}")
+
+        ext_input = input("Select External Tools (comma-separated numbers, 'A' for all, or '0'): ").strip().upper()
+
+        if ext_input == 'A':
+            config["use_external_tools"] = True
+            config["external_tool_names"] = [t["identifier"] for t in external_tools]
+        elif ext_input and ext_input != "0":
+            config["use_external_tools"] = True
+            try:
+                indices = [int(i.strip()) - 1 for i in ext_input.split(",")]
+                config["external_tool_names"] = [external_tools[i]["identifier"] for i in indices if
+                                                 0 <= i < len(external_tools)]
+            except ValueError:
+                print("[!] Invalid input. Defaulting to no External tools.")
+                config["use_external_tools"] = False
 
     return config
 
 
-def execute_semantic_filter(query, mcp_tags, top_k=8):
+def execute_semantic_filter(query, config, top_k=8):
     """
     Tests the standalone semantic filtering endpoint to visualize
     which tools the Reranker selects for the given query.
     """
     print("\n" + "=" * 60)
-    print(" PHASE 3: SEMANTIC MCP TOOL FILTERING (RERANKER)")
+    print(" PHASE 3: SEMANTIC AGENT TOOL FILTERING (RERANKER)")
     print("=" * 60)
 
     payload = {
         "query": query,
         "history_context": "",
         "top_k": top_k,
-        "mcp_tags": mcp_tags if mcp_tags else None
+        "use_academic_agent": config.get("use_academic_agent", False),
+        "academic_tags": config.get("academic_tags"),
+        "use_external_tools": config.get("use_external_tools", False),
+        "external_tool_names": config.get("external_tool_names")
     }
 
     print("[Analyzing user intent and reranking tools...]\n")
     try:
-        response = requests.post(f"{BASE_URL}/api/mcp/filter", json=payload, headers=HEADERS)
+        response = requests.post(f"{BASE_URL}/api/agent/semantic_filter", json=payload, headers=HEADERS)
         response.raise_for_status()
         data = response.json()
 
@@ -195,9 +225,9 @@ def stream_chat_execution(config):
     """
     query = input("\nEnter your analytical query: ")
 
-    # Execute the semantic filter diagnostic first if MCP is enabled
-    if config["use_mcp"]:
-        execute_semantic_filter(query, config["mcp_tags"])
+    # Execute the semantic filter diagnostic first if any tools are enabled
+    if config["use_academic_agent"] or config["use_external_tools"]:
+        execute_semantic_filter(query, config)
 
     print("\n" + "=" * 60)
     print(" PHASE 4: AGENTIC CHAT EXECUTION (SSE STREAM)")
@@ -209,16 +239,16 @@ def stream_chat_execution(config):
         "stream": True,
         "provider_id": config["provider_id"],
         "kb_id": config["kb_id"],
-        "use_mcp": config["use_mcp"]
+        "use_academic_agent": config["use_academic_agent"],
+        "academic_tags": config["academic_tags"],
+        "use_external_tools": config["use_external_tools"],
+        "external_tool_names": config["external_tool_names"]
     }
 
     if config["force_translate"]:
         payload["force_translate"] = True
         payload["trans_provider_id"] = config["trans_provider_id"]
         payload["trans_model"] = config["trans_model"]
-
-    if config["use_mcp"]:
-        payload["mcp_tags"] = config["mcp_tags"]
 
     print("\n[Transmitting Payload to API...]\n")
 
@@ -305,6 +335,6 @@ def stream_chat_execution(config):
 
 
 if __name__ == "__main__":
-    providers_list, kbs_list, mcp_tags_list = execute_automated_health_checks()
-    req_config = interactive_parameter_configuration(providers_list, kbs_list, mcp_tags_list)
+    providers_list, kbs_list, acad_tags_list, ext_tools_list = execute_automated_health_checks()
+    req_config = interactive_parameter_configuration(providers_list, kbs_list, acad_tags_list, ext_tools_list)
     stream_chat_execution(req_config)
