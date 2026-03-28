@@ -13,7 +13,7 @@ from Bio import Entrez
 
 from src.core.config_manager import ConfigManager
 from src.core.email_check import verify_email_robust
-from src.core.network_worker import setup_global_network_env, create_robust_session
+from src.core.network_worker import setup_global_network_env, create_robust_session, GlobalRateLimiter, global_rate_limiter
 from src.core.oa import OAFetcher
 from src.task.s2_task import s2_request, is_s2_enabled
 
@@ -25,6 +25,9 @@ def get_app_root():
 
 
 APP_ROOT = get_app_root()
+
+
+
 
 
 class UdpJsonHandler(logging.Handler):
@@ -71,6 +74,10 @@ root_logger.addHandler(stderr_handler)
 ConfigManager()
 setup_global_network_env()
 
+
+
+
+
 def get_setting_or_env(key, env_name):
     """优先读取 GUI 设置，如果为空再读环境变量"""
     val = str(ConfigManager().user_settings.get(key, "")).strip()
@@ -80,6 +87,7 @@ def get_setting_or_env(key, env_name):
 
 ncbi_email = get_setting_or_env("ncbi_email", "NCBI_API_EMAIL")
 ncbi_api_key = get_setting_or_env("ncbi_api_key", "NCBI_API_KEY")
+openalex_api_key = get_setting_or_env("openalex_api_key", "OPENALEX_API_KEY")
 s2_api_key = get_setting_or_env("s2_api_key", "S2_API_KEY")
 github_token = get_setting_or_env("github_token", "GITHUB_TOKEN")
 
@@ -104,6 +112,7 @@ def is_ncbi_enabled():
 # 满足你的需求：保持启动时的日志打印！
 if ncbi_email: logger.info("Using NCBI Email.")
 if ncbi_api_key: logger.info("Using NCBI API Key.")
+if openalex_api_key: logger.info("Using OpenALEX API Key.")
 if s2_api_key: logger.info("Using S2 API Key.")
 if github_token: logger.info("Using GitHub Token.")
 
@@ -158,19 +167,17 @@ def simple_retry(max_attempts=3, delay=2):
 
                     if any(code in err_str for code in ["400", "401", "403", "404", "not found", "bad request"]):
                         logger.warning(f"Client error detected ({err_str}), skipping retry for '{func.__name__}' 喵.")
-                        if attempt == max_attempts - 1:
-                            raise e
-                        else:
-                            raise e
+                        raise e
 
                     if attempt == max_attempts - 1:
                         raise e
                     wait = delay * (2 ** attempt)
                     logger.warning(f"Attempt {attempt + 1} for '{func.__name__}' failed: {e}. Retrying in {wait}s...")
                     time.sleep(wait)
-        return wrapper
-    return decorator
 
+        return wrapper
+
+    return decorator
 
 
 @simple_retry(max_attempts=2, delay=1)
@@ -178,11 +185,19 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
     logger.info(f"Task: Unified Literature Search | Query: '{query}' | Offset: {offset} | Source: {source}")
 
     if not is_ncbi_enabled():
-        logger.error("NCBI has been disabled due to the lack of available email addresses; other tools are still functioning normally.")
+        logger.error(
+            "NCBI has been disabled due to the lack of a valid email address AND API Key; other tools are still functioning normally.")
 
     if source in ["auto", "openalex"]:
         page = (offset // max_results) + 1
-        url = f"https://api.openalex.org/works?search={urllib.parse.quote(query)}&mailto={ncbi_email}&per-page={max_results}&page={page}"
+        url = f"https://api.openalex.org/works?search={urllib.parse.quote(query)}&per-page={max_results}&page={page}"
+
+        openalex_rps = 9 if openalex_api_key else 2
+        global_rate_limiter.acquire("openalex", rps=openalex_rps)
+
+        if openalex_api_key:
+            url += f"&api_key={openalex_api_key}"
+
         try:
             res = mcp_request("GET", url, timeout=15)
             res.raise_for_status()
@@ -252,6 +267,9 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
 
     if source in ["auto", "pubmed"] and is_ncbi_enabled():
         try:
+            ncbi_rps = 9 if ncbi_api_key else 4
+            global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
+
             search_handle = Entrez.esearch(db="pubmed", term=query, retstart=offset, retmax=max_results)
             search_res = Entrez.read(search_handle, validate=False)
             ids = search_res.get("IdList", []) if isinstance(search_res, dict) else []
@@ -291,40 +309,46 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
             logger.warning(f"Pubmed search failed: {e}")
 
     if source in ["auto", "semantic_scholar"] and is_s2_enabled():
-        try:
-            url = "https://api.semanticscholar.org/graph/v1/paper/search"
-            params = {"query": query, "limit": max_results, "offset": offset,
-                      "fields": "title,authors,year,abstract,citationCount,isOpenAccess,url,externalIds"}
+        if not s2_api_key:
+            logger.warning("Semantic Scholar is disabled due to missing API Key.")
+            if source == "semantic_scholar":
+                return json.dumps(
+                    {"status": "error", "message": "Semantic Scholar API is disabled. Please configure an API Key."})
+        elif is_s2_enabled():
+            try:
+                url = "https://api.semanticscholar.org/graph/v1/paper/search"
+                params = {"query": query, "limit": max_results, "offset": offset,
+                          "fields": "title,authors,year,abstract,citationCount,isOpenAccess,url,externalIds"}
 
-            res = s2_request("GET", url, params=params)
-            if res is None:
-                logger.warning("S2 request returned None (likely API key missing or rate limited).")
-                raise ValueError("S2 request failed silently")
-            res.raise_for_status()
-            response_text = res.text
-            if not response_text or len(response_text.strip()) == 0:
-                logger.warning("S2 response is empty")
-                raise ValueError("S2 response is empty")
-            json_data = res.json()
-            if not isinstance(json_data, dict):
-                raise ValueError("S2 response is not a dictionary")
-            parsed = []
-            for p in res.json().get("data", []):
-                if not isinstance(p, dict): continue
-                authors_raw = p.get("authors") or []
-                if not isinstance(authors_raw, list): authors_raw = []
-                ext_ids = p.get("externalIds")
-                parsed.append({"title": p.get("title", ""), "year": p.get("year", "Unknown"),
-                               "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
-                               "citation_count": p.get("citationCount", 0),
-                               "abstract": p.get("abstract") or "No abstract",
-                               "doi": ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else "",
-                               "url": p.get("url", ""),
-                               "source_db": "Semantic Scholar"})
+                res = s2_request("GET", url, params=params)
+                if res is None:
+                    logger.warning("S2 request returned None (likely API key missing or rate limited).")
+                    raise ValueError("S2 request failed silently")
+                res.raise_for_status()
+                response_text = res.text
+                if not response_text or len(response_text.strip()) == 0:
+                    logger.warning("S2 response is empty")
+                    raise ValueError("S2 response is empty")
+                json_data = res.json()
+                if not isinstance(json_data, dict):
+                    raise ValueError("S2 response is not a dictionary")
+                parsed = []
+                for p in res.json().get("data", []):
+                    if not isinstance(p, dict): continue
+                    authors_raw = p.get("authors") or []
+                    if not isinstance(authors_raw, list): authors_raw = []
+                    ext_ids = p.get("externalIds")
+                    parsed.append({"title": p.get("title", ""), "year": p.get("year", "Unknown"),
+                                   "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
+                                   "citation_count": p.get("citationCount", 0),
+                                   "abstract": p.get("abstract") or "No abstract",
+                                   "doi": ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else "",
+                                   "url": p.get("url", ""),
+                                   "source_db": "Semantic Scholar"})
 
-                if parsed: return json.dumps({"status": "success", "source": "semantic_scholar", "results": parsed})
-        except Exception as e:
-            logger.warning(f"Semantic scholar search failed: {e}")
+                    if parsed: return json.dumps({"status": "success", "source": "semantic_scholar", "results": parsed})
+            except Exception as e:
+                logger.warning(f"Semantic scholar search failed: {e}")
 
 
     return json.dumps({"status": "success", "results": [], "message": "No results found from any source"})
@@ -332,7 +356,8 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
 
 @simple_retry(max_attempts=2, delay=1)
 def traverse_citation_graph(doi: str, direction: Literal["references", "citations"] = "references",
-                            max_results: int = 10, source: Literal["auto", "openalex", "semantic_scholar"] = "auto") -> str:
+                            max_results: int = 10,
+                            source: Literal["auto", "openalex", "semantic_scholar"] = "auto") -> str:
     logger.info(f"Task: Citation Graph | DOI: {doi} | Direction: {direction} | Source: {source}")
 
     if direction not in ["references", "citations"]: return json.dumps(
@@ -342,11 +367,16 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
     last_error = None
 
     if source in ["auto", "openalex"]:
+        openalex_rps = 9 if openalex_api_key else 2
+        global_rate_limiter.acquire("openalex", rps=openalex_rps)
+
         try:
             if direction == "references":
-                work_res = mcp_request("GET",
-                                       f"https://api.openalex.org/works/https://doi.org/{clean_doi}?mailto={ncbi_email}",
-                                       timeout=15)
+                url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
+                if openalex_api_key:
+                    url += f"?api_key={openalex_api_key}"
+
+                work_res = mcp_request("GET", url, timeout=15)
                 if work_res.status_code == 404:
                     return json.dumps({"status": "success", "results": [], "message": f"DOI '{clean_doi}' not found."})
                 work_res.raise_for_status()
@@ -358,10 +388,14 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
 
                 filter_str = "|".join([r.split("/")[-1] for r in ref_ids])
                 safe_filter = urllib.parse.quote(f"ids.openalex:{filter_str}")
-                url = f"https://api.openalex.org/works?filter={safe_filter}&mailto={ncbi_email}"
+                url = f"https://api.openalex.org/works?filter={safe_filter}"
+                if openalex_api_key:
+                    url += f"&api_key={openalex_api_key}"
             else:
                 safe_filter = urllib.parse.quote(f"cites:https://doi.org/{clean_doi}")
-                url = f"https://api.openalex.org/works?filter={safe_filter}&per-page={max_results}&mailto={ncbi_email}"
+                url = f"https://api.openalex.org/works?filter={safe_filter}&per-page={max_results}"
+                if openalex_api_key:
+                    url += f"&api_key={openalex_api_key}"
 
             res = mcp_request("GET", url, timeout=15)
             res.raise_for_status()
@@ -395,7 +429,12 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
             last_error = e
 
     if source in ["auto", "semantic_scholar"]:
-        if is_s2_enabled():
+        if not s2_api_key:
+            logger.warning("Semantic Scholar citation graph is disabled due to missing API Key.")
+            if source == "semantic_scholar":
+                return json.dumps(
+                    {"status": "error", "message": "Semantic Scholar API is disabled. Please configure an API Key."})
+        elif is_s2_enabled():
             try:
                 url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/{direction}?fields=title,authors,year,abstract,citationCount,externalIds,url&limit={max_results}"
 
@@ -477,8 +516,10 @@ def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", ma
 
     if not is_ncbi_enabled():
         return json.dumps({"status": "error",
-                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
+                           "message": "NCBI tools are disabled. Both a valid email and NCBI API Key must be configured in Global Settings."})
 
+    ncbi_rps = 9 if ncbi_api_key else 4
+    global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
 
     try:
         db = "gds" if db_type.lower() == "geo" else "sra"
@@ -527,7 +568,11 @@ def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein
     logger.info(f"Task: Sequence Fetch | ID: {accession_id} | DB: {db_type}")
 
     if not is_ncbi_enabled():
-        return json.dumps({"status": "error", "message": "NCBI tools are disabled..."})
+        return json.dumps({"status": "error",
+                           "message": "NCBI tools are disabled. Both a valid email and NCBI API Key must be configured in Global Settings."})
+
+    ncbi_rps = 9 if ncbi_api_key else 4
+    global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
 
     safe_id = accession_id.strip()
     safe_db = db_type.strip().lower()
@@ -568,8 +613,10 @@ def fetch_taxonomy_info(organism_name: str) -> str:
 
     if not is_ncbi_enabled():
         return json.dumps({"status": "error",
-                           "message": "NCBI tools are disabled. A valid email must be strictly configured in Global Settings to use NCBI services."})
+                           "message": "NCBI tools are disabled. Both a valid email and NCBI API Key must be configured in Global Settings."})
 
+    ncbi_rps = 9 if ncbi_api_key else 4
+    global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
 
     try:
         search_handle = Entrez.esearch(db="taxonomy", term=organism_name, retmax=1)
@@ -641,7 +688,11 @@ def universal_ncbi_summary(query: str, database: Literal["gene", "protein", "nuc
 
     if not is_ncbi_enabled():
         return json.dumps({"status": "error",
-                           "message": "NCBI tools are disabled. Both a valid Email and NCBI API Key must be configured in Global Settings."})
+                           "message": "NCBI tools are disabled. Both a valid email and NCBI API Key must be configured in Global Settings."})
+
+    ncbi_rps = 9 if ncbi_api_key else 4
+    global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
+
 
     try:
         search_handle = Entrez.esearch(db=database, term=query, retmax=max_results)
@@ -880,6 +931,10 @@ def fetch_wikipedia_summary(query: str, language: str = "en") -> str:
 @simple_retry(max_attempts=2, delay=1)
 def search_github_repos(query: str, max_results: int = 5) -> str:
     logger.info(f"Task: GitHub Search | Query: '{query}'")
+
+    github_rph = 4900 if github_token else 50
+    global_rate_limiter.acquire("github", rph=github_rph)
+
     try:
         url = "https://api.github.com/search/repositories"
         params = {"q": query, "sort": "stars", "order": "desc", "per_page": max_results}

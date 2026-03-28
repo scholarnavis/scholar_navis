@@ -1,4 +1,3 @@
-# common_task.py
 import os
 import platform
 
@@ -19,13 +18,18 @@ class VersionCheckTask(BackgroundTask):
 
             url = f"{__latest__}?os={os_name}"
 
+            self.logger.debug(f"Checking for updates at: {url}")
+
             response = session.get(url, timeout=5)
             if response.status_code == 200:
                 latest_version = response.text.strip()
+                self.logger.info(f"Successfully fetched latest version: {latest_version}")  # 新增：记录成功获取到的版本号
                 return {"latest_version": latest_version}
+            else:
+                self.logger.warning(
+                    f"Update check failed with status code: {response.status_code}")  # 新增：记录非 200 状态码的警告
         except Exception as e:
             self.logger.error(f"Failed to check for updates: {e}")
-        return {"latest_version": None}
 
 
 class VerifyModelsTask(BackgroundTask):

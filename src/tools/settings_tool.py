@@ -163,6 +163,7 @@ class SettingsTool(BaseTool):
         """挂载全部输入组件变更事件，跟踪是否发生了改动"""
         self.input_ncbi_email.textChanged.connect(self._mark_unsaved)
         self.input_ncbi_api_key.textChanged.connect(self._mark_unsaved)
+        self.input_openalex_api_key.textChanged.connect(self._mark_unsaved)
         self.input_s2_api_key.textChanged.connect(self._mark_unsaved)
         self.input_s2_rate_limit.textChanged.connect(self._mark_unsaved)
         self.input_github_token.textChanged.connect(self._mark_unsaved)
@@ -320,6 +321,7 @@ class SettingsTool(BaseTool):
 
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
+        self.input_openalex_api_key.setText(self.config.user_settings.get("openalex_api_key", ""))
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
         self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
         self.input_s2_rate_limit.setText(str(self.config.user_settings.get("s2_rate_limit", 1.0)))
@@ -382,6 +384,10 @@ class SettingsTool(BaseTool):
         self.input_ncbi_api_key.setPlaceholderText("NCBI API Key (Optional but recommended)")
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
 
+        self.input_openalex_api_key = HoverRevealLineEdit()
+        self.input_openalex_api_key.setPlaceholderText("OpenAlex Premium API Key (Optional)")
+        self.input_openalex_api_key.setText(self.config.user_settings.get("openalex_api_key", ""))
+
         self.input_s2_api_key = HoverRevealLineEdit()
         self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
@@ -414,6 +420,7 @@ class SettingsTool(BaseTool):
 
         layout.addRow("NCBI Email:", self.input_ncbi_email)
         layout.addRow("NCBI API Key:", self.input_ncbi_api_key)
+        layout.addRow("OpenAlex Key:", self.input_openalex_api_key)
         layout.addRow("S2 API Key:", self.input_s2_api_key)
         layout.addRow("S2 Rate Limit (req/s):", self.input_s2_rate_limit)
         layout.addRow("GitHub Token:", self.input_github_token)
@@ -426,11 +433,13 @@ class SettingsTool(BaseTool):
         tm = ThemeManager()
         self.lbl_api_hint.setText(
             f"<div style='line-height: 1.5;'>"
-            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>⚠️ NCBI STRICT POLICY:</span> "
-            f"You MUST provide a valid real email address. Empty or incorrectly formatted emails will <span style='color:{tm.color('danger')}; font-weight:bold;'>completely disable</span> the NCBI PubMed/Omics tools to prevent server IP bans.<br><br>"
+            f"<span style='color:{tm.color('warning')}; font-weight:bold;'>⚠️ NCBI RATE LIMITS:</span> "
+            f"You MUST provide a valid email address to use NCBI tools. An API Key is <span style='color:{tm.color('success')}; font-weight:bold;'>optional but highly recommended</span>. Without a key, tools will still function but under strict rate limits, which may slow down massive literature retrieval.<br><br>"
             f"<span style='color:{tm.color('accent')}; font-weight:bold;'>INFO & API Keys:</span><br>"
-            f"• <b>NCBI PubMed:</b> An API Key increases rate limits from 3 to 10 requests/sec. "
+            f"• <b>NCBI PubMed:</b> Email is mandatory. Adding an API key increases rate limits from 3 to 10 requests/sec. "
             f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for NCBI Key]</a><br>"
+            f"• <b>OpenAlex:</b> Can be used without a key, but <span style='color:{tm.color('warning')};'>highly prone to 429 Too Many Requests errors</span>. Premium API Key provides higher limits and faster responses. "
+            f"<a href='ttps://openalex.org/settings/api-key' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for OpenAlex Key]</a><br>"
             f"• <b>Semantic Scholar:</b> An API Key severely prevents '429 Too Many Requests' errors during massive literature retrieval. "
             f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for S2 Key]</a><br>"
             f"• <b>GitHub Token:</b> Increases search limits from 10/min to 30/min. "
@@ -2215,6 +2224,7 @@ class SettingsTool(BaseTool):
             self.config.save_mcp_servers()
 
         new_key = self.input_ncbi_api_key.text().strip()
+        new_openalex_key = self.input_openalex_api_key.text().strip()
         new_s2_key = self.input_s2_api_key.text().strip()
         s2_rate_text = self.input_s2_rate_limit.text().strip()
         try:
@@ -2253,6 +2263,7 @@ class SettingsTool(BaseTool):
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
+            "openalex_api_key": new_openalex_key,
             "s2_api_key": new_s2_key,
             "s2_rate_limit": s2_rate_text,
             "github_token": new_github_token,
@@ -2280,6 +2291,11 @@ class SettingsTool(BaseTool):
             os.environ["NCBI_API_KEY"] = new_key
         else:
             os.environ.pop("NCBI_API_KEY", None)
+
+        if new_openalex_key:
+            os.environ["OPENALEX_API_KEY"] = new_openalex_key
+        else:
+            os.environ.pop("OPENALEX_API_KEY", None)
 
         if new_email:
             os.environ["NCBI_API_EMAIL"] = new_email

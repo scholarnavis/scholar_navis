@@ -183,6 +183,7 @@ class ConfigManager:
             "is_first_run": True,
             "ncbi_email": "",
             "ncbi_api_key": "",
+            "openalex_api_key": "",
             "s2_api_key": "",
             "s2_rate_limit": "1.0",
             "github_token": "",
@@ -265,8 +266,10 @@ class ConfigManager:
 
         os.environ["NCBI_API_EMAIL"] = self.user_settings.get("ncbi_email", "")
         os.environ["NCBI_API_KEY"] = self.user_settings.get("ncbi_api_key", "")
+        os.environ["OPENALEX_API_KEY"] = self.user_settings.get("openalex_api_key", "")
         os.environ["S2_API_KEY"] = self.user_settings.get("s2_api_key", "")
         os.environ["GITHUB_TOKEN"] = self.user_settings.get("github_token", "")
+
 
     def toggle_mcp_tag(self, tag: str, is_checked: bool):
         tags = self.mcp_servers.get("deselected_mcp_tags", [])

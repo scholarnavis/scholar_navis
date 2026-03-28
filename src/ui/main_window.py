@@ -525,6 +525,13 @@ class MainWindow(QMainWindow):
                                 </span>
                             </div>
 
+                            <div style="background-color: {tm.color('bg_input')}; border-left: 4px solid {tm.color('success')}; padding: 12px 16px; margin: 15px 0; border-radius: 4px;">
+                                <b style="color: {tm.color('success')}; font-size: 14px;">🔑 API Keys & Rate Limits</b><br>
+                                <span style="font-size: 13px; color: {tm.color('text_muted')}; display: inline-block; margin-top: 4px;">
+                                NCBI PubMed and Semantic Scholar tools can function without API keys, but will be subject to strict rate limits. We strongly recommend configuring your free API keys in the settings for optimal performance and to avoid request timeouts.
+                                </span>
+                            </div>
+
                             <p style="font-size: 13px; color: {tm.color('text_muted')}; text-align: center; margin-top: 20px;">
                                 <i style="color: {tm.color('accent')};">Please proceed to <b>Global Settings</b> to configure your AI models, API keys, and network proxy.</i>
                             </p>
