@@ -15,6 +15,7 @@ from plugins.academic_agent import get_app_root
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
+from src.core.encryption_service import SystemEncryptionService
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, resolve_auto_model, get_onnx_cache_dir)
@@ -25,7 +26,8 @@ from src.core.theme_manager import ThemeManager
 from src.task.common_task import VerifyModelsTask
 from src.task.config_task import ExportConfigTask, ImportConfigTask
 from src.task.hf_download_task import RealTimeHFDownloadTask
-from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask, HWDetectTask, EmailVerifyTask
+from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask, HWDetectTask, EmailVerifyTask, \
+    ImportNativeSkillTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
@@ -924,25 +926,26 @@ class SettingsTool(BaseTool):
             return
 
         final_code = preview_dlg.get_edited_code()
-        APP_ROOT = self.config.BASE_DIR
+        enc_service = SystemEncryptionService()
+        encrypted_bytes = enc_service.encrypt(final_code)
 
-        # ===== 修改为后台统一任务队列 =====
-        self.import_skill_pd = ProgressDialog(self.widget, "Importing Skill", "Encrypting and saving...")
-        self.import_skill_pd.show()
+        cfg = {
+            "description": "User Imported Native Script",
+            "type": "SKILL",
+            "command": f"<Pending: {skill_name}>",
+            "enabled": True,
+            "_pending_bytes": encrypted_bytes,
+            "_is_new": True
+        }
 
-        self.import_skill_task_mgr = TaskManager()
-        self.import_skill_task_mgr.sig_progress.connect(self.import_skill_pd.update_progress)
-        self.import_skill_task_mgr.sig_result.connect(lambda res: self._on_import_skill_finished(res, skill_name))
-        self.import_skill_pd.sig_canceled.connect(self.import_skill_task_mgr.cancel_task)
+        self._add_mcp_row(skill_name, cfg)
 
-        self.import_skill_task_mgr.start_task(
-            ImportNativeSkillTask,
-            task_id="import_skill",
-            mode=TaskMode.THREAD,  # 属于 IO 密集型操作，用 THREAD 即可
-            skill_name=skill_name,
-            final_code=final_code,
-            base_dir=APP_ROOT
-        )
+        if hasattr(self, '_mark_unsaved'):
+            self._mark_unsaved()
+
+        from src.ui.components.toast import ToastManager
+        ToastManager().show(f"Skill '{skill_name}' staged. Click 'Save Settings' to commit.", "info")
+
 
     def _on_import_skill_finished(self, result, skill_name):
         if result.get("success"):

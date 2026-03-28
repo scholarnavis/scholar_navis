@@ -523,6 +523,14 @@ async def chat_completions(
     ext_tags = [t.replace("[External]", "").strip() for t in body.external_tool_names if
                 isinstance(t, str)] if body.external_tool_names else []
 
+    use_acad = body.use_academic_agent
+    if use_acad and body.academic_tags is not None and len(body.academic_tags) == 0:
+        use_acad = False
+
+    use_ext = body.use_external_tools
+    if use_ext and body.external_tool_names is not None and len(body.external_tool_names) == 0:
+        use_ext = False
+
     task_queue = queue.Queue()
     task_kwargs = {
         "main_config": main_config,
@@ -531,9 +539,9 @@ async def chat_completions(
         "kb_id": body.kb_id,
         "requires_translation": requires_translation,
         "external_context": [],
-        "use_academic_agent": body.use_academic_agent,
+        "use_academic_agent": use_acad,
         "academic_tags": acad_tags,
-        "use_external_tools": body.use_external_tools,
+        "use_external_tools": use_ext,
         "external_tool_names": ext_tags
     }
 
@@ -844,25 +852,33 @@ def semantic_filter_agent_tools(payload: SemanticFilterRequest):
     acad_tags = [t.replace("[ACADEMIC]", "").strip() for t in payload.academic_tags if isinstance(t, str)] if payload.academic_tags else []
     ext_names = [t.replace("[External]", "").strip() for t in payload.external_tool_names if isinstance(t, str)] if payload.external_tool_names else []
 
+    use_acad = payload.use_academic_agent
+    if use_acad and payload.academic_tags is not None and len(payload.academic_tags) == 0:
+        use_acad = False
+
+    use_ext = payload.use_external_tools
+    if use_ext and payload.external_tool_names is not None and len(payload.external_tool_names) == 0:
+        use_ext = False
+
     logger.warning("\n" + "=" * 50)
     logger.warning("🔍 [RERANKER DEBUG] Starting Semantic Filter Tool Selection")
     logger.warning(f"-> Query Intent: {payload.query}")
-    logger.warning(f"-> Academic Agent Enabled: {payload.use_academic_agent}")
+    logger.warning(f"-> Academic Agent Enabled: {use_acad}")
     logger.warning(f"-> Cleaned Academic Tags Filter: {acad_tags}")
-    logger.warning(f"-> External Tools Enabled: {payload.use_external_tools}")
+    logger.warning(f"-> External Tools Enabled: {use_ext}")
     logger.warning(f"-> Cleaned External Names Filter: {ext_names}")
 
     raw_tools = []
 
     # 1. Gather Internal Academic Tools
-    if payload.use_academic_agent:
+    if use_acad:
         raw_academic = skill_mgr.get_academic_schemas(acad_tags)
         if raw_academic:
             raw_tools.extend(raw_academic)
             logger.warning(f"-> Pulled {len(raw_academic)} Academic Tools based on tags.")
 
     # 2. Gather External Tools (SKILL + MCP)
-    if payload.use_external_tools:
+    if use_ext:
         ext_skills = skill_mgr.get_external_schemas(ext_names)
         if ext_skills:
             raw_tools.extend(ext_skills)

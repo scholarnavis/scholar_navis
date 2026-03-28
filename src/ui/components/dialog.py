@@ -946,8 +946,7 @@ class ProgressDialog(BaseDialog):
         super().__init__(parent, title=title, width=540)
         self.setWindowModality(Qt.ApplicationModal)
 
-        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.CustomizeWindowHint)
-
+        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
         if telemetry_config is None:
             self.telemetry = {"cpu": True, "ram": True, "gpu": True, "net": False, "io": True}
         else:

@@ -393,7 +393,9 @@ class ChatInputContainer(QFrame):
             self.btn_send.setToolTip("")
 
     def _on_mcp_status_changed(self):
-        if self.chk_mcp_enable.isChecked():
+        if hasattr(self, 'chk_external_tools') and self.chk_external_tools.isChecked():
+            self.refresh_mcp()
+        elif hasattr(self, 'chk_mcp_enable') and self.chk_mcp_enable.isChecked():
             self.refresh_mcp()
 
     def _on_tag_toggled(self, tag, checked):
@@ -970,8 +972,14 @@ class ChatTool(BaseTool):
             self.combo_kb.setEnabled(enabled)
 
         if hasattr(self, 'input_container'):
-            if hasattr(self.input_container, 'chk_mcp_enable'):
+            if hasattr(self.input_container, 'chk_external_tools'):
+                self.input_container.chk_external_tools.setEnabled(enabled)
+            elif hasattr(self.input_container, 'chk_mcp_enable'):
                 self.input_container.chk_mcp_enable.setEnabled(enabled)
+
+            if hasattr(self.input_container, 'chk_academic_agent'):
+                self.input_container.chk_academic_agent.setEnabled(enabled)
+
             if hasattr(self.input_container, 'btn_mcp_tags'):
                 self.input_container.btn_mcp_tags.setEnabled(enabled)
 
@@ -1433,6 +1441,12 @@ class ChatTool(BaseTool):
         academic_tags = [t.replace("[ACADEMIC]", "").strip() for t in selected_tags if t.startswith("[ACADEMIC]")]
         external_names = [t.replace("[External]", "").strip() for t in selected_tags if t.startswith("[External]")]
 
+        if use_academic_agent and not academic_tags:
+            use_academic_agent = False
+
+        if use_external_tools and not external_names:
+            use_external_tools = False
+
         if main_config:
             actual_model = main_config.get("model_name", "").strip()
             self.logger.info(
@@ -1644,9 +1658,13 @@ class ChatTool(BaseTool):
     def handle_external_send_with_mcp(self, context_text, prompt_text, target_tag):
         self.get_ui_widget()
 
-        if hasattr(self, 'input_container') and hasattr(self.input_container, 'chk_mcp_enable'):
-            if not self.input_container.chk_mcp_enable.isChecked():
-                self.input_container.chk_mcp_enable.setChecked(True)
+        if hasattr(self, 'input_container'):
+            if hasattr(self.input_container, 'chk_external_tools'):
+                if not self.input_container.chk_external_tools.isChecked():
+                    self.input_container.chk_external_tools.setChecked(True)
+            elif hasattr(self.input_container, 'chk_mcp_enable'):
+                if not self.input_container.chk_mcp_enable.isChecked():
+                    self.input_container.chk_mcp_enable.setChecked(True)
 
         config_mgr = ConfigManager()
         available_tags = MCPManager.get_instance().get_available_mcp()
@@ -1688,13 +1706,16 @@ class ChatTool(BaseTool):
         safe_name = quote("External Context.txt")
         link = f"cite://view?path={safe_path}&page=1&name={safe_name}"
 
-        # 提取前 80 个字符做预览，去掉换行符保持气泡紧凑
         preview_text = context_text[:80].replace('\n', ' ') + "..."
         self.external_context_html = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {preview_text} (Click to read more)</a></div>"
 
-        if hasattr(self, 'input_container') and hasattr(self.input_container, 'chk_mcp_enable'):
-            if not self.input_container.chk_mcp_enable.isChecked():
-                self.input_container.chk_mcp_enable.setChecked(True)
+        if hasattr(self, 'input_container'):
+            if hasattr(self.input_container, 'chk_external_tools'):
+                if not self.input_container.chk_external_tools.isChecked():
+                    self.input_container.chk_external_tools.setChecked(True)
+            elif hasattr(self.input_container, 'chk_mcp_enable'):
+                if not self.input_container.chk_mcp_enable.isChecked():
+                    self.input_container.chk_mcp_enable.setChecked(True)
 
         if prompt_text:
             self.process_send(prompt_text)
