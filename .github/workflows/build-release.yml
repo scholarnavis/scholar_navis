@@ -1,4 +1,4 @@
-name: Build Scholar Navis (Win & Linux)
+name: Build Scholar Navis (Windows)
 
 on:
   push:
@@ -13,17 +13,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest]
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Install System Dependencies (Linux only)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxcb-cursor0
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
@@ -53,5 +47,4 @@ jobs:
           name: Scholar-Navis-Build-${{ matrix.os }}
           path: |
             *.zip
-            *.tar.gz
           retention-days: 7
