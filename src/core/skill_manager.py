@@ -150,42 +150,83 @@ class SkillManager:
 
 
     def _load_external_skills_from_config(self):
-        """
-        从配置中动态加载外部传入的 Python 脚本作为 External Skills。
-        约定：外部脚本必须暴露 `execute` 函数和 `SCHEMA` 字典。
-        """
         from src.core.config_manager import ConfigManager
         config_mgr = ConfigManager()
         external_scripts = config_mgr.mcp_servers.get("external_skills", {})
 
+        import types
+        import os
+        import builtins
+        from src.core.encryption_service import SystemEncryptionService
+        enc_service = SystemEncryptionService()
+
+        APP_ROOT = config_mgr.BASE_DIR
+
         for skill_name, script_info in external_scripts.items():
-            # 新版逻辑：兼容携带 enabled 开关的对象
             if isinstance(script_info, dict):
                 if not script_info.get("enabled", True):
-                    continue  # 用户如果取消勾选，则不在内存中加载
+                    continue
                 script_path = script_info.get("command", "")
             else:
-                # 兼容你的老版本纯路径字符串
                 script_path = script_info
 
             if not os.path.exists(script_path):
-                logger.warning(f"External skill script missing: {script_path}")
+                logger.warning(f"External skill encrypted file missing: {script_path}")
                 continue
 
             try:
-                spec = importlib.util.spec_from_file_location(skill_name, script_path)
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
+                # 1. 解密代码
+                with open(script_path, 'rb') as f:
+                    encrypted_data = f.read()
+                decrypted_code = enc_service.decrypt(encrypted_data)
 
-                    if hasattr(module, 'execute') and hasattr(module, 'SCHEMA'):
-                        self.external_skills[skill_name] = module.execute
-                        self.external_schemas[skill_name] = module.SCHEMA
-                        logger.info(f"Successfully loaded external skill: {skill_name}")
-                    else:
-                        logger.error(f"External skill '{skill_name}' lacks 'execute' func or 'SCHEMA' dict.")
+                workspace_dir = os.path.join(APP_ROOT, 'tools', 'skill', f"{skill_name}_workspace")
+                os.makedirs(workspace_dir, exist_ok=True)
+                abs_workspace = os.path.abspath(workspace_dir)
+
+                # 拦截原生 open 函数
+                original_open = builtins.open
+                def safe_open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
+                    abs_target = os.path.abspath(os.path.join(abs_workspace, str(file)))
+                    if not abs_target.startswith(abs_workspace):
+                        logger.error(f"Sandbox Escape Blocked: [{skill_name}] tried to access '{file}'")
+                        raise PermissionError(f"Security Violation: Access denied to paths outside '{abs_workspace}'")
+                    return original_open(abs_target, mode, buffering, encoding, errors, newline, closefd, opener)
+
+                # 构造受限的内置函数字典
+                sandbox_builtins = builtins.__dict__.copy()
+                sandbox_builtins['open'] = safe_open  # 替换为安全的 open
+
+                # 构建执行环境的全局变量
+                sandbox_globals = {
+                    '__builtins__': sandbox_builtins,
+                    '__name__': skill_name,
+                    'WORKSPACE_DIR': abs_workspace
+                }
+
+                # 3. 内存级动态创建模块并挂载
+                module = types.ModuleType(skill_name)
+                module.__dict__.update(sandbox_globals)
+
+                exec(decrypted_code, module.__dict__)
+
+                if hasattr(module, 'execute') and hasattr(module, 'SCHEMA'):
+                    self.external_skills[skill_name] = module.execute
+                    self.external_schemas[skill_name] = module.SCHEMA
+                    logger.info(f"Successfully loaded sandboxed skill: {skill_name}")
+                else:
+                    logger.error(f"Encrypted skill '{skill_name}' lacks 'execute' func or 'SCHEMA' dict.")
             except Exception as e:
-                logger.error(f"Failed to load external skill '{skill_name}': {e}")
+                logger.error(f"Failed to load encrypted skill '{skill_name}': {e}")
+
+    def reload_external_skills(self):
+        """
+        清空现有外部 Skill 缓存并根据最新配置动态重新加载。
+        """
+        self.external_skills.clear()
+        self.external_schemas.clear()
+        self._load_external_skills_from_config()
+        logger.info("External skills reloaded dynamically.")
 
 
     def register_skill(self, schema: dict, func: Callable, is_external: bool = True):

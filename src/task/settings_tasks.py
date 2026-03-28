@@ -1,8 +1,10 @@
 import asyncio
+import os
 
 import httpx
 
 from src.core.core_task import BackgroundTask
+from src.core.encryption_service import SystemEncryptionService
 
 
 class FetchModelsTask(BackgroundTask):
@@ -247,3 +249,61 @@ class HWDetectTask(BackgroundTask):
                 "devs": [{"name": "Auto Detect", "id": "auto"}],
                 "msg": str(e)
             }
+
+
+class ImportNativeSkillTask(BackgroundTask):
+    """
+    后台处理 Native Skill 的加密与安全落盘任务
+    """
+    def _execute(self):
+        self.update_progress(10, "Initializing encryption service...")
+        skill_name = self.kwargs.get("skill_name")
+        final_code = self.kwargs.get("final_code")
+        base_dir = self.kwargs.get("base_dir")
+
+        if not all([skill_name, final_code, base_dir]):
+            raise ValueError("Missing required arguments for skill import.")
+
+        workspace_dir = os.path.join(base_dir, 'tools', 'skill')
+        os.makedirs(workspace_dir, exist_ok=True)
+        target_path = os.path.join(workspace_dir, f"{skill_name}.enc")
+
+        self.update_progress(40, "Encrypting script using system-bound key...")
+        enc_service = SystemEncryptionService()
+        encrypted_bytes = enc_service.encrypt(final_code)
+
+        self.update_progress(80, "Writing to secure storage...")
+        with open(target_path, 'wb') as f:
+            f.write(encrypted_bytes)
+
+        self.update_progress(100, "Import completed.")
+        return {"success": True, "target_path": target_path}
+
+
+class TestMcpConnectionTask(BackgroundTask):
+    """
+    后台测试 MCP 服务器连接状态的统一任务
+    """
+
+    def _execute(self):
+        server_name = self.kwargs.get("server_name")
+        config = self.kwargs.get("config")
+
+        self.update_progress(20, f"Initializing connection to '{server_name}'...")
+
+        from src.core.mcp_manager import MCPManager
+        mcp_mgr = MCPManager.get_instance()
+
+        self.update_progress(50, "Handshaking and verifying MCP protocol...")
+
+        success = mcp_mgr._sync_start(server_name, config)
+
+        if success:
+            self.update_progress(90, "Connection successful. Reading tools schema...")
+            mcp_mgr.disconnect_server(server_name)
+            self.update_progress(100, "Test passed.")
+            return {"success": True, "msg": f"Successfully connected to '{server_name}' and verified protocol."}
+        else:
+            status = mcp_mgr.get_server_status(server_name)
+            mcp_mgr.disconnect_server(server_name)
+            return {"success": False, "msg": f"Handshake failed: {status}"}

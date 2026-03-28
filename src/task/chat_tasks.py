@@ -456,19 +456,21 @@ class ChatGenerationTask(BackgroundTask):
             if raw_academic:
                 raw_tools.extend(raw_academic)
 
-        # 2. 外部工具组合 (External SKILLS + External MCP)
+        # 2. 外部工具组合
         if self.use_external_tools:
             # 2.1 提取外部 SKILL
             ext_skills = skill_mgr.get_external_schemas(self.external_tool_names)
             if ext_skills:
                 raw_tools.extend(ext_skills)
 
-            # 2.2 提取外部 MCP，并根据 Server 过滤
-            mcp_tools = mcp_mgr.get_all_tools_schema() or []
-            for schema in mcp_tools:
+            for schema in mcp_mgr.tool_schemas.values():
                 server_name = schema.get("server", "Unknown Server")
                 if not self.external_tool_names or server_name in self.external_tool_names:
-                    raw_tools.append(schema)
+                    clean_schema = {
+                        "type": schema.get("type", "function"),
+                        "function": schema.get("function", {})
+                    }
+                    raw_tools.append(clean_schema)
 
         if raw_tools:
             self.send_log("INFO",
@@ -478,6 +480,9 @@ class ChatGenerationTask(BackgroundTask):
             time.sleep(0.05)
             combined_tools = self.filter_tools_by_rag(search_query, raw_tools, top_k=8)
             self._emit_token("[CLEAR_SEARCH]")
+
+            final_tool_names = [t.get("function", {}).get("name", "Unknown") for t in combined_tools]
+            self.send_log("INFO", f"Final selected tools for LLM generation: {', '.join(final_tool_names)}")
 
         combined_tools.append({
             "type": "function",

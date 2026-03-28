@@ -209,7 +209,37 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
 
     # 1. 判断启动模式
+    is_admin = False
+    try:
+        if os.name == 'nt':
+            import ctypes
+
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        else:
+            is_admin = os.geteuid() == 0
+    except Exception:
+        pass
+
+    if is_admin:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        import sys
+
+        # 因为此时主应用还未初始化，需要临时创建一个 QApplication 来显示报错弹窗
+        temp_app = QApplication(sys.argv)
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Security Alert: Elevated Privileges")
+        msg_box.setText("Scholar Navis cannot be run with Administrator / Root privileges.")
+        msg_box.setInformativeText(
+            "For security reasons and to prevent sandbox escapes, please restart the application as a standard user.")
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec()
+        sys.exit(1)
+    # ==============================================================================
+
+    # 1. 判断启动模式
     is_api_mode = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
+
 
     # 2. 统一在最开始创建 Qt 应用实例，以支持 QLocalSocket 机制
     if is_api_mode:

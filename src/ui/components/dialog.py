@@ -1,3 +1,4 @@
+import ast
 import os
 import re
 import time
@@ -5,16 +6,18 @@ import time
 import psutil
 import torch
 from PySide6.QtCore import Qt, Signal, QTimer, QRegularExpression
-from PySide6.QtGui import QColor, QRegularExpressionValidator, QGuiApplication
+from PySide6.QtGui import QColor, QRegularExpressionValidator, QGuiApplication, QTextCharFormat, QSyntaxHighlighter, \
+    QFont
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QHeaderView, QAbstractItemView, QTableWidget,
-                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea)
+                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea, QPlainTextEdit)
 
+from src.core.core_task import TaskManager, TaskMode
 from src.core.models_registry import EMBEDDING_MODELS
 from src.core.theme_manager import ThemeManager
-from src.task.dialog_task import DialogTaskManager
+from src.task.settings_tasks import TestMcpConnectionTask
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
@@ -627,9 +630,6 @@ class McpConfigDialog(BaseDialog):
         title = "Edit MCP Server" if server_config else "Add MCP Server"
         super().__init__(parent, title=title, width=660)
 
-        self.task_manager = DialogTaskManager()
-        self._setup_task_signals()
-
         self.form_widget = QWidget()
         self.form_layout = QFormLayout(self.form_widget)
         self.form_layout.setSpacing(15)
@@ -748,25 +748,36 @@ class McpConfigDialog(BaseDialog):
         )
 
     def _on_test_clicked(self):
-        """测试连接（使用TaskManager管理）"""
+        """测试连接（使用标准 TaskManager 管理）"""
         name, cfg = self.get_config()
         if not name or (not cfg.get("command") and not cfg.get("url")):
             StandardDialog(self, "Missing Info", "Please enter at least a Server ID and Command/URL.").exec()
             return
-        # 取消现有任务
-        if self.task_manager.is_running():
-            self.task_manager.cancel_task()
+
+        # 1. 取消现有任务
+        if self.task_mgr and hasattr(self.task_mgr, 'is_running') and self.task_mgr.is_running():
+            self.task_mgr.cancel_task()
+
         self.btn_test.setEnabled(False)
         self.pd = ProgressDialog(self, "Testing Connection", f"Connecting to [{name}]...\nPlease wait...")
-
-        self.pd.sig_canceled.connect(self.task_manager.cancel_task)
-
         self.pd.show()
-        # 启动测试任务
-        self.task_manager.start_mcp_test(name, cfg)
 
-    def _on_test_finished(self, result: dict):
-        """测试完成回调"""
+        self.task_mgr = TaskManager()
+        self.task_mgr.sig_progress.connect(self.pd.update_progress)
+        self.task_mgr.sig_result.connect(self._on_test_finished)
+        self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
+
+        # 3. 启动任务
+        self.task_mgr.start_task(
+            TestMcpConnectionTask,
+            task_id="test_mcp_conn",
+            mode=TaskMode.THREAD,
+            server_name=name,
+            config=cfg
+        )
+
+    def _on_test_finished(self, result):
+        """测试完成统一回调"""
         self.btn_test.setEnabled(True)
 
         if not hasattr(self, 'pd') or not self.pd:
@@ -779,18 +790,6 @@ class McpConfigDialog(BaseDialog):
             self.pd.show_success_state("Connection Successful", msg)
         else:
             self.pd.show_finish_state(False, "Connection Failed", f"Unable to connect to server:\n{msg}")
-
-    def _on_test_error(self, error_msg: str):
-        """测试错误回调"""
-        self.btn_test.setEnabled(True)
-
-        if hasattr(self, 'pd') and self.pd:
-            self.pd.show_finish_state(False, "Connection Error", f"Error during connection test:\n{error_msg}")
-
-    def _on_test_progress(self, progress: int, msg: str):
-
-        if hasattr(self, 'pd') and self.pd:
-            self.pd.update_progress(progress, msg)
 
 
     def _apply_theme(self):
@@ -1559,6 +1558,136 @@ class SkillConfigDialog(BaseDialog):
 
     def get_data(self):
         return self.input_name.text().strip(), self.input_path.text().strip()
+
+
+class SkillSecurityAnalyzer(ast.NodeVisitor):
+    DANGEROUS_IMPORTS = {'os', 'sys', 'subprocess', 'shutil', 'socket', 'requests', 'urllib', 'http'}
+    DANGEROUS_CALLS = {'eval', 'exec', 'open', '__import__'}
+
+    def __init__(self):
+        self.score = 100
+        self.warnings = []
+
+    def analyze(self, code_str: str) -> dict:
+        self.score = 100
+        self.warnings.clear()
+
+        try:
+            tree = ast.parse(code_str)
+            self.visit(tree)
+        except SyntaxError as e:
+            return {"score": 0, "warnings": [f"Syntax Error: {e}"], "level": "Fatal"}
+
+        level = "Safe"
+        if self.score < 60:
+            level = "High Risk"
+        elif self.score < 80:
+            level = "Medium Risk"
+
+        return {"score": max(0, self.score), "warnings": self.warnings, "level": level}
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            if alias.name.split('.')[0] in self.DANGEROUS_IMPORTS:
+                self.score -= 20
+                self.warnings.append(f"Dangerous import detected: '{alias.name}'")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        if node.module and node.module.split('.')[0] in self.DANGEROUS_IMPORTS:
+            self.score -= 20
+            self.warnings.append(f"Dangerous from...import detected: '{node.module}'")
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Name):
+            if node.func.id in self.DANGEROUS_CALLS:
+                self.score -= 30
+                self.warnings.append(f"Dangerous function call detected: '{node.func.id}'")
+        self.generic_visit(node)
+
+
+class PythonHighlighter(QSyntaxHighlighter):
+    def __init__(self, document, theme_mgr):
+        super().__init__(document)
+        self.highlighting_rules = []
+
+        keyword_format = QTextCharFormat()
+        keyword_format.setForeground(QColor(theme_mgr.color("accent")))
+        keyword_format.setFontWeight(QFont.Bold)
+        keywords = [
+            "def", "class", "import", "from", "return", "pass", "if", "elif", "else",
+            "try", "except", "finally", "with", "as", "for", "while", "in", "and", "or", "not"
+        ]
+        for word in keywords:
+            pattern = QRegularExpression(rf"\b{word}\b")
+            self.highlighting_rules.append((pattern, keyword_format))
+
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor(theme_mgr.color("success")))
+        self.highlighting_rules.append((QRegularExpression("\".*\""), string_format))
+        self.highlighting_rules.append((QRegularExpression("'.*'"), string_format))
+
+    def highlightBlock(self, text):
+        for pattern, format in self.highlighting_rules:
+            iterator = pattern.globalMatch(text)
+            while iterator.hasNext():
+                match = iterator.next()
+                self.setFormat(match.capturedStart(), match.capturedLength(), format)
+
+
+class SkillPreviewDialog(BaseDialog):
+    def __init__(self, parent=None, skill_name="", code_content="", is_importing=True):
+        title = f"Skill Review: {skill_name}" if is_importing else f"Edit Skill: {skill_name}"
+        super().__init__(parent, title=title, width=750)
+        self.setMinimumHeight(550)
+
+        self.code_content = code_content
+        self.is_importing = is_importing
+
+        # 1. 静态安全分析
+        analyzer = SkillSecurityAnalyzer()
+        report = analyzer.analyze(code_content)
+
+        # 2. 渲染顶部安全评分提示
+        lbl_info = QLabel(f"<b>Security Score: {report['score']}/100 ({report['level']})</b>")
+        if report['score'] < 60:
+            lbl_info.setStyleSheet(f"color: {self.tm.color('danger')}; font-size: 14px;")
+        elif report['score'] < 80:
+            lbl_info.setStyleSheet(f"color: {self.tm.color('warning')}; font-size: 14px;")
+        else:
+            lbl_info.setStyleSheet(f"color: {self.tm.color('success')}; font-size: 14px;")
+        self.content_layout.addWidget(lbl_info)
+
+        if report['warnings']:
+            lbl_warnings = QLabel("Warnings:\n- " + "\n- ".join(report['warnings']))
+            lbl_warnings.setStyleSheet(f"color: {self.tm.color('warning')}; font-size: 12px;")
+            self.content_layout.addWidget(lbl_warnings)
+
+        # 3. 渲染代码高亮编辑器
+        self.editor = QPlainTextEdit()
+        self.editor.setPlainText(code_content)
+        font = QFont("Consolas", 10)
+        self.editor.setFont(font)
+        self.editor.setStyleSheet(
+            f"background-color: {self.tm.color('bg_input')}; "
+            f"color: {self.tm.color('text_main')}; "
+            f"border: 1px solid {self.tm.color('border')}; "
+            f"border-radius: 4px;"
+        )
+        self.highlighter = PythonHighlighter(self.editor.document(), self.tm)
+
+        self.content_layout.addWidget(self.editor, stretch=1)
+
+        self.add_button("Cancel", self.reject)
+        btn_text = "Confirm Import" if is_importing else "Save Changes"
+        self.add_button(btn_text, self.accept, is_primary=True)
+
+        self._apply_theme()
+
+    def get_edited_code(self):
+        return self.editor.toPlainText()
+
 
 
 class ApiProvidersDialog(BaseDialog):

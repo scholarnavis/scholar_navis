@@ -142,7 +142,7 @@ class MCPManager:
                 def start_lazy_server(name=server_name, cfg=run_cfg):
                     self._async_start(name, cfg)
 
-                self._loop.call_later(delay_ms / 1000.0, start_lazy_server)
+                self._loop.call_soon_threadsafe(self._loop.call_later, delay_ms / 1000.0, start_lazy_server)
                 delay_ms += 2000
 
             else:

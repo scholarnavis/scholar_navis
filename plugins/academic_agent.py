@@ -24,8 +24,8 @@ def get_app_root():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-APP_ROOT = get_app_root()
 
+APP_ROOT = get_app_root()
 
 
 
@@ -117,7 +117,7 @@ if s2_api_key: logger.info("Using S2 API Key.")
 if github_token: logger.info("Using GitHub Token.")
 
 
-WORKSPACE_DIR = os.path.join(APP_ROOT, "mcp_workspace", "downloads")
+WORKSPACE_DIR = os.path.join(APP_ROOT, 'tools',"mcp")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 logger.info(f"Local Workspace initialized at: {WORKSPACE_DIR}")
 

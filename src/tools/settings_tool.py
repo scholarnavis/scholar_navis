@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QAbstractItemView, QHeaderView,
                                QTableWidgetItem, QCheckBox, QApplication, QFrame, QFileDialog)
 
+from plugins.academic_agent import get_app_root
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
@@ -738,6 +739,11 @@ class SettingsTool(BaseTool):
             mcp_mgr = MCPManager.get_instance()
             mcp_mgr.bootstrap_servers(force_all=False)
 
+            from src.core.skill_manager import SkillManager
+            skill_mgr = SkillManager.get_instance()
+            if hasattr(skill_mgr, 'reload_external_skills'):
+                skill_mgr.reload_external_skills()
+
             from src.ui.components.toast import ToastManager
             ToastManager().show("Refreshing external tool states...", "info")
             self._refresh_mcp_status()
@@ -898,29 +904,70 @@ class SettingsTool(BaseTool):
             "<i>Only import scripts from absolutely trusted sources. Do you accept all risks and wish to proceed?</i>"
         )
 
+        from src.ui.components.dialog import StandardDialog, SkillPreviewDialog
+        from PySide6.QtWidgets import QFileDialog
+        import os
 
         dlg = StandardDialog(self.widget, "⚠️ HIGH RISK OPERATION", warning_msg, show_cancel=True)
         if not dlg.exec():
             return
 
-        skill_dlg = SkillConfigDialog(self.widget)
-        if skill_dlg.exec():
-            name, path = skill_dlg.get_data()
-            if not name or not path: return
+        path, _ = QFileDialog.getOpenFileName(self.widget, "Import Native Skill", "", "Python Files (*.py)")
+        if not path: return
 
-            if name in ["built-in", "Academic Tool","builtin"]:
-                ToastManager().show(f"The name '{name}' is reserved for core system usage.", "error")
-                return
+        skill_name = os.path.basename(path).replace(".py", "")
+        with open(path, 'r', encoding='utf-8') as f:
+            raw_code = f.read()
 
+        preview_dlg = SkillPreviewDialog(self.widget, skill_name, raw_code, is_importing=True)
+        if not preview_dlg.exec():
+            return
+
+        final_code = preview_dlg.get_edited_code()
+        APP_ROOT = self.config.BASE_DIR
+
+        # ===== 修改为后台统一任务队列 =====
+        self.import_skill_pd = ProgressDialog(self.widget, "Importing Skill", "Encrypting and saving...")
+        self.import_skill_pd.show()
+
+        self.import_skill_task_mgr = TaskManager()
+        self.import_skill_task_mgr.sig_progress.connect(self.import_skill_pd.update_progress)
+        self.import_skill_task_mgr.sig_result.connect(lambda res: self._on_import_skill_finished(res, skill_name))
+        self.import_skill_pd.sig_canceled.connect(self.import_skill_task_mgr.cancel_task)
+
+        self.import_skill_task_mgr.start_task(
+            ImportNativeSkillTask,
+            task_id="import_skill",
+            mode=TaskMode.THREAD,  # 属于 IO 密集型操作，用 THREAD 即可
+            skill_name=skill_name,
+            final_code=final_code,
+            base_dir=APP_ROOT
+        )
+
+    def _on_import_skill_finished(self, result, skill_name):
+        if result.get("success"):
+            target_path = result.get("target_path")
+
+            # 写入表格并标记配置未保存
             cfg = {
-                "description": "User Imported Native Python Script",
+                "description": "User Imported Native Script",
                 "type": "SKILL",
-                "command": path,
+                "command": target_path,
                 "enabled": True
             }
 
-            self._add_mcp_row(name, cfg)
-            self._mark_unsaved()
+            self._add_mcp_row(skill_name, cfg)
+
+            if hasattr(self, '_mark_unsaved'):
+                self._mark_unsaved()
+
+            self.import_skill_pd.show_finish_state(True, "Import Successful",
+                                                   f"Skill '{skill_name}' has been encrypted and secured.")
+            from src.ui.components.toast import ToastManager
+            ToastManager().show(f"Skill '{skill_name}' imported successfully.", "success")
+        else:
+            self.import_skill_pd.show_finish_state(False, "Import Failed",
+                                                   result.get("msg", "Unknown error during encryption."))
 
     def _on_edit_mcp_clicked(self, row):
         name_item = self.table_mcp.item(row, 1)
@@ -2366,6 +2413,9 @@ class SettingsTool(BaseTool):
                 from src.core.mcp_manager import MCPManager
                 mcp_mgr = MCPManager.get_instance()
                 mcp_mgr.bootstrap_servers()
+                skill_mgr = SkillManager.get_instance()
+                if hasattr(skill_mgr, 'reload_external_skills'):
+                    skill_mgr.reload_external_skills()
 
                 if hasattr(self, '_refresh_mcp_status'):
                     self._refresh_mcp_status()
