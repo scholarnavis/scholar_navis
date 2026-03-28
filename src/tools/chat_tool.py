@@ -260,19 +260,19 @@ class ChatInputContainer(QFrame):
 
         self.btn_send = QPushButton("Send")
         self.btn_send.setCursor(Qt.PointingHandCursor)
-        self.btn_send.setFixedSize(70, 32)
+        self.btn_send.setFixedSize(90, 32)  # 加宽以防止文字截断
         self.btn_send.setStyleSheet(f"""
-                    QPushButton {{ 
-                        background-color: #007acc; color: white; border-radius: 6px; 
-                        font-weight: bold; font-family: {ThemeManager().font_family()};
-                    }}
-                    QPushButton:hover {{ background-color: #0062a3; }}
-                """)
+                           QPushButton {{ 
+                               background-color: #007acc; color: white; border-radius: 6px; 
+                               font-weight: bold; font-family: {ThemeManager().font_family()};
+                           }}
+                           QPushButton:hover {{ background-color: #0062a3; }}
+                       """)
         self.bottom_bar.addWidget(self.btn_send)
 
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setCursor(Qt.PointingHandCursor)
-        self.btn_stop.setFixedSize(70, 32)
+        self.btn_stop.setFixedSize(90, 32)
         self.btn_stop.setVisible(False)
         self.bottom_bar.addWidget(self.btn_stop)
 
@@ -1442,8 +1442,12 @@ class ChatTool(BaseTool):
         self.current_ai_text = ""
         self.current_ai_bubble = self.add_bubble("", is_user=False)
         self.current_ai_bubble.set_loading(True)
+
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
+        self.input_container.btn_stop.setEnabled(True)
+        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setToolTip("")
         self.set_controls_enabled(False)
 
         self._is_rendering_dirty = False
@@ -1451,6 +1455,12 @@ class ChatTool(BaseTool):
 
         # Cleanly abort previous tasks if any exist
         if getattr(self, 'chat_task_mgr', None):
+            try:
+                self.chat_task_mgr.sig_progress.disconnect()
+                self.chat_task_mgr.sig_state_changed.disconnect()
+                self.chat_task_mgr.sig_result.disconnect()
+            except Exception:
+                pass
             self.chat_task_mgr.cancel_task()
 
         self.chat_task_mgr = TaskManager()
@@ -1580,15 +1590,18 @@ class ChatTool(BaseTool):
         self.start_ai_response(kb_id, requires_translation)
 
     def cancel_generation(self):
+        if not self.input_container.btn_stop.isEnabled():
+            return
+
+        self.input_container.btn_stop.setEnabled(False)
+        self.input_container.btn_stop.setText("Stopping...")
+        self.input_container.btn_stop.setToolTip("Waiting for background resources to safely release...")
+
         if getattr(self, 'chat_task_mgr', None):
             self.chat_task_mgr.cancel_task()
 
         if hasattr(self, '_render_timer'): self._render_timer.stop()
         self.set_controls_enabled(True)
-
-        self.input_container.btn_stop.setEnabled(False)
-        self.input_container.btn_stop.setText("Stopping...")
-        self.input_container.btn_stop.setToolTip("Waiting for background resources to safely release...")
 
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
@@ -1914,7 +1927,7 @@ class ChatTool(BaseTool):
         # 检查是否是被主动中止的，履行“无论成功与否都要弹窗告知用户”的要求
 
         if is_cancelled:
-            StandardDialog(self.widget, "Task Cancelled", "The AI generation has been safely stopped by the user.",
+            StandardDialog(self.widget, "Task Cancelled", "The AI generation has been stopped by the user.",
                            show_cancel=False).exec()
             if hasattr(self, '_restore_last_input'):
                 self._restore_last_input()

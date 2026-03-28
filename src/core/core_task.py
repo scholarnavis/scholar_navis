@@ -101,10 +101,25 @@ class RunnerProcess(mp.Process):
             self.logger.error(f"Process Crash: {traceback.format_exc()}")
             raise
 
+
+# 全局孤儿线程池：保存被取消但仍在后台进行收尾的线程，防止被 Python GC 杀掉导致 0xC0000409
+_active_threads = set()
+
+
 class RunnerThread(QThread):
     def __init__(self, task_cls, task_id, queue, kwargs):
-        super().__init__()
+        # 绝不传递 parent，防止主进程垃圾回收时误杀底层 C++ 线程
+        super().__init__(parent=None)
         self.task = task_cls(task_id, queue, kwargs)
+
+        # 线程启动前，把自己注册到全局集合保命
+        _active_threads.add(self)
+        self.finished.connect(self._on_finish)
+
+    def _on_finish(self):
+        # 线程自然死透后，自动从集合中移除，并安全释放 C++ 内存
+        _active_threads.discard(self)
+        self.deleteLater()
 
     def run(self):
         self.task.run()
@@ -176,8 +191,10 @@ class TaskManager(QObject):
         if self.hooks["pre"]:
             self.hooks["pre"]()
 
-        WorkerClass = RunnerProcess if mode == TaskMode.PROCESS else RunnerThread
-        self.worker = WorkerClass(task_class, task_id, self.task_queue, kwargs)
+        if mode == TaskMode.THREAD:
+            self.worker = RunnerThread(task_class, task_id, self.task_queue, kwargs)
+        else:
+            self.worker = RunnerProcess(task_class, task_id, self.task_queue, kwargs)
 
         try:
             self.worker.start()
@@ -186,7 +203,7 @@ class TaskManager(QObject):
             self.logger.error(f"Spawn FAILED: {e}")
             self.sig_state_changed.emit(TaskState.FAILED.value, f"Spawn FAILED: {e}")
 
-    # --- 消息分发 ---
+
 
     def _poll_queue(self):
         if not self.task_queue: return
@@ -244,39 +261,29 @@ class TaskManager(QObject):
                 except OSError:
                     pass
 
-    # --- 控制逻辑 ---
 
     def wait(self, timeout_sec: float = None):
-        """
-        等待任务完成（成功、失败或终止）。
-        阻塞当前代码向下执行，但使用 QEventLoop 保证 UI 不会卡顿！
-        """
-        # 如果任务还没生成（比如在 delay 阶段），或者是空的，直接返回
+
         if not self.worker or (self.current_mode == TaskMode.PROCESS and not self.worker.is_alive()) or (
                 self.current_mode == TaskMode.THREAD and not self.worker.isRunning()):
             return
 
         loop = QEventLoop(self)
 
-        # 定义收到结束信号时退出局部事件循环
         def on_state_changed(state, msg):
             if state in [TaskState.SUCCESS.value, TaskState.FAILED.value, TaskState.TERMINATED.value]:
                 loop.quit()
 
         self.sig_state_changed.connect(on_state_changed)
 
-        # 超时强行退出阻塞
         if timeout_sec:
             QTimer.singleShot(int(timeout_sec * 1000), loop.quit)
 
-        # 启动局部事件循环 (代码会停在这里，但 UI 事件依然响应)
         loop.exec()
 
-        # 断开连接，防止内存泄漏
         self.sig_state_changed.disconnect(on_state_changed)
 
     def cancel_task(self):
-        # 1. 如果还在延迟启动阶段，直接取消定时器
         if self._delay_start_timer.isActive():
             self._delay_start_timer.stop()
             self.sig_state_changed.emit(TaskState.TERMINATED.value, "Cancelled before start.")
@@ -285,41 +292,34 @@ class TaskManager(QObject):
         if not self.worker:
             return
 
-        # 2. 尝试优雅取消 (通知 Python 层的 Task 实例)
-        if hasattr(self.worker, 'task'):
-            self.worker.task.cancel()
+        worker_to_stop = self.worker
+        self.worker = None
+        self._queue_timer.stop()
 
-        # 3. 暴力终止与安全清理
-        if self.current_mode == TaskMode.PROCESS and self.worker.is_alive():
-            self._kill_process_tree(self.worker.pid)
-            self.worker.join(timeout=1.0)  # 确保进程真正释放资源
+        if hasattr(worker_to_stop, 'task'):
+            worker_to_stop.task.cancel()
 
-        elif self.current_mode == TaskMode.THREAD and self.worker.isRunning():
-            self.worker.requestInterruption()
-            self.worker.quit()
-            self.worker.wait(1000)  # 给予 C++ 底层 1 秒的事件循环处理时间，防止 0xC0000409
+        if self.current_mode == TaskMode.PROCESS and worker_to_stop.is_alive():
+            self._kill_process_tree(worker_to_stop.pid)
+            worker_to_stop.join(timeout=1.0)
+        elif self.current_mode == TaskMode.THREAD and worker_to_stop.isRunning():
+            worker_to_stop.requestInterruption()
+            # 绝对不要在这里卡 UI，_active_threads 会默默负责给它送终
 
-        # 4. 发出信号与清理
         self.sig_state_changed.emit(TaskState.TERMINATED.value, "Task has been terminated.")
-        if self.hooks["terminate"]:
-            self.hooks["terminate"]()
 
-        self._cleanup_worker()
+        # 安全调用 Hook，修复直接写死 key 的隐患
+        if self.hooks.get("terminate"):
+            self.hooks["terminate"]()
 
     def _cleanup_worker(self):
         self._queue_timer.stop()
         if self.worker:
-            if self.current_mode == TaskMode.THREAD:
-                if self.worker.isRunning():
-                    # 如果线程仍在运行（例如强杀失败），安全地推迟删除
-                    self.worker.finished.connect(self.worker.deleteLater)
-                else:
-                    self.worker.deleteLater()
-            elif self.current_mode == TaskMode.PROCESS:
-                # 显式解除进程对象的引用，释放底层系统句柄
-                if self.worker.is_alive():
-                    self.worker.terminate()
+            if self.current_mode == TaskMode.PROCESS and self.worker.is_alive():
+                self.worker.terminate()
+
             self.worker = None
+
 
     @staticmethod
     def _kill_process_tree(pid: int):
