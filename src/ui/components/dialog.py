@@ -25,7 +25,12 @@ from src.ui.components.toast import ToastManager
 class BaseDialog(QDialog):
     def __init__(self, parent=None, title="Dialog", width=450):
         super().__init__(parent)
-        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+        self.setWindowFlags(
+            Qt.Dialog |
+            Qt.CustomizeWindowHint |
+            Qt.WindowTitleHint |
+            Qt.WindowCloseButtonHint
+        )
         self.setWindowTitle(title)
 
         self._target_width = width
