@@ -305,42 +305,59 @@ class InternalTextViewer(QMainWindow):
         self.setCentralWidget(self.text_browser)
         self.text_browser.installEventFilter(self)
         self._setup_toolbar()
+        self._setup_search_bar()
 
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
     def _apply_theme(self):
         tm = ThemeManager()
+        # 1. 文本区域样式
         self.text_browser.setStyleSheet(f"""
             QTextBrowser {{
                 background-color: {tm.color('bg_main')};
                 color: {tm.color('text_main')};
-                font-family: {tm.font_family()};
-                padding: 20px;
                 border: none;
                 selection-background-color: {tm.color('accent')};
                 selection-color: {tm.color('selection_fg')};
             }}
         """)
 
-        tb_style = f"""
-            QToolBar {{ background: {tm.color('bg_card')}; border-bottom: 1px solid {tm.color('border')}; padding: 6px; }} 
-            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; font-family: {tm.font_family()}; }} 
-            QToolButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
+        # 2. 统一所有工具栏样式 (包括主工具栏和搜索栏)
+        common_tb_style = f"""
+            QToolBar {{ 
+                background: {tm.color('bg_card')}; 
+                border-bottom: 1px solid {tm.color('border')}; 
+                padding: 6px; 
+            }} 
+            QToolButton, QPushButton {{ 
+                color: {tm.color('text_main')}; 
+                padding: 5px 10px; 
+                border-radius: 4px; 
+                background: transparent; 
+            }} 
+            QToolButton:hover, QPushButton:hover {{ 
+                background: {tm.color('btn_hover')}; 
+                color: {tm.color('accent')}; 
+            }}
         """
         for tb in self.findChildren(QToolBar):
-            tb.setStyleSheet(tb_style)
+            tb.setStyleSheet(common_tb_style)
 
-        for lbl in self.findChildren(QLabel):
-            if "(Tip:" in lbl.text():
-                lbl.setStyleSheet(
-                    f"color: {tm.color('text_muted')}; font-style: italic; font-size: 13px; padding-left: 10px; font-family: {tm.font_family()};")
+        # 3. 搜索输入框样式
+        self.search_input.setStyleSheet(f"""
+            background-color: {tm.color('bg_input')}; 
+            color: {tm.color('text_main')}; 
+            border: 1px solid {tm.color('border')}; 
+            border-radius: 4px; 
+            padding: 4px;
+        """)
 
-        if hasattr(self, 'act_zoom_in'):
-            self.act_zoom_in.setIcon(tm.icon("add", "text_main"))
-            self.act_zoom_out.setIcon(tm.icon("remove", "text_main"))
-            self.act_open_sys.setIcon(tm.icon("link", "text_main"))
-            self.act_export.setIcon(tm.icon("download", "text_main"))
+        # 4. 图标更新
+        if hasattr(self, 'btn_find_prev'):
+            self.btn_find_prev.setIcon(tm.icon("chevron-left", "text_main"))
+            self.btn_find_next.setIcon(tm.icon("chevron-right", "text_main"))
+            self.btn_close_search.setIcon(tm.icon("close", "danger"))
 
     def _setup_toolbar(self):
         tm = ThemeManager()
@@ -488,6 +505,81 @@ class InternalTextViewer(QMainWindow):
 
             self.text_browser.setTextCursor(cursor)
             self.text_browser.ensureCursorVisible()
+
+    def keyPressEvent(self, event):
+        """处理快捷键：Ctrl+F 搜索，Space 翻译"""
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_F:
+            self._toggle_search()
+        elif event.key() == Qt.Key_Space:
+            self._trigger_translation()
+        elif event.key() == Qt.Key_Escape and self.search_toolbar.isVisible():
+            self._close_search()
+        else:
+            super().keyPressEvent(event)
+
+    def _trigger_translation(self):
+        """获取选中文本并触发翻译信号"""
+        cursor = self.text_browser.textCursor()
+        selected_text = cursor.selectedText().strip()
+        if selected_text and hasattr(GlobalSignals(), 'sig_invoke_translator'):
+            clean_text = selected_text.replace('\u2029', '\n')
+            GlobalSignals().sig_invoke_translator.emit(clean_text)
+
+    def _setup_search_bar(self):
+        """初始化文本搜索工具栏"""
+        tm = ThemeManager()
+        self.search_toolbar = QToolBar()
+        self.search_toolbar.setMovable(False)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search text...")
+        self.search_input.returnPressed.connect(self._find_next)
+
+        self.btn_find_prev = QPushButton(" Prev")
+        self.btn_find_prev.clicked.connect(self._find_prev)
+
+        self.btn_find_next = QPushButton(" Next")
+        self.btn_find_next.clicked.connect(self._find_next)
+
+        self.btn_close_search = QPushButton(" Close")
+        self.btn_close_search.clicked.connect(self._close_search)
+
+        self.search_toolbar.addWidget(self.search_input)
+        self.search_toolbar.addWidget(self.btn_find_prev)
+        self.search_toolbar.addWidget(self.btn_find_next)
+        self.search_toolbar.addWidget(self.btn_close_search)
+
+        self.addToolBar(Qt.TopToolBarArea, self.search_toolbar)
+        self.search_toolbar.hide()
+
+    def _toggle_search(self):
+        if self.search_toolbar.isVisible():
+            self._close_search()
+        else:
+            self.search_toolbar.show()
+            self.search_input.setFocus()
+            self.search_input.selectAll()
+
+    def _find_next(self):
+        text = self.search_input.text()
+        if text:
+            if not self.text_browser.find(text):
+                self.text_browser.moveCursor(self.text_browser.textCursor().Start)
+                self.text_browser.find(text)
+
+    def _find_prev(self):
+        text = self.search_input.text()
+        if text:
+            from PySide6.QtGui import QTextDocument
+            if not self.text_browser.find(text, QTextDocument.FindBackward):
+                self.text_browser.moveCursor(self.text_browser.textCursor().End)
+                self.text_browser.find(text, QTextDocument.FindBackward)
+
+    def _close_search(self):
+        self.search_toolbar.hide()
+        cursor = self.text_browser.textCursor()
+        cursor.clearSelection()
+        self.text_browser.setTextCursor(cursor)
 
     def open_system_app(self):
         if self.original_file_path and os.path.exists(self.original_file_path):
