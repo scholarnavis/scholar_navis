@@ -9,6 +9,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar
 
+from src.core.device_manager import DeviceManager
 
 is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
@@ -87,7 +88,7 @@ class SplashScreen(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SplashScreen)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.SplashScreen)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(500, 280)
 
@@ -194,22 +195,12 @@ class AppController(QObject):
         self.worker.deleteLater()
 
         self.main_window.show()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
+
         self.splash.close()
 
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
-
-    def _start_api_server(self):
-        from src.core.config_manager import ConfigManager
-        config = ConfigManager()
-
-        if config.user_settings.get("api_server_enabled", False):
-            self.logger.info("Initializing Local API Server...")
-            try:
-                from src.api.api_server import run_server
-                # 保持线程引用，防止被垃圾回收
-                self.api_thread = run_server()
-            except Exception as e:
-                self.logger.error(f"Failed to start API server: {e}")
 
 
 
@@ -217,17 +208,52 @@ if __name__ == "__main__":
 
     multiprocessing.freeze_support()
 
+    # 1. 判断启动模式
+    is_api_mode = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
 
-    # 拦截 API Server 独立运行模式
-    if len(sys.argv) > 1 and sys.argv[1] == "--api-server":
+    # 2. 统一在最开始创建 Qt 应用实例，以支持 QLocalSocket 机制
+    if is_api_mode:
+        from PySide6.QtCore import QCoreApplication
+        app = QCoreApplication(sys.argv)
+    else:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication(sys.argv)
+
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+    # 3. 全局单例锁检测
+    unique_server_name = "ScholarNavis_SingleInstance_Lock"
+    socket = QLocalSocket()
+    socket.connectToServer(unique_server_name)
+
+    # 如果能连上服务器，说明已经有一个实例（GUI 或 API）在运行
+    if socket.waitForConnected(500):
+        if is_api_mode:
+            print("Initialization Failed: Scholar Navis (GUI or API) is currently executing.")
+        else:
+            from PySide6.QtWidgets import QMessageBox
+
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("Execution Alert")
+            msg_box.setText("Scholar Navis is currently executing.")
+            msg_box.setInformativeText(
+                "The application (GUI or API) is already operating in the background. Concurrent instantiation is prohibited.")
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.exec()
+        sys.exit(0)
+
+    # 4. 当前无其他实例，抢占互斥锁
+    local_server = QLocalServer()
+    QLocalServer.removeServer(unique_server_name)
+    local_server.listen(unique_server_name)
+
+    # 5. 根据模式进入相应的启动流程
+    if is_api_mode:
+        # --- API 启动流程 ---
         os.environ["SCARF_NO_ANALYTICS"] = "true"
 
-        from PySide6.QtCore import QCoreApplication
-
-        app = QCoreApplication(sys.argv)
-
         from src.core.logger import setup_logger
-
         global_logger = setup_logger()
 
         from src.core.config_manager import ConfigManager
@@ -248,57 +274,34 @@ if __name__ == "__main__":
         run_server()
         sys.exit(0)
 
-    #  GUI 启动流程
-    from PySide6.QtNetwork import QLocalServer, QLocalSocket
-    from PySide6.QtWidgets import QMessageBox
+    else:
+        # --- GUI 启动流程 ---
+        import ctypes
+        from src.core.logger import setup_logger
 
-    from src.core.logger import setup_logger
+        if sys.platform == "win32":
+            try:
+                myappid = ctypes.c_wchar_p("scholar.navis.app")
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except Exception:
+                pass
 
-    if sys.platform == "win32":
-        try:
-            myappid = ctypes.c_wchar_p("scholar.navis.app")
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except Exception:
-            pass
+        global_logger = setup_logger()
 
-    app = QApplication(sys.argv)
+        from src.core.theme_manager import ThemeManager
+        from src.core.config_manager import ConfigManager
+        import qdarktheme
 
-    unique_server_name = "ScholarNavis_SingleInstance_Lock"
-    socket = QLocalSocket()
-    socket.connectToServer(unique_server_name)
+        tm = ThemeManager()
+        global_icon = tm.get_app_icon()
+        app.setWindowIcon(global_icon)
 
-    # 如果能连上服务器，说明已经有一个实例在运行
-    if socket.waitForConnected(500):
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setWindowTitle("Notice")
-        msg_box.setText("Scholar Navis is already running.")
-        msg_box.setInformativeText(
-            "The application is running in the background. Please do not open multiple instances.")
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.exec()
-        sys.exit(0)
+        app.processEvents()
 
-    local_server = QLocalServer()
-    QLocalServer.removeServer(unique_server_name)
-    local_server.listen(unique_server_name)
+        saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
+        qdarktheme.setup_theme(saved_theme)
 
-    global_logger = setup_logger()
+        controller = AppController(global_logger)
+        controller.splash.setWindowIcon(global_icon)
 
-    from src.core.theme_manager import ThemeManager
-    from src.core.config_manager import ConfigManager
-    import qdarktheme
-
-    tm = ThemeManager()
-    global_icon = tm.get_app_icon()
-    app.setWindowIcon(global_icon)
-
-    app.processEvents()
-
-    saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
-    qdarktheme.setup_theme(saved_theme)
-
-    controller = AppController(global_logger)
-    controller.splash.setWindowIcon(global_icon)
-
-    sys.exit(app.exec())
+        sys.exit(app.exec())

@@ -185,17 +185,22 @@ class ChatInputContainer(QFrame):
         main_layout.addWidget(self.context_banner)
 
         self.mcp_toolbar = QHBoxLayout()
+        use_academic = self.config.user_settings.get("chat_use_academic_agent", True)
+        use_external = self.config.user_settings.get("chat_use_external_tools", False)
+
         # 1. 学术 Agent 开关
         self.chk_academic_agent = QCheckBox("Academic Agent")
         self.chk_academic_agent.setStyleSheet("color: #05B8CC; font-weight: bold;")
-        self.chk_academic_agent.setChecked(True)
+        self.chk_academic_agent.setChecked(use_academic)
         self.chk_academic_agent.setToolTip("Enable built-in native academic skills (Zero Latency)")
+        self.chk_academic_agent.toggled.connect(lambda c: self._save_agent_state("chat_use_academic_agent", c))
 
         # 2. 外部 Tools 开关
         self.chk_external_tools = QCheckBox("External Tools")
         self.chk_external_tools.setStyleSheet("color: #05B8CC; font-weight: bold;")
-        self.chk_external_tools.setChecked(False)
+        self.chk_external_tools.setChecked(use_external)
         self.chk_external_tools.setToolTip("Enable external MCP servers and custom Python scripts")
+        self.chk_external_tools.toggled.connect(lambda c: self._save_agent_state("chat_use_external_tools", c))
 
         self.btn_mcp_tags = QToolButton()
         self.btn_mcp_tags = QPushButton("Filter Tools", self)
@@ -216,56 +221,13 @@ class ChatInputContainer(QFrame):
         self.user_deselected_tags = set()
         self.known_tags = set()
 
-        self.btn_mcp_guide = QPushButton("Prompt guide", self)
-        self.btn_mcp_guide.setCursor(Qt.PointingHandCursor)
-        self.btn_mcp_guide.setStyleSheet(
-            "color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px;")
-        self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
-
-        self.tag_actions = {}
-        self.user_deselected_tags = set()
-        self.known_tags = set()
-
-        self.btn_mcp_guide = QPushButton("Prompt guide")
-
-        # 存储复选框动作的字典
-        self.tag_actions = {}
-
-        self.btn_mcp_guide = QPushButton("Prompt guide")
-        self.btn_mcp_guide.setCursor(Qt.PointingHandCursor)
-        self.btn_mcp_guide.setStyleSheet(
-            "color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px;")
-        self.btn_mcp_guide.setVisible(True)
-
         self.mcp_toolbar.addWidget(self.chk_academic_agent)
         self.mcp_toolbar.addWidget(self.chk_external_tools)
         self.mcp_toolbar.addWidget(self.btn_mcp_tags)
-        self.mcp_toolbar.addWidget(self.btn_mcp_guide)
         self.mcp_toolbar.addStretch()
         main_layout.insertLayout(1, self.mcp_toolbar)
 
         self.chk_external_tools.toggled.connect(self._on_external_tools_toggled)
-        self.menu_mcp_guide = QMenu(self)
-
-        prompts = [
-            "Search for the latest academic literature, preprints, and abstracts regarding a specific research topic.",
-            "Find the exact metadata and full-text Open Access PDF link for a specific article or DOI.",
-            "Trace the citation graph (references and citations) to find related literature for this DOI.",
-            "Query comprehensive functional annotations, sequences, and ID mappings for a specific gene or protein.",
-            "Retrieve protein-protein interaction networks and perform functional enrichment analysis for a set of targets.",
-            "Find 3D protein structures and detailed experimental metadata in the RCSB PDB.",
-            "Search for chemical properties, molecular weights, and drug targets for a specific compound.",
-            "Search for public omics datasets (GEO/SRA) related to specific experimental treatments.",
-            "Search GitHub for open-source repositories, software pipelines, or code related to this analysis.",
-            "Read and summarize the text content of a specific webpage or Wikipedia article."
-        ]
-
-        for p in prompts:
-            action = QAction(p, self)
-            action.triggered.connect(lambda checked, text=p: self.set_text(text))
-            self.menu_mcp_guide.addAction(action)
-
-        self.btn_mcp_guide.setMenu(self.menu_mcp_guide)
 
         self.bottom_bar = QHBoxLayout()
         self.bottom_bar.setContentsMargins(0, 0, 0, 0)
@@ -326,6 +288,11 @@ class ChatInputContainer(QFrame):
         QTimer.singleShot(100, self.refresh_mcp)
         if self.chk_external_tools.isChecked():
             self.refresh_mcp()
+
+    def _save_agent_state(self, key, checked):
+        self.config.user_settings[key] = checked
+        self.config.save_settings()
+
 
     def _apply_theme(self):
         tm = ThemeManager()
@@ -388,19 +355,17 @@ class ChatInputContainer(QFrame):
                 """)
 
         btn_mcp_style = f"""
-            QPushButton {{ color: {tm.color('text_muted')}; background: transparent; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
-            QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('text_main')}; }}
-        """
+                    QPushButton {{ color: {tm.color('text_muted')}; background: transparent; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
+                    QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('text_main')}; }}
+                """
         self.btn_mcp_tags.setIcon(tm.icon("filter", "text_muted"))
         self.btn_mcp_tags.setStyleSheet(btn_mcp_style)
-        self.btn_mcp_guide.setIcon(tm.icon("help", "text_muted"))
-        self.btn_mcp_guide.setStyleSheet(btn_mcp_style)
 
         self.btn_send.setIcon(tm.icon("send", "bg_main"))
         self.btn_send.setStyleSheet(f"""
-                    QPushButton {{ background-color: {tm.color('academic_blue')}; color: #ffffff; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
-                    QPushButton:hover {{ background-color: {tm.color('academic_blue_hover')}; }}
-                """)
+                            QPushButton {{ background-color: {tm.color('academic_blue')}; color: #ffffff; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
+                            QPushButton:hover {{ background-color: {tm.color('academic_blue_hover')}; }}
+                        """)
 
         self.btn_stop.setIcon(tm.icon("close", "bg_main"))
         self.btn_stop.setStyleSheet(f"""
@@ -409,15 +374,13 @@ class ChatInputContainer(QFrame):
                 """)
 
         menu_style = f"""
-            QMenu {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
-            QMenu::item {{ padding: 6px 12px; margin: 2px 0px; color: {tm.color('text_main')}; border-radius: 4px; }}
-            QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #ffffff; }}
-            QMenu QCheckBox {{ color: {tm.color('text_main')}; background-color: transparent; padding: 6px 12px; font-size: 13px; border-radius: 4px; }}
-            QMenu QCheckBox:hover {{ background-color: {tm.color('accent')}; color: #ffffff; }}
-        """
+                    QMenu {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
+                    QMenu::item {{ padding: 6px 12px; margin: 2px 0px; color: {tm.color('text_main')}; border-radius: 4px; }}
+                    QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #ffffff; }}
+                    QMenu QCheckBox {{ color: {tm.color('text_main')}; background-color: transparent; padding: 6px 12px; font-size: 13px; border-radius: 4px; }}
+                    QMenu QCheckBox:hover {{ background-color: {tm.color('accent')}; color: #ffffff; }}
+                """
         self.menu_mcp_tags.setStyleSheet(menu_style)
-        if hasattr(self, 'menu_mcp_guide'):
-            self.menu_mcp_guide.setStyleSheet(menu_style)
 
     def set_uploading(self, is_uploading: bool):
         self.btn_send.setEnabled(not is_uploading)
@@ -453,7 +416,6 @@ class ChatInputContainer(QFrame):
 
     def _on_external_tools_toggled(self, checked):
         self.btn_mcp_tags.setVisible(checked)
-        self.btn_mcp_guide.setVisible(checked)
         if checked:
             self.refresh_mcp()
 
@@ -517,9 +479,14 @@ class ChatInputContainer(QFrame):
                 self.menu_mcp_tags.addAction(dummy)
                 return
 
-            # 修改：使用统一容器包装 CheckBox，避免点击间隙关闭菜单
-            from PySide6.QtWidgets import QWidget, QVBoxLayout, QWidgetAction
-            self.menu_container = QWidget()
+            class MenuContainerWidget(QWidget):
+                def mousePressEvent(self, event):
+                    event.accept()
+
+                def mouseReleaseEvent(self, event):
+                    event.accept()
+
+            self.menu_container = MenuContainerWidget()
             self.menu_layout = QVBoxLayout(self.menu_container)
             self.menu_layout.setContentsMargins(6, 6, 6, 6)
             self.menu_layout.setSpacing(4)
@@ -801,8 +768,7 @@ class ChatTool(BaseTool):
         top_bar.addLayout(row2_layout)
         main_layout.addWidget(self.top_bar_wrapper)
 
-        # Ribbon State Logic
-        self.ribbon_state = "Pinned"
+        self.ribbon_state = self.config.user_settings.get("chat_ribbon_state", "Pinned")
 
         def set_ribbon_visible(visible):
             self.model_selector.setVisible(visible)
@@ -811,24 +777,36 @@ class ChatTool(BaseTool):
             self.lbl_kb.setVisible(visible)
             self.combo_kb.setVisible(visible)
 
-        def toggle_ribbon_state():
-            if self.ribbon_state == "Pinned":
-                self.ribbon_state = "Hover"
-                self.btn_ribbon_state.setText(" Hover")
-                self.btn_ribbon_state.setIcon(tm.icon("menu", "text_muted"))
-                set_ribbon_visible(False)
-            elif self.ribbon_state == "Hover":
-                self.ribbon_state = "Collapsed"
-                self.btn_ribbon_state.setText(" Collapsed")
-                self.btn_ribbon_state.setIcon(tm.icon("down", "text_muted"))
-                set_ribbon_visible(False)
-            else:
-                self.ribbon_state = "Pinned"
+        def apply_ribbon_state(state):
+            tm = ThemeManager()
+            self.ribbon_state = state
+            self.config.user_settings["chat_ribbon_state"] = state
+            self.config.save_settings()
+
+            if state == "Pinned":
                 self.btn_ribbon_state.setText(" Pinned")
                 self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
                 set_ribbon_visible(True)
+            elif state == "Hover":
+                self.btn_ribbon_state.setText(" Hover")
+                self.btn_ribbon_state.setIcon(tm.icon("menu", "text_muted"))
+                set_ribbon_visible(False)
+            elif state == "Collapsed":
+                self.btn_ribbon_state.setText(" Collapsed")
+                self.btn_ribbon_state.setIcon(tm.icon("down", "text_muted"))
+                set_ribbon_visible(False)
+
+        def toggle_ribbon_state():
+            if self.ribbon_state == "Pinned":
+                apply_ribbon_state("Hover")
+            elif self.ribbon_state == "Hover":
+                apply_ribbon_state("Collapsed")
+            else:
+                apply_ribbon_state("Pinned")
 
         self.btn_ribbon_state.clicked.connect(toggle_ribbon_state)
+
+        apply_ribbon_state(self.ribbon_state)
 
         # Install event filter for Hover mechanics
         self.top_bar_wrapper.installEventFilter(self)
@@ -1262,34 +1240,9 @@ class ChatTool(BaseTool):
     def load_llm_configs(self):
         if hasattr(self, 'model_selector'):
             self.model_selector.load_llm_configs()
-            self._force_restore_ui(self.model_selector, "chat_llm_id", "chat_model_name")
         if hasattr(self, 'trans_selector'):
             self.trans_selector.load_llm_configs()
-            self._force_restore_ui(self.trans_selector, "chat_trans_llm_id", "chat_trans_model_name")
 
-    def _force_restore_ui(self, selector, id_key, name_key):
-        from PySide6.QtWidgets import QComboBox
-        combos = selector.findChildren(QComboBox)
-        if len(combos) >= 2:
-            provider_combo = combos[0]
-            model_combo = combos[1]
-
-            saved_id = self.config.user_settings.get(id_key, "")
-            saved_name = self.config.user_settings.get(name_key, "")
-
-            if saved_id:
-                idx = provider_combo.findData(saved_id)
-                if idx < 0:
-                    configs = self.config.load_llm_configs()
-                    target_name = next((c.get("name") for c in configs if c.get("id") == saved_id), "")
-                    idx = provider_combo.findText(target_name)
-                if idx >= 0:
-                    provider_combo.setCurrentIndex(idx)
-
-            if saved_name:
-                idx = model_combo.findText(saved_name)
-                if idx >= 0:
-                    model_combo.setCurrentIndex(idx)
 
     def process_send(self, text):
         # 1. 获取并格式化 KB ID
@@ -1313,9 +1266,6 @@ class ChatTool(BaseTool):
                 return
 
         trans_config = self.trans_selector.get_current_config()
-        if trans_config:
-            trans_config = trans_config.copy()
-            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
 
         is_english = detect_primary_language(text) == 'en'
         requires_translation = (not is_english) and (trans_config is not None)
@@ -1471,38 +1421,8 @@ class ChatTool(BaseTool):
             self.worker_thread = None
             self.worker = None
 
-        def _extract_config(selector, id_key, name_key):
-            from PySide6.QtWidgets import QComboBox
-            combos = selector.findChildren(QComboBox)
-            if not combos: return None
-
-            provider_id = combos[0].currentData()
-            provider_name = combos[0].currentText()
-            configs = self.config.load_llm_configs()
-
-            target = next((c for c in configs if c.get("id") == provider_id), None)
-            if not target:
-                target = next((c for c in configs if c.get("name") == provider_name), None)
-
-            if target:
-                target = target.copy()
-                if len(combos) >= 2:
-                    raw_model = combos[1].currentText()
-                    clean_model = raw_model
-                    for s in [" [Custom]", " [Closed]"]:
-                        if clean_model.endswith(s):
-                            clean_model = clean_model[:-len(s)]
-                            break
-                    target["model_name"] = clean_model
-                    self.config.user_settings[id_key] = target.get("id", "")
-                    self.config.user_settings[name_key] = raw_model
-                    self.config.save_settings()
-                return target
-            return None
-
-        # Extract real-time UI selections directly, bypassing get_current_config()
-        main_config = _extract_config(self.model_selector, "chat_llm_id", "chat_model_name")
-        trans_config = _extract_config(self.trans_selector, "chat_trans_llm_id", "chat_trans_model_name")
+        main_config = self.model_selector.get_current_config()
+        trans_config = self.trans_selector.get_current_config()
 
         use_academic_agent = self.input_container.chk_academic_agent.isChecked() if hasattr(self.input_container,
                                                                                             'chk_academic_agent') else True
@@ -1645,9 +1565,6 @@ class ChatTool(BaseTool):
         self.external_chunks = old_chunks
 
         trans_config = self.trans_selector.get_current_config()
-        if trans_config:
-            trans_config = trans_config.copy()
-            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
 
         is_english = detect_primary_language(new_text) == 'en'
         requires_translation = (not is_english) and (trans_config is not None)

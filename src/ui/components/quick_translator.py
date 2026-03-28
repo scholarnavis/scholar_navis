@@ -102,33 +102,8 @@ class QuickTranslatorWindow(QWidget):
         )
 
     def reload_and_restore_configs(self):
-        """重新加载并恢复配置"""
         self.model_selector.load_llm_configs()
-        self._force_restore_ui(self.model_selector, "quick_trans_llm_id", "quick_trans_model_name")
 
-    def _force_restore_ui(self, selector, id_key, name_key):
-        """强制恢复UI配置"""
-        combos = selector.findChildren(QComboBox)
-        if len(combos) >= 2:
-            provider_combo = combos[0]
-            model_combo = combos[1]
-
-            saved_id = self.cfg_mgr.user_settings.get(id_key, "")
-            saved_name = self.cfg_mgr.user_settings.get(name_key, "")
-
-            if saved_id:
-                idx = provider_combo.findData(saved_id)
-                if idx < 0:
-                    configs = self.cfg_mgr.load_llm_configs()
-                    target_name = next((c.get("name") for c in configs if c.get("id") == saved_id), "")
-                    idx = provider_combo.findText(target_name)
-                if idx >= 0:
-                    provider_combo.setCurrentIndex(idx)
-
-            if saved_name:
-                idx = model_combo.findText(saved_name)
-                if idx >= 0:
-                    model_combo.setCurrentIndex(idx)
 
     def _setup_ui(self):
         """设置UI布局"""
@@ -299,10 +274,9 @@ class QuickTranslatorWindow(QWidget):
         self.btn_trans.setVisible(False)
         self.btn_stop.setVisible(True)
 
-        # 获取翻译配置
-        trans_config = self._extract_trans_config()
+        trans_config = self.model_selector.get_current_config()
         if not trans_config:
-            self._on_error("Failed to get translation configuration")
+            self._on_error("Translation provider disabled or not selected.")
             return
 
         # 启动翻译任务
@@ -314,6 +288,7 @@ class QuickTranslatorWindow(QWidget):
             llm_config=trans_config
         )
 
+
     def _stop_translation(self):
         """停止翻译任务"""
         if self.translator_manager.is_running():
@@ -321,35 +296,6 @@ class QuickTranslatorWindow(QWidget):
         self.output_box.append("<br><span style='color:#e6a23c;'><b>[Stopped by User]</b></span>")
         self._reset_buttons()
 
-    def _extract_trans_config(self):
-        """提取翻译配置"""
-        combos = self.model_selector.findChildren(QComboBox)
-        if not combos:
-            return None
-
-        provider_id = combos[0].currentData()
-        provider_name = combos[0].currentText()
-        configs = self.cfg_mgr.load_llm_configs()
-
-        target = next((c for c in configs if c.get("id") == provider_id), None)
-        if not target:
-            target = next((c for c in configs if c.get("name") == provider_name), None)
-
-        if target:
-            target = target.copy()
-            if len(combos) >= 2:
-                raw_model = combos[1].currentText()
-                clean_model = raw_model
-                for s in [" [Custom]", " [Closed]"]:
-                    if clean_model.endswith(s):
-                        clean_model = clean_model[:-len(s)]
-                        break
-                target["model_name"] = clean_model
-                self.cfg_mgr.user_settings["quick_trans_llm_id"] = target.get("id", "")
-                self.cfg_mgr.user_settings["quick_trans_model_name"] = raw_model
-                self.cfg_mgr.save_settings()
-            return target
-        return None
 
 
     def _on_token(self, token: str):

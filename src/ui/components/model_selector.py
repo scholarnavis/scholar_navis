@@ -66,10 +66,10 @@ class ModelSelectorWidget(QWidget):
         self.combo_provider.blockSignals(True)
         self.combo_provider.clear()
 
-        if self.config_key in ["trans_llm_id", "chat_trans_llm_id", "quick_trans_llm_id"]:
+        if self.config_key in ["chat_trans_llm_id", "quick_trans_llm_id"]:
             self.combo_provider.addItem("None (Disable)", None)
 
-        active_id = self.config_manager.user_settings.get(self.config_key, "openai")
+        active_id = self.config_manager.user_settings.get(self.config_key)
         target_idx = 0
 
         self.configs = self.config_manager.load_llm_configs()
@@ -81,7 +81,7 @@ class ModelSelectorWidget(QWidget):
             self.combo_provider.setItemData(idx, provider_name, Qt.ToolTipRole)
 
             if cfg.get("id") == active_id:
-                target_idx = self.combo_provider.count() - 1
+                target_idx = idx
 
         if self.combo_provider.count() > 0:
             self.combo_provider.setCurrentIndex(target_idx)
@@ -92,72 +92,125 @@ class ModelSelectorWidget(QWidget):
     def _on_provider_changed(self):
         cfg = self.combo_provider.currentData()
         self.combo_model.blockSignals(True)
-
-        # 定义一个标识，判断当前是否启用了视觉模型选择框
         has_vision = getattr(self, 'combo_vision', None) is not None
-
         if has_vision:
             self.combo_vision.blockSignals(True)
 
         self.combo_model.clear()
-
         if has_vision:
             self.combo_vision.clear()
             self.combo_vision.addItem("Auto (Use Main Model)", "auto")
 
         if cfg:
-            self.config_manager.user_settings[self.config_key] = cfg.get("id")
-            self.config_manager.save_settings()
+            provider_id = cfg.get("id")
+            self.config_manager.user_settings[self.config_key] = provider_id
 
-            models = cfg.get("fetched_models", [])
-            current_model = cfg.get(self.model_key, cfg.get("model_name", "No Model"))
-            current_vision = cfg.get(self.vision_key, "auto")
+            models = []
+            for m in cfg.get("fetched_models", []):
+                clean_m = str(m).strip()
+                if clean_m and clean_m not in models:
+                    models.append(clean_m)
 
-            items = list(models)
-            if current_model and current_model not in items:
-                items.insert(0, current_model)
+            models_config = cfg.get("models_config", {})
+            for m in models_config.keys():
+                clean_m = str(m).strip()
+                if clean_m and clean_m not in models:
+                    models.append(clean_m)
 
-            self.combo_model.addItems(items)
-            for i, model_item in enumerate(items):
-                self.combo_model.setItemData(i, model_item, Qt.ToolTipRole)
-            self.combo_model.setCurrentText(current_model)
+            default_model = str(cfg.get("model_name", "")).strip()
+            if default_model and default_model not in models:
+                models.insert(0, default_model)
 
+            memorized_model = str(self.config_manager.user_settings.get(f"{self.model_key}_{provider_id}", "")).strip()
+            if not memorized_model or memorized_model not in models:
+                memorized_model = default_model if default_model else (models[0] if models else "")
+
+            tm = None
+            try:
+                from src.core.theme_manager import ThemeManager
+                tm = ThemeManager()
+            except ImportError:
+                pass
+
+            idx_to_select = 0
+            for i, m_name in enumerate(models):
+                mode = models_config.get(m_name, {}).get("mode", "inherit")
+                display_name = m_name
+                icon = None
+
+                if mode == "custom":
+                    display_name = f"{m_name} [Custom]"
+                    if tm: icon = tm.icon("settings", "warning")
+                elif mode == "closed":
+                    display_name = f"{m_name} [Closed]"
+                    if tm: icon = tm.icon("cancel", "danger")
+                else:
+                    if tm: icon = tm.icon("api", "text_muted")
+
+                if icon:
+                    self.combo_model.addItem(icon, display_name, m_name)
+                else:
+                    self.combo_model.addItem(display_name, m_name)
+
+                self.combo_model.setItemData(i, display_name, Qt.ToolTipRole)
+
+                if m_name == memorized_model:
+                    idx_to_select = i
+
+            if self.combo_model.count() > 0:
+                self.combo_model.setCurrentIndex(idx_to_select)
+
+            # 视觉模型也同样采用清洗后的列表
             if has_vision:
-                self.combo_vision.addItems(items)
-                for i, model_item in enumerate(items):
-                    self.combo_vision.setItemData(i + 1, model_item, Qt.ToolTipRole)
-
-                idx = self.combo_vision.findText(current_vision)
+                memorized_vision = str(
+                    self.config_manager.user_settings.get(f"{self.vision_key}_{provider_id}", "auto")).strip()
+                for i, m_name in enumerate(models):
+                    self.combo_vision.addItem(m_name, m_name)
+                    self.combo_vision.setItemData(i + 1, m_name, Qt.ToolTipRole)
+                idx = self.combo_vision.findData(memorized_vision)
                 if idx >= 0:
                     self.combo_vision.setCurrentIndex(idx)
                 else:
                     self.combo_vision.setCurrentIndex(0)
+
+            self.combo_model.setEnabled(True)
+            if has_vision: self.combo_vision.setEnabled(True)
         else:
-            self.config_manager.user_settings[self.config_key] = None
-            self.config_manager.save_settings()
+            self.config_manager.user_settings[self.config_key] = ""
+            self.combo_model.addItem("Disabled", "")
+            self.combo_model.setEnabled(False)
+            if has_vision: self.combo_vision.setEnabled(False)
 
+        self.config_manager.save_settings()
         self.combo_model.blockSignals(False)
-
-        if has_vision:
-            self.combo_vision.blockSignals(False)
-
+        if has_vision: self.combo_vision.blockSignals(False)
         self.sig_model_changed.emit()
 
     def _on_model_changed(self):
         cfg = self.combo_provider.currentData()
-        model_name = self.combo_model.currentText()
-        if cfg and model_name:
-            self.config_manager.user_settings[self.model_key] = model_name
+        if not cfg: return
+
+        provider_id = cfg.get("id")
+
+        clean_model = str(self.combo_model.currentData() or "").strip()
+        display_name = str(self.combo_model.currentText() or "").strip()
+
+        if provider_id and clean_model:
+            self.config_manager.user_settings[f"{self.model_key}_{provider_id}"] = clean_model
+            self.config_manager.user_settings[self.model_key] = display_name
             self.config_manager.save_settings()
         self.sig_model_changed.emit()
 
     def _on_vision_changed(self):
         cfg = self.combo_provider.currentData()
-        vision_name = self.combo_vision.currentData() or self.combo_vision.currentText()
-        if vision_name == "auto":
-            vision_name = "auto"
+        if not cfg: return
 
-        if cfg:
+        provider_id = cfg.get("id")
+        vision_name = str(self.combo_vision.currentData() or self.combo_vision.currentText() or "").strip()
+        if vision_name == "auto": vision_name = "auto"
+
+        if provider_id:
+            self.config_manager.user_settings[f"{self.vision_key}_{provider_id}"] = vision_name
             self.config_manager.user_settings[self.vision_key] = vision_name
             self.config_manager.save_settings()
 
@@ -170,15 +223,23 @@ class ModelSelectorWidget(QWidget):
                 break
         self.config_manager.save_llm_configs(file_configs)
 
+
     def get_current_config(self):
+        """直接吐出合并且清洗好的 config，无需外部再操作"""
         cfg = self.combo_provider.currentData()
         if cfg:
             cfg_copy = cfg.copy()
-            saved_model = self.config_manager.user_settings.get(self.model_key)
-            saved_vision = self.config_manager.user_settings.get(self.vision_key)
-            if saved_model:
-                cfg_copy["model_name"] = saved_model
-            if saved_vision and self.enable_vision:
-                cfg_copy["vision_model_name"] = saved_vision
+            clean_model = self.combo_model.currentData()
+
+            if clean_model:
+                # 最终兜底防线
+                cfg_copy["model_name"] = str(clean_model).strip()
+
+            if getattr(self, 'combo_vision', None) is not None and self.enable_vision:
+                vision_val = self.combo_vision.currentData()
+                if vision_val and vision_val != "auto":
+                    cfg_copy["vision_model_name"] = str(vision_val).strip()
+                else:
+                    cfg_copy["vision_model_name"] = ""
             return cfg_copy
         return None

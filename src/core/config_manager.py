@@ -108,7 +108,18 @@ class ConfigManager:
                 else:
                     with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
                         f.write(json_str)
-                os.replace(temp_path, path)
+
+                import time
+                for attempt in range(3):
+                    try:
+                        os.replace(temp_path, path)
+                        break
+                    except PermissionError:
+                        if attempt < 2:
+                            time.sleep(0.1)
+                        else:
+                            raise
+
             except Exception as e:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
@@ -138,8 +149,21 @@ class ConfigManager:
                         except Exception:
                             return None
                 else:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        return json.load(f)
+                    try:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            return json.load(f)
+                    except Exception as e:
+                        # 处理之前可能被意外加密的配置文件，尝试解密并迁移至明文
+                        self.logger.warning(f"Plain text load failed, trying decryption migration: {e}")
+                        try:
+                            with open(path, 'rb') as f:
+                                raw_data = f.read()
+                            decrypted_text = self.encryption_service.decrypt(raw_data)
+                            plain_data = json.loads(decrypted_text)
+                            self.save_json(path, plain_data, encrypt=False)
+                            return plain_data
+                        except Exception:
+                            return None
             except Exception as e:
                 self.logger.error(f"Critical error reading {path}: {e}")
                 return None
@@ -172,8 +196,9 @@ class ConfigManager:
             "chat_model_name": "",
             "chat_trans_llm_id": "",
             "chat_trans_model_name": "",
-
-            # API Server Configurations
+            "chat_use_academic_agent": True,
+            "chat_use_external_tools": False,
+            "chat_ribbon_state": "Pinned",
             "api_server_host": "127.0.0.1",
             "api_server_port": 8000,
             "api_server_key": "",
