@@ -30,7 +30,7 @@ def execute() -> str:
     """
     try:
         # 获取当前时间并格式化
-        now = datetime.now()
+        now = datetime.datetime.now()
         formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
         # 构建给大模型的结果

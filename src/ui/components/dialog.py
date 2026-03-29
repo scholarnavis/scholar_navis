@@ -1,6 +1,7 @@
 import ast
 import os
 import re
+import sys
 import time
 
 import psutil
@@ -106,15 +107,30 @@ class BaseDialog(QDialog):
         self.move(target_x, target_y)
 
     def _apply_theme(self):
-        tm = self.tm
+        from src.core.theme_manager import ThemeManager
+        tm = ThemeManager()
 
-        bg_color = QColor(tm.color('bg_main'))
-        luminance = (0.299 * bg_color.red() + 0.587 * bg_color.green() + 0.114 * bg_color.blue())
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from PySide6.QtGui import QColor
 
-        if luminance > 128:
-            QGuiApplication.styleHints().setColorScheme(Qt.ColorScheme.Light)
-        else:
-            QGuiApplication.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+                # 提取当前背景色，通过亮度判断是否处于深色模式
+                is_dark = QColor(tm.color('bg_main')).lightness() < 128
+
+                hwnd = int(self.winId())
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                value = ctypes.c_int(1 if is_dark else 0)
+
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    ctypes.byref(value),
+                    ctypes.sizeof(value)
+                )
+            except Exception:
+                pass
+
 
         self.setStyleSheet(f"""
             QDialog, QWidget#ContentWidget {{
@@ -283,8 +299,8 @@ class BaseDialog(QDialog):
 
 
 class StandardDialog(BaseDialog):
-    def __init__(self, parent=None, title="Notification", message="", show_cancel=False):
-        super().__init__(parent, title=title, width=420)
+    def __init__(self, parent=None, title="Notification", message="", show_cancel=False, width=420):
+        super().__init__(parent, title=title, width=width)
 
         self.is_long_text = len(message) > 300 or message.count('\n') > 8
 
@@ -654,6 +670,10 @@ class McpConfigDialog(BaseDialog):
 
         self.inp_desc = QLineEdit()
         self.inp_desc.setPlaceholderText("e.g. Provide 12306 train ticket search capabilities")
+
+        desc_regex = QRegularExpression(r"^[\x20-\x7E]*$")
+        desc_validator = QRegularExpressionValidator(desc_regex, self.inp_desc)
+        self.inp_desc.setValidator(desc_validator)
 
         self.desc_hint_widget = QWidget()
         hint_layout = QHBoxLayout(self.desc_hint_widget)
@@ -1460,19 +1480,51 @@ class ProjectEditorDialog(BaseDialog):
 
 
 class SkillConfigDialog(BaseDialog):
-    def __init__(self, parent=None, skill_name="", script_path=""):
+    def __init__(self, parent=None, skill_name="", script_path="", description=""):
         super().__init__(parent, title="Native Skill Configuration", width=550)
 
         tm = ThemeManager()
         self.tm = tm
 
         self.input_name = QLineEdit(skill_name)
-        self.input_name.setPlaceholderText("e.g., fetch_arxiv_summary (Press Ctrl+Z to undo text)")
+        self.input_name.setPlaceholderText("e.g., fetch_arxiv_summary")
         self.input_name.setMinimumHeight(32)
 
         self.input_path = QLineEdit(script_path)
         self.input_path.setPlaceholderText("Select a Python (.py) script...")
         self.input_path.setMinimumHeight(32)
+
+        self.desc_container = QWidget()
+        desc_v_layout = QVBoxLayout(self.desc_container)
+        desc_v_layout.setContentsMargins(0, 0, 0, 0)
+        desc_v_layout.setSpacing(4)
+
+        self.input_desc = QLineEdit(description)
+        self.input_desc.setPlaceholderText("Description tells the LLM what this tool does.")
+        self.input_desc.setMinimumHeight(32)
+
+        desc_regex = QRegularExpression(r"^[\x20-\x7E]*$")
+        desc_validator = QRegularExpressionValidator(desc_regex, self.input_desc)
+        self.input_desc.setValidator(desc_validator)
+
+        self.desc_hint_widget = QWidget()
+        hint_layout = QHBoxLayout(self.desc_hint_widget)
+        hint_layout.setContentsMargins(0, 0, 0, 0)
+        hint_layout.setSpacing(6)
+
+        self.lbl_desc_icon = QLabel()
+        self.lbl_desc_icon.setFixedSize(14, 14)
+
+        self.lbl_desc_text = QLabel(
+            "<b>Crucial for AI:</b> Clearly describe the tool's purpose so the AI knows exactly when to use it.")
+        self.lbl_desc_text.setWordWrap(True)
+        self.lbl_desc_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        hint_layout.addWidget(self.lbl_desc_icon, 0, Qt.AlignTop)
+        hint_layout.addWidget(self.lbl_desc_text, 1)
+
+        desc_v_layout.addWidget(self.input_desc)
+        desc_v_layout.addWidget(self.desc_hint_widget)
 
         self.btn_browse = QPushButton()
         self.btn_browse.setIcon(tm.icon("folder", "accent"))
@@ -1494,7 +1546,11 @@ class SkillConfigDialog(BaseDialog):
         path_layout.setSpacing(4)
 
         form = QFormLayout()
+        form.setSpacing(15)
+        form.setLabelAlignment(Qt.AlignRight)
+
         form.addRow("Tool Name:", self.input_name)
+        form.addRow("Description:", self.desc_container)
         form.addRow("Script Path:", path_layout)
 
         if hasattr(self, 'content_layout'):
@@ -1509,51 +1565,65 @@ class SkillConfigDialog(BaseDialog):
         self.btn_clear.clicked.connect(self.input_path.clear)
 
         self._apply_theme()
+        self._apply_inputs_theme(tm)
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.lbl_desc_icon.setPixmap(tm.icon("help", "warning").pixmap(14, 14))
+        self.lbl_desc_text.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 11.5px; font-style: italic; border: none; background: transparent;")
+        self.desc_hint_widget.setStyleSheet("background: transparent;")
 
     def _apply_inputs_theme(self, tm):
-        t = tm.themes
         input_style = f"""
             QLineEdit {{
-                border: 1px solid {t.get("border", "#D5D6DC")};
+                border: 1px solid {tm.color('border')};
                 border-radius: 4px;
                 padding: 6px 10px;
-                background: white;
-                color: black;
+                background: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
             }}
             QLineEdit:focus {{
-                border: 1px solid {t.get("accent", "#FFDD33")};
+                border: 1px solid {tm.color('accent')};
             }}
         """
         self.input_name.setStyleSheet(input_style)
         self.input_path.setStyleSheet(input_style)
+        self.input_desc.setStyleSheet(input_style)
 
     def _browse_file(self):
         from PySide6.QtWidgets import QFileDialog
-        import importlib.util
-        from src.ui.components.toast import ToastManager
+        import ast
 
         path, _ = QFileDialog.getOpenFileName(self, "Select Native Skill Script", "", "Python Scripts (*.py)")
         if path:
             self.input_path.setText(path)
-            # 如果名称为空，则尝试静默加载脚本并提取预设名称
-            if not self.input_name.text().strip():
-                try:
-                    spec = importlib.util.spec_from_file_location("temp_module", path)
-                    if spec and spec.loader:
-                        module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(module)
-                        if hasattr(module, "SCHEMA"):
-                            name = module.SCHEMA.get("function", {}).get("name", "")
-                            if name:
-                                self.input_name.setText(name)
-                except Exception:
-                    # 静默失败，让用户手动填写
-                    pass
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    raw_code = f.read()
+                tree = ast.parse(raw_code)
+                for node in tree.body:
+                    if isinstance(node, ast.Assign):
+                        for target in node.targets:
+                            if isinstance(target, ast.Name) and target.id == "SCHEMA":
+                                schema_dict = ast.literal_eval(node.value)
+                                func_info = schema_dict.get("function", {})
+
+                                if func_info.get("name"):
+                                    self.input_name.setText(func_info.get("name"))
+                                if func_info.get("description"):
+                                    self.input_desc.setText(func_info.get("description"))
+            except Exception as e:
+                pass
 
     def _validate_and_accept(self):
         from src.ui.components.toast import ToastManager
         if not self.input_name.text().strip():
             ToastManager().show("Please enter a Tool Name.", "warning")
+            return
+        if not self.input_desc.text().strip():
+            ToastManager().show("Please enter a Tool Description.", "warning")
             return
         if not self.input_path.text().strip():
             ToastManager().show("Please select a Script Path.", "warning")
@@ -1561,7 +1631,8 @@ class SkillConfigDialog(BaseDialog):
         self.accept()
 
     def get_data(self):
-        return self.input_name.text().strip(), self.input_path.text().strip()
+        return self.input_name.text().strip(), self.input_desc.text().strip(), self.input_path.text().strip()
+
 
 
 class SkillSecurityAnalyzer(ast.NodeVisitor):
@@ -1795,25 +1866,24 @@ class ApiProvidersDialog(BaseDialog):
         self._apply_theme()
 
     def _apply_theme(self):
-        # 先让 BaseDialog 渲染背景和底部按钮
         super()._apply_theme()
         tm = self.tm
 
-        # 使用动态获取的 ThemeManager 颜色变量渲染输入框
-        input_style = f"""
-            QLineEdit {{
-                border: 1px solid {tm.color('border')};
-                border-radius: 4px;
-                padding: 6px 10px;
-                background: {tm.color('bg_input')};
-                color: {tm.color('text_main')};
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {tm.color('accent')};
-            }}
-        """
-        self.input_name.setStyleSheet(input_style)
-        self.input_path.setStyleSheet(input_style)
+        self.table.setStyleSheet(f"""
+                    QTableWidget {{ 
+                        background-color: transparent; 
+                        border: none;
+                        alternate-background-color: {tm.color('bg_input')};
+                    }}
+                    QHeaderView::section {{ 
+                        background-color: {tm.color('bg_card')}; 
+                        border-bottom: 2px solid {tm.color('border')};
+                    }}
+                    QTableWidget::item {{ 
+                        padding: 12px; 
+                        border: none;
+                    }}
+                """)
 
 class LicenseDialog(BaseDialog):
     def __init__(self, parent=None):

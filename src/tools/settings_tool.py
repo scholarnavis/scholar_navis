@@ -1,17 +1,18 @@
+import base64
 import json
 import logging
 import os
 import time
+import zlib
 
 import qdarktheme
 from PySide6.QtCore import Qt, QObject, QTimer, QEvent, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QScrollArea, QHBoxLayout, QTableWidget,
                                QAbstractItemView, QHeaderView,
                                QTableWidgetItem, QCheckBox, QApplication, QFrame, QFileDialog)
 
-from plugins.academic_agent import get_app_root
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
@@ -26,13 +27,12 @@ from src.core.theme_manager import ThemeManager
 from src.task.common_task import VerifyModelsTask
 from src.task.config_task import ExportConfigTask, ImportConfigTask
 from src.task.hf_download_task import RealTimeHFDownloadTask
-from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask, HWDetectTask, EmailVerifyTask, \
-    ImportNativeSkillTask
+from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask, HWDetectTask, EmailVerifyTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import ProgressDialog, StandardDialog, AddModelDialog, \
-    UnsavedChangesDialog, ExportPasswordDialog, ImportPasswordDialog, SkillConfigDialog, McpConfigDialog
+    UnsavedChangesDialog, ExportPasswordDialog, ImportPasswordDialog
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
@@ -61,6 +61,7 @@ class FloatingOverlayFilter(QObject):
             y = self.parent_widget.height() - self.btn.height() - 20
             self.btn.move(x, y)
         return super().eventFilter(obj, event)
+
 
 
 
@@ -207,6 +208,7 @@ class SettingsTool(BaseTool):
 
         # Update MCP Buttons
         if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setStyleSheet(self._get_btn_style(btn_type="success"))
+        if hasattr(self, 'btn_import_skill'): self.btn_import_skill.setStyleSheet(self._get_btn_style(btn_type="warning"))
         if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setStyleSheet(self._get_btn_style())
 
         # Update LLM/Model Buttons with Colors
@@ -306,6 +308,7 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'btn_test_device'): self.btn_test_device.setIcon(tm.icon("test", "accent"))
 
         if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setIcon(tm.icon("add", "success"))
+        if hasattr(self, 'btn_import_skill'): self.btn_import_skill.setIcon(tm.icon("download", "warning"))
         if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setIcon(tm.icon("refresh", "text_main"))
 
     def _load_current_settings(self, is_undo=False, reload_from_disk=True):
@@ -369,7 +372,6 @@ class SettingsTool(BaseTool):
         self._is_loading = False
 
         if is_undo:
-            from src.ui.components.toast import ToastManager
             ToastManager().show("Changes reverted to the last saved state.", "info")
             if hasattr(self, '_refresh_mcp_status'):
                 self._refresh_mcp_status()
@@ -746,7 +748,6 @@ class SettingsTool(BaseTool):
             if hasattr(skill_mgr, 'reload_external_skills'):
                 skill_mgr.reload_external_skills()
 
-            from src.ui.components.toast import ToastManager
             ToastManager().show("Refreshing external tool states...", "info")
             self._refresh_mcp_status()
         except Exception as e:
@@ -759,10 +760,11 @@ class SettingsTool(BaseTool):
         always_on = cfg.get("always_on", False)
         is_enabled = cfg.get("enabled", False) or always_on
 
-        # 0. Enabled Checkbox
         chk = QCheckBox()
         chk.setChecked(is_enabled)
 
+        tm = ThemeManager()
+        muted_color = QColor(tm.color("text_muted"))
 
         if always_on or is_hardcoded:
             chk.setEnabled(False)
@@ -786,28 +788,28 @@ class SettingsTool(BaseTool):
         name_item.setData(Qt.UserRole, cfg)
         name_item.setFlags(name_item.flags() ^ Qt.ItemIsEditable)
         if is_hardcoded:
-            name_item.setForeground(Qt.gray)
+            name_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 1, name_item)
 
         desc_str = cfg.get("description", "")
         desc_item = QTableWidgetItem(desc_str)
         desc_item.setFlags(desc_item.flags() ^ Qt.ItemIsEditable)
         if is_hardcoded:
-            desc_item.setForeground(Qt.gray)
+            desc_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 2, desc_item)
 
         stype = cfg.get("type", "stdio")
         type_item = QTableWidgetItem(stype)
         type_item.setFlags(type_item.flags() ^ Qt.ItemIsEditable)
         if is_hardcoded:
-            type_item.setForeground(Qt.gray)
+            type_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 3, type_item)
 
         target = cfg.get("command", "") if stype == "stdio" else cfg.get("url", "")
         target_item = QTableWidgetItem(target)
         target_item.setFlags(target_item.flags() ^ Qt.ItemIsEditable)
         if is_hardcoded:
-            target_item.setForeground(Qt.gray)
+            target_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 4, target_item)
 
         status_lbl = QLabel("Checking...")
@@ -867,11 +869,12 @@ class SettingsTool(BaseTool):
         self.table_mcp.setCellWidget(row, 6, action_widget)
 
     def _on_add_mcp_clicked(self):
+        tm = ThemeManager()
         warning_msg = (
             "<b>⚠️ Security Disclaimer for External MCP Servers</b><br><br>"
             "You are about to connect a third-party MCP server to Scholar Navis.<br>"
             "External servers are highly privileged and can execute code, read local files, or access the network on your behalf. "
-            "<span style='color:#ff6b6b; font-weight:bold;'>Only connect to servers from trusted developers.</span><br><br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>Only connect to servers from trusted developers.</span><br><br>"
             "<i>The Scholar Navis developers are not responsible for any data loss, security breaches, or system damage caused by third-party MCP servers.</i><br><br>"
             "Do you understand the risks and wish to proceed?"
         )
@@ -898,17 +901,16 @@ class SettingsTool(BaseTool):
                 self._mark_unsaved()
 
     def _on_import_skill_clicked(self):
+        tm = ThemeManager()
         warning_msg = (
             "<b>🚨 CRITICAL SECURITY WARNING: NATIVE SKILL IMPORT</b><br><br>"
             "You are attempting to import a Native Python Skill (`.py` script) directly into the main process of Scholar Navis.<br><br>"
-            "<span style='color:#ff6b6b; font-weight:bold;'>1. ARBITRARY CODE EXECUTION:</span> These scripts run with the EXACT SAME privileges as the main application. Malicious scripts can steal your data, delete files, or compromise your system.<br>"
-            "<span style='color:#ff6b6b; font-weight:bold;'>2. STRICT SANDBOXING:</span> The script MUST ONLY import Python Standard Library modules (e.g., `os`, `json`, `urllib`). Importing third-party pip packages (like `requests`, `pandas`) that are not packaged with Navis will instantly crash the agent with a `ModuleNotFoundError`.<br><br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>1. ARBITRARY CODE EXECUTION:</span> These scripts run with the EXACT SAME privileges as the main application. Malicious scripts can steal your data, delete files, or compromise your system.<br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>2. STRICT SANDBOXING:</span> The script MUST ONLY import Python Standard Library modules (e.g., `os`, `json`, `urllib`). Importing third-party pip packages (like `requests`, `pandas`) that are not packaged with Navis will instantly crash the agent with a `ModuleNotFoundError`.<br><br>"
             "<i>Only import scripts from absolutely trusted sources. Do you accept all risks and wish to proceed?</i>"
         )
 
-        from src.ui.components.dialog import StandardDialog, SkillPreviewDialog
-        from PySide6.QtWidgets import QFileDialog
-        import os
+        import ast
 
         dlg = StandardDialog(self.widget, "⚠️ HIGH RISK OPERATION", warning_msg, show_cancel=True)
         if not dlg.exec():
@@ -921,30 +923,56 @@ class SettingsTool(BaseTool):
         with open(path, 'r', encoding='utf-8') as f:
             raw_code = f.read()
 
-        preview_dlg = SkillPreviewDialog(self.widget, skill_name, raw_code, is_importing=True)
+        parsed_name = skill_name
+        parsed_desc = "User Imported Native Script"
+        try:
+            tree = ast.parse(raw_code)
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id == "SCHEMA":
+                            # 安全地将代码中的字典结构转为 Python 字典
+                            schema_dict = ast.literal_eval(node.value)
+                            func_info = schema_dict.get("function", {})
+                            if func_info.get("name"):
+                                parsed_name = func_info.get("name")
+                            if func_info.get("description"):
+                                parsed_desc = func_info.get("description")
+        except Exception as e:
+            self.logger.warning(f"Failed to parse SCHEMA from skill: {e}")
+
+        from src.ui.components.dialog import SkillPreviewDialog, SkillConfigDialog
+
+        preview_dlg = SkillPreviewDialog(self.widget, parsed_name, raw_code, is_importing=True)
         if not preview_dlg.exec():
             return
 
         final_code = preview_dlg.get_edited_code()
+
+        config_dlg = SkillConfigDialog(self.widget, skill_name=parsed_name, script_path=path, description=parsed_desc)
+        if not config_dlg.exec():
+            return
+
+        final_name, final_desc, final_path = config_dlg.get_data()
+
         enc_service = SystemEncryptionService()
         encrypted_bytes = enc_service.encrypt(final_code)
 
         cfg = {
-            "description": "User Imported Native Script",
+            "description": final_desc,
             "type": "SKILL",
-            "command": f"<Pending: {skill_name}>",
+            "command": f"<Pending Edit: {final_name}>",
             "enabled": True,
             "_pending_bytes": encrypted_bytes,
             "_is_new": True
         }
 
-        self._add_mcp_row(skill_name, cfg)
+        self._add_mcp_row(final_name, cfg)
 
         if hasattr(self, '_mark_unsaved'):
             self._mark_unsaved()
 
-        from src.ui.components.toast import ToastManager
-        ToastManager().show(f"Skill '{skill_name}' staged. Click 'Save Settings' to commit.", "info")
+        ToastManager().show(f"Skill '{final_name}' staged. Click 'Save Settings' to commit.", "info")
 
 
     def _on_import_skill_finished(self, result, skill_name):
@@ -966,7 +994,6 @@ class SettingsTool(BaseTool):
 
             self.import_skill_pd.show_finish_state(True, "Import Successful",
                                                    f"Skill '{skill_name}' has been encrypted and secured.")
-            from src.ui.components.toast import ToastManager
             ToastManager().show(f"Skill '{skill_name}' imported successfully.", "success")
         else:
             self.import_skill_pd.show_finish_state(False, "Import Failed",
@@ -981,44 +1008,99 @@ class SettingsTool(BaseTool):
 
         if old_cfg.get("type") == "SKILL":
             from src.ui.components.dialog import SkillConfigDialog
-            dlg = SkillConfigDialog(self.widget, skill_name=old_name, script_path=old_cfg.get("command", ""))
-            if dlg.exec():
-                new_name, new_path = dlg.get_data()
 
-                if new_name != old_name and new_name in ["built-in", "Academic Tool","builtin"]:
+            dlg = SkillConfigDialog(
+                self.widget,
+                skill_name=old_name,
+                script_path=old_cfg.get("command", ""),
+                description=old_cfg.get("description", "")
+            )
+
+            if dlg.exec():
+                new_name, new_desc, new_path = dlg.get_data()
+
+                if new_name != old_name and new_name in ["built-in", "Academic Tool", "builtin"]:
                     ToastManager().show(f"The name '{new_name}' is reserved for core system usage.", "error")
                     return
 
                 new_cfg = old_cfg.copy()
-                new_cfg["command"] = new_path
+                new_cfg["description"] = new_desc  # 更新 Description
 
+                from src.ui.components.dialog import SkillPreviewDialog
+                from src.core.encryption_service import SystemEncryptionService
+
+
+                if new_path != old_cfg.get("command", "") and new_path.endswith(".py"):
+                    try:
+                        with open(new_path, 'r', encoding='utf-8') as f:
+                            raw_code = f.read()
+
+                        preview_dlg = SkillPreviewDialog(self.widget, new_name, raw_code, is_importing=True)
+                        if preview_dlg.exec():
+                            final_code = preview_dlg.get_edited_code()
+                            enc_service = SystemEncryptionService()
+                            encrypted_bytes = enc_service.encrypt(final_code)
+
+                            new_cfg["_pending_bytes"] = encrypted_bytes
+                            new_cfg["_is_edited"] = True
+                            new_path = f"<Pending Edit: {new_name}>"
+                        else:
+                            return
+                    except Exception as e:
+                        ToastManager().show(f"Failed to load new script: {e}", "error")
+                        return
+
+                elif new_path == old_cfg.get("command", "") and new_path.endswith(".enc") and os.path.exists(new_path):
+                    try:
+                        enc_service = SystemEncryptionService()
+                        with open(new_path, 'rb') as f:
+                            decrypted_code = enc_service.decrypt(f.read())
+
+                        preview_dlg = SkillPreviewDialog(self.widget, new_name, decrypted_code, is_importing=True)
+                        if preview_dlg.exec():
+                            final_code = preview_dlg.get_edited_code()
+                            encrypted_bytes = enc_service.encrypt(final_code)
+
+                            new_cfg["_pending_bytes"] = encrypted_bytes
+                            new_cfg["_is_edited"] = True
+                            new_path = f"<Pending Edit: {new_name}>"
+                        else:
+                            return
+                    except Exception as e:
+                        ToastManager().show(f"Failed to decrypt existing skill: {e}", "error")
+                        return
+
+                # 更新 UI 和内存中的数据配置
+                new_cfg["command"] = new_path
                 name_item.setText(new_name)
                 name_item.setData(Qt.UserRole, new_cfg)
+                self.table_mcp.item(row, 2).setText(new_desc)
                 self.table_mcp.item(row, 4).setText(new_path)
 
                 if hasattr(self, '_mark_unsaved'):
                     self._mark_unsaved()
 
         else:
+            from src.ui.components.dialog import McpConfigDialog
             dlg = McpConfigDialog(self.widget, server_name=old_name, server_config=old_cfg)
             if dlg.exec():
-                new_name, new_cfg = dlg.get_config()
+                new_name, new_server_cfg = dlg.get_config()
 
-                # 名称拦截
-                if new_name != old_name and new_name in ["built-in", "Academic Tool","builtin"]:
+                if new_name != old_name and new_name in ["built-in", "Academic Tool", "builtin"]:
                     ToastManager().show(f"The name '{new_name}' is reserved for core system usage.", "error")
                     return
 
-                new_cfg["always_on"] = old_cfg.get("always_on", False)
-                new_cfg["enabled"] = old_cfg.get("enabled", True)
+                new_server_cfg["always_on"] = old_cfg.get("always_on", False)
+                new_server_cfg["enabled"] = old_cfg.get("enabled", True)
 
                 name_item.setText(new_name)
-                name_item.setData(Qt.UserRole, new_cfg)
-                self.table_mcp.item(row, 2).setText(new_cfg.get("description", ""))
-                self.table_mcp.item(row, 3).setText(new_cfg.get("type", "stdio"))
+                name_item.setData(Qt.UserRole, new_server_cfg)
+                self.table_mcp.item(row, 2).setText(new_server_cfg.get("description", ""))
+                self.table_mcp.item(row, 3).setText(new_server_cfg.get("type", "stdio"))
 
-                target = new_cfg.get("command", "") if new_cfg.get("type", "stdio") == "stdio" else new_cfg.get("url",
-                                                                                                                "")
+                target = new_server_cfg.get("command", "") if new_server_cfg.get("type",
+                                                                                 "stdio") == "stdio" else new_server_cfg.get(
+                    "url", "")
                 self.table_mcp.item(row, 4).setText(target)
 
                 if hasattr(self, '_mark_unsaved'):
@@ -1644,6 +1726,7 @@ class SettingsTool(BaseTool):
 
     def _execute_export(self):
         # 1. 获取加密密码
+        from src.ui.components.dialog import ExportPasswordDialog, ProgressDialog
         pwd_dlg = ExportPasswordDialog(self.widget)
         pwd_dlg.exec()
         if pwd_dlg.is_cancelled:
@@ -1651,6 +1734,8 @@ class SettingsTool(BaseTool):
         password = pwd_dlg.password
 
         # 2. 选择保存路径
+        from PySide6.QtWidgets import QFileDialog
+        import os
         path, _ = QFileDialog.getSaveFileName(
             self.widget, "Save Config", "scholar_navis_config.json", "JSON (*.json)"
         )
@@ -1658,23 +1743,52 @@ class SettingsTool(BaseTool):
             return
 
         # 3. 准备数据束
+        from src.core.encryption_service import SystemEncryptionService
+        import zlib
+        import base64
+
+        enc_service = SystemEncryptionService()
+        exported_skills_data = {}
+
+        for name, cfg in self.config.mcp_servers.get("external_skills", {}).items():
+            if name in ["built-in", "Academic Tool", "builtin"]: continue
+            skill_path = cfg.get("command", "")
+            if skill_path and os.path.exists(skill_path):
+                try:
+                    with open(skill_path, 'rb') as f:
+                        decrypted_data = enc_service.decrypt(f.read())
+
+                        if isinstance(decrypted_data, str):
+                            decrypted_data = decrypted_data.encode('utf-8')
+
+                        compressed_bytes = zlib.compress(decrypted_data, level=9)
+                        b64_str = base64.b64encode(compressed_bytes).decode('utf-8')
+
+                        exported_skills_data[name] = b64_str
+                except Exception as e:
+                    self.logger.warning(f"Failed to decrypt and compress skill {name} for export: {e}")
+
         bundle = {
             "settings": self.config.user_settings,
             "mcp_servers": self.config.mcp_servers,
-            "llm_configs": self.llm_configs
+            "llm_configs": self.llm_configs,
+            "skill_files_zlib_b64": exported_skills_data
         }
 
         self.btn_export.setEnabled(False)
-        pd = ProgressDialog(self.widget, "Security Export", "Performing encryption & serialization...")
+        pd = ProgressDialog(self.widget, "Security Export", "Performing compression, encryption & serialization...")
         pd.show()
 
-        # 4. 启动异步导出任务，并将 path 传递给回调函数
+        # 4. 启动异步导出任务，统一使用 export_task_mgr
         self.export_task_mgr = TaskManager()
         self.export_task_mgr.sig_progress.connect(pd.update_progress)
         self.export_task_mgr.sig_result.connect(lambda res: self._finalize_export(res, path, pd))
         self.export_task_mgr.start_task(
-            ExportConfigTask, "export_cfg", mode=TaskMode.THREAD,
-            bundle=bundle, password=password
+            ExportConfigTask,
+            task_id="export_cfg",
+            path=path,
+            password=password,
+            bundle=bundle
         )
 
     def _finalize_export(self, result, path, pd):
@@ -1731,12 +1845,14 @@ class SettingsTool(BaseTool):
         self.import_task_mgr.start_task(ImportConfigTask, "import_cfg", mode=TaskMode.THREAD, path=path,
                                         password=password)
 
+
     def _finalize_import(self, result, pd, path):
         self.btn_import.setEnabled(True)
 
         if not result.get("success"):
             if "Decryption failed" in result.get("msg", ""):
                 pd.close_safe()
+                from src.ui.components.dialog import StandardDialog
                 dlg = StandardDialog(
                     self.widget,
                     "Decryption Failed",
@@ -1748,17 +1864,50 @@ class SettingsTool(BaseTool):
             else:
                 pd.show_finish_state(False, "Import Failed", result.get("msg", "Unknown error"))
             return
+
         try:
             final_data = result.get("data", {})
+
+            if "skill_files_zlib_b64" in final_data:
+                from src.core.encryption_service import SystemEncryptionService
+                import zlib
+                import base64
+
+                enc_service = SystemEncryptionService()
+
+                for s_name, b64_str in final_data["skill_files_zlib_b64"].items():
+                    try:
+                        compressed_bytes = base64.b64decode(b64_str)
+                        plain_code_bytes = zlib.decompress(compressed_bytes)
+
+                        plain_code_str = plain_code_bytes.decode('utf-8')
+                        encrypted_data = enc_service.encrypt(plain_code_str)
+
+                        if isinstance(encrypted_data, str):
+                            encrypted_bytes = encrypted_data.encode('utf-8')
+                        else:
+                            encrypted_bytes = encrypted_data
+
+                        if "mcp_servers" in final_data and "external_skills" in final_data["mcp_servers"]:
+                            if s_name in final_data["mcp_servers"]["external_skills"]:
+                                final_data["mcp_servers"]["external_skills"][s_name]["_pending_bytes"] = encrypted_bytes
+                                final_data["mcp_servers"]["external_skills"][s_name]["_is_new"] = True
+                                final_data["mcp_servers"]["external_skills"][s_name][
+                                    "command"] = f"<Pending Edit: {s_name}>"
+
+                    except Exception as e:
+                        self.logger.error(f"💥 CRITICAL: Failed to decompress and stage skill '{s_name}': {e}")
+                        from src.ui.components.toast import ToastManager
+                        ToastManager().show(f"Failed to restore skill {s_name}: {e}", "error")
 
             if "settings" in final_data:
                 imported_settings = final_data.get("settings", {}).copy()
 
-                # Device compatibility validation
                 imported_device = imported_settings.get("inference_device", "auto")
                 if self.combo_device.findData(imported_device) < 0:
                     fallback_dev = "cpu" if self.combo_device.findData("cpu") >= 0 else "auto"
                     imported_settings["inference_device"] = fallback_dev
+                    from src.ui.components.toast import ToastManager
                     ToastManager().show(
                         f"Imported device '{imported_device}' is unavailable. Defaulting to {fallback_dev.upper()}.",
                         "warning"
@@ -1781,9 +1930,11 @@ class SettingsTool(BaseTool):
                 f"Configuration bundle ({mode}) has been loaded into the interface.\n\n"
                 "Please click 'Save Settings' at the bottom to apply these changes permanently."
             )
+            from src.ui.components.toast import ToastManager
             ToastManager().show(f"Configuration imported to UI ({mode}). Please save to apply.", "success")
         except Exception as e:
             self.logger.error(f"Import application failed: {e}")
+            from src.ui.components.dialog import StandardDialog
             StandardDialog(self.widget, "Import Error", f"Failed to apply settings to UI:\n{e}").exec()
 
 
@@ -2248,6 +2399,7 @@ class SettingsTool(BaseTool):
         new_mcp_servers = {}
         new_external_skills = {}
         if hasattr(self, 'table_mcp'):
+            active_skill_names = set()
             for row in range(self.table_mcp.rowCount()):
                 name_item = self.table_mcp.item(row, 1)
                 if not name_item: continue
@@ -2265,13 +2417,44 @@ class SettingsTool(BaseTool):
                     cfg["enabled"] = chk.isChecked()
 
                 if cfg.get("type") == "SKILL":
+                    active_skill_names.add(name)
+                    if "_pending_bytes" in cfg:
+                        workspace_dir = os.path.join(self.config.BASE_DIR, 'tools', 'skill')
+                        os.makedirs(workspace_dir, exist_ok=True)
+                        target_path = os.path.join(workspace_dir, f"{name}.enc")
+                        try:
+                            with open(target_path, 'wb') as f:
+                                f.write(cfg["_pending_bytes"])
+                            cfg["command"] = target_path
+                        except Exception as e:
+                            self.logger.error(f"Failed to write skill '{name}' to disk: {e}")
+
+                        for temp_key in ["_pending_bytes", "_is_new", "_is_edited"]:
+                            cfg.pop(temp_key, None)
+
                     new_external_skills[name] = cfg
                 else:
                     new_mcp_servers[name] = cfg
 
-            self.config.mcp_servers["mcpServers"] = new_mcp_servers
-            self.config.mcp_servers["external_skills"] = new_external_skills
-            self.config.save_mcp_servers()
+                old_skills = self.config.mcp_servers.get("external_skills", {})
+                import shutil
+                for old_name, old_cfg in old_skills.items():
+                    if old_name not in active_skill_names:
+                        old_path = old_cfg.get("command", "")
+                        if old_path and "tools" in old_path and "skill" in old_path:
+                            try:
+                                if os.path.exists(old_path):
+                                    os.remove(old_path)
+                                skill_workspace = os.path.join(self.config.BASE_DIR, 'tools', 'skill',
+                                                               f"{old_name}_workspace")
+                                if os.path.exists(skill_workspace) and os.path.isdir(skill_workspace):
+                                    shutil.rmtree(skill_workspace)
+                            except Exception as e:
+                                self.logger.warning(f"Failed to properly clean up deleted skill for '{old_name}': {e}")
+
+                self.config.mcp_servers["mcpServers"] = new_mcp_servers
+                self.config.mcp_servers["external_skills"] = new_external_skills
+                self.config.save_mcp_servers()
 
         new_key = self.input_ncbi_api_key.text().strip()
         new_openalex_key = self.input_openalex_api_key.text().strip()

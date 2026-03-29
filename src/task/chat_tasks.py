@@ -540,9 +540,15 @@ class ChatGenerationTask(BackgroundTask):
             f"### CONTEXT:\n{context_str}"
         )
 
-        clean_history = [{"role": m["role"], "content": m["content"], "tool_calls": m.get("tool_calls"),
-                          "tool_call_id": m.get("tool_call_id"), "name": m.get("name")} for m in self.messages[:-1] if
-                         "role" in m and "content" in m]
+        clean_history = []
+        for m in self.messages[:-1]:
+            if "role" in m and "content" in m:
+                msg = {"role": m["role"], "content": m["content"]}
+                if m.get("tool_calls"): msg["tool_calls"] = m["tool_calls"]
+                if m.get("tool_call_id"): msg["tool_call_id"] = m["tool_call_id"]
+                if m.get("name"): msg["name"] = m["name"]
+                clean_history.append(msg)
+
         rag_messages = [{"role": "system", "content": system_prompt}] + clean_history
         rag_messages.append({"role": "user", "content": llm_content})
 
@@ -659,15 +665,37 @@ class ChatGenerationTask(BackgroundTask):
                         break
 
                     tool_executed = True
-                    assistant_msg = {"role": "assistant", "content": content or "", "tool_calls": tool_calls}
+                    norm_tool_calls = []
+                    for tc in tool_calls:
+                        if hasattr(tc, 'model_dump'):
+                            norm_tool_calls.append(tc.model_dump())
+                        elif not isinstance(tc, dict):
+                            norm_tool_calls.append({
+                                "id": getattr(tc, "id", f"call_{uuid.uuid4().hex[:8]}"),
+                                "type": getattr(tc, "type", "function"),
+                                "function": {
+                                    "name": getattr(getattr(tc, "function", None), "name", "unknown"),
+                                    "arguments": getattr(getattr(tc, "function", None), "arguments", "{}")
+                                }
+                            })
+                        else:
+                            norm_tool_calls.append(tc)
+
+                    assistant_msg = {"role": "assistant", "content": content or "", "tool_calls": norm_tool_calls}
                     if reasoning: assistant_msg["reasoning_content"] = reasoning
                     rag_messages.append(assistant_msg)
 
-                    for tool_call in tool_calls:
+                    for tool_call in norm_tool_calls:
                         if self.is_cancelled(): break
-                        tool_name = tool_call['function']['name']
+
+                        t_id = tool_call.get('id', f"call_{uuid.uuid4().hex[:8]}")
+                        t_func = tool_call.get('function', {})
+                        tool_name = t_func.get('name', 'unknown')
+
+                        tool_result = f"[System Error] Tool '{tool_name}' not found or disabled."
+
                         try:
-                            raw_args = tool_call['function']['arguments']
+                            raw_args = t_func.get('arguments', '{}')
                             tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
 
                             if tool_name == "generate_image":
@@ -683,10 +711,6 @@ class ChatGenerationTask(BackgroundTask):
                                     self.logger.error(f"Internal Image Tool failed: {img_e}")
                                     tool_result = f"Image generation failed: {str(img_e)}"
 
-
-
-
-
                             elif skill_mgr.is_skill_available(tool_name):
                                 tool_args_str = json.dumps(tool_args, ensure_ascii=False)
                                 short_args = tool_args_str if len(tool_args_str) < 120 else tool_args_str[:120] + "..."
@@ -694,7 +718,6 @@ class ChatGenerationTask(BackgroundTask):
                                 if hasattr(skill_mgr, 'academic_skills') and tool_name in skill_mgr.academic_skills:
                                     prefix = "[ACADEMIC]"
                                     self.send_log("INFO", f"{prefix} Executing internal skill: {tool_name}")
-
                                 else:
                                     prefix = "[SKILL]"
                                     self.send_log("INFO", f"{prefix} Executing external skill script: {tool_name}")
@@ -735,6 +758,10 @@ class ChatGenerationTask(BackgroundTask):
                                         tool_result = json.dumps(res_data, ensure_ascii=False)
                                 except:
                                     pass
+                            else:
+                                self.logger.warning(
+                                    f"Model hallucinated or attempted to call disabled tool: {tool_name}")
+                                tool_result = f"[TOOL ERROR] The tool '{tool_name}' does not exist or is disabled. Please answer the user using only your current knowledge or valid tools."
 
                         except Exception as e:
                             self.logger.error(f"MCP tool {tool_name} failed: {e}")
@@ -749,7 +776,7 @@ class ChatGenerationTask(BackgroundTask):
                                 f"INSTRUCTION TO AI:\n1. Explain to the user EXACTLY why the access failed."
                             )
 
-                        rag_messages.append({"role": "tool", "tool_call_id": tool_call['id'], "name": tool_name,
+                        rag_messages.append({"role": "tool", "tool_call_id": t_id, "name": tool_name,
                                              "content": tool_result})
             except Exception as e:
                 self.logger.warning(f"Tool calling loop failed: {e}")

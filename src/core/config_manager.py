@@ -99,14 +99,15 @@ class ConfigManager:
         """原子性写入 JSON 配置文件"""
         with self._lock:
             temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), text=False)  # 始终二进制写入
+            os.close(temp_fd)
             try:
                 json_str = json.dumps(data, indent=4, ensure_ascii=False)
                 if encrypt:
                     content = self.encryption_service.encrypt(json_str)
-                    with os.fdopen(temp_fd, 'wb') as f:
+                    with open(temp_path, 'wb') as f:
                         f.write(content)
                 else:
-                    with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                    with open(temp_path, 'w', encoding='utf-8') as f:
                         f.write(json_str)
 
                 import time
@@ -122,9 +123,13 @@ class ConfigManager:
 
             except Exception as e:
                 if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                    try:
+                        os.remove(temp_path)
+                    except Exception as rm_e:
+                        self.logger.error(f"Failed to remove temp file {temp_path}: {rm_e}")
                 self.logger.error(f"Failed to save config at {path}: {e}")
                 raise
+
 
     def load_json(self, path, encrypt=True):
         if not os.path.exists(path):

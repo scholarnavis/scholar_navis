@@ -211,9 +211,14 @@ class SkillManager:
                 exec(decrypted_code, module.__dict__)
 
                 if hasattr(module, 'execute') and hasattr(module, 'SCHEMA'):
-                    self.external_skills[skill_name] = module.execute
-                    self.external_schemas[skill_name] = module.SCHEMA
-                    logger.info(f"Successfully loaded sandboxed skill: {skill_name}")
+                    func_name = module.SCHEMA.get("function", {}).get("name")
+
+                    if func_name:
+                        self.external_skills[func_name] = module.execute
+                        self.external_schemas[func_name] = module.SCHEMA
+                        logger.info(f"Successfully loaded sandboxed skill: UI[{skill_name}] -> Func[{func_name}]")
+                    else:
+                        logger.error(f"Encrypted skill '{skill_name}' SCHEMA lacks a function name.")
                 else:
                     logger.error(f"Encrypted skill '{skill_name}' lacks 'execute' func or 'SCHEMA' dict.")
             except Exception as e:

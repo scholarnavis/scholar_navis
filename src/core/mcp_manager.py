@@ -322,6 +322,7 @@ class MCPManager:
             if any(tag in selected_tags for tag in tool_tags):
                 filtered_tools.append({
                     "type": schema.get("type", "function"),
+                    "server": schema.get("server", "Unknown Server"),
                     "function": schema.get("function", {})
                 })
 
@@ -391,6 +392,7 @@ class MCPManager:
         return [
             {
                 "type": schema.get("type", "function"),
+                "server": schema.get("server", "Unknown Server"),
                 "function": schema.get("function", {})
             }
             for schema in self.tool_schemas.values()

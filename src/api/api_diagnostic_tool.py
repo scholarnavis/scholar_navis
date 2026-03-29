@@ -61,6 +61,7 @@ def interactive_parameter_configuration(providers, kbs, academic_tags, external_
     config = {
         "provider_id": None,
         "model": None,
+        "stream": True,
         "trans_provider_id": None,
         "trans_model": None,
         "force_translate": False,
@@ -79,6 +80,10 @@ def interactive_parameter_configuration(providers, kbs, academic_tags, external_
     if mode_choice == "2":
         config["is_error_test"] = True
         print("\n[!] Error Handling Test Mode Enabled. A deliberate invalid model request will be sent.")
+
+    stream_input = input("\n[Advanced] Enable Streaming SSE? (Y/n): ").strip().lower()
+    if stream_input == 'n':
+        config["stream"] = False
 
     # --- Main Model Selection ---
     print("\n[ Primary LLM Provider ]")
@@ -236,7 +241,7 @@ def stream_chat_execution(config):
     payload = {
         "model": config["model"],
         "messages": [{"role": "user", "content": query}],
-        "stream": True,
+        "stream": config["stream"],  # 使用用户配置的流式状态
         "provider_id": config["provider_id"],
         "kb_id": config["kb_id"],
         "use_academic_agent": config["use_academic_agent"],
@@ -250,10 +255,11 @@ def stream_chat_execution(config):
         payload["trans_provider_id"] = config["trans_provider_id"]
         payload["trans_model"] = config["trans_model"]
 
-    print("\n[Transmitting Payload to API...]\n")
+    print(f"\n[Transmitting Payload to API... (Streaming: {config['stream']})]\n")
 
     try:
-        response = requests.post(f"{BASE_URL}/v1/chat/completions", json=payload, headers=HEADERS, stream=True)
+        response = requests.post(f"{BASE_URL}/v1/chat/completions", json=payload, headers=HEADERS,
+                                 stream=config["stream"])
 
         if response.status_code != 200:
             print(f"[!] Server responded with non-200 status code: {response.status_code}")
@@ -262,54 +268,77 @@ def stream_chat_execution(config):
         cited_sources_data = []
         follow_ups_data = []
 
-        print("--- Reasoning Trace ---")
-        for line in response.iter_lines():
-            if line:
-                decoded_line = line.decode('utf-8')
-                if decoded_line.startswith("data: "):
-                    data_str = decoded_line[6:]
-                    if data_str == "[DONE]":
-                        break
+        if not config["stream"]:
+            # 新增：非流式完整 JSON 响应处理
+            try:
+                data = response.json()
+                if "error" in data:
+                    print("\n\n" + "!" * 40)
+                    print("🚨 STANDARD API ERROR CAUGHT 🚨")
+                    print(json.dumps(data["error"], indent=2))
+                    print("!" * 40 + "\n")
+                    return
 
-                    try:
-                        chunk = json.loads(data_str)
+                choice = data.get("choices", [{}])[0].get("message", {})
+                print("--- Final Generated Content ---\n")
+                print(choice.get("content", ""))
 
-                        if "error" in chunk:
-                            print("\n\n" + "!" * 40)
-                            print("🚨 STANDARD API ERROR CAUGHT 🚨")
-                            print("!" * 40)
-                            err = chunk["error"]
-                            print(f"Type   : {err.get('type')}")
-                            print(f"Code   : {err.get('code')}")
-                            print(f"Param  : {err.get('param')}")
-                            print(f"Message:\n{err.get('message')}")
-                            print("!" * 40 + "\n")
-                            return
+                cited_sources_data = choice.get("cited_sources", [])
+                follow_ups_data = choice.get("follow_ups", [])
+            except ValueError:
+                print(f"[✘] Failed to parse JSON response. Raw output:\n{response.text}")
+                return
 
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+        else:
+            # 原有的流式分块处理逻辑
+            print("--- Reasoning Trace ---")
+            for line in response.iter_lines():
+                if line:
+                    decoded_line = line.decode('utf-8')
+                    if decoded_line.startswith("data: "):
+                        data_str = decoded_line[6:]
+                        if data_str == "[DONE]":
+                            break
 
-                        # 1. Output Reasoning Token
-                        if "reasoning_content" in delta:
-                            sys.stdout.write(f"\033[90m{delta['reasoning_content']}\033[0m")
-                            sys.stdout.flush()
+                        try:
+                            chunk = json.loads(data_str)
 
-                        # 2. Output Standard Content Token
-                        if "content" in delta:
-                            if not has_printed_content_header:
-                                print("\n\n--- Primary Content ---")
-                                has_printed_content_header = True
+                            if "error" in chunk:
+                                print("\n\n" + "!" * 40)
+                                print("🚨 STANDARD API ERROR CAUGHT 🚨")
+                                print("!" * 40)
+                                err = chunk["error"]
+                                print(f"Type   : {err.get('type')}")
+                                print(f"Code   : {err.get('code')}")
+                                print(f"Param  : {err.get('param')}")
+                                print(f"Message:\n{err.get('message')}")
+                                print("!" * 40 + "\n")
+                                return
 
-                            sys.stdout.write(delta["content"])
-                            sys.stdout.flush()
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
 
-                        # 3. Capture Structural Metadata (Citations & Follow-ups)
-                        if "cited_sources" in delta:
-                            cited_sources_data = delta["cited_sources"]
-                        if "follow_ups" in delta:
-                            follow_ups_data = delta["follow_ups"]
+                            # 1. Output Reasoning Token
+                            if "reasoning_content" in delta:
+                                sys.stdout.write(f"\033[90m{delta['reasoning_content']}\033[0m")
+                                sys.stdout.flush()
 
-                    except json.JSONDecodeError:
-                        continue
+                            # 2. Output Standard Content Token
+                            if "content" in delta:
+                                if not has_printed_content_header:
+                                    print("\n\n--- Primary Content ---")
+                                    has_printed_content_header = True
+
+                                sys.stdout.write(delta["content"])
+                                sys.stdout.flush()
+
+                            # 3. Capture Structural Metadata (Citations & Follow-ups)
+                            if "cited_sources" in delta:
+                                cited_sources_data = delta["cited_sources"]
+                            if "follow_ups" in delta:
+                                follow_ups_data = delta["follow_ups"]
+
+                        except json.JSONDecodeError:
+                            continue
 
         # --- Metadata Rendering ---
         print("\n\n" + "-" * 40)
