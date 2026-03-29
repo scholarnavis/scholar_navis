@@ -1,15 +1,17 @@
-import ctypes
+import os
+import multiprocessing
 import os
 import sys
+import threading
 import time
-import multiprocessing
 
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
 
-from src.core.device_manager import DeviceManager
+from src.core.core_task import TaskManager, TaskMode
+from src.task.startup_tasks import HardwareInitTask
 
 is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
@@ -30,12 +32,12 @@ class StartupWorker(QThread):
     def __init__(self, logger):
         super().__init__()
         self.logger = logger
+        self.hw_task_mgr = TaskManager()
 
     def run(self):
         try:
             self.sig_progress.emit(5, "Detecting hardware info...")
             time.sleep(0.1)
-            from src.core.device_manager import DeviceManager
 
             self.sig_progress.emit(6, "Loading model registry framework...")
             time.sleep(0.1)
@@ -54,11 +56,9 @@ class StartupWorker(QThread):
             _ = cfg_mgr.user_settings
             setup_global_network_env()
 
-            self.sig_progress.emit(25, "Scanning local hardware & compute engines...")
+            self.sig_progress.emit(25, "Scanning local hardware & compute engines (Background)...")
             time.sleep(0.1)
-            dev_mgr = DeviceManager()
-            dev = dev_mgr.get_optimal_device()
-            dev_str = dev.get('type', 'cpu') if isinstance(dev, dict) else str(dev)
+            self.hw_task_mgr.start_task(HardwareInitTask, task_id="hw_warmup", mode=TaskMode.THREAD)
 
             self.sig_progress.emit(40, "Mounting theme cache and UI assets...")
             time.sleep(0.1)
@@ -158,6 +158,7 @@ class AppController(QObject):
 
         from src.core.config_manager import ConfigManager
         from src.core.theme_manager import ThemeManager
+        import qdarktheme
 
         cfg = ConfigManager().user_settings
         theme_setting = cfg.get("theme", "Dark").lower()
@@ -200,9 +201,8 @@ class AppController(QObject):
 
         self.splash.close()
 
+        QTimer.singleShot(500, self.main_window.check_first_run)
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
-
-
 
 if __name__ == "__main__":
 
@@ -224,7 +224,6 @@ if __name__ == "__main__":
         from PySide6.QtWidgets import QApplication, QMessageBox
         import sys
 
-        # 因为此时主应用还未初始化，需要临时创建一个 QApplication 来显示报错弹窗
         temp_app = QApplication(sys.argv)
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
@@ -235,7 +234,6 @@ if __name__ == "__main__":
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.exec()
         sys.exit(1)
-    # ==============================================================================
 
     # 1. 判断启动模式
     is_api_mode = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
@@ -280,7 +278,6 @@ if __name__ == "__main__":
 
     # 5. 根据模式进入相应的启动流程
     if is_api_mode:
-        # --- API 启动流程 ---
         os.environ["SCARF_NO_ANALYTICS"] = "true"
 
         from src.core.logger import setup_logger
@@ -305,7 +302,6 @@ if __name__ == "__main__":
         sys.exit(0)
 
     else:
-        # --- GUI 启动流程 ---
         import ctypes
         from src.core.logger import setup_logger
 

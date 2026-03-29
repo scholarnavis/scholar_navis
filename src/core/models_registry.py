@@ -51,44 +51,6 @@ EMBEDDING_MODELS = [
             "min_vram": "4 GB",
             "disk_space": "2.5 GB"
         }
-    },
-    {
-        "id": "embed_gte_qwen2_7b",
-        "ui_name": "GTE-Qwen2-7B-Instruct",
-        "hf_repo_id": "Alibaba-NLP/gte-Qwen2-7B-instruct",
-        "description": "LLM-based embedding. State-of-the-art semantic understanding.",
-        "tags": ["MTEB Top 10", "High VRAM"],
-        "max_tokens": 32768,
-        "dimensions": 3584,
-        "trust_remote_code": True,
-        "chunk_size": 1500,
-        "chunk_overlap": 250,
-        "batch_size": 4,
-        "recommended_config": {
-            "device_priority": "GPU Required",
-            "min_ram": "32 GB",
-            "min_vram": "16 GB",
-            "disk_space": "15 GB"
-        }
-    },
-    {
-        "id": "embed_nv_v2",
-        "ui_name": "NVIDIA NV-Embed-v2",
-        "hf_repo_id": "nvidia/NV-Embed-v2",
-        "description": "NVIDIA official model. Supports 32k context. Requires 24GB+ VRAM.",
-        "tags": ["NVIDIA","SOTA"],
-        "max_tokens": 32768,
-        "dimensions": 4096,
-        "trust_remote_code": True,
-        "chunk_size": 2000,
-        "chunk_overlap": 300,
-        "batch_size": 2,
-        "recommended_config": {
-            "device_priority": "High-End GPU Only",
-            "min_ram": "64 GB",
-            "min_vram": "24 GB",
-            "disk_space": "16 GB"
-        }
     }
 ]
 
@@ -116,20 +78,6 @@ RERANKER_MODELS = [
             "min_ram": "8 GB",
             "min_vram": "6 GB",
             "disk_space": "2.5 GB"
-        }
-    },
-    {
-        "id": "rerank_gemma_9b",
-        "ui_name": "Ultra (Precision) - BGE-Reranker-v2-Gemma",
-        "hf_repo_id": "BAAI/bge-reranker-v2-gemma",
-        "description": "Based on Gemma-2-9B. Massive parameters, high performance.",
-        "tags": ["9B Params", "High VRAM"],
-        "max_chunk_size": 2500,
-        "recommended_config": {
-            "device_priority": "High-End GPU Only",
-            "min_ram": "32 GB",
-            "min_vram": "20 GB",
-            "disk_space": "20 GB"
         }
     }
 ]
@@ -171,29 +119,23 @@ def get_optimal_chunk_settings(embedding_model_id: str, reranker_model_id: str):
 
     return chunk_size, overlap, batch_size
 
+
 def resolve_auto_model(model_type="embedding", device="cpu"):
-    has_gpu = device in ["cuda", "mps"]
-    vram_gb = 0
-    if has_gpu and device == "cuda":
-        try:
-            import torch
-            props = torch.cuda.get_device_properties(0)
-            vram_gb = props.total_memory / (1024 ** 3)
-        except:
-            vram_gb = 0
+    # 加入 "dml" (DirectML) 的识别，以兼容未来的 DeviceManager 传参
+    has_gpu = device in ["cuda", "mps", "dml", "directml"]
 
     if model_type == "embedding":
         if has_gpu:
-            if vram_gb >= 22: return "embed_nv_v2"
-            elif vram_gb >= 12: return "embed_gte_qwen2_7b"
-            else: return "embed_scientific_m3"
-        else: return "embed_nano_fast"
+            return "embed_scientific_m3"
+        else:
+            return "embed_nano_fast"
 
     elif model_type == "reranker":
         if has_gpu:
-            if vram_gb >= 20: return "rerank_gemma_9b"
-            else: return "rerank_pro_m3"
-        else: return "rerank_lite"
+            return "rerank_pro_m3"
+        else:
+            return "rerank_lite"
+
     return None
 
 

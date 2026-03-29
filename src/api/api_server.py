@@ -1,29 +1,27 @@
 import asyncio
-import time
 import json
-import uuid
 import logging
 import queue
-import threading
 import re
+import threading
+import time
+import uuid
 from typing import List, Dict, Optional, Any
-from fastapi import FastAPI, HTTPException, Request, Depends, Security, Body
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+
 import uvicorn
-import multiprocessing as mp
-import queue as q
+from fastapi import FastAPI, Request, Depends, Body
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+
 from src.core.config_manager import ConfigManager
-from src.core.core_task import TaskState, RunnerProcess
+from src.core.core_task import TaskState
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
-from src.core.version import __version__
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import check_model_exists, get_model_conf, resolve_auto_model
-from src.core.network_worker import setup_global_network_env
+from src.core.version import __version__
 from src.task.chat_tasks import ChatGenerationTask
-from src.task.kb_tasks import RerankTask
 
 app = FastAPI(
     title="Scholar Navis Agentic API",
@@ -912,33 +910,23 @@ def semantic_filter_agent_tools(payload: SemanticFilterRequest):
     context_str = f" Previous Context: {payload.history_context}" if payload.history_context else ""
     rerank_query = f"User Intent: {payload.query}.{context_str} Find the most appropriate API tools to fulfill this request."
 
-    mp_queue = mp.Queue()
-    worker = RunnerProcess(
-        RerankTask, "api_rerank_sync", mp_queue,
-        {"query": rerank_query, "docs": candidate_docs, "domain": "Tool Selection", "top_k": payload.top_k}
-    )
-    worker.start()
+    # [修改点开始]：彻底移除 RunnerProcess 和 mp.Queue()，直接调用单例引擎
+    from src.core.rerank_engine import RerankEngine
 
     ranked = None
     error_msg = None
-    while True:
-        try:
-            data = mp_queue.get(timeout=0.2)
-            state = data.get("state")
-            if state == TaskState.SUCCESS.value:
-                ranked = data.get("payload") or candidate_docs[:payload.top_k]
-                break
-            elif state == TaskState.FAILED.value:
-                error_msg = data.get('msg', 'Unknown execution anomaly.')
-                break
-        except q.Empty:
-            if not worker.is_alive():
-                error_msg = "Rerank process terminated unexpectedly."
-                break
-        except Exception as e:
-            if not worker.is_alive():
-                error_msg = str(e)
-                break
+
+    try:
+        engine = RerankEngine()
+        # 直接在当前 FastAPI 的 worker 线程中同步执行打分
+        ranked = engine.rerank(rerank_query, candidate_docs, domain="Tool Selection", top_k=payload.top_k)
+
+        if not ranked:
+            ranked = candidate_docs[:payload.top_k]
+    except Exception as e:
+        error_msg = str(e)
+        ranked = candidate_docs[:payload.top_k]
+    # [修改点结束]
 
     if error_msg:
         logger.warning(f"❌ Reranker failed: {error_msg}. Falling back to full toolset.")

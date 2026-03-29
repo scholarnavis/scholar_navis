@@ -92,36 +92,56 @@ def build_app():
         if os.path.exists(d):
             shutil.rmtree(d)
 
+
+    hook_file = "torch_runtime_hook.py"
+    with open(hook_file, "w", encoding="utf-8") as f:
+        f.write("import torch\nimport torch.autograd\n")
+    print("[*] Generated PyTorch Runtime Hook to prevent circular imports.")
+
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--onedir",
         "--windowed",
         f"--name={app_name_safe}",
+        f"--runtime-hook={hook_file}",  # 注入 Hook
     ]
+
 
     packages_to_collect = [
         "optimum", "transformers", "onnxruntime", "tokenizers",
-        "chromadb",
+        "chromadb"
     ]
 
-    data_to_collect = ["docx"]
+    data_to_collect = ["docx","litellm"]
+
+    hidden_imports = [
+        "torch",
+        "torch.autograd",
+        "safetensors",
+        "huggingface_hub"
+    ]
 
     for pkg in packages_to_collect:
         cmd.extend(["--collect-all", pkg])
     for pkg in data_to_collect:
         cmd.extend(["--collect-data", pkg])
+    for hi in hidden_imports:
+        cmd.extend(["--hidden-import", hi])
 
+    # 依然需要 Copy Metadata 骗过 transformers 的检查
     cmd.extend(["--copy-metadata", "transformers"])
     cmd.extend(["--copy-metadata", "tqdm"])
     cmd.extend(["--copy-metadata", "regex"])
+    cmd.extend(["--copy-metadata", "torch"])
 
     cmd.append("--add-data=Assets;Assets")
 
     excludes = [
         "tkinter", "matplotlib", "seaborn", "jupyter", "notebook",
-        "IPython", "plotly", "pygame", "setuptools", "wheel",
-        "torchvision","nvidia", "triton", "torchaudio"
+        "IPython", "plotly", "pygame",
+        "torchvision", "nvidia", "triton", "torchaudio",
+        "PyQt6", "PyQt5"
     ]
     for ex in excludes:
         cmd.append(f"--exclude-module={ex}")
@@ -133,6 +153,10 @@ def build_app():
 
     print(f"\n[2/4] Executing PyInstaller (Packaging PySide6 & ONNXRuntime)...")
     result = subprocess.run(cmd)
+
+    # 无论打包成功失败，清理掉临时生成的 Hook 文件
+    if os.path.exists(hook_file):
+        os.remove(hook_file)
 
     if result.returncode != 0:
         print("\n[-] PyInstaller build failed.")

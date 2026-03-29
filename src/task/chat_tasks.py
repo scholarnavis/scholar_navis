@@ -193,10 +193,38 @@ class ChatGenerationTask(BackgroundTask):
         self.messages = self.kwargs.get('messages', [])
         self.kb_id = self.kwargs.get('kb_id')
         if self.kb_id == "none": self.kb_id = None
-        self.requires_translation = self.kwargs.get('requires_translation', False)
+
+        if self.kb_id:
+            from src.core.models_registry import ModelManager
+            ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(self.kb_id)
+            if not ready:
+                self._emit_error(json.dumps({
+                    "title": "Model Missing - Action Blocked",
+                    "body": f"Required offline model is not installed:\n• {missing_label}\n\nPlease go to [Global Settings] and click 'Save' to download required models."
+                }))
+                return
+
+        original_user_query = self.messages[-1].get('display_text', self.messages[-1].get('content', ''))
+
+        try:
+            from src.core.lang_detect import detect_primary_language
+            is_english = detect_primary_language(original_user_query) == 'en'
+
+            if not is_english and self.trans_config is None:
+                self.send_log("WARNING",
+                              "Non-English input detected, but translation model is not enabled. The core model may not perfectly handle this language.")
+                self.requires_translation = False
+            else:
+                self.requires_translation = (not is_english)
+
+        except Exception as e:
+            self.logger.warning(f"Language detection failed in background: {e}")
+            self.requires_translation = False
+
         self.external_context = self.kwargs.get('external_context', [])
         self.use_academic_agent = self.kwargs.get('use_academic_agent', True)
         self.academic_tags = self.kwargs.get('academic_tags', [])
+
 
         self.use_external_tools = self.kwargs.get('use_external_tools', False)
         self.external_tool_names = self.kwargs.get('external_tool_names',
@@ -871,8 +899,6 @@ class ChatGenerationTask(BackgroundTask):
                 status = "✅ [SELECTED]" if idx < top_k else "❌ [REJECTED]"
                 log_lines.append(f"{idx+1:02d}. {status} Score: {score:.4f} | Tool: {tool_name}")
 
-                if idx >= top_k and any(kw in tool_name.lower() for kw in ['search', 'literature', 'pubmed', 'crossref']):
-                    self.send_log("WARNING", f"Critical tool '{tool_name}' was rejected with score ({score:.4f}). Check if its Schema Description matches the prompt intent.")
 
             log_lines.append("[------------------------------------]\n")
             self.send_log("INFO", "\n".join(log_lines))
@@ -890,42 +916,36 @@ class ChatGenerationTask(BackgroundTask):
 
     def _process_rerank(self, query, docs, domain, top_k, emit_warning=True):
         if not docs: return []
+        import time
         time.sleep(0.05)
 
-        from src.core.core_task import RunnerProcess
-        from src.task.kb_tasks import RerankTask
+        try:
+            from src.core.rerank_engine import RerankEngine
+            engine = RerankEngine()
 
-        queue = mp.Queue()
-        worker = RunnerProcess(
-            RerankTask, "rerank_sync", queue,
-            {"query": query, "docs": docs, "domain": domain, "top_k": top_k}
-        )
-        worker.start()
+            ranked_docs = engine.rerank(query, docs, domain=domain, top_k=top_k)
 
-        ranked = None
-        while True:
-            if self.is_cancelled():
-                worker.terminate()
-                worker.join(timeout=0.5)
-                queue.close()
-                queue.cancel_join_thread()
-                break
-            try:
-                data = queue.get(timeout=0.2)
-                state = data.get("state")
-                if state == TaskState.SUCCESS.value:
-                    ranked = data["payload"] if data.get("payload") else docs[:top_k]
-                    break
-                elif state == TaskState.FAILED.value:
-                    if emit_warning:
-                        self._emit_token(
-                            f"<br><div style='color:#e6a23c; font-size:13px;'>⚠️ <b>Reranker Processing Skipped</b><br>Failed to rerank. Defaulting.</div><br>")
-                    break
-            except q.Empty:
-                if not worker.is_alive(): break
-            except Exception:
-                if not worker.is_alive(): break
-        return ranked
+            if ranked_docs:
+                return ranked_docs
+            else:
+                return docs[:top_k]
+
+        except Exception as e:
+            self.logger.error(f"Direct Rerank Engine execution failed: {e}")
+
+            if emit_warning:
+                warning_html = (
+                    f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
+                    f"⚠️ <b>Reranker Processing Failed</b><br><br>"
+                    f"Failed to rerank documents: <i>{str(e)}</i>.<br>"
+                    f"If the model is missing, please go to <b>[Global Settings] -> [Models]</b> to manually download it.<br><br>"
+                    f"<i>* Continuing analysis with default document ordering.</i>"
+                    f"</div><br>"
+                )
+                self._emit_token(warning_html)
+
+            # 降级方案：返回未重新排序的前 top_k 个文档
+            return docs[:top_k]
 
 
 class DownloadImageTask(BackgroundTask):

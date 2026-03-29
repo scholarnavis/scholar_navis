@@ -570,126 +570,6 @@ class ChatInputContainer(QFrame):
 
 
 
-    def filter_tools_by_rag(self, user_query, raw_mcp_tools, top_k=8):
-        """
-        根据用户查询，使用 Reranker 对工具进行打分排序，仅提取 Top-K 工具。
-        加入了历史上下文，提升意图识别准确率。如果模型不可用，静默降级并返回所有工具。
-        """
-        if not raw_mcp_tools or len(raw_mcp_tools) <= top_k:
-            self.logger.info(
-                f"Bypassing Reranker: Tool count ({len(raw_mcp_tools) if raw_mcp_tools else 0}) is <= top_k ({top_k}). Using all available tools.")
-            return raw_mcp_tools
-
-        try:
-            candidate_docs = []
-            for tool in raw_mcp_tools:
-                func = tool.get("function", {})
-                content = f"Tool Name: {func.get('name', '')}. Description: {func.get('description', '')}"
-                candidate_docs.append({
-                    "content": content,
-                    "metadata": {"tool_schema": tool}
-                })
-
-            history_context = ""
-            if len(self.messages) >= 2:
-                history_context = f" Previous Context: {self.messages[-2].get('content', '')[:200]}"
-
-            rerank_query = f"User Intent: {user_query}.{history_context} Find the most appropriate API tools to fulfill this request."
-
-            rerank_model_id = getattr(self, 'config', ConfigManager()).user_settings.get("rerank_model_id",
-                                                                                         "rerank_auto")
-            self.logger.info(
-                f"Invoking Reranker model [{rerank_model_id}] with query context. Filtering {len(raw_mcp_tools)} MCP tools...")
-
-            ranked_docs = self._process_rerank(rerank_query, candidate_docs, domain="Tool Selection", top_k=top_k,
-                                               emit_warning=False)
-
-            if ranked_docs is None:
-                self.logger.warning("Tool reranking failed or process terminated. Silently degrading to use all tools.")
-                return raw_mcp_tools
-
-            best_tools = [doc["metadata"]["tool_schema"] for doc in ranked_docs]
-
-            top_tool_names = [t.get("function", {}).get("name", "Unknown") for t in best_tools]
-            self.logger.info(f"Reranker successfully selected top tools for this query: {', '.join(top_tool_names)}")
-
-            return best_tools
-
-        except Exception as e:
-            self.logger.warning(f"Exception during tool reranking: {e}. Silently degrading to use all selected tools.")
-            return raw_mcp_tools
-
-
-    def _process_rerank(self, query, docs, domain, top_k, emit_warning=True):
-        if not docs: return[]
-
-        import multiprocessing as mp
-        import queue as q
-
-        time.sleep(0.05)
-
-        from src.core.core_task import TaskState, RunnerProcess
-        from src.task.kb_tasks import RerankTask
-
-        queue = mp.Queue()
-        worker = RunnerProcess(
-            RerankTask, "rerank_sync", queue,
-            {"query": query, "docs": docs, "domain": domain, "top_k": top_k}
-        )
-        worker.start()
-
-        ranked = None
-        while True:
-            if getattr(self, '_is_cancelled', False):
-                worker.terminate()
-                worker.join(timeout=0.5)
-                queue.close()
-                queue.cancel_join_thread()
-                break
-            try:
-                data = queue.get(timeout=0.2)
-                state = data.get("state")
-
-                if state == TaskState.SUCCESS.value:
-                    if data.get("payload"):
-                        ranked = data["payload"]
-                    else:
-                        ranked = docs[:top_k]
-                    break
-                elif state == TaskState.FAILED.value:
-                    error_msg = data.get('msg', 'Unknown execution error')
-                    self.logger.error(f"Rerank process failed: {error_msg}")
-
-                    if emit_warning:
-                        warning_html = (
-                            f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
-                            f"⚠️ <b>Reranker Processing Skipped</b><br><br>"
-                            f"Failed to rerank documents: <i>{error_msg}</i>.<br>"
-                            f"If the model is missing, please go to <b>[Global Settings] -> [Models]</b> to manually download a Reranker model.<br><br>"
-                            f"<i>* Continuing analysis with default document ordering.</i>"
-                            f"</div><br>"
-                        )
-                        self._emit_token(warning_html)
-                    break
-            except q.Empty:
-                if not worker.is_alive():
-                    self.logger.error("Rerank process died unexpectedly.")
-                    if emit_warning:
-                        self._emit_token(
-                            f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
-                            f"⚠️ <b>Reranker Process Terminated</b><br><br>"
-                            f"The background reranking process terminated unexpectedly. This is often caused by missing models or insufficient memory.<br><br>"
-                            f"<i>* Continuing analysis with default document ordering.</i>"
-                            f"</div><br>"
-                        )
-                    break
-            except Exception:
-                if not worker.is_alive():
-                    break
-
-        return ranked
-
-
 class ChatTool(BaseTool):
     def __init__(self):
         super().__init__("Chat Assistant")
@@ -1251,7 +1131,6 @@ class ChatTool(BaseTool):
         if hasattr(self, 'trans_selector'):
             self.trans_selector.load_llm_configs()
 
-
     def process_send(self, text):
         # 1. 获取并格式化 KB ID
         kb_data = self.combo_kb.currentData()
@@ -1259,32 +1138,7 @@ class ChatTool(BaseTool):
         if not kb_id:
             kb_id = "none"
 
-        # 2. 模型拦截校验
-        if kb_id != "none":
-            ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(kb_id)
-            if not ready:
-                msg = (
-                    f"<b>Model Missing - Action Blocked</b><br><br>"
-                    f"Required offline model is not installed: <br>"
-                    f"<font color='#ff6b6b'>• {missing_label}</font><br><br>"
-                    f"Please go to <b>[Global Settings]</b> and click 'Save' to download required models."
-                )
-                StandardDialog(self.widget, "Offline Security Intercept", msg, show_cancel=False).exec()
-                GlobalSignals().request_model_download.emit(missing_id, m_type)
-                return
 
-        trans_config = self.trans_selector.get_current_config()
-
-        is_english = detect_primary_language(text) == 'en'
-        requires_translation = (not is_english) and (trans_config is not None)
-
-        if not is_english and trans_config is None:
-            if not getattr(self.__class__, '_has_shown_lang_warning', False):
-                ToastManager().show(
-                    "Non-English input detected, but translation model is not enabled. \nThe core model may not perfectly handle this language; please verify the accuracy of the results.",
-                    "warning"
-                )
-                self.__class__._has_shown_lang_warning = True
 
         # 4. 获取当前附件数据
         current_html = getattr(self, 'external_context_html', "")
@@ -1319,7 +1173,7 @@ class ChatTool(BaseTool):
 
         self.input_container.hide_context_preview()
         self.external_chunks = current_chunks
-        self.start_ai_response(kb_id, requires_translation)
+        self.start_ai_response(kb_id)
 
     def _restore_last_input(self):
         last_user_msg = None
@@ -1587,21 +1441,7 @@ class ChatTool(BaseTool):
         })
 
         self.external_chunks = old_chunks
-
-        trans_config = self.trans_selector.get_current_config()
-
-        is_english = detect_primary_language(new_text) == 'en'
-        requires_translation = (not is_english) and (trans_config is not None)
-
-        if not is_english and trans_config is None:
-            if not getattr(self.__class__, '_has_shown_lang_warning', False):
-                ToastManager().show(
-                    "Non-English input detected, but translation model is not enabled. \nThe core model may not perfectly handle this language; please verify the accuracy of the results.",
-                    "warning"
-                )
-                self.__class__._has_shown_lang_warning = True
-
-        self.start_ai_response(kb_id, requires_translation)
+        self.start_ai_response(kb_id)
 
     def cancel_generation(self):
         if not self.input_container.btn_stop.isEnabled():
