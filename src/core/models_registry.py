@@ -236,14 +236,18 @@ def load_external_models():
     ext_models = cfg.load_external_models_data()
     if ext_models:
         for m in ext_models.get("embedding", []):
+            m['trust_remote_code'] = False
             if not get_model_conf(m['id'], "embedding"): EMBEDDING_MODELS.append(m)
         for m in ext_models.get("reranker", []):
+            m['trust_remote_code'] = False
             if not get_model_conf(m['id'], "reranker"): RERANKER_MODELS.append(m)
 
 
 def register_external_model(model_info, model_type="embedding"):
     if not model_info: return
     model_id = model_info.get("id")
+
+    model_info['trust_remote_code'] = False
 
     if get_model_conf(model_id, model_type):
         return
