@@ -22,7 +22,7 @@ dependencies = [
     "optimum>=2.1.0",
     "curl-cffi>=0.14.0",
     "torch>=2.10.0",
-    "cryptography>=46.0.5",
+    "cryptography>=46.0.6",
     "keyring>=24.0.0",
     "chardet<6.0",
     "hf-xet>=1.2.0",
@@ -37,7 +37,7 @@ dependencies = [
     "litellm>=1.82.1",
     "fastapi>=0.135.1",
     "uvicorn>=0.41.0",
-    "langchain-core==1.2.22",
+    "langchain-core>=1.2.22",
 ]
 
 
