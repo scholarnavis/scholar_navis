@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Scholar Navis | AI-Driven Academic Navigation</title>
 
-    <link rel="icon" type="image/x-icon" href="/favicon.ico">
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 
-    <meta name="description" content="A high-performance PySide6 desktop application for academic research, featuring Local RAG, Academic MCP, and structured evidence organization.">
+    <meta name="description" content="A high-performance PySide6 desktop application for academic research, featuring Local RAG, Academic Agent Tools (MCP & SKILLs), and structured evidence organization.">
 
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <script>
@@ -109,13 +109,13 @@
                 </svg>
             </div>
             <h1 class="text-4xl md:text-6xl font-black mb-6 tracking-tight">
-                Scholar Navis
-            </h1>
-            <p class="text-lg md:text-xl text-slate-600 dark:text-slate-400 mb-10 max-w-3xl mx-auto leading-relaxed">
-                An intelligent <strong>Evidence Organizer</strong> designed for rigorous scientific literature review. Mitigating LLM hallucinations through a fusion of Local RAG, Hardware-Accelerated Reranking, and direct Model Context Protocol (MCP) integrations.
-            </p>
+                Scholar Navis
+            </h1>
+            <p class="text-lg md:text-xl text-slate-600 dark:text-slate-400 mb-10 max-w-3xl mx-auto leading-relaxed">
+                An intelligent <strong>Evidence Organizer</strong> designed for rigorous scientific literature review. Mitigating LLM hallucinations through a fusion of Local RAG, Hardware-Accelerated Reranking, and direct academic agent tools (Model Context Protocol [MCP] and customizable SKILLs).
+            </p>
 
-            <div class="flex flex-col sm:flex-row justify-center gap-4">
+            <div class="flex flex-col sm:flex-row justify-center gap-4">
                 <a href="http://scholarnavis.com/dl" class="inline-flex items-center justify-center px-8 py-4 bg-primary text-white font-bold rounded-xl hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
                     <i class="fa-solid fa-download mr-2"></i> Download Release
                 </a>
@@ -148,21 +148,21 @@
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
-                    <div class="text-primary mb-4"><i class="fa-solid fa-shield-halved text-3xl"></i></div>
-                    <h3 class="text-xl font-bold mb-3">Layer 1: Secure Data Ingestion</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4">
-                        A dual-path pipeline guarantees data sovereignty. The persistent path independently processes local PDFs through hardware-accelerated ONNX vectorization into a local ChromaDB, ensuring absolute privacy for unpublished manuscripts. A secondary, temporary path integrates journal RSS feeds seamlessly.
-                    </p>
-                </div>
+                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
+                    <div class="text-primary mb-4"><i class="fa-solid fa-shield-halved text-3xl"></i></div>
+                    <h3 class="text-xl font-bold mb-3">Layer 1: Secure Data Ingestion</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4">
+                        A dual-path pipeline guarantees data sovereignty. The persistent path independently processes local PDFs using hardware-accelerated ONNX vectorization into a local ChromaDB, enabling genuinely air-gapped environments alongside self-hosted MCP/SKILL modules for highly confidential research.
+                    </p>
+                </div>
 
-                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
-                    <div class="text-purple-500 mb-4"><i class="fa-solid fa-network-wired text-3xl"></i></div>
-                    <h3 class="text-xl font-bold mb-3">Layer 2: Logical Orchestration</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4">
-                        Mitigates corpus bias through automated language detection and English pre-translation. Standardized queries traverse Vector Search, Reranker scoring, in-context prompting, and schema injection before dispatch. Calibrated to anchor high-compliance LLMs against hallucination metrics.
-                    </p>
-                </div>
+                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
+                    <div class="text-purple-500 mb-4"><i class="fa-solid fa-network-wired text-3xl"></i></div>
+                    <h3 class="text-xl font-bold mb-3">Layer 2: Logical Orchestration</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4">
+                        Mitigates corpus bias through automated language detection and English pre-translation. Standardized queries traverse Vector Search, Reranker scoring, in-context prompting, and the execution of academic agent tools (MCP and SKILLs) before dispatch, enforcing objective factual constraints.
+                    </p>
+                </div>
 
                 <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
                     <div class="text-emerald-500 mb-4"><i class="fa-solid fa-code text-3xl"></i></div>
@@ -179,14 +179,14 @@
         <div class="max-w-7xl mx-auto">
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
-                    <div class="w-12 h-12 bg-blue-100 dark:bg-blue-900/30 rounded-lg flex items-center justify-center mb-6 text-blue-600 dark:text-blue-400">
-                        <i class="fa-solid fa-database text-xl"></i>
-                    </div>
-                    <h3 class="text-xl font-bold mb-3">Anchored Local RAG</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Build your private knowledge base with granular data traceability. Acts as an effective anchoring framework, significantly reducing citation and entity extraction error rates compared to standalone LLMs.
-                    </p>
-                </div>
+                    <div class="w-12 h-12 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center mb-6 text-purple-600 dark:text-purple-400">
+                        <i class="fa-solid fa-microscope text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-bold mb-3">Academic Agent Tools (MCP & SKILLs)</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Deep integration with a consortium of international biological and chemical databases (NCBI, UniProt, PubChem, STRINGdb, AlphaFold, etc.) via dynamic academic agent architecture. Performs real-time fact-checking and empowers the AI to autonomously retrieve scholarly materials.
+                    </p>
+                </div>
 
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
                     <div class="w-12 h-12 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center mb-6 text-purple-600 dark:text-purple-400">
