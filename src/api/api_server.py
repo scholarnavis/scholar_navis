@@ -980,7 +980,7 @@ def run_server():
         port = int(config_mgr.user_settings.get("api_server_port", 8000))
     except (ValueError, TypeError):
         port = 8000
-    api_key = config_mgr.user_settings.get("api_server_key", "").strip()
+    api_key = config_mgr.user_settings.get("api_server_key", "123456").strip()
     logger.info(f"Starting Standalone API Server on {host}:{port}")
     if api_key:
         logger.info("API Key authentication is ENABLED.")
