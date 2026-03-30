@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Scholar Navis | AI-Driven Academic Navigation</title>
 
-    <link rel="icon" type="image/x-icon" href="/favicon.ico">
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 
-    <meta name="description" content="A high-performance PySide6 desktop application for academic research, featuring Local RAG, Academic Agent Tools (MCP & SKILLs), and structured evidence organization.">
+    <meta name="description" content="A high-performance PySide6 desktop application for academic research, featuring Local RAG, Academic Agent Tools (MCP & SKILLs), and structured evidence organization.">
 
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <script>
@@ -83,9 +83,9 @@
         </div>
     </nav>
 
-    <header class="pt-32 pb-12 px-4 text-center">
-        <div class="max-w-4xl mx-auto">
-            <div class="w-40 h-40 mx-auto mb-8 logo-container">
+    <header class="pt-32 pb-12 px-4 flex flex-col items-center text-center">
+        <div class="max-w-4xl w-full mx-auto flex flex-col items-center">
+            <div class="w-40 h-40 mb-8 logo-container">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="100%" height="100%">
                     <defs>
                         <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#0F172A" /><stop offset="100%" stop-color="#1E1B4B" /></linearGradient>
@@ -109,13 +109,13 @@
                 </svg>
             </div>
             <h1 class="text-4xl md:text-6xl font-black mb-6 tracking-tight">
-                Scholar Navis
-            </h1>
-            <p class="text-lg md:text-xl text-slate-600 dark:text-slate-400 mb-10 max-w-3xl mx-auto leading-relaxed">
-                An intelligent <strong>Evidence Organizer</strong> designed for rigorous scientific literature review. Mitigating LLM hallucinations through a fusion of Local RAG, Hardware-Accelerated Reranking, and direct academic agent tools (Model Context Protocol [MCP] and customizable SKILLs).
-            </p>
+                Scholar Navis
+            </h1>
+            <p class="text-lg md:text-xl text-slate-600 dark:text-slate-400 mb-10 max-w-3xl mx-auto leading-relaxed">
+                An intelligent <strong>Evidence Organizer</strong> designed for rigorous scientific literature review. Mitigating LLM hallucinations through a fusion of Local RAG, Hardware-Accelerated Reranking, and direct academic agent tools (Model Context Protocol [MCP] and customizable SKILLs).
+            </p>
 
-            <div class="flex flex-col sm:flex-row justify-center gap-4">
+            <div class="flex flex-col sm:flex-row justify-center gap-4">
                 <a href="http://scholarnavis.com/dl" class="inline-flex items-center justify-center px-8 py-4 bg-primary text-white font-bold rounded-xl hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
                     <i class="fa-solid fa-download mr-2"></i> Download Release
                 </a>
@@ -142,32 +142,32 @@
 
     <section id="architecture" class="py-20 px-4 bg-slate-100 dark:bg-slate-900/50">
         <div class="max-w-7xl mx-auto">
-            <div class="text-center mb-16">
+            <div class="text-center mb-16 flex flex-col items-center mx-auto">
                 <h2 class="text-3xl font-bold mb-4">The Three-Layer Architecture</h2>
-                <p class="text-slate-500 max-w-2xl mx-auto">Discarding conventional cloud wrappers, Scholar Navis operates entirely locally through a rigorously engineered pipeline orchestrated by a native Qt Event Bus.</p>
+                <p class="text-slate-500 max-w-2xl">Discarding conventional cloud wrappers, Scholar Navis operates entirely locally through a rigorously engineered pipeline orchestrated by a native Qt Event Bus.</p>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
-                    <div class="text-primary mb-4"><i class="fa-solid fa-shield-halved text-3xl"></i></div>
-                    <h3 class="text-xl font-bold mb-3">Layer 1: Secure Data Ingestion</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4">
-                        A dual-path pipeline guarantees data sovereignty. The persistent path independently processes local PDFs using hardware-accelerated ONNX vectorization into a local ChromaDB, enabling genuinely air-gapped environments alongside self-hosted MCP/SKILL modules for highly confidential research.
-                    </p>
-                </div>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 items-stretch">
+                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 flex flex-col h-full">
+                    <div class="text-primary mb-4"><i class="fa-solid fa-shield-halved text-3xl"></i></div>
+                    <h3 class="text-xl font-bold mb-3">Layer 1: Secure Data Ingestion</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4 flex-grow">
+                        A dual-path pipeline guarantees data sovereignty. The persistent path independently processes local PDFs using hardware-accelerated ONNX vectorization into a local ChromaDB, enabling genuinely air-gapped environments alongside self-hosted MCP/SKILL modules for highly confidential research.
+                    </p>
+                </div>
 
-                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
-                    <div class="text-purple-500 mb-4"><i class="fa-solid fa-network-wired text-3xl"></i></div>
-                    <h3 class="text-xl font-bold mb-3">Layer 2: Logical Orchestration</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4">
-                        Mitigates corpus bias through automated language detection and English pre-translation. Standardized queries traverse Vector Search, Reranker scoring, in-context prompting, and the execution of academic agent tools (MCP and SKILLs) before dispatch, enforcing objective factual constraints.
-                    </p>
-                </div>
+                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 flex flex-col h-full">
+                    <div class="text-purple-500 mb-4"><i class="fa-solid fa-network-wired text-3xl"></i></div>
+                    <h3 class="text-xl font-bold mb-3">Layer 2: Logical Orchestration</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4 flex-grow">
+                        Mitigates corpus bias through automated language detection and English pre-translation. Standardized queries traverse Vector Search, Reranker scoring, in-context prompting, and the execution of academic agent tools (MCP and SKILLs) before dispatch, enforcing objective factual constraints.
+                    </p>
+                </div>
 
-                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
+                <div class="bg-white dark:bg-darkSurface p-8 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 flex flex-col h-full">
                     <div class="text-emerald-500 mb-4"><i class="fa-solid fa-code text-3xl"></i></div>
                     <h3 class="text-xl font-bold mb-3">Layer 3: Output Rendering</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed flex-grow">
                         Generated outputs undergo real-time parsing via regular expressions (regex) to drive a highly interactive UI. Native support for HTTP, Mermaid diagrams, and Cite protocols enables contextual citation verification and immediate database navigation.
                     </p>
                 </div>
@@ -179,22 +179,22 @@
         <div class="max-w-7xl mx-auto">
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
-                    <div class="w-12 h-12 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center mb-6 text-purple-600 dark:text-purple-400">
-                        <i class="fa-solid fa-microscope text-xl"></i>
-                    </div>
-                    <h3 class="text-xl font-bold mb-3">Academic Agent Tools (MCP & SKILLs)</h3>
-                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Deep integration with a consortium of international biological and chemical databases (NCBI, UniProt, PubChem, STRINGdb, AlphaFold, etc.) via dynamic academic agent architecture. Performs real-time fact-checking and empowers the AI to autonomously retrieve scholarly materials.
-                    </p>
-                </div>
+                    <div class="w-12 h-12 bg-blue-100 dark:bg-blue-900/30 rounded-lg flex items-center justify-center mb-6 text-blue-600 dark:text-blue-400">
+                        <i class="fa-solid fa-database text-xl"></i>
+                    </div>
+                    <h3 class="text-xl font-bold mb-3">Anchored Local RAG</h3>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        Build your private knowledge base with granular data traceability. Acts as an effective anchoring framework, significantly reducing citation and entity extraction error rates compared to standalone LLMs.
+                    </p>
+                </div>
 
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
                     <div class="w-12 h-12 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center mb-6 text-purple-600 dark:text-purple-400">
                         <i class="fa-solid fa-microscope text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Authoritative MCP Interoperability</h3>
+                    <h3 class="text-xl font-bold mb-3">Academic Agent Tools (MCP & SKILLs)</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Direct integration with authoritative databases including NCBI, UniProt, Semantic Scholar, and Unpaywall. This architecture empowers the AI to autonomously retrieve full-text PDFs and relevant scholarly materials.
+                        Deep integration with a consortium of international biological and chemical databases (NCBI, UniProt, PubChem, STRINGdb, AlphaFold, etc.) via dynamic academic agent architecture. Performs real-time fact-checking and empowers the AI to autonomously retrieve scholarly materials.
                     </p>
                 </div>
 
@@ -242,62 +242,68 @@
     </section>
 
     <section class="py-24 bg-slate-100 dark:bg-slate-900/50 border-t border-slate-200 dark:border-slate-800">
-        <div class="max-w-5xl mx-auto px-4">
-            <div class="text-center mb-16">
-                <h2 class="text-3xl font-bold mb-4">Hardware Utilization</h2>
-                <p class="text-slate-500">Scholar Navis maximizes local inference speeds dynamically routing tasks via CUDA (NVIDIA), DirectML (AMD/Intel), or CoreML (Apple Silicon).</p>
+        <div class="max-w-5xl mx-auto px-4 flex flex-col items-center">
+            <div class="text-center mb-16 max-w-2xl mx-auto">
+                <h2 class="text-3xl font-bold mb-4">Hardware Utilization & Built-in Matrix</h2>
+                <p class="text-slate-500">Scholar Navis maximizes local inference speeds dynamically routing tasks via CUDA, DirectML, or MPS.</p>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border border-slate-200 dark:border-slate-800">
-                    <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
-                        <span class="w-2 h-2 rounded-full bg-yellow-500"></span> Minimum Configuration
-                    </h4>
-                    <ul class="space-y-4">
-                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                            <span class="text-slate-500">Memory (RAM)</span>
-                            <span class="font-semibold">8 GB</span>
-                        </li>
-                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                            <span class="text-slate-500">Graphics (GPU)</span>
-                            <span class="font-semibold text-right text-sm">Not Required<br>(CPU-only Inference)</span>
-                        </li>
-                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                            <span class="text-slate-500">Disk Space</span>
-                            <span class="font-semibold">~2 GB (Lite Models)</span>
-                        </li>
-                        <li class="flex justify-between">
-                            <span class="text-slate-500">Models</span>
-                            <span class="font-medium text-blue-500 text-sm">Arctic-XS / BGE-Base</span>
-                        </li>
-                    </ul>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8 w-full items-stretch">
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border border-slate-200 dark:border-slate-800 flex flex-col justify-between">
+                    <div>
+                        <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full bg-yellow-500"></span> Minimum (Nano / Lite)
+                        </h4>
+                        <ul class="space-y-4">
+                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                <span class="text-slate-500">Memory (RAM)</span>
+                                <span class="font-semibold">~2 GB+</span>
+                            </li>
+                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                <span class="text-slate-500">Graphics (GPU)</span>
+                                <span class="font-semibold text-right text-sm">Not Required<br>(CPU-Execution Ready)</span>
+                            </li>
+                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                <span class="text-slate-500">Disk Space</span>
+                                <span class="font-semibold">1.6 GB</span>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 flex justify-between items-start">
+                        <span class="text-slate-500 mt-1">Models</span>
+                        <span class="font-medium text-blue-500 text-sm text-right leading-relaxed">Embedding: Snowflake Arctic XS<br>Reranker: BGE-Reranker-Base</span>
+                    </div>
                 </div>
 
-                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border-2 border-primary shadow-xl md:scale-105">
-                    <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
-                        <span class="w-2 h-2 rounded-full bg-emerald-500"></span> Recommended (Pro)
-                    </h4>
-                    <ul class="space-y-4">
-                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                            <span class="text-slate-500">Memory (RAM)</span>
-                            <span class="font-semibold">16 GB - 32 GB</span>
-                        </li>
-                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                            <span class="text-slate-500">Graphics (VRAM)</span>
-                            <span class="font-semibold text-right">NVIDIA 6GB+<br><span class="text-xs font-normal text-slate-400">(RTX 3060/4060+)</span></span>
-                        </li>
-                        <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                            <span class="text-slate-500">Disk Space</span>
-                            <span class="font-semibold">~10 GB (High Precision)</span>
-                        </li>
-                        <li class="flex justify-between">
-                            <span class="text-slate-500">Models</span>
-                            <span class="font-medium text-blue-500 text-sm">BGE-M3 / Qwen2-7B-Embed</span>
-                        </li>
-                    </ul>
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border-2 border-primary shadow-xl md:scale-105 flex flex-col justify-between">
+                    <div>
+                        <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full bg-emerald-500"></span> Pro (Scientific / M3)
+                        </h4>
+                        <ul class="space-y-4">
+                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                <span class="text-slate-500">Memory (RAM)</span>
+                                <span class="font-semibold">8 GB+</span>
+                            </li>
+                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                <span class="text-slate-500">Graphics (VRAM)</span>
+                                <span class="font-semibold text-right">GPU Recommended<br><span class="text-xs font-normal text-slate-400">4GB ~ 6GB VRAM</span></span>
+                            </li>
+                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                <span class="text-slate-500">Disk Space</span>
+                                <span class="font-semibold">5.0 GB</span>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 flex justify-between items-start">
+                        <span class="text-slate-500 mt-1">Models</span>
+                        <span class="font-medium text-emerald-500 text-sm text-right leading-relaxed">Embedding: BGE-M3<br>Reranker: BGE-Reranker-v2-M3</span>
+                    </div>
                 </div>
             </div>
-            <p class="mt-12 text-center text-xs text-slate-400 italic">Note: High-performance Reranker models (e.g., Gemma-9B architecture) may incur substantial latency penalties or require 20GB+ VRAM for optimal execution speed.</p>
+            <p class="mt-12 text-center text-sm text-slate-600 dark:text-slate-400 max-w-3xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-darkSurface p-4 rounded-xl shadow-sm">
+                <strong>Beyond the Defaults:</strong> Scholar Navis supports seamless integration of custom HuggingFace repositories. External embedding and reranking models can be dynamically loaded and compiled to ONNX locally to build your personalized research pipeline.
+            </p>
         </div>
     </section>
 
