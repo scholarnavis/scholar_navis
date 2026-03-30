@@ -669,7 +669,7 @@ class McpConfigDialog(BaseDialog):
         desc_v_layout.setSpacing(4)
 
         self.inp_desc = QLineEdit()
-        self.inp_desc.setPlaceholderText("e.g. Provide 12306 train ticket search capabilities")
+        self.inp_desc.setPlaceholderText("Describe the tool's purpose (English only)...")  # 修改占位符，提示仅限英文
 
         desc_regex = QRegularExpression(r"^[\x20-\x7E]*$")
         desc_validator = QRegularExpressionValidator(desc_regex, self.inp_desc)
@@ -682,6 +682,11 @@ class McpConfigDialog(BaseDialog):
 
         self.lbl_desc_icon = QLabel()
         self.lbl_desc_icon.setFixedSize(14, 14)
+
+        self.lbl_desc_text = QLabel(
+            "<b>Crucial for AI:</b> Clearly describe the tool's purpose in English so the AI knows exactly when to use it.")
+        self.lbl_desc_text.setWordWrap(True)
+        self.lbl_desc_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self.lbl_desc_text = QLabel(
             "<b>Crucial for AI:</b> Clearly describe the tool's purpose so the AI knows exactly when to use it.")
@@ -1500,7 +1505,7 @@ class SkillConfigDialog(BaseDialog):
         desc_v_layout.setSpacing(4)
 
         self.input_desc = QLineEdit(description)
-        self.input_desc.setPlaceholderText("Description tells the LLM what this tool does.")
+        self.input_desc.setPlaceholderText("Describe the tool's purpose (English only)...")  # 修改占位符，与 MCP 保持一致
         self.input_desc.setMinimumHeight(32)
 
         desc_regex = QRegularExpression(r"^[\x20-\x7E]*$")
@@ -1516,7 +1521,7 @@ class SkillConfigDialog(BaseDialog):
         self.lbl_desc_icon.setFixedSize(14, 14)
 
         self.lbl_desc_text = QLabel(
-            "<b>Crucial for AI:</b> Clearly describe the tool's purpose so the AI knows exactly when to use it.")
+            "<b>Crucial for AI:</b> Clearly describe the tool's purpose in English so the AI knows exactly when to use it.")  
         self.lbl_desc_text.setWordWrap(True)
         self.lbl_desc_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
