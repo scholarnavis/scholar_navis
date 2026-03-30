@@ -1,176 +1,87 @@
+# Scholar Navis
 
+**A Privacy-First Scientific Discovery Engine Powered by Localized Retrieval-Augmented Generation (RAG) and Academic Agent Tools**
 
-![构架图](./docs/architecture.png)
+Scholar Navis is a native desktop research engine engineered specifically for computational biology and molecular plant sciences. Designed to circumvent the critical cognitive bottleneck induced by the exponential growth of multi-omics data, this system integrates Retrieval-Augmented Generation (RAG) with specialized academic agent tools (including the Model Context Protocol [MCP] and customizable SKILLs).
 
-## 一、 系统执行摘要
+Scholar Navis fundamentally resolves the pervasive "hallucination" and "knowledge conflict" phenomena inherent in Large Language Models (LLMs). By orchestrating a paradigm shift from an "opaque end-to-end generator" to a "transparent and traceable scientific reasoning scaffold," the framework ensures that all synthetic outputs are strictly anchored to verified local literature pools and authoritative biological databases.
 
-Scholar Navis 是一个主要在本地客户端运行的学术文献处理系统。该系统整合了文档解析、向量化检索、大语言模型（LLM）对话编排以及外部订阅流（RSS）采集。系统采用了表现层与业务逻辑层分离的架构，通过多线程与子进程隔离繁重的计算任务，并实现了内部私有持久化数据与外部临时文本流的统一调度与处理。
+-----
 
-------
+## 🏗️ System Architecture
 
+![](./docs/architecture.png)
 
+The Scholar Navis framework operates through three rigorously engineered layers, orchestrated by a native Qt Event Bus to construct a high-fidelity data processing pipeline:
 
-## 二、 全链路处理流程与核心逻辑
+### Layer 1: Secure Data Ingestion and Vectorization
 
-系统在运行过程中，数据从输入到输出的生命周期可划分为以下五个标准处理阶段：
+Establishing a highly secure, dual-path pipeline to guarantee absolute data privacy for unpublished or sensitive research. The persistent data path independently processes local PDF manuscripts utilizing hardware-accelerated ONNX vectorization into a localized ChromaDB instance, effectively isolating core intellectual property. Concurrently, a transient path facilitates the seamless integration of journal RSS feeds and temporary text inputs.
 
-### 阶段 1：数据摄入与分类处理 (Data Ingestion & Routing)
+### Layer 2: Logical Orchestration and Inference
 
-系统对输入数据采取“持久化”与“临时化”双轨处理逻辑：
+To mitigate linguistic and pre-training corpus biases, user inputs undergo automated language detection and are pre-translated into English. Standardized queries are processed via ChromaDB vector search and refined by local Reranker scoring. Crucially, before being dispatched to the LLM, the context is dynamically augmented through in-context prompting, strictly defined JSON schema injection, and the execution of academic agent tools (MCP and SKILLs), enforcing objective factual constraints.
 
-- **持久化路径（本地文献）：** 用户导入 PDF 或文本文件后，系统首先进行大小与哈希双重去重。随后，根据当前配置的模型上限进行动态切分（Dynamic Chunking），调用 ONNX Runtime（结合硬件加速）提取文本向量，最终将向量与文本片段写入 ChromaDB，并在 meta.json 中建立文件 UUID 与真实名称的映射。
-- **临时化路径（外部订阅流）：** RSS 模块通过防屏蔽网络请求抓取线上文献的标题与摘要，并在后台异步嗅探 OA（Open Access）全文链接。当用户选择将这些 RSS 摘要发送至对话框时，系统**绕过向量化与 ChromaDB 存储**，直接将其作为“外部上下文（External Context）”暂存于内存中，避免了对本地知识库的污染。
+### Layer 3: Dynamic Output Rendering and Interaction
 
-### 阶段 2：意图预处理 (Intent Preprocessing)
+Utilizing real-time regular expression (regex) parsing, this layer constructs a highly interactive academic interface. Specialized biological identifiers (e.g., NCBI TaxID, PubChem CID) are dynamically transformed into actionable hyperlinks. A dedicated "Cited Sources" module ensures rigorous citation tracking, while multidimensional heuristic follow-up prompts are generated to augment lateral scientific exploration.
 
-- **语言自适应：** 当用户在 Chat 界面提交查询（Query）时，系统利用 langdetect 进行语言检测。若输入为非英语，系统会调用配置的翻译模型，通过预设的提示词（要求保留拉丁学名与专业术语）将其翻译为标准学术英语，以对齐英文为主的底层向量库。
+-----
 
-### 阶段 3：混合召回与统一重排 (Hybrid Recall & Unified Reranking)
+## 🚀 Core Capabilities & Performance Benchmarks
 
-系统将来自不同渠道的信息进行合并与降噪：
+Scholar Navis rigorously addresses the latency-accuracy trade-off and the inherent parametric biases of highly conversational foundation models.
 
-- **初步召回：** 使用处理后的 Query 对 ChromaDB 发起向量检索，获取数十个相关的本地文档切片。
-- **上下文合并：** 将上述本地文档切片，与内存中挂载的“临时化数据”（如用户勾选的 RSS 摘要集合、临时上传的纯文本）合并为一个候选文档池。
-- **统一重排：** 将整个候选文档池与 Query 输入至独立的 Reranker（重排引擎）子进程中。Reranker 基于语义相关性进行交叉打分与排序，截取 Top-K 个片段，形成最终的高纯度上下文，并生成带有统一编号的 sources_map（来源映射表）。
+### 1\. Deep Hallucination Mitigation in Literature Retrieval
 
-### 阶段 4：智能体工具路由与执行 (Agentic Routing & MCP Execution)
+General-purpose LLMs frequently exhibit severe citation hallucinations, acting as autoregressive sequence predictors that prioritize fluent but flawed parametric memory. Scholar Navis utilizes strict source confinement to sever these unreliable inference paths.
 
-若用户开启了联网/工具功能，系统会介入 MCP 协议层：
+![](./docs/Figure_Literature_Retrieval_Evaluation.png)
 
-- **工具降维过滤：** 面对可能存在的数十个 MCP 工具，系统提取各工具的名称与描述，将其视为普通文本，**复用阶段 3 的 Reranker 模型**进行相关性打分。仅保留得分最高的少数工具（Top-K），将其 Schema 注入给 LLM，防止超出 Token 限制。
-- **决策与调用：** LLM 接收包含“系统指令、重排后的合并上下文、工具 Schema、用户 Query”的 Prompt。若 LLM 判定当前上下文不足以回答问题，将输出 Tool Call（工具调用）指令。系统同步执行对应的 MCP 工具（如查询 NCBI），将返回的 JSON 结果附加至对话上下文中，驱动 LLM 进行二次推理。
+**Performance:** Quantitative evaluations indicate that standalone foundation models yield literature retrieval accuracies below 10%. Integration with the Scholar Navis localized RAG and MCP architecture effectively eliminates fabricated references, significantly elevating the retrieval accuracy of top-tier model combinations (e.g., powered by Claude-sonnet-4.6, Qwen3.5-plus) to over 90% ($P \le 0.001$).
 
-### 阶段 5：流式渲染与闭环交互 (Streaming Render & Interactive Feedback)
+### 2\. High-Precision Biological Entity Extraction
 
-- **正则解析与排版：** LLM 的输出以数据流（Stream）形式返回。系统通过正则表达式提取特定结构：将 <think> 标签内的推理过程转化为 UI 上的可折叠组件；将 Mermaid 图表代码块转化为 mermaid:// 内部协议链接。
-- **引用溯源：** LLM 输出的引用序号（如 [1], [2]）会被系统捕获，并与阶段 3 生成的 sources_map 进行比对，渲染为带有 cite:// 内部协议的可点击链接。
-- **交互阅读：** 用户点击引用链接后，系统调起内部的 PDF 或文本查看器。在阅读器中，用户选中复杂文本并按下空格键，系统将通过全局信号触发独立的翻译悬浮窗进行文本转换或润色，完成整个学术处理闭环。
+By directing queries through MCP to authoritative databases, the framework forces the LLM's inference logic to strictly anchor onto high-fidelity biological metadata (e.g., exact amino acid sequences, interacting protein networks) prior to output generation.
 
-------
+![](./docs/Figure_Precision_in_Biological_Entity_Extraction_Evaluation.png)
 
+**Performance:** The extraction precision for complex biological entities is significantly enhanced from a baseline of 30%–60% to a robust 60%–90%. The system notably resolves the "knowledge conflict" for highly instruction-compliant models by suppressing their ungrounded parametric memory.
 
+### 3\. Resolving the Latency-Accuracy Trade-off
 
-## 三、 宏观架构设计支撑
+Scholar Navis empowers researchers to seamlessly synthesize critical evidence across disparate sources, drastically compressing the information acquisition cycle while guaranteeing absolute scientific rigor.
 
-支撑上述流水线稳定运行的底层架构包含以下三个核心机制：
+![](./docs/Figure_End-to-End_Efficiency_Evaluation.png)
 
-1. **事件驱动的模块解耦 (GlobalSignals)**
-   UI 组件与后台业务逻辑相对独立。模块间的状态同步（如知识库切换、RSS 文本向聊天框的投递、划词翻译的唤醒等）均通过 Qt 的 Signal/Slot 机制及单例模式的全局事件总线进行路由。
-2. **异步与进程隔离机制 (TaskManager)**
-   系统构建了标准的后台任务基类。常规网络请求、文件 I/O 被分配至线程池（QThread）中运行；对于资源密集型的推理任务（如 ONNX 向量提取和 Reranker 重排），系统调用了 multiprocessing 进行严格的子进程隔离，规避了 Python GIL 的限制，确保 UI 线程无阻塞。
-3. **硬件资源自适应调度 (DeviceManager)**
-   在初始化模型引擎（如 ONNXRuntime）前，系统探测当前硬件环境，动态配置最优的 ExecutionProvider（CUDA, DirectML, ROCm 或 CoreML）。同时，针对显存较小的设备设计了低显存模式分支，在 LLM 生成对话前主动释放检索模型占用的内存。
+**Performance:** In end-to-end simulations of complex information-gathering tasks, traditional manual workflows required approximately 870 seconds. While standalone models are fast, their data is scientifically unreliable. Scholar Navis achieves a pragmatic equilibrium, securing highly accurate biological data in a fraction of the manual curation time without introducing statistically significant latency for optimized models.
 
-------
+-----
 
+## 🔒 Data Privacy and Hardware-Bound Security
 
+Given the extreme sensitivity of pre-published biological data, Scholar Navis is engineered with stringent security protocols:
 
-## 四、 核心模块技术特征
+  * **Absolute Local Processing:** All sensitive operations, including PDF parsing, embedding vector construction, and Reranker semantic filtering, are executed strictly offline on local hardware.
+  * **Air-Gapping Capability:** External network requests are initiated strictly under explicit user authorization. For highly confidential institutional research, users can deploy fully localized, non-networked open-weight LLMs alongside self-hosted MCP/SKILL modules, achieving a genuinely air-gapped environment.
+  * **Hardware-Bound Configuration Security:** All user configuration files (including API credentials) are encrypted utilizing OS-native security primitives and cryptographically bound to the unique hardware fingerprint of the host machine.
 
-### 4.1 信息采集与反反爬 (RSSTool, OAFetcher)
+-----
 
-- 底层网络请求使用了 curl_cffi 以模拟主流浏览器的 TLS 指纹。
-- 针对防护盾（如 Cloudflare），设计了代理节点降级机制。
-- OA 全文链接嗅探通过并发请求多源 API（Semantic Scholar, OpenAlex 等）并结合启发式规则过滤杂项实现。
+## 📚 Integrated Authoritative Databases and References
 
-### 4.2 独立阅读与处理工具 (pdf_viewer, mermaid_viewer, quick_translator)
+Scholar Navis deeply integrates with a consortium of international biological and chemical databases via its dynamic academic agent architecture (MCP/SKILLs) to perform real-time fact-checking.
 
-- 基于 PyMuPDF 和 QTextBrowser 实现了支持文档定位与高亮的内置阅读器。
-- 翻译模块为独立悬浮窗口，内置特定提示词，确保在翻译或润色过程中保留拉丁学名及专有名词。
-- 图表渲染器基于 QWebEngineView 与本地静态 mermaid.min.js 进行离线渲染，并支持无损导出。
+**When utilizing Scholar Navis for academic research, please ensure appropriate citation of the following foundational database resources that power the system's factual grounding:**
 
-------
-
-
-
-```python
-# arxiv_fetcher_skill.py
-import json
-import urllib.request
-import xml.etree.ElementTree as ET
-
-# ==========================================
-# 1. 必须定义的 SCHEMA (OpenAI 格式)
-# ==========================================
-SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "fetch_arxiv_summary",  # 注意：这个名字会显示在你的 Chat 工具过滤器列表里
-        "description": "Fetch the title, authors, and abstract summary of a paper from ArXiv using its ArXiv ID.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "arxiv_id": {
-                    "type": "string",
-                    "description": "The exact ArXiv ID of the paper (e.g., '2303.08774' or '1706.03762')."
-                }
-            },
-            "required": ["arxiv_id"]
-        }
-    }
-}
-
-# ==========================================
-# 2. 必须定义的 execute 函数
-# ==========================================
-def execute(arxiv_id: str) -> str:
-    """
-    实际执行逻辑。
-    参数名称必须和 SCHEMA 中的 properties 键名完全一致。
-    返回值建议是 JSON 格式的字符串，这样大模型最容易理解。
-    """
-    # ArXiv API 接口地址
-    url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
-    
-    try:
-        # 发送请求 (带上通用 User-Agent 防拦截)
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10.0) as response:
-            xml_data = response.read()
-
-        # 解析返回的 XML 数据
-        root = ET.fromstring(xml_data)
-        ns = {'atom': 'http://www.w3.org/2005/Atom'}
-        entry = root.find('atom:entry', ns)
-
-        # 没找到论文的异常处理
-        if entry is None:
-            return json.dumps({"status": "error", "message": f"No paper found for ArXiv ID: {arxiv_id}"})
-
-        # 提取关键信息并清洗换行符
-        title = entry.find('atom:title', ns).text.replace('\n', ' ').strip()
-        summary = entry.find('atom:summary', ns).text.replace('\n', ' ').strip()
-        authors = [author.find('atom:name', ns).text for author in entry.findall('atom:author', ns)]
-        published = entry.find('atom:published', ns).text
-
-        # 构建给大模型的结果
-        result = {
-            "status": "success",
-            "arxiv_id": arxiv_id,
-            "title": title,
-            "published_date": published,
-            "authors": ", ".join(authors),
-            "abstract": summary
-        }
-        
-        return json.dumps(result, ensure_ascii=False)
-
-    except urllib.error.URLError as e:
-        return json.dumps({"status": "error", "message": f"Network error connecting to ArXiv: {e.reason}"})
-    except Exception as e:
-        return json.dumps({"status": "error", "message": f"Unexpected error during execution: {str(e)}"})
-```
-
-
-## 五、 工程质量与容错机制
-
-1. **异常与状态回滚：**
-   所有涉及网络请求与本地 I/O 的任务均包含了 try-except-finally 结构。在长耗时任务（如导入、导出）被中止时，系统会执行清理临时文件（.lock, .tmp）、回滚界面状态等操作。
-2. **UI 线程安全性：**
-   针对 PySide6 中常见的跨线程操作和模态对话框嵌套问题，系统使用了 QTimer.singleShot 进行异步延时处理，确保前一个事件循环结束或对话框销毁后再触发后续的 UI 更新，避免了界面逻辑死锁。
-3. **UI 样式统一管理：**
-   构建了 ThemeManager 单例进行集中管理。各组件的 QSS 样式表、自绘控件颜色及 SVG 图标着色，均通过统一接口与当前设定的主题模式挂钩。
-
-## 六、 总结
-
-从代码层面的实现逻辑来看，Scholar Navis 是一个管线清晰、状态流转严谨的桌面端应用程序。系统在数据输入端分离了“需持久化的私有文件”与“临时处理的订阅文本”，在中间层通过重排引擎（Reranker）统一了本地检索与 MCP 工具的路由标准，并在输出端通过正则与内部协议实现了多源引用数据的聚合与交互。其工程实现具备明确的模块划分、合理的并发隔离与较强的容错控制，能够稳定支撑桌面端的学术文献本地化管理与处理需求。
+  * **NCBI:** Sayers, E.W., Beck, J., Bolton, E.E., et al. (2025). Database resources of the National Center for Biotechnology Information in 2025. *Nucleic Acids Res* 53:D20–d29.
+  * **UniProt:** Consortium, T.U. (2024). UniProt: the Universal Protein Knowledgebase in 2025. *Nucleic Acids Research* 53:D609–D617.
+  * **PubChem:** Kim, S., Chen, J., Cheng, T., et al. (2024). PubChem 2025 update. *Nucleic Acids Research* 53:D1516–D1525.
+  * **RCSB PDB:** \* Berman, H.M., Westbrook, J., Feng, Z., et al. (2000). The Protein Data Bank. *Nucleic Acids Research* 28:235–242.
+      * Burley, S.K., Bhatt, R., Bhikadiya, C., et al. (2024). Updated resources for exploring experimentally-determined PDB structures and Computed Structure Models at the RCSB Protein Data Bank. *Nucleic Acids Research* 53:D564–D574.
+  * **STRINGdb:** von Mering, C., Jensen, L.J., Snel, B., et al. (2005). STRING: known and predicted protein-protein associations, integrated and transferred across organisms. *Nucleic Acids Res* 33:D433–437.
+  * **Ensembl Plants:** Yates, A.D., Allen, J., Amode, R.M., et al. (2021). Ensembl Genomes 2022: an expanding genome resource for non-vertebrates. *Nucleic Acids Research* 50:D996–D1003.
+  * **AlphaFold:** Jumper, J., Evans, R., Pritzel, A., et al. (2021). Highly accurate protein structure prediction with AlphaFold. *Nature* 596:583–589.
+  * **KEGG:** Kanehisa, M., and Goto, S. (2000). KEGG: kyoto encyclopedia of genes and genomes. *Nucleic Acids Res* 28:27–30.
+  * **ChEBI:** Degtyarenko, K., de Matos, P., Ennis, M., et al. (2007). ChEBI: a database and ontology for chemical entities of biological interest. *Nucleic Acids Research* 36:D344–D350.
+  * **JASPAR:** Ovek Baydar, D., Rauluseviciute, I., Aronsen, D.R., et al. (2025). JASPAR 2026: expansion of transcription factor binding profiles and integration of deep learning models. *Nucleic Acids Research* 54:D184–D193.
