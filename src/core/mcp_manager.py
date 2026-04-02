@@ -279,10 +279,10 @@ class MCPManager:
             def _unwrap_exception(exc):
                 if hasattr(exc, 'exceptions'):
                     return " | ".join(_unwrap_exception(sub_e) for sub_e in exc.exceptions)
-                return str(exc)
+                return f"{exc.__class__.__name__}({str(exc)})" if str(exc) else f"{exc.__class__.__name__}()"
 
             err_msg = _unwrap_exception(e)
-            if not err_msg.strip():
+            if not err_msg.strip() or err_msg == "()":
                 err_msg = repr(e)
 
             logger.error(f"[{server_name}] Connection error: {err_msg}")

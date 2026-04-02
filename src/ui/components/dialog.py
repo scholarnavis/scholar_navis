@@ -1521,7 +1521,7 @@ class SkillConfigDialog(BaseDialog):
         self.lbl_desc_icon.setFixedSize(14, 14)
 
         self.lbl_desc_text = QLabel(
-            "<b>Crucial for AI:</b> Clearly describe the tool's purpose in English so the AI knows exactly when to use it.")  
+            "<b>Crucial for AI:</b> Clearly describe the tool's purpose in English so the AI knows exactly when to use it.")
         self.lbl_desc_text.setWordWrap(True)
         self.lbl_desc_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
