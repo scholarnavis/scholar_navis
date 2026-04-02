@@ -39,6 +39,9 @@ dependencies = [
     "uvicorn>=0.41.0",
     "langchain-core>=1.2.22",
     "onnx>=1.21.0",
+    "aiohttp>=3.13.4",
+    "requests>=2.33.0",
+    "pygments>=2.20.0",
 ]
 
 
