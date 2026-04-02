@@ -14,11 +14,12 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QFileDialog, QFrame, QAbstractItemView, QMenu, QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.core_task import TaskManager, TaskState
+from src.core.core_task import TaskManager, TaskState, TaskMode
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
-from src.task.rss_tasks import FetchRSSTask
+from src.task.rss_tasks import FetchRSSTask, SearchArticlesTask, ImportRssTask, ExportRssTask
 from src.tools.base_tool import BaseTool
+from src.ui.components.RotatingSpinner import ModernSpinner
 from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog, StandardDialog
 from src.ui.components.toast import ToastManager
 
@@ -259,6 +260,12 @@ class ArticleWidget(QFrame):
         self.btn_chat.clicked.connect(self._send_to_chat)
         btn_layout.insertWidget(1, self.btn_chat)
 
+        if self.article_data.get('pdf_url'):
+            self.btn_download_oa = QPushButton(" Download OA Article")
+            self.btn_download_oa.setCursor(Qt.PointingHandCursor)
+            self.btn_download_oa.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['pdf_url'])))
+            btn_layout.insertWidget(0, self.btn_download_oa)
+
         self.btn_link = QPushButton(" Publisher Link")
         self.btn_link.setCursor(Qt.PointingHandCursor)
         self.btn_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.article_data['link'])))
@@ -291,6 +298,14 @@ class ArticleWidget(QFrame):
         if hasattr(self, 'btn_chat'):
             self.btn_chat.setIcon(tm.icon("send", "text_main"))
             self.btn_chat.setStyleSheet(btn_style)
+
+        if hasattr(self, 'btn_download_oa'):
+            self.btn_download_oa.setIcon(tm.icon("download", "bg_main"))
+            # Uses a solid green success background with main background color (usually white/black) for text
+            self.btn_download_oa.setStyleSheet(
+                f"QPushButton {{ background-color: {tm.color('success')}; color: {tm.color('bg_main')}; border: none; border-radius: 4px; padding: 4px 10px; font-weight: bold; }}"
+                f"QPushButton:hover {{ opacity: 0.8; }}"
+            )
 
         if hasattr(self, 'btn_link'):
             self.btn_link.setIcon(tm.icon("link", "text_main"))
@@ -416,20 +431,17 @@ class RSSTool(BaseTool):
             self.btn_manage.setIcon(tm.icon("folder", "bg_main"))
             self.btn_manage.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;")
 
-        if hasattr(self, 'btn_edit'):
-            self.btn_edit.setIcon(tm.icon("edit", "text_main"))
-            self.btn_edit.setStyleSheet(f"background-color: {btn_bg}; color: {text_main}; padding: 6px 15px; border-radius: 4px; border: 1px solid {border};")
+        if hasattr(self, 'btn_more_actions'):
+            self.btn_more_actions.setIcon(tm.icon("settings", "text_main"))
+            self.btn_more_actions.setStyleSheet(
+                f"background-color: {btn_bg}; color: {text_main}; padding: 6px 15px; border-radius: 4px; border: 1px solid {border};")
 
-        if hasattr(self, 'btn_add'):
-            self.btn_add.setIcon(tm.icon("add", "bg_main"))
-            self.btn_add.setStyleSheet(
-                f"background-color: {tm.color('success')}; color: {tm.color('bg_main')}; "
-                f"padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;"
-            )
-
-        if hasattr(self, 'btn_unsub'):
-            self.btn_unsub.setIcon(tm.icon("delete", "bg_main"))
-            self.btn_unsub.setStyleSheet(f"background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; border: none;")
+        if hasattr(self, 'more_menu'):
+            self.more_menu.setStyleSheet(f"""
+                        QMenu {{ background-color: {bg_card}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 4px; }} 
+                        QMenu::item {{ padding: 6px 20px; }}
+                        QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
+                    """)
 
         if hasattr(self, 'btn_refresh'):
             self.btn_refresh.setIcon(tm.icon("sync", "bg_main"))
@@ -455,8 +467,94 @@ class RSSTool(BaseTool):
             self.btn_export_pdf.setIcon(tm.icon("file-text", "warning"))
             self.btn_export_pdf.setStyleSheet(f"QPushButton {{ color: {tm.color('warning')}; background-color: transparent; border: 1px solid {tm.color('warning')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; }}")
 
+        if hasattr(self, 'inp_global_search'):
+            self.inp_global_search.setStyleSheet(f"""
+                        QLineEdit {{
+                            background-color: {bg_main}; 
+                            color: {text_main}; 
+                            border: 1px solid {tm.color('accent')}; 
+                            border-radius: 15px; 
+                            padding: 6px 15px; 
+                            font-size: 13px;
+                        }}
+                        QLineEdit:focus {{
+                            border: 2px solid {tm.color('accent_hover')};
+                        }}
+                    """)
 
+        if hasattr(self, 'lbl_loading_anim'):
+            self.lbl_loading_anim.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: bold;")
 
+    def trigger_global_search(self):
+        query = self.inp_global_search.text().strip()
+        if not query:
+            row = self.feed_list.currentRow()
+            if row >= 0:
+                self._on_feed_selected(row)
+            return
+
+        self._clear_articles()
+        self.feed_list.clearSelection()
+
+        self.lbl_loading_text.setText(f"Searching for '{query}'...")
+        self.loading_container.show()
+        self.spinner.start()
+        self.scroll_area.hide()
+
+        if not hasattr(self, 'search_task_mgr'):
+            self.search_task_mgr = TaskManager()
+
+        try:
+            self.search_task_mgr.sig_result.disconnect()
+            self.search_task_mgr.sig_state_changed.disconnect()
+        except Exception:
+            pass
+
+        self.search_task_mgr.sig_result.connect(self._on_search_result)
+        self.search_task_mgr.sig_state_changed.connect(self._on_search_state)
+
+        # Launch the background search
+        from src.core.core_task import TaskMode
+        self.search_task_mgr.start_task(
+            SearchArticlesTask,
+            "rss_search",
+            mode=TaskMode.PROCESS,
+            query=query,
+            cache_file=self.cache_file
+        )
+
+    def _on_search_state(self, state, msg):
+        if state in [TaskState.SUCCESS.value, TaskState.FAILED.value, TaskState.TERMINATED.value]:
+
+            # --- 停止并隐藏动画 ---
+            self.spinner.stop()
+            self.loading_container.hide()
+            self.scroll_area.show()
+
+            if state == TaskState.FAILED.value:
+                ToastManager().show(f"Search failed: {msg}", "error")
+
+    def _on_search_result(self, results):
+        if not results:
+            lbl = QLabel(f"No articles found matching '{self.inp_global_search.text()}'")
+            lbl.setStyleSheet(
+                f"color: {ThemeManager().color('text_muted')}; padding: 30px; font-size: 15px; font-style: italic;")
+            lbl.setAlignment(Qt.AlignCenter)
+            self.article_layout.insertWidget(0, lbl)
+            return
+
+        # Prepare for rendering
+        if not hasattr(self, 'article_widgets_cache'):
+            self.article_widgets_cache = {}
+
+        # Use a virtual URL key for search results cache
+        self.current_render_url = "_global_search_results"
+        self.article_widgets_cache[self.current_render_url] = []
+        self.render_queue = results.copy()
+
+        # Start standard batch rendering mechanism
+        self.render_timer.start(15)
+        ToastManager().show(f"Found {len(results)} relevant articles.", "success")
 
     def get_ui_widget(self) -> QWidget:
         if hasattr(self, 'widget'): return self.widget
@@ -467,29 +565,43 @@ class RSSTool(BaseTool):
 
         toolbar = QHBoxLayout()
         self.btn_manage = QPushButton("Manage Subscriptions")
-        self.btn_manage.setStyleSheet("background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+        self.btn_manage.setStyleSheet(
+            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
         self.btn_manage.clicked.connect(self.open_subscription_manager)
 
-        self.btn_edit = QPushButton("Edit Source")
-        self.btn_edit.clicked.connect(self.edit_feed)
+        # 替换原有零散按钮，整合为下拉菜单
+        self.btn_more_actions = QPushButton(" Options")
+        self.more_menu = QMenu(self.btn_more_actions)
 
-        self.btn_unsub = QPushButton("Unsubscribe Selected")
-        self.btn_unsub.clicked.connect(lambda: self._batch_action("unsubscribe"))
+        self.action_add = self.more_menu.addAction("Add Custom Source")
+        self.action_add.triggered.connect(self.add_custom_feed)
+
+        self.action_edit = self.more_menu.addAction("Edit Source")
+        self.action_edit.triggered.connect(self.edit_feed)
+
+        self.action_unsub = self.more_menu.addAction("Unsubscribe Selected")
+        self.action_unsub.triggered.connect(lambda: self._batch_action("unsubscribe"))
+
+        self.more_menu.addSeparator()
+
+        self.action_import = self.more_menu.addAction("Import Feeds")
+        self.action_import.triggered.connect(self.import_feeds)
+
+        self.action_export = self.more_menu.addAction("Export Feeds")
+        self.action_export.triggered.connect(self.export_feeds)
+
+        self.btn_more_actions.setMenu(self.more_menu)
 
         self.lbl_time = QLabel("Last Fetched: Never")
         self.lbl_time.setStyleSheet("color: #888; font-style: italic; margin-left: 10px;")
 
         self.btn_refresh = QPushButton("Sync Selected")
-        self.btn_refresh.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
+        self.btn_refresh.setStyleSheet(
+            "background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
         self.btn_refresh.clicked.connect(lambda: self._batch_action("fetch"))
 
-        self.btn_add = QPushButton(" Add Custom Source")
-        self.btn_add.clicked.connect(self.add_custom_feed)
-
-
         toolbar.addWidget(self.btn_manage)
-        toolbar.addWidget(self.btn_edit)
-        toolbar.addWidget(self.btn_unsub)
+        toolbar.addWidget(self.btn_more_actions)
         toolbar.addWidget(self.lbl_time)
         toolbar.addStretch()
         toolbar.addWidget(self.btn_refresh)
@@ -518,7 +630,6 @@ class RSSTool(BaseTool):
                                 QPushButton:hover { background-color: #444; color: white; }
                             """)
 
-
         left_action_bar.addWidget(self.btn_feed_sel_all)
         left_action_bar.addWidget(self.btn_feed_sel_inv)
         left_action_bar.addStretch()
@@ -527,6 +638,7 @@ class RSSTool(BaseTool):
         self.btn_feed_sel_inv.clicked.connect(lambda: self._batch_select_feeds("invert"))
 
         self.feed_list = QListWidget()
+        self.feed_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.feed_list.itemDoubleClicked.connect(lambda item: self.edit_feed())
         self.feed_list.currentRowChanged.connect(self._on_feed_selected)
         self.feed_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -572,6 +684,25 @@ class RSSTool(BaseTool):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        self.loading_container = QWidget()
+        self.loading_layout = QHBoxLayout(self.loading_container)
+        self.loading_layout.setAlignment(Qt.AlignCenter)
+        self.loading_layout.setContentsMargins(0, 40, 0, 40)
+
+        self.spinner = ModernSpinner(size=32)
+
+        tm = ThemeManager()
+        self.lbl_loading_text = QLabel("Searching...")
+        self.lbl_loading_text.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: bold;")
+
+        self.loading_layout.addWidget(self.spinner)
+        self.loading_layout.addSpacing(10)
+        self.loading_layout.addWidget(self.lbl_loading_text)
+
+        self.loading_container.hide()
+        right_layout.insertWidget(2, self.loading_container)
+
 
         self.article_container = QWidget()
         self.article_container.setStyleSheet("background: transparent;")
@@ -669,11 +800,67 @@ class RSSTool(BaseTool):
                 self._save_config()
                 self._refresh_feed_ui()
 
+
     def _filter_feed_list(self, text):
         text = text.lower()
         for i in range(self.feed_list.count()):
             item = self.feed_list.item(i)
-            item.setHidden(text not in item.text().lower())
+            feed_url = item.data(Qt.UserRole)
+            feed = next((f for f in self.feeds if f.get('url') == feed_url), {})
+
+            match = (text in feed.get('name', '').lower() or
+                     text in feed.get('category', '').lower() or
+                     text in feed.get('url', '').lower())
+            item.setHidden(not match)
+
+    def export_feeds(self):
+        path, _ = QFileDialog.getSaveFileName(self.widget, "Export RSS Feeds", "rss_feeds_export.json",
+                                              "JSON Files (*.json)")
+        if not path: return
+
+        self.task_mgr.sig_result.connect(self._on_export_done)
+        self.task_mgr.start_task(ExportRssTask, "rss_export", feeds=self.feeds, export_path=path, mode=TaskMode.THREAD)
+
+    def _on_export_done(self, result):
+        try:
+            self.task_mgr.sig_result.disconnect(self._on_export_done)
+        except:
+            pass
+
+        if result and result.get("success"):
+            ToastManager().show(f"Feeds exported successfully.", "success")
+        else:
+            ToastManager().show(f"Export failed: {result.get('error') if result else 'Unknown error'}", "error")
+
+    def import_feeds(self):
+        path, _ = QFileDialog.getOpenFileName(self.widget, "Import RSS Feeds", "", "JSON Files (*.json)")
+        if not path: return
+
+        self.task_mgr.sig_result.connect(self._on_import_done)
+        self.task_mgr.start_task(ImportRssTask, "rss_import", import_path=path, mode=TaskMode.THREAD)
+
+    def _on_import_done(self, result):
+        try:
+            self.task_mgr.sig_result.disconnect(self._on_import_done)
+        except:
+            pass
+
+        if result and result.get("success"):
+            new_feeds = result.get("feeds", [])
+            existing_urls = {f['url'] for f in self.feeds}
+            added = 0
+            for nf in new_feeds:
+                # 基于 URL 进行去重，避免重复导入
+                if isinstance(nf, dict) and 'url' in nf and nf['url'] not in existing_urls:
+                    self.feeds.append(nf)
+                    added += 1
+
+            self._save_config()
+            self._refresh_feed_ui()
+            ToastManager().show(f"Imported {added} new feeds successfully.", "success")
+        else:
+            ToastManager().show(f"Import failed: {result.get('error') if result else 'Unknown error'}", "error")
+
 
     def _show_feed_context_menu(self, pos):
         tm = ThemeManager()
@@ -750,15 +937,46 @@ class RSSTool(BaseTool):
         if not target_feeds:
             return
 
+        self._is_cancelling = False  # Track the cancellation state
+
         telemetry_off = {"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
-        self.pd = ProgressDialog(self.widget, "Fetching Literature", f"Syncing {len(target_feeds)} feeds...", telemetry_config=telemetry_off)
+        self.pd = ProgressDialog(self.widget, "Fetching Literature", f"Syncing {len(target_feeds)} feeds...",
+                                 telemetry_config=telemetry_off)
         self.pd.show()
 
         self.task_mgr.sig_progress.connect(self.pd.update_progress)
         self.task_mgr.sig_state_changed.connect(self._on_fetch_done)
-        self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
 
-        self.task_mgr.start_task(FetchRSSTask, "rss_fetch", feeds=target_feeds, save_path=self.cache_file)
+        # Connect to the new gentle cancellation wrapper instead of aggressive destruction
+        self.pd.sig_canceled.connect(self._safe_cancel_task)
+
+        self.task_mgr.start_task(
+            FetchRSSTask,
+            "rss_fetch",
+            feeds=target_feeds,
+            mode=TaskMode.THREAD,
+            save_path=self.cache_file
+        )
+
+    def _safe_cancel_task(self):
+        self._is_cancelling = True
+
+        # 1. Freeze the foreground dialog and update status
+        if hasattr(self, 'pd') and self.pd:
+            self.pd.show()  # Force visibility if the dialog attempted to auto-close
+            self.pd.update_progress(100, "Cancelling... Waiting for tasks to safely terminate.")
+
+            self.pd.setWindowFlags(self.pd.windowFlags() & ~Qt.WindowCloseButtonHint)
+
+            for btn in self.pd.findChildren(QPushButton):
+                btn.setEnabled(False)
+
+            self.pd.show()  # Re-apply window flags to take effect
+
+        # 2. Transmit the termination signal to the background task (Thread or Process)
+        if self.task_mgr.worker and hasattr(self.task_mgr.worker, 'task'):
+            self.task_mgr.worker.task.cancel()
+
 
     def _on_fetch_done(self, state, msg):
         try:
@@ -770,8 +988,14 @@ class RSSTool(BaseTool):
         except:
             pass
 
+        # 统一替换为 show_finish_state 闭环强反馈
+        if hasattr(self, '_is_cancelling') and self._is_cancelling:
+            self.pd.show_finish_state(False, "Task Cancelled", "Background fetch task successfully terminated.")
+            self._is_cancelling = False
+            return
+
         if state == TaskState.SUCCESS.value:
-            self.pd.show_success_state("Complete", "Literature synced successfully.")
+            self.pd.show_finish_state(True, "Complete", "Literature synced successfully.")
             self._load_cache()
 
             if hasattr(self, 'article_widgets_cache'):
@@ -781,21 +1005,18 @@ class RSSTool(BaseTool):
                 self.article_widgets_cache.clear()
 
             self._on_feed_selected(self.feed_list.currentRow())
-        else:
-            self.pd.close_safe()
-            ToastManager().show(f"Fetch failed: {msg}", "error")
+        elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+            self.pd.show_finish_state(False, "Fetch Halted", f"Task ended: {msg}")
 
 
     def _on_feed_selected(self, row):
         if row < 0: return
-
         feed = self.feeds[row]
-        if feed.get("is_default", False):
-            self.btn_edit.setEnabled(False)
-            self.btn_edit.setToolTip("Built-in Default Source (Cannot edit)")
-        else:
-            self.btn_edit.setEnabled(True)
-            self.btn_edit.setToolTip("Edit Custom Source")
+
+        is_default = feed.get("is_default", False)
+        if hasattr(self, 'action_edit'):
+            self.action_edit.setEnabled(not is_default)
+            self.action_edit.setToolTip("Built-in Default Source (Cannot edit)" if is_default else "Edit Custom Source")
 
         self._clear_articles()
 
@@ -886,6 +1107,13 @@ class RSSTool(BaseTool):
         def on_cancel():
             self._cancel_export = True
 
+            pd.show()
+            pd.update_progress(100, "Cancelling export... cleaning up temp files...")
+            pd.setWindowFlags(pd.windowFlags() & ~Qt.WindowCloseButtonHint)
+            for btn in pd.findChildren(QPushButton):
+                btn.setEnabled(False)
+            pd.show()
+
         pd.sig_canceled.connect(on_cancel)
         QApplication.instance().processEvents()
 
@@ -964,11 +1192,12 @@ class RSSTool(BaseTool):
                         time.sleep(0.1)
 
                 if cleaned or not os.path.exists(path):
-                    ToastManager().show("PDF export cancelled. Temporary file cleaned.", "warning")
+                    pd.show_finish_state(False, "Export Cancelled", "PDF export cancelled. Temporary file cleaned.")
                 else:
-                    ToastManager().show("Export cancelled, but partial file is locked by system.", "warning")
-
+                    pd.show_finish_state(False, "Export Cancelled",
+                                         "Export cancelled, but partial file is locked by system.")
                 return
+
 
             if page_idx > 0:
                 printer.newPage()
@@ -998,7 +1227,7 @@ class RSSTool(BaseTool):
             QApplication.instance().processEvents()
 
         painter.end()
-        pd.show_success_state("Complete", f"Successfully exported {page_count} pages to PDF.")
+        pd.show_finish_state(True, "Complete", f"Successfully exported {page_count} pages to PDF.")
 
 
     def _load_config(self):

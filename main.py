@@ -1,27 +1,17 @@
-import ctypes
+import os
+import multiprocessing
 import os
 import sys
+import threading
 import time
 
-import qdarktheme
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
 
-from src.core.device_manager import DeviceManager
-from src.core.mcp_manager import MCPManager
-from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, ensure_onnx_model
-from src.core.network_worker import setup_global_network_env
-from src.ui.main_window import MainWindow
-from src.version import __version__
-
-# 拦截来自 MCPManager 的子进程唤起请求，防止主 UI 被无限循环启动
-if len(sys.argv) > 1 and sys.argv[1] == "--run-builtin-mcp":
-    os.environ["SCARF_NO_ANALYTICS"] = "true"
-    from plugins.academic_mcp_server import mcp
-    mcp.run(transport='stdio')
-    sys.exit(0)
+from src.core.core_task import TaskManager, TaskMode
+from src.task.startup_tasks import HardwareInitTask
 
 is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
@@ -30,7 +20,6 @@ if is_compiled:
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Disable telemetry for academic privacy
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["SCARF_NO_ANALYTICS"] = "true"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -43,56 +32,50 @@ class StartupWorker(QThread):
     def __init__(self, logger):
         super().__init__()
         self.logger = logger
+        self.hw_task_mgr = TaskManager()
 
     def run(self):
         try:
+            self.sig_progress.emit(5, "Detecting hardware info...")
+            time.sleep(0.1)
+
+            self.sig_progress.emit(6, "Loading model registry framework...")
+            time.sleep(0.1)
+            from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, \
+                ensure_onnx_model
+
+            self.sig_progress.emit(7, "Loading user settings...")
+            time.sleep(0.1)
+            from src.core.network_worker import setup_global_network_env
+            from src.core.config_manager import ConfigManager
+            from src.core.theme_manager import ThemeManager
+
             self.sig_progress.emit(10, "Loading system configuration & network profiles...")
             time.sleep(0.1)
             cfg_mgr = ConfigManager()
             _ = cfg_mgr.user_settings
             setup_global_network_env()
 
-            self.sig_progress.emit(25, "Scanning local hardware & compute engines...")
+            self.sig_progress.emit(25, "Scanning local hardware & compute engines (Background)...")
             time.sleep(0.1)
-            dev_mgr = DeviceManager()
-            dev = dev_mgr.get_optimal_device()
-            dev_str = dev.get('type', 'cpu') if isinstance(dev, dict) else str(dev)
+            self.hw_task_mgr.start_task(HardwareInitTask, task_id="hw_warmup", mode=TaskMode.THREAD)
 
             self.sig_progress.emit(40, "Mounting theme cache and UI assets...")
             time.sleep(0.1)
             tm = ThemeManager()
             _ = tm.color('bg_main')
 
-            self.sig_progress.emit(55, "Connecting to local knowledge base & logs...")
-            time.sleep(0.1)
-
-            self.sig_progress.emit(70, "Loading MCP Subsystem metadata...")
+            self.sig_progress.emit(60, "Loading MCP Subsystem metadata...")
             time.sleep(0.1)
             cfg_mgr.load_mcp_servers()
 
-            self.sig_progress.emit(85, "Checking AI models & local cache integrity...")
+            self.sig_progress.emit(80, "Pre-loading UI components & ML libraries...")
             time.sleep(0.1)
-            embed_id = cfg_mgr.user_settings.get("current_model_id", "embed_auto")
-            rerank_id = cfg_mgr.user_settings.get("rerank_model_id", "rerank_auto")
+            from src.ui.main_window import MainWindow
+            from src.core.mcp_manager import MCPManager
 
-            if embed_id == "embed_auto":
-                embed_id = resolve_auto_model("embedding", dev_str)
-            if rerank_id == "rerank_auto":
-                rerank_id = resolve_auto_model("reranker", dev_str)
-
-            for mid, mtype in[(embed_id, "embedding"), (rerank_id, "reranker")]:
-                conf = get_model_conf(mid, mtype)
-                if conf and not conf.get('is_network', False):
-                    repo_id = conf.get('hf_repo_id')
-                    if repo_id and check_model_exists(repo_id):
-                        ensure_onnx_model(repo_id, mtype)
-
-            self.sig_progress.emit(95, "Building Main User Interface...")
+            self.sig_progress.emit(100, "Ready. Building workspace...")
             time.sleep(0.1)
-
-            self.sig_progress.emit(100, "Ready.")
-            time.sleep(0.1)
-
             self.sig_finished.emit()
 
         except Exception as e:
@@ -105,7 +88,7 @@ class SplashScreen(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SplashScreen)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.SplashScreen)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(500, 280)
 
@@ -117,7 +100,6 @@ class SplashScreen(QWidget):
             self.setWindowIcon(QIcon(ico_path))
         else:
             self.setWindowIcon(QIcon(png_path))
-
 
         bg_color = tm.color("bg_main")
         bg_card = tm.color("bg_card")
@@ -142,7 +124,8 @@ class SplashScreen(QWidget):
         layout.addWidget(self.logo, alignment=Qt.AlignCenter)
 
         self.title = QLabel("Scholar Navis")
-        self.title.setStyleSheet(f"color: {text_main}; font-size: 26px; font-weight: bold; border: none; letter-spacing: 1px;")
+        self.title.setStyleSheet(
+            f"color: {text_main}; font-size: 26px; font-weight: bold; border: none; letter-spacing: 1px;")
         self.title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title)
 
@@ -175,6 +158,7 @@ class AppController(QObject):
 
         from src.core.config_manager import ConfigManager
         from src.core.theme_manager import ThemeManager
+        import qdarktheme
 
         cfg = ConfigManager().user_settings
         theme_setting = cfg.get("theme", "Dark").lower()
@@ -200,88 +184,150 @@ class AppController(QObject):
     @Slot()
     def on_startup_finished(self):
         self.splash.progress.setValue(100)
-        self.splash.lbl_status.setText("Ready.")
+        self.splash.lbl_status.setText("Ready. Initializing workspace...")
+        QApplication.processEvents()
+        QTimer.singleShot(50, self._build_and_show_main_window)
+
+    def _build_and_show_main_window(self):
+        from src.ui.main_window import MainWindow
+        from src.core.mcp_manager import MCPManager
 
         self.main_window = MainWindow()
-
         self.worker.deleteLater()
 
         self.main_window.show()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
+
         self.splash.close()
 
+        QTimer.singleShot(500, self.main_window.check_first_run)
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
-
 
 if __name__ == "__main__":
 
-    import multiprocessing
-
     multiprocessing.freeze_support()
 
+    # 1. 判断启动模式
+    is_admin = False
+    try:
+        if os.name == 'nt':
+            import ctypes
 
-    from src.core.logger import setup_logger
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        else:
+            is_admin = os.geteuid() == 0
+    except Exception:
+        pass
 
-    global_logger = setup_logger()
+    if is_admin:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        import sys
 
-    if sys.platform == "win32":
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
+        temp_app = QApplication(sys.argv)
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Security Alert: Elevated Privileges")
+        msg_box.setText("Scholar Navis cannot be run with Administrator / Root privileges.")
+        msg_box.setInformativeText(
+            "For security reasons and to prevent sandbox escapes, please restart the application as a standard user.")
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec()
+        sys.exit(1)
 
-        try:
-            myappid = ctypes.c_wchar_p("scholar.navis.app")
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except Exception:
-            pass
+    # 1. 判断启动模式
+    is_api_mode = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
 
-    app = QApplication(sys.argv)
+
+    # 2. 统一在最开始创建 Qt 应用实例，以支持 QLocalSocket 机制
+    if is_api_mode:
+        from PySide6.QtCore import QCoreApplication
+        app = QCoreApplication(sys.argv)
+    else:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication(sys.argv)
 
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
-    from PySide6.QtWidgets import QMessageBox
 
+    # 3. 全局单例锁检测
     unique_server_name = "ScholarNavis_SingleInstance_Lock"
     socket = QLocalSocket()
     socket.connectToServer(unique_server_name)
 
-    # 如果能连上服务器，说明已经有一个实例在运行
+    # 如果能连上服务器，说明已经有一个实例（GUI 或 API）在运行
     if socket.waitForConnected(500):
-        global_logger.warning("Application is already running. Exiting...")
+        if is_api_mode:
+            print("Initialization Failed: Scholar Navis (GUI or API) is currently executing.")
+        else:
+            from PySide6.QtWidgets import QMessageBox
 
-        # 调用原生提示弹窗
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setWindowTitle("Notice")
-        msg_box.setText("Scholar Navis is already running.")
-        msg_box.setInformativeText(
-            "The application is running in the background or system tray. Please do not open multiple instances.")
-        msg_box.setStandardButtons(QMessageBox.Ok)
-
-        msg_box.exec()
-
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("Execution Alert")
+            msg_box.setText("Scholar Navis is currently executing.")
+            msg_box.setInformativeText(
+                "The application (GUI or API) is already operating in the background. Concurrent instantiation is prohibited.")
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.exec()
         sys.exit(0)
 
-    # 如果没有运行，则在本进程创建一个本地服务器
+    # 4. 当前无其他实例，抢占互斥锁
     local_server = QLocalServer()
     QLocalServer.removeServer(unique_server_name)
     local_server.listen(unique_server_name)
 
-    from src.core.theme_manager import ThemeManager
-    from src.core.config_manager import ConfigManager
-    import qdarktheme
+    # 5. 根据模式进入相应的启动流程
+    if is_api_mode:
+        os.environ["SCARF_NO_ANALYTICS"] = "true"
 
-    tm = ThemeManager()
+        from src.core.logger import setup_logger
+        global_logger = setup_logger()
 
-    global_icon = tm.get_app_icon()
+        from src.core.config_manager import ConfigManager
+        from src.core.network_worker import setup_global_network_env
+        from src.core.mcp_manager import MCPManager
 
-    app.setWindowIcon(global_icon)
+        # 初始化基础环境并读取配置
+        ConfigManager()
+        setup_global_network_env()
 
-    app.processEvents()
+        # 强制拉起 MCP 服务器
+        global_logger.info("Bootstrapping MCP Servers for API mode...")
+        MCPManager.get_instance().bootstrap_servers(force_all=True)
 
-    saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
-    qdarktheme.setup_theme(saved_theme)
+        # 启动 API 服务器
+        from src.api.api_server import run_server
 
-    controller = AppController(global_logger)
-    controller.splash.setWindowIcon(global_icon)
+        run_server()
+        sys.exit(0)
 
-    sys.exit(app.exec())
+    else:
+        import ctypes
+        from src.core.logger import setup_logger
+
+        if sys.platform == "win32":
+            try:
+                myappid = ctypes.c_wchar_p("scholar.navis.app")
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except Exception:
+                pass
+
+        global_logger = setup_logger()
+
+        from src.core.theme_manager import ThemeManager
+        from src.core.config_manager import ConfigManager
+        import qdarktheme
+
+        tm = ThemeManager()
+        global_icon = tm.get_app_icon()
+        app.setWindowIcon(global_icon)
+
+        app.processEvents()
+
+        saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
+        qdarktheme.setup_theme(saved_theme)
+
+        controller = AppController(global_logger)
+        controller.splash.setWindowIcon(global_icon)
+
+        sys.exit(app.exec())

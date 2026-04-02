@@ -2,6 +2,8 @@ import os
 import logging
 import random
 import re
+import threading
+import time
 
 import requests
 import httpx
@@ -435,3 +437,43 @@ class NetworkRerankerFunction:
             logger.error(f"Network Reranker Error: {str(e)}")
             # Return empty list to prevent application crash during a search
             return []
+
+
+class GlobalRateLimiter:
+    def __init__(self):
+        self.locks = {
+            "ncbi": threading.Lock(),
+            "openalex": threading.Lock(),
+            "github": threading.Lock(),
+            "s2": threading.Lock()
+        }
+        self.last_called = {k: 0.0 for k in self.locks}
+        self.waiting_counts = {k: 0 for k in self.locks}
+        self.queue_lock = threading.Lock()
+
+    def acquire(self, service, rps=None, rph=None):
+        limit_val = rps if rps else rph
+        limit_type = "rps" if rps else "rph"
+
+        with self.queue_lock:
+            self.waiting_counts[service] += 1
+            current_queue = self.waiting_counts[service]
+
+        logger.info(
+            f"[RateLimiter] {service.upper()} Queue: {current_queue} request(s) waiting. Limit: {limit_val} {limit_type}.")
+
+        with self.locks.get(service, threading.Lock()):
+            try:
+                min_interval = (1.0 / rps) if rps else (3600.0 / rph)
+                now = time.time()
+                elapsed = now - self.last_called[service]
+                if elapsed < min_interval:
+                    sleep_time = min_interval - elapsed
+                    time.sleep(sleep_time)
+                self.last_called[service] = time.time()
+            finally:
+                with self.queue_lock:
+                    self.waiting_counts[service] -= 1
+
+
+global_rate_limiter = GlobalRateLimiter()

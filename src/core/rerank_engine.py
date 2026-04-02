@@ -1,4 +1,6 @@
 import logging
+import threading
+
 from optimum.onnxruntime import ORTModelForSequenceClassification
 from transformers import AutoTokenizer
 
@@ -20,6 +22,7 @@ class RerankEngine:
             cls._instance.device = "cpu"
             cls._instance.config = ConfigManager()
             cls._instance.dev_mgr = DeviceManager()
+            cls._instance._inference_lock = threading.Lock()
         return cls._instance
 
     def load_model(self):
@@ -106,7 +109,8 @@ class RerankEngine:
 
         try:
             inputs = self.tokenizer(pairs, padding=True, truncation=True, return_tensors='pt', max_length=512)
-            logits = self.model(**inputs).logits
+            with self._inference_lock:
+                logits = self.model(**inputs).logits
 
             if logits.shape[1] == 1:
                 scores = logits.view(-1).detach().numpy()

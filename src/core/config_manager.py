@@ -7,6 +7,11 @@ import tempfile
 import keyring
 from cryptography.fernet import Fernet, InvalidToken
 
+from src.core.encryption_service import SystemEncryptionService
+
+# 当前配置导出版本号，用于未来兼容性检查
+CONFIG_VERSION = "1.0"
+
 
 class ConfigManager:
     _instance = None
@@ -47,7 +52,8 @@ class ConfigManager:
         os.makedirs(self.CONFIG_DIR, exist_ok=True)
 
         # 2. 初始化加密套件
-        self._init_encryption()
+        self.encryption_service = SystemEncryptionService(service_name="ScholarNavis")
+        self.encryption_service._get_master_key()
 
         # 3. 加载核心配置
         self.load_settings()
@@ -92,34 +98,42 @@ class ConfigManager:
     def save_json(self, path, data, encrypt=True):
         """原子性写入 JSON 配置文件"""
         with self._lock:
-            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), text=not encrypt)
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), text=False)  # 始终二进制写入
+            os.close(temp_fd)
             try:
                 json_str = json.dumps(data, indent=4, ensure_ascii=False)
-
                 if encrypt:
-                    content = self.fernet.encrypt(json_str.encode('utf-8'))
-                    with os.fdopen(temp_fd, 'wb') as f:
+                    content = self.encryption_service.encrypt(json_str)
+                    with open(temp_path, 'wb') as f:
                         f.write(content)
                 else:
-                    with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                    with open(temp_path, 'w', encoding='utf-8') as f:
                         f.write(json_str)
 
-                os.replace(temp_path, path)
+                import time
+                for attempt in range(3):
+                    try:
+                        os.replace(temp_path, path)
+                        break
+                    except PermissionError:
+                        if attempt < 2:
+                            time.sleep(0.1)
+                        else:
+                            raise
+
             except Exception as e:
                 if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                    try:
+                        os.remove(temp_path)
+                    except Exception as rm_e:
+                        self.logger.error(f"Failed to remove temp file {temp_path}: {rm_e}")
                 self.logger.error(f"Failed to save config at {path}: {e}")
+                raise
+
 
     def load_json(self, path, encrypt=True):
-        """
-        完整定义的 load_json：
-        1. 处理文件不存在
-        2. 处理加密解密（包含 InvalidToken 容错）
-        3. 处理从明文到密文的自动迁移（真实触发保存）
-        """
         if not os.path.exists(path):
             return None
-
         with self._lock:
             try:
                 if encrypt:
@@ -127,29 +141,38 @@ class ConfigManager:
                         raw_data = f.read()
 
                     try:
-                        # 尝试解密
-                        decrypted_text = self.fernet.decrypt(raw_data).decode('utf-8')
+                        decrypted_text = self.encryption_service.decrypt(raw_data)
                         return json.loads(decrypted_text)
-                    except (InvalidToken, Exception) as e:
-                        self.logger.warning(f"Decryption failed for {path}, checking if plain text: {e}")
+                    except Exception as e:
+                        # 处理旧版本明文迁移逻辑
+                        self.logger.warning(f"Decryption failed, trying plain text migration: {e}")
                         try:
                             with open(path, 'r', encoding='utf-8') as f:
                                 plain_data = json.load(f)
-
-                            self.logger.info(f"Migrating plain-text config to encrypted: {path}")
                             self.save_json(path, plain_data, encrypt=True)
                             return plain_data
-
                         except Exception:
-                            self.logger.error(f"Config file is corrupted or not valid JSON: {path}")
                             return None
                 else:
-                    # 非加密模式读取
-                    with open(path, 'r', encoding='utf-8') as f:
-                        return json.load(f)
+                    try:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            return json.load(f)
+                    except Exception as e:
+                        # 处理之前可能被意外加密的配置文件，尝试解密并迁移至明文
+                        self.logger.warning(f"Plain text load failed, trying decryption migration: {e}")
+                        try:
+                            with open(path, 'rb') as f:
+                                raw_data = f.read()
+                            decrypted_text = self.encryption_service.decrypt(raw_data)
+                            plain_data = json.loads(decrypted_text)
+                            self.save_json(path, plain_data, encrypt=False)
+                            return plain_data
+                        except Exception:
+                            return None
             except Exception as e:
                 self.logger.error(f"Critical error reading {path}: {e}")
                 return None
+
 
     def load_settings(self):
         default_settings = {
@@ -160,13 +183,31 @@ class ConfigManager:
             "proxy_url": "",
             "hf_mirror": "",
             "hf_token": "",
-            "theme": "Dark",
+            "theme": "auto",
             "log_level": "INFO",
             "is_first_run": True,
             "ncbi_email": "",
             "ncbi_api_key": "",
+            "openalex_api_key": "",
             "s2_api_key": "",
-            "github_token": ""
+            "s2_rate_limit": "1.0",
+            "github_token": "",
+            "quick_trans_is_pinned": True,
+            "quick_trans_markdown": True,
+            "trans_source_lang": "Auto Detect",
+            "trans_target_lang": "English",
+            "quick_trans_model_name": "",
+            "quick_trans_llm_id": "",
+            "chat_llm_id": "",
+            "chat_model_name": "",
+            "chat_trans_llm_id": "",
+            "chat_trans_model_name": "",
+            "chat_use_academic_agent": True,
+            "chat_use_external_tools": False,
+            "chat_ribbon_state": "Pinned",
+            "api_server_host": "127.0.0.1",
+            "api_server_port": 8000,
+            "api_server_key": "",
         }
 
         current_settings = self.load_json(self.SETTINGS_PATH, encrypt=True)
@@ -230,8 +271,10 @@ class ConfigManager:
 
         os.environ["NCBI_API_EMAIL"] = self.user_settings.get("ncbi_email", "")
         os.environ["NCBI_API_KEY"] = self.user_settings.get("ncbi_api_key", "")
+        os.environ["OPENALEX_API_KEY"] = self.user_settings.get("openalex_api_key", "")
         os.environ["S2_API_KEY"] = self.user_settings.get("s2_api_key", "")
         os.environ["GITHUB_TOKEN"] = self.user_settings.get("github_token", "")
+
 
     def toggle_mcp_tag(self, tag: str, is_checked: bool):
         tags = self.mcp_servers.get("deselected_mcp_tags", [])
@@ -258,15 +301,10 @@ class ConfigManager:
         py_path = sys.executable
 
         default_mcp_servers = {
-            "mcpServers": {
-                "builtin": {
-                    "type": "stdio",
-                    "command": py_path,
-                    "args": ["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"],
-                    "enabled": True, "always_on": True, "description": "Core Tools"
-                },
-            },
-            "deselected_mcp_tags": []
+            "mcpServers": {},
+            "external_skills": {},
+            "deselected_mcp_tags": [],
+            "deselected_external_tools": []
         }
 
         current_servers = self.load_json(self.MCP_SERVERS_PATH, encrypt=True)
@@ -276,16 +314,19 @@ class ConfigManager:
             current_servers = default_mcp_servers.copy()
             is_modified = True
         else:
+            legacy_academic_keys = ["academic_agent", "builtin_academic", "scholar_navis_internal"]
+            mcp_configs = current_servers.get("mcpServers", {})
 
-            if "builtin" not in current_servers["mcpServers"]:
-                current_servers["mcpServers"]["builtin"] = default_mcp_servers["mcpServers"]["builtin"]
-                is_modified = True
-            else:
-                current_servers["mcpServers"]["builtin"]["command"] = py_path
+            for legacy_key in legacy_academic_keys:
+                if legacy_key in mcp_configs:
+                    self.logger.info(f"Detected legacy MCP academic tool: {legacy_key}. Removing for SKILL migration.")
+                    del mcp_configs[legacy_key]
+                    is_modified = True
 
-            if "deselected_mcp_tags" not in current_servers:
-                current_servers["deselected_mcp_tags"] = []
-                is_modified = True
+            for key in ["external_skills", "deselected_mcp_tags", "deselected_external_tools"]:
+                if key not in current_servers:
+                    current_servers[key] = {} if key == "external_skills" else []
+                    is_modified = True
 
         self.mcp_servers = current_servers
         if is_modified:

@@ -265,7 +265,7 @@ class LogTool(BaseTool):
         self.btn_find_prev.setIcon(tm.icon("chevron-up", "text_main"))
         self.btn_find_prev.setText("▲" if self.btn_find_prev.icon().isNull() else "")
 
-        self.btn_find_next.setIcon(tm.icon("achevron-down", "text_main"))
+        self.btn_find_next.setIcon(tm.icon("chevron-down", "text_main"))
         self.btn_find_next.setText("▼" if self.btn_find_next.icon().isNull() else "")
 
         self.btn_close_search.setIcon(tm.icon("close", "text_main"))

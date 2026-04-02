@@ -17,7 +17,6 @@ from src.core.models_registry import get_model_conf, ensure_onnx_model
 from src.core.rerank_engine import RerankEngine
 
 logger = logging.getLogger("Task.kb")
-_embed_fn_cache: dict = {}
 
 def _setup_worker_env():
     import os
@@ -47,46 +46,29 @@ def _setup_worker_env():
     return base_dir
 
 
+# --- kb_tasks.py ---
+
 def _worker_load_model(kb_id, config):
     logger = logging.getLogger("Worker.ModelLoader")
-
     kb_mgr = KBManager()
     dev_mgr = DeviceManager()
-
     kb_data = kb_mgr.get_kb_by_id(kb_id)
     if not kb_data:
         raise RuntimeError(f"Metadata not found for KB ID: {kb_id}")
-
-    model_id = kb_data.get('model_id', 'embed_auto')
-    conf = get_model_conf(model_id, "embedding")
-
     user_device = config.user_settings.get("inference_device", "auto")
     device_str = dev_mgr.parse_device_string(user_device)
-
-    logger.info(f"User selected inference_device: {user_device}")
-    logger.info(f"Parsed device string for ONNX: {device_str}")
-
+    model_id = kb_data.get('model_id', 'embed_auto')
+    conf = get_model_conf(model_id, "embedding")
     repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
-
     try:
         onnx_dir = ensure_onnx_model(repo_id, "embedding")
 
-        cache_key = (onnx_dir, str(device_str))
-        if cache_key in _embed_fn_cache:
-            logger.info(f"Embedding model cache hit: {cache_key}")
-            return _embed_fn_cache[cache_key]
+        logger.info(f"Loading Embedding Model: {repo_id} on {device_str}")
 
-        logger.info(f"Loading cached ONNX model from: {onnx_dir}")
-        embed_fn = ONNXEmbeddingFunction(onnx_dir, device=device_str)
-
-        # ✅ 存入缓存
-        _embed_fn_cache[cache_key] = embed_fn
-        return embed_fn
-
+        return ONNXEmbeddingFunction(onnx_dir, device=device_str)
     except Exception as e:
-        error_info = f"Model {repo_id} load failed. Check ONNX conversion or cache."
-        logger.error(f"{error_info} | {e}")
-        raise RuntimeError(error_info)
+        logger.error(f"Failed to load model: {e}")
+        raise RuntimeError(f"Model Load Failed: {str(e)}")
 
 
 class ONNXEmbeddingFunction(EmbeddingFunction):
@@ -233,163 +215,181 @@ class ImportFilesTask(BackgroundTask):
         self.send_log("INFO", "Loading AI Model...")
         self.send_log("INFO", f"Task kwargs: files_count={len(files)}, is_rebuild={is_rebuild}")
 
-        embed_fn = _worker_load_model(kb_id, self.config)
+        from src.core.config_manager import ConfigManager
+        config = ConfigManager()
+        embed_fn = _worker_load_model(kb_id, config)
 
-        # 连接数据库
-        if not db_mgr.switch_kb(kb_id, embedding_function=embed_fn):
-            raise RuntimeError("Failed to connect to ChromaDB.")
-
-        process_tasks = []
-
-        # 2. 处理重建逻辑或增量导入逻辑
-        if is_rebuild:
-            self.send_log("WARNING", "Rebuilding vector database...")
-            try:
-                db_mgr.client.delete_collection("main_collection")
-                kb_info = kb_mgr.get_kb_by_id(kb_id)
-                db_mgr.collection = db_mgr.client.get_or_create_collection(
-                    name="main_collection",
-                    embedding_function=embed_fn,
-                    metadata={"kb_name": kb_info['name']}
-                )
-            except Exception:
-                pass
-
-            all_docs = kb_mgr.get_kb_files(kb_id)
-            process_tasks = [(d['path'], d['name']) for d in all_docs]
-        else:
-            for fp in files:
-                result = kb_mgr.import_file_to_kb(kb_id, fp)
-                if result:
-                    process_tasks.append(result)
-
-        # 3. 动态获取最优切分参数（木桶原理）
-        kb_info = kb_mgr.get_kb_by_id(kb_id)
-        current_embed_id = kb_info.get('model_id', 'embed_auto') if kb_info else 'embed_auto'
-        current_rerank_id = self.config.user_settings.get("rerank_model_id", "rerank_auto")
-
-        opt_chunk, opt_overlap, opt_batch = get_optimal_chunk_settings(current_embed_id, current_rerank_id)
-        self.send_log("INFO", f"Chunk settings applied: Chunk={opt_chunk}, Overlap={opt_overlap}, Batch={opt_batch}")
-
-        # 4. 初始化基础文本切分器
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=opt_chunk,
-            chunk_overlap=opt_overlap,
-            separators=["\n\n", "\n", ". ", " ", ""],
-            length_function=len
-        )
-
-        # 初始化 PDF 引擎，扩大异常捕获范围，抛出底层信息
-        pdf_engine = None
         try:
-            from src.core.pdf_engine import PDFEngine
-            pdf_engine = PDFEngine()
+            # 连接数据库
+            if not db_mgr.switch_kb(kb_id, embedding_function=embed_fn):
+                raise RuntimeError("Failed to connect to ChromaDB.")
 
-            # 日志劫持（将子模块底层的 logger 信息转发回 UI 进度条界面）
-            class LoggerHijacker:
-                def __init__(self, task_ref): self.task_ref = task_ref
+            process_tasks = []
 
-                def debug(self, msg): pass
+            # 2. 处理重建逻辑或增量导入逻辑
+            if is_rebuild:
+                self.send_log("WARNING", "Rebuilding vector database...")
+                try:
+                    db_mgr.client.delete_collection("main_collection")
+                    kb_info = kb_mgr.get_kb_by_id(kb_id)
+                    db_mgr.collection = db_mgr.client.get_or_create_collection(
+                        name="main_collection",
+                        embedding_function=embed_fn,
+                        metadata={"kb_name": kb_info['name']}
+                    )
+                except Exception:
+                    pass
 
-                def info(self, msg):
-                    if "Vectorized" in msg or "Loaded" in msg:
-                        self.task_ref.send_log("INFO", msg)
+                all_docs = kb_mgr.get_kb_files(kb_id)
+                process_tasks = [(d['path'], d['name']) for d in all_docs]
+            else:
+                for fp in files:
+                    result = kb_mgr.import_file_to_kb(kb_id, fp)
+                    if result:
+                        process_tasks.append(result)
 
-                def warning(self, msg): self.task_ref.send_log("WARNING", msg)
+            # 3. 动态获取最优切分参数（木桶原理）
+            kb_info = kb_mgr.get_kb_by_id(kb_id)
+            current_embed_id = kb_info.get('model_id', 'embed_auto') if kb_info else 'embed_auto'
+            current_rerank_id = config.user_settings.get("rerank_model_id", "rerank_auto")
 
-                def error(self, msg): self.task_ref.send_log("ERROR", f"PDFEngine Error: {msg}")
+            opt_chunk, opt_overlap, opt_batch = get_optimal_chunk_settings(current_embed_id, current_rerank_id)
+            self.send_log("INFO", f"Chunk settings applied: Chunk={opt_chunk}, Overlap={opt_overlap}, Batch={opt_batch}")
 
-            pdf_engine.logger = LoggerHijacker(self)
-        except Exception as e:
-            self.send_log("ERROR", f"PDFEngine import or initialization failed: {e}")
-            self.send_log("ERROR", f"Traceback:\n{traceback.format_exc()}")
+            # 4. 初始化基础文本切分器
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=opt_chunk,
+                chunk_overlap=opt_overlap,
+                separators=["\n\n", "\n", ". ", " ", ""],
+                length_function=len
+            )
 
-        total = len(process_tasks)
-        self.send_log("INFO", f"Actual tasks to process: {total}")
-        success_count = 0
-        temp_dir = tempfile.gettempdir()
-
-        # 5. 核心循环解析
-        for i, (read_path, source_name) in enumerate(process_tasks):
-            if not os.path.exists(read_path): continue
-            pct = int((i / total) * 100)
-            self.update_progress(pct, f"Indexing: {source_name}")
-            self.send_log("INFO", f"Processing item {i}: {source_name} at {read_path}")
-
+            # 初始化 PDF 引擎，扩大异常捕获范围，抛出底层信息
+            pdf_engine = None
             try:
-                # PDF 智能分流
-                if source_name.lower().endswith('.pdf') and pdf_engine:
-                    # 制造物理替身欺骗 LangChain
-                    temp_pdf_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}_{source_name}")
-                    shutil.copy2(read_path, temp_pdf_path)
+                from src.core.pdf_engine import PDFEngine
+                pdf_engine = PDFEngine()
 
-                    try:
-                        # 动态参数注入 process_pdf
-                        chunks_count = pdf_engine.process_pdf(
-                            temp_pdf_path,
-                            real_filename=source_name,
-                            chunk_size=opt_chunk,
-                            chunk_overlap=opt_overlap,
-                            batch_size=opt_batch
-                        )
-                        if chunks_count > 0:
-                            success_count += 1
-                        else:
-                            self.send_log("WARNING", f"{source_name} extracted 0 characters.")
-                    finally:
-                        # 清理替身
-                        if os.path.exists(temp_pdf_path):
-                            os.remove(temp_pdf_path)
+                # 日志劫持（将子模块底层的 logger 信息转发回 UI 进度条界面）
+                class LoggerHijacker:
+                    def __init__(self, task_ref): self.task_ref = task_ref
 
-                # 其他格式文档走基础切分
-                else:
-                    text_content = FileService.read_file_content(read_path)
+                    def debug(self, msg): pass
 
-                    if source_name.lower().endswith('.doc'):
-                        self.send_log("WARNING", f"Skipping {source_name}: Legacy .doc is not supported for indexing.")
-                        continue
+                    def info(self, msg):
+                        if "Vectorized" in msg or "Loaded" in msg:
+                            self.task_ref.send_log("INFO", msg)
 
-                    if not text_content or len(text_content.strip()) < 10:
-                        self.send_log("WARNING", f"Skipped empty/unreadable file: {source_name}")
-                        continue
+                    def warning(self, msg): self.task_ref.send_log("WARNING", msg)
 
-                    chunks = text_splitter.split_text(text_content)
-                    if not chunks: continue
+                    def error(self, msg): self.task_ref.send_log("ERROR", f"PDFEngine Error: {msg}")
 
-                    ids = [f"{source_name}_{k}_{uuid.uuid4().hex[:6]}" for k in range(len(chunks))]
-                    metadatas = [{
-                        "source": source_name,
-                        "chunk_id": k,
-                        "page": 1,
-                        "file_path": read_path
-                    } for k in range(len(chunks))]
-
-                    for j in range(0, len(chunks), opt_batch):
-                        batch_chunks = chunks[j:j + opt_batch]
-                        batch_ids = ids[j:j + opt_batch]
-                        batch_metas = metadatas[j:j + opt_batch]
-                        db_mgr.add_documents(documents=batch_chunks, metadatas=batch_metas, ids=batch_ids)
-                    success_count += 1
-
+                pdf_engine.logger = LoggerHijacker(self)
             except Exception as e:
-                self.send_log("ERROR", f"Failed to index {source_name}: {str(e)}")
-                self.send_log("ERROR", f"Task Inner Loop Error Traceback:\n{traceback.format_exc()}")
+                self.send_log("ERROR", f"PDFEngine import or initialization failed: {e}")
+                self.send_log("ERROR", f"Traceback:\n{traceback.format_exc()}")
 
-        # 6. 收尾工作：更新时间戳、强制 WAL 落盘
-        kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
-        self.send_log("INFO", f"Indexing complete. Processed {success_count}/{total} files.")
+            total = len(process_tasks)
+            self.send_log("INFO", f"Actual tasks to process: {total}")
+            success_count = 0
+            temp_dir = tempfile.gettempdir()
 
-        if getattr(db_mgr, 'client', None):
+            # 5. 核心循环解析
+            for i, (read_path, source_name) in enumerate(process_tasks):
+                if self.is_cancelled():
+                    self.send_log("WARNING", "Task cancelled by user, safely aborting...")
+                    raise InterruptedError("Task was safely terminated by the user.")
+
+                if not os.path.exists(read_path): continue
+                pct = int((i / total) * 100)
+                self.update_progress(pct, f"Indexing: {source_name}")
+                self.send_log("INFO", f"Processing item {i}: {source_name} at {read_path}")
+
+                try:
+                    # PDF 智能分流
+                    if source_name.lower().endswith('.pdf') and pdf_engine:
+
+                        temp_pdf_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}_{source_name}")
+                        shutil.copy2(read_path, temp_pdf_path)
+
+                        try:
+                            chunks_count = pdf_engine.process_pdf(
+                                temp_pdf_path,
+                                real_filename=source_name,
+                                chunk_size=opt_chunk,
+                                chunk_overlap=opt_overlap,
+                                batch_size=opt_batch
+                            )
+                            if chunks_count > 0:
+                                success_count += 1
+                            else:
+                                self.send_log("WARNING", f"{source_name} extracted 0 characters.")
+                        finally:
+                            # 清理替身
+                            if os.path.exists(temp_pdf_path):
+                                os.remove(temp_pdf_path)
+
+                    # 其他格式文档走基础切分
+                    else:
+                        text_content = FileService.read_file_content(read_path)
+
+                        if source_name.lower().endswith('.doc'):
+                            self.send_log("WARNING", f"Skipping {source_name}: Legacy .doc is not supported for indexing.")
+                            continue
+
+                        if not text_content or len(text_content.strip()) < 10:
+                            self.send_log("WARNING", f"Skipped empty/unreadable file: {source_name}")
+                            continue
+
+                        chunks = text_splitter.split_text(text_content)
+                        if not chunks: continue
+
+                        ids = [f"{source_name}_{k}_{uuid.uuid4().hex[:6]}" for k in range(len(chunks))]
+                        metadatas = [{
+                            "source": source_name,
+                            "chunk_id": k,
+                            "page": 1,
+                            "file_path": read_path
+                        } for k in range(len(chunks))]
+
+                        for j in range(0, len(chunks), opt_batch):
+                            batch_chunks = chunks[j:j + opt_batch]
+                            batch_ids = ids[j:j + opt_batch]
+                            batch_metas = metadatas[j:j + opt_batch]
+                            db_mgr.add_documents(documents=batch_chunks, metadatas=batch_metas, ids=batch_ids)
+                        success_count += 1
+
+                except Exception as e:
+                    self.send_log("ERROR", f"Failed to index {source_name}: {str(e)}")
+                    self.send_log("ERROR", f"Task Inner Loop Error Traceback:\n{traceback.format_exc()}")
+
+            kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
+            self.send_log("INFO", f"Indexing complete. Processed {success_count}/{total} files.")
+
+        finally:
+            self.send_log("INFO", "Releasing model memory and database locks...")
+
+            if getattr(db_mgr, 'client', None):
+                try:
+                    db_mgr.client._system.stop()
+                except Exception:
+                    pass
+
+            if 'embed_fn' in locals() and embed_fn:
+                if hasattr(embed_fn, 'model'):
+                    del embed_fn.model
+                del embed_fn
+
+            import gc
+            gc.collect()
+
             try:
-                db_mgr.client._system.stop()
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    self.send_log("INFO", "CUDA cache cleared.")
             except Exception:
                 pass
-
-        # 释放模型显存
-        del embed_fn
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 
 class DeleteFilesTask(BackgroundTask):
@@ -415,22 +415,24 @@ class DeleteFilesTask(BackgroundTask):
         kb_mgr._update_meta_field(kb_id, "file_map", file_map)
 
         # 3. 清理向量库中的数据
-        embed_fn = _worker_load_model(kb_id, self.config)
-        if db_mgr.switch_kb(kb_id, embedding_function=embed_fn):
-            total = len(file_names)
-            for i, fname in enumerate(file_names):
-                self.update_progress(int((i / total) * 100), f"Deleting vectors for {fname}...")
-                db_mgr.delete_by_source(fname)
+        if db_mgr.switch_kb(kb_id, embedding_function=None):
+            try:
+                total = len(file_names)
+                for i, fname in enumerate(file_names):
+                    if self.is_cancelled():
+                        raise InterruptedError("Task was safely terminated by the user.")
+                    self.update_progress(int((i / total) * 100), f"Deleting vectors for {fname}...")
+                    db_mgr.delete_by_source(fname)
 
-            #4. 强制落盘保险
-            if getattr(db_mgr, 'client', None):
-                try:
-                    db_mgr.client._system.stop()
-                except Exception:
-                    pass
+            finally:
+                if getattr(db_mgr, 'client', None):
+                    try:
+                        db_mgr.client._system.stop()
+                    except Exception:
+                        pass
 
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
-        self.send_log("INFO", f"Successfully deleted {len(file_names)} files.")
+        self.send_log("INFO", f"Successfully deleted {len(file_names)} files (No model loaded).")
 
 
 class RenameFilesTask(BackgroundTask):
@@ -450,30 +452,32 @@ class RenameFilesTask(BackgroundTask):
         kb_mgr._update_meta_field(kb_id, "file_map", file_map)
 
         # 2. 更新向量库中的 metadata
-        embed_fn = _worker_load_model(kb_id, self.config)
-        if db_mgr.switch_kb(kb_id, embedding_function=embed_fn) and db_mgr.collection:
-            total = len(renames)
-            for i, (old_name, new_name) in enumerate(renames.items()):
-                self.update_progress(int((i / total) * 100), f"Updating index: {old_name} -> {new_name}")
-                try:
-                    existing = db_mgr.collection.get(where={"source": old_name})
-                    if existing and existing['ids']:
-                        new_metadatas = existing['metadatas']
-                        for m in new_metadatas: m['source'] = new_name
-                        db_mgr.collection.update(ids=existing['ids'], metadatas=new_metadatas)
-                except Exception as e:
-                    self.send_log("WARNING", f"Vector metadata update failed for {old_name}: {e}")
+        if db_mgr.switch_kb(kb_id, embedding_function=None) and db_mgr.collection:
+            try:
+                total = len(renames)
+                for i, (old_name, new_name) in enumerate(renames.items()):
+                    if self.is_cancelled():
+                        raise InterruptedError("Task was safely terminated by the user.")
+                    self.update_progress(int((i / total) * 100), f"Updating index: {old_name} -> {new_name}")
 
-            #  3. 强制落盘保险
-            if getattr(db_mgr, 'client', None):
-                try:
-                    db_mgr.client._system.stop()
-                except Exception:
-                    pass
+                    try:
+                        existing = db_mgr.collection.get(where={"source": old_name}, include=['metadatas'])
+                        if existing and existing['ids']:
+                            new_metadatas = existing['metadatas']
+                            for m in new_metadatas:
+                                m['source'] = new_name
+                            db_mgr.collection.update(ids=existing['ids'], metadatas=new_metadatas)
+                    except Exception as e:
+                        self.send_log("WARNING", f"Vector update failed: {e}")
+            finally:
+                if getattr(db_mgr, 'client', None):
+                    try:
+                        db_mgr.client._system.stop()
+                    except Exception:
+                        pass
 
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
-        self.send_log("INFO", f"✅ Successfully renamed {len(renames)} files.")
-
+        self.send_log("INFO", f"Successfully renamed {len(renames)} files.")
 
 class ExportKBTask(BackgroundTask):
     def _execute(self):
@@ -485,15 +489,15 @@ class ExportKBTask(BackgroundTask):
         src_dir = os.path.join(kb_mgr.WORKSPACE_DIR, kb_id)
         if not os.path.exists(src_dir): raise FileNotFoundError("Not found")
         self.send_log("INFO", f"📦 Packing Knowledge Base {kb_id}...")
+
         with zipfile.ZipFile(dest_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(src_dir):
                 for file in files:
+                    if self.is_cancelled():
+                        raise InterruptedError("Export task was safely terminated by the user.")
                     if file.endswith('.lock') or file.endswith('.tmp'): continue
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, start=os.path.dirname(src_dir))
-                    zipf.write(file_path, arcname)
-                    self.update_progress(0, f"Packing: {file}")
-        self.send_log("INFO", f"✅ Export successful: {dest_path}")
+
+        self.send_log("INFO", f"Export successful: {dest_path}")
 
 
 class ImportExternalKBTask(BackgroundTask):

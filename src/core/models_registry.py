@@ -6,10 +6,6 @@ import sys
 import json
 import warnings
 
-from huggingface_hub import scan_cache_dir, snapshot_download, constants
-from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
-from transformers import AutoTokenizer
-
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
@@ -55,44 +51,6 @@ EMBEDDING_MODELS = [
             "min_vram": "4 GB",
             "disk_space": "2.5 GB"
         }
-    },
-    {
-        "id": "embed_gte_qwen2_7b",
-        "ui_name": "GTE-Qwen2-7B-Instruct",
-        "hf_repo_id": "Alibaba-NLP/gte-Qwen2-7B-instruct",
-        "description": "LLM-based embedding. State-of-the-art semantic understanding.",
-        "tags": ["MTEB Top 10", "High VRAM"],
-        "max_tokens": 32768,
-        "dimensions": 3584,
-        "trust_remote_code": True,
-        "chunk_size": 1500,
-        "chunk_overlap": 250,
-        "batch_size": 4,
-        "recommended_config": {
-            "device_priority": "GPU Required",
-            "min_ram": "32 GB",
-            "min_vram": "16 GB",
-            "disk_space": "15 GB"
-        }
-    },
-    {
-        "id": "embed_nv_v2",
-        "ui_name": "NVIDIA NV-Embed-v2",
-        "hf_repo_id": "nvidia/NV-Embed-v2",
-        "description": "NVIDIA official model. Supports 32k context. Requires 24GB+ VRAM.",
-        "tags": ["NVIDIA","SOTA"],
-        "max_tokens": 32768,
-        "dimensions": 4096,
-        "trust_remote_code": True,
-        "chunk_size": 2000,
-        "chunk_overlap": 300,
-        "batch_size": 2,
-        "recommended_config": {
-            "device_priority": "High-End GPU Only",
-            "min_ram": "64 GB",
-            "min_vram": "24 GB",
-            "disk_space": "16 GB"
-        }
     }
 ]
 
@@ -120,20 +78,6 @@ RERANKER_MODELS = [
             "min_ram": "8 GB",
             "min_vram": "6 GB",
             "disk_space": "2.5 GB"
-        }
-    },
-    {
-        "id": "rerank_gemma_9b",
-        "ui_name": "Ultra (Precision) - BGE-Reranker-v2-Gemma",
-        "hf_repo_id": "BAAI/bge-reranker-v2-gemma",
-        "description": "Based on Gemma-2-9B. Massive parameters, high performance.",
-        "tags": ["9B Params", "High VRAM"],
-        "max_chunk_size": 2500,
-        "recommended_config": {
-            "device_priority": "High-End GPU Only",
-            "min_ram": "32 GB",
-            "min_vram": "20 GB",
-            "disk_space": "20 GB"
         }
     }
 ]
@@ -175,29 +119,23 @@ def get_optimal_chunk_settings(embedding_model_id: str, reranker_model_id: str):
 
     return chunk_size, overlap, batch_size
 
+
 def resolve_auto_model(model_type="embedding", device="cpu"):
-    has_gpu = device in ["cuda", "mps"]
-    vram_gb = 0
-    if has_gpu and device == "cuda":
-        try:
-            import torch
-            props = torch.cuda.get_device_properties(0)
-            vram_gb = props.total_memory / (1024 ** 3)
-        except:
-            vram_gb = 0
+    # 加入 "dml" (DirectML) 的识别，以兼容未来的 DeviceManager 传参
+    has_gpu = device in ["cuda", "mps", "dml", "directml"]
 
     if model_type == "embedding":
         if has_gpu:
-            if vram_gb >= 22: return "embed_nv_v2"
-            elif vram_gb >= 12: return "embed_gte_qwen2_7b"
-            else: return "embed_scientific_m3"
-        else: return "embed_nano_fast"
+            return "embed_scientific_m3"
+        else:
+            return "embed_nano_fast"
 
     elif model_type == "reranker":
         if has_gpu:
-            if vram_gb >= 20: return "rerank_gemma_9b"
-            else: return "rerank_pro_m3"
-        else: return "rerank_lite"
+            return "rerank_pro_m3"
+        else:
+            return "rerank_lite"
+
     return None
 
 
@@ -240,14 +178,18 @@ def load_external_models():
     ext_models = cfg.load_external_models_data()
     if ext_models:
         for m in ext_models.get("embedding", []):
+            m['trust_remote_code'] = False
             if not get_model_conf(m['id'], "embedding"): EMBEDDING_MODELS.append(m)
         for m in ext_models.get("reranker", []):
+            m['trust_remote_code'] = False
             if not get_model_conf(m['id'], "reranker"): RERANKER_MODELS.append(m)
 
 
 def register_external_model(model_info, model_type="embedding"):
     if not model_info: return
     model_id = model_info.get("id")
+
+    model_info['trust_remote_code'] = False
 
     if get_model_conf(model_id, model_type):
         return
@@ -271,7 +213,10 @@ def register_external_model(model_info, model_type="embedding"):
 
 load_external_models()
 
-def _get_hf_home(): return os.environ.get("HF_HOME", constants.HF_HOME)
+def _get_hf_home():
+    from huggingface_hub import constants
+    return os.environ.get("HF_HOME", constants.HF_HOME)
+
 def _is_file_valid(path):
     if not os.path.exists(path): return False
     try:
@@ -281,6 +226,7 @@ def _is_file_valid(path):
 
 def _official_check(repo_id):
     try:
+        from huggingface_hub import scan_cache_dir
         info = scan_cache_dir(_get_hf_home())
         for repo in info.repos:
             if repo.repo_id == repo_id and repo.revisions: return True
@@ -302,6 +248,7 @@ def _repair_model_links(repo_id):
     repo_dir = os.path.join(_get_hf_home(), "hub", "models--" + repo_id.replace("/", "--"))
     if not os.path.exists(repo_dir): return False
     try:
+        from huggingface_hub import snapshot_download
         for folder in ["snapshots", "refs"]:
             p = os.path.join(repo_dir, folder)
             if os.path.exists(p): shutil.rmtree(p, ignore_errors=True)
@@ -373,6 +320,10 @@ def ensure_onnx_model(repo_id, model_type=None):
                 return onnx_dir
 
     logger.info("Local ONNX cache miss, preparing for download and conversion...")
+    logger.info("Loading heavy AI frameworks (Transformers/Optimum) into memory...")
+    from huggingface_hub import snapshot_download
+    from transformers import AutoTokenizer
+    from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
     model_path = snapshot_download(repo_id=repo_id)
 
     source_has_onnx = False
@@ -435,6 +386,13 @@ def ensure_onnx_model(repo_id, model_type=None):
         if 'model' in locals(): del model
         if 'tokenizer' in locals(): del tokenizer
         gc.collect()
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
     folder_name = "models--" + repo_id.replace("/", "--")
     hf_model_dir = os.path.join(hf_home, "hub", folder_name)

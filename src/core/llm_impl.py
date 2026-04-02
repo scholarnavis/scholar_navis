@@ -1,11 +1,62 @@
 import json
 import logging
+import threading
 from typing import Generator, List, Dict, Optional
 
-import httpx
-from openai import OpenAI, APIStatusError
+import litellm
+from litellm import completion, image_generation
+from litellm.exceptions import APIError, APIConnectionError, ContextWindowExceededError, RateLimitError, Timeout, \
+    AuthenticationError, ServiceUnavailableError, BadRequestError, NotFoundError
+
 from src.core.config_manager import ConfigManager
 from src.core.network_worker import _get_explicit_proxy_kwargs
+
+
+_translation_lock = threading.Lock()
+_TRANSLATION_CACHE = {}
+
+def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs):
+    if not llm_instance: return text
+
+    # 使用方向和文本的哈希作为唯一键，彻底与 llm_instance 实例解耦
+    cache_key = f"{direction}_{hash(text)}"
+
+    with _translation_lock:
+        if cache_key in _TRANSLATION_CACHE:
+            return _TRANSLATION_CACHE[cache_key]
+
+    if direction == "to_en":
+        prompt = (
+            "You are an expert bioinformatician and translator. "
+            "Translate the following user query into precise academic English. "
+            "CRITICAL: DO NOT translate or alter any Latin taxonomic names (e.g., Gossypium, Arabidopsis) "
+            "or scientific abbreviations (e.g., scRNA-seq, qPCR). "
+            "Output ONLY the translated English text, nothing else."
+        )
+    else:
+        prompt = (
+            "You are an expert academic translator. Translate the following English text "
+            "into the language of the user's original query. \n"
+            "CRITICAL RULES:\n"
+            "1. KEEP ALL CITATION TAGS INTACT (e.g., [1], [2]).\n"
+            "2. DO NOT translate Latin taxonomic names.\n"
+            "3. PRESERVE all Markdown formatting.\n"
+        )
+
+    response = llm_instance.chat([
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": text}
+    ], **kwargs)
+
+    res_text = response.get("content", "").strip() if isinstance(response, dict) else str(response).strip()
+
+    if res_text:
+        _TRANSLATION_CACHE[cache_key] = res_text
+
+    return res_text
+
+
+litellm.drop_params = True
 
 
 class OpenAICompatibleLLM:
@@ -15,13 +66,7 @@ class OpenAICompatibleLLM:
         self.config_data = config or {}
 
         sys_cfg = ConfigManager().user_settings
-        custom_timeout = config.get("timeout", 60.0) if config else 60.0
-
-        httpx_kwargs = {"timeout": custom_timeout}
-        proxy_cfg = _get_explicit_proxy_kwargs()
-        httpx_kwargs.update(proxy_cfg)
-
-        self.http_client = httpx.Client(**httpx_kwargs)
+        self.custom_timeout = config.get("timeout", 60.0) if config else 60.0
 
         if not config:
             self.provider_id = sys_cfg.get("active_llm_id", "custom")
@@ -34,7 +79,6 @@ class OpenAICompatibleLLM:
             self.base_url = config.get("base_url", "http://localhost:11434/v1")
             self.model_name = config.get("model_name", "llama3")
 
-
         self._missing_api_key = False
         if not raw_api_key or str(raw_api_key).strip() == "":
             if "localhost" not in self.base_url and "127.0.0.1" not in self.base_url:
@@ -43,9 +87,9 @@ class OpenAICompatibleLLM:
         else:
             self.api_key = str(raw_api_key).strip()
 
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url, http_client=self.http_client)
-
-        self.logger.info(f"Initialized Pure OpenAI-Compatible LLM: [{self.model_name}] @ {self.base_url}")
+        # 配置代理环境供 LiteLLM 内部的 HTTP 请求使用
+        proxy_cfg = _get_explicit_proxy_kwargs()
+        self.logger.info(f"Initialized Unified LLM Provider via LiteLLM: [{self.model_name}] @ {self.base_url}")
 
         applied_params = self._get_payload_kwargs()
         if applied_params:
@@ -63,12 +107,8 @@ class OpenAICompatibleLLM:
         self.logger.info(f"[{self.model_name}] Request Parameters: {safe_payload}")
 
     def cancel(self):
+        # LiteLLM 对流的打断可以通过停止迭代来实现，无需手动 close client
         self._is_cancelled = True
-        try:
-            if self.client and hasattr(self.client, "close"):
-                self.client.close()
-        except Exception:
-            pass
 
     def _parse_custom_params(self, params_list: List[Dict]) -> Dict:
         res = {}
@@ -112,40 +152,24 @@ class OpenAICompatibleLLM:
         elif param_mode == "custom":
             custom_params = self._parse_custom_params(model_params)
 
+        if "temperature" not in custom_params:
+            custom_params["temperature"] = 0.01
+        if "top_p" not in custom_params:
+            custom_params["top_p"] = 0.1
+
         return {k: v for k, v in custom_params.items() if k not in ["messages", "model", "stream", "tools"]}
-
-    def _split_openai_payload(self, payload: Dict) -> Dict:
-        standard_keys = {
-            "temperature", "top_p", "n", "stop", "max_tokens", "presence_penalty",
-            "frequency_penalty", "logit_bias", "user", "response_format", "seed",
-            "tools", "tool_choice", "parallel_tool_calls", "logprobs", "top_logprobs"
-        }
-
-        standard_payload = {}
-        extra_payload = {}
-
-        for k, v in payload.items():
-            if k in standard_keys:
-                standard_payload[k] = v
-            else:
-                extra_payload[k] = v
-
-        if extra_payload:
-            standard_payload["extra_body"] = extra_payload
-
-        return standard_payload
 
     def _process_messages(self, messages: List[Dict]) -> List[Dict]:
         """
-        支持多模态消息：
-        如果上层 UI 传入了包含 image_url 的复杂 content 结构，予以保留。
+        支持多模态消息：LiteLLM 会将符合 OpenAI 规范的 image_url 自动转译给 Anthropic/Gemini 等
         """
         processed_msgs = []
         for m in messages:
+            msg_dict = m.copy()
             role = m.get("role", "user")
             content = m.get("content", "")
 
-            msg_dict = {"role": role}
+            msg_dict["role"] = role
 
             if isinstance(content, list):
                 valid_parts = []
@@ -159,55 +183,53 @@ class OpenAICompatibleLLM:
             else:
                 msg_dict["content"] = str(content) if content is not None else ""
 
-            if "tool_calls" in m:
-                msg_dict["tool_calls"] = m["tool_calls"]
-            if "tool_call_id" in m:
-                msg_dict["tool_call_id"] = m["tool_call_id"]
-            if "name" in m:
-                msg_dict["name"] = m["name"]
-
             processed_msgs.append(msg_dict)
 
         return processed_msgs
 
+    def _build_litellm_kwargs(self, payload: Dict, messages: List[Dict], stream: bool = False) -> Dict:
+        """构建底层路由参数：决定是当做中转站处理，还是按原生厂商协议处理"""
+        kwargs = {
+            "model": self.model_name,
+            "api_key": self.api_key,
+            "stream": stream,
+            "messages": messages,
+            "timeout": self.custom_timeout,
+            **payload
+        }
+
+        # 绝对服从用户配置：确保传入配置项里的 API URL
+        if self.base_url:
+            kwargs["api_base"] = self.base_url
+
+        base = self.base_url.lower() if self.base_url else ""
+
+        # 智能路由 1：处理几个规矩特殊、需要走原生协议的官方 API
+        if "api.anthropic.com" in base or "api.minimaxi.com/anthropic" in base:
+            kwargs["custom_llm_provider"] = "anthropic"
+            if not self.model_name.startswith("anthropic/"):
+                pass
+        elif "api.deepseek.com" in base:
+            kwargs["custom_llm_provider"] = "deepseek"
+            if not self.model_name.startswith("deepseek/"):
+                kwargs["model"] = f"deepseek/{self.model_name}"
+        elif "generativelanguage" in base and "openai" not in base:
+            kwargs["custom_llm_provider"] = "gemini"
+            if not self.model_name.startswith("gemini/"):
+                kwargs["model"] = f"gemini/{self.model_name}"
+        elif "xiaomimimo.com" in base:
+            kwargs["custom_llm_provider"] = "openai"
+            if not self.model_name.startswith("openai/"):
+                kwargs["model"] = f"openai/{self.model_name}"
+        else:
+            kwargs["custom_llm_provider"] = "openai"
+            if not self.model_name.startswith("openai/"):
+                kwargs["model"] = f"openai/{self.model_name}"
+
+        return kwargs
+
     def chat(self, messages: List[Dict], is_translation=False, **kwargs):
-
         if getattr(self, '_missing_api_key', False):
-            raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
-
-        payload = self._get_payload_kwargs()
-        payload.update(kwargs)
-
-        if is_translation:
-            for k in ['tools', 'tool_choice', 'response_format', 'image_generation']:
-                payload.pop(k, None)
-
-        processed_messages = self._process_messages(messages)
-        safe_payload = self._split_openai_payload(payload)
-
-        self._log_params(safe_payload)
-
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=processed_messages,
-            **safe_payload
-        )
-        choice = response.choices[0]
-
-        if choice.message.tool_calls:
-            return {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{"id": t.id, "type": "function",
-                                "function": {"name": t.function.name, "arguments": t.function.arguments}} for t in
-                               choice.message.tool_calls]
-            }
-        return choice.message.content or ""
-
-    def stream_chat(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[str, None, None]:
-
-        if getattr(self, '_missing_api_key', False):
-            # [修改] 抛出异常阻断对话
             raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
 
         payload = self._get_payload_kwargs()
@@ -220,18 +242,52 @@ class OpenAICompatibleLLM:
         processed_messages = self._process_messages(messages)
         self._log_params(payload)
 
+        try:
+            litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=False)
+            response = completion(**litellm_kwargs)
+            choice = response.choices[0]
+
+            reasoning = getattr(choice.message, 'reasoning_content', None)
+            if not reasoning and hasattr(choice.message, 'model_extra') and choice.message.model_extra:
+                reasoning = choice.message.model_extra.get('reasoning_content')
+
+            if getattr(choice.message, 'tool_calls', None):
+                msg_dump = choice.message.model_dump(exclude_none=True)
+                msg_dump["reasoning_content"] = reasoning or ""
+                if not msg_dump.get("content"):
+                    msg_dump["content"] = ""
+                return msg_dump
+
+            return {
+                "content": choice.message.content or "",
+                "reasoning_content": reasoning or "",
+                "role": "assistant"
+            }
+        except Exception as e:
+            self.logger.error(f"Chat completion error: {str(e)}")
+            raise e
+
+    def stream_chat(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[str, None, None]:
+        if getattr(self, '_missing_api_key', False):
+            raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
+
+        payload = self._get_payload_kwargs()
+        payload.update(kwargs)
+
+        if is_translation:
+            for k in ['tools', 'tool_choice', 'response_format', 'image_generation']:
+                payload.pop(k, None)
+
+        processed_messages = self._process_messages(messages)
         stream = payload.pop("stream", True)
-        safe_payload = self._split_openai_payload(payload)
+        self._log_params(payload)
 
         is_thinking = False
+        native_reasoning_mode = False
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=processed_messages,
-                stream=stream,
-                **safe_payload
-            )
+            litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=stream)
+            response = completion(**litellm_kwargs)
 
             if not stream:
                 yield response.choices[0].message.content or ""
@@ -244,9 +300,12 @@ class OpenAICompatibleLLM:
                     yield "\n\n[⛔ Generation halted by user.]"
                     break
 
-                if not chunk.choices: continue
+                if not getattr(chunk, 'choices', None) or not chunk.choices:
+                    continue
+
                 delta = chunk.choices[0].delta
 
+                # 提取思考内容
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if not reasoning and hasattr(delta, 'model_extra') and delta.model_extra:
                     reasoning = delta.model_extra.get('reasoning_content')
@@ -255,25 +314,105 @@ class OpenAICompatibleLLM:
                     if not is_thinking:
                         yield "<think>\n"
                         is_thinking = True
+                        native_reasoning_mode = True
                     yield reasoning
 
+                # 提取正文内容
                 content = getattr(delta, 'content', None)
                 if content:
-                    if is_thinking:
-                        yield "\n</think>\n\n"
+                    if "<think>" in content and not is_thinking:
+                        is_thinking = True
+                        native_reasoning_mode = False
+
+                    if "</think>" in content and is_thinking:
+                        yield content
                         is_thinking = False
-                    yield content
+                        continue
+
+                    if is_thinking:
+                        if native_reasoning_mode:
+                            yield "\n</think>\n\n"
+                            is_thinking = False
+                            native_reasoning_mode = False
+                            yield content
+                        else:
+                            yield content
+                    else:
+                        yield content
 
             if is_thinking:
                 yield "\n</think>\n"
 
-        except APIStatusError as e:
-            friendly_msg = ""
-            if e.status_code == 400:
-                friendly_msg = "\n\n💡 <b>System Tip:</b> Request rejected. Make sure context limits aren't exceeded or parameters are valid."
-            yield f"\n\n[API Request Error: HTTP {e.status_code}]\n{str(e)}{friendly_msg}\n"
+
+        except ContextWindowExceededError as e:
+
+            self.logger.error(f"Context window exceeded: {e}")
+
+            yield f"\n\n[Context Exceeded Error]\nThe input text or document is too long for this model. Please clear history or use a model with a larger context window.\n"
+
+
+        except RateLimitError as e:
+
+            self.logger.error(f"Rate limit hit: {e}")
+
+            yield f"\n\n[Rate Limit Error]\nToo many requests or insufficient quota. Please try again later.\n"
+
+
+        except Timeout as e:
+            self.logger.error(f"Request timeout: {e}")
+            yield f"\n\n[Timeout Error]\nThe model took too long to respond. Please check your network or try a different provider.\n"
+        except AuthenticationError as e:
+            self.logger.error(f"Authentication Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[API Request Error: HTTP 401]\n{err_msg}\n"
+        except NotFoundError as e:
+            self.logger.error(f"Not Found Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[API Request Error: HTTP 404]\n{err_msg}\n"
+        except BadRequestError as e:
+            self.logger.error(f"Bad Request Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[API Request Error: HTTP 400]\n{err_msg}\n💡 Tip: This might happen if you sent an image to a text-only model or provided invalid parameters.\n"
+        except ServiceUnavailableError as e:
+            self.logger.error(f"Service Unavailable Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[API Request Error: HTTP 503]\nThe API service is currently overloaded or down. Please try again later.\nDetails: {err_msg}\n"
+        except APIConnectionError as e:
+            self.logger.error(f"API Connection Error: {e}")
+            err_msg = getattr(e, 'message', str(e))
+            yield f"\n\n[System Error: Connection Failed]\nFailed to connect to the API endpoint. Please check your proxy settings or local network.\nDetails: {err_msg}\n"
+        except APIError as e:
+            self.logger.error(f"API Error ({e.status_code}): {e.message}")
+            yield f"\n\n[API Request Error: HTTP {e.status_code}]\n{e.message}\n"
         except Exception as e:
-            if self._is_cancelled or "closed" in str(e).lower():
+            if self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
                 yield "\n\n[⛔ Generation halted by user.]"
             else:
+                self.logger.error(f"Unexpected system error: {e}")
                 yield f"\n\n[System Error: {str(e)}]\n"
+
+
+    def generate_image(self, prompt: str, **kwargs) -> str:
+        """
+        补全的多模态：统一的图像生成接口。
+        支持 DALL-E, Midjourney (需要对应的代理 API), 或兼容的模型。
+        """
+        if getattr(self, '_missing_api_key', False):
+            raise ValueError("API Key is missing. Please configure your API key.")
+
+        self.logger.info(f"Generating image with prompt: {prompt[:50]}...")
+
+        try:
+            # LiteLLM 的图像生成接口
+            res = image_generation(
+                prompt=prompt,
+                model=self.model_name,
+                api_key=self.api_key,
+                api_base=self.base_url,
+                **kwargs
+            )
+            # 提取生成的图像 URL
+            return res.data[0].url
+        except Exception as e:
+            self.logger.error(f"Image generation failed: {str(e)}")
+            raise e

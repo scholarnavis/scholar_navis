@@ -1,6 +1,6 @@
 import platform
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QSizePolicy
 from PySide6.QtCore import Qt, QUrl, QSize
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtSvgWidgets import QSvgWidget
@@ -9,9 +9,8 @@ from src.task.common_task import VersionCheckTask
 from src.tools.base_tool import BaseTool
 from src.core.theme_manager import ThemeManager
 from src.core.core_task import TaskManager, TaskMode
-# 确保在这里引入了刚刚写好的 ApiProvidersDialog
 from src.ui.components.dialog import LicenseDialog, ApiProvidersDialog
-from src.version import __version__, __app_name__, __description__, __website__, __github__, __dl__
+from src.core.version import __version__, __app_name__, __description__, __website__, __github__, __dl__
 
 
 class AboutTool(BaseTool):
@@ -51,11 +50,40 @@ class AboutTool(BaseTool):
         self.lbl_update.hide()
         self.lbl_update.setOpenExternalLinks(True)
 
-        layout.addWidget(self.lbl_title)
-        layout.addWidget(self.lbl_desc)
         layout.addWidget(self.lbl_version)
         layout.addWidget(self.lbl_update)
         layout.addSpacing(20)
+
+        self.disclaimer_container = QWidget()
+        self.disclaimer_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        disclaimer_layout = QHBoxLayout(self.disclaimer_container)
+        disclaimer_layout.setContentsMargins(20, 20, 20, 20)
+        disclaimer_layout.setSpacing(15)
+
+        self.lbl_disclaimer_icon = QLabel()
+        self.lbl_disclaimer_icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+
+        self.lbl_disclaimer_text = QLabel()
+        self.lbl_disclaimer_text.setWordWrap(True)
+        self.lbl_disclaimer_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        disclaimer_text = (
+            "<b>IMPORTANT DISCLAIMER</b><br><br>"
+            "Scholar Navis uses Large Language Models (LLMs). While augmented with RAG and MCP, "
+            "AI-generated content may still contain <b>inaccuracies or hallucinations</b>. Users are <b>strictly required</b> "
+            "to verify information via provided citations/links. Developers are not liable for any research errors or "
+            "academic misconduct arising from the use of this tool."
+        )
+        self.lbl_disclaimer_text.setText(disclaimer_text)
+
+        disclaimer_layout.addWidget(self.lbl_disclaimer_icon)
+        disclaimer_layout.addWidget(self.lbl_disclaimer_text)
+
+        layout.addWidget(self.disclaimer_container)
+        # ---------------
+
+        layout.addSpacing(25)
 
         # 按钮容器
         btn_layout = QHBoxLayout()
@@ -72,7 +100,7 @@ class AboutTool(BaseTool):
         self.btn_web.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(__website__)))
         self.btn_git.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(__github__)))
         self.btn_license.clicked.connect(self._show_licenses)
-        self.btn_api.clicked.connect(self._show_api_providers)  # 连接到新弹窗
+        self.btn_api.clicked.connect(self._show_api_providers)
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_web)
@@ -133,7 +161,7 @@ class AboutTool(BaseTool):
         self.btn_web.setIcon(tm.icon("link", "text_main"))
         self.btn_git.setIcon(tm.icon("github", "text_main"))
         self.btn_license.setIcon(tm.icon("copyright", "text_main"))
-        self.btn_api.setIcon(tm.icon("api", "text_main"))  # 使用 API 或 database 图标
+        self.btn_api.setIcon(tm.icon("api", "text_main"))
 
         btn_style = f"""
             QPushButton {{ 
@@ -151,6 +179,29 @@ class AboutTool(BaseTool):
                 color: {tm.color('accent')};
             }}
         """
+
+        self.disclaimer_container.setStyleSheet(f"""
+                    QWidget {{
+                        background-color: {tm.color('bg_input')};
+                        border: 1px solid {tm.color('border')};
+                        border-left: 4px solid {tm.color('warning')};
+                        border-radius: 8px;
+                    }}
+                """)
+
+        icon_pixmap = tm.icon("info", "warning").pixmap(QSize(24, 24))
+        self.lbl_disclaimer_icon.setPixmap(icon_pixmap)
+        self.lbl_disclaimer_icon.setStyleSheet("background: transparent; border: none;")
+
+        self.lbl_disclaimer_text.setStyleSheet(f"""
+                    QLabel {{
+                        {base_font} 
+                        color: {tm.color('text_main')}; 
+                        font-size: 14px; 
+                        background: transparent;
+                        border: none;
+                    }}
+                """)
 
         for btn in [self.btn_web, self.btn_git, self.btn_license, self.btn_api]:
             btn.setIconSize(QSize(16, 16))

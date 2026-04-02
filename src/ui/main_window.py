@@ -6,7 +6,8 @@ from PySide6.QtCore import Qt, QSize, QTimer, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
-                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem)
+                               QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem,
+                               QApplication)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
@@ -155,19 +156,30 @@ class MainWindow(QMainWindow):
             "About": "info"
         }
 
-        # 注册所有工具
-        self.add_tool(ImportTool())
-        self.add_tool(ChatTool())
-        self.add_tool(RSSTool())
-        self.add_tool(SettingsTool())
-        self.add_tool(LogTool())
-        self.add_tool(AboutTool())
+        self.tool_classes = [
+            ("Library Manager", ImportTool),
+            ("Chat Assistant", ChatTool),
+            ("Literature Tracker", RSSTool),
+            ("Global Settings", SettingsTool),
+            ("System Logs", LogTool),
+            ("About", AboutTool)
+        ]
+        self.tools = [None] * len(self.tool_classes)
 
-        self.sidebar.setCurrentRow(0)
-        self.perform_startup_checks()
+        # 仅生成左侧边栏按钮和右侧占位符，不进行耗时的实例化
+        for name, _ in self.tool_classes:
+            icon_name = self.icon_map.get(name, "tag")
+            item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {name}")
+            self.sidebar.addItem(item)
+
+            dummy_widget = QWidget()
+            dummy_widget.setStyleSheet("background-color: transparent;")
+            self.tool_stack.addWidget(dummy_widget)
+
         self.clean_old_logs()
-        self._setup_mcp_status_bar()
+        QTimer.singleShot(300, self.perform_startup_checks)
 
+        # 把原本这里的 translator_dialog 等初始化保留
         self.translator_dialog = QuickTranslatorWindow(None)
         self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
         self.shortcut_translate.activated.connect(self.toggle_quick_translator)
@@ -175,10 +187,32 @@ class MainWindow(QMainWindow):
         self.tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+        from src.core.signals import GlobalSignals
+        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
+            GlobalSignals().sig_send_to_chat.connect(self.route_to_chat)
+        if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
+            GlobalSignals().sig_route_to_chat_with_mcp.connect(self.route_to_chat_with_mcp)
+
+        self.sidebar.setCurrentRow(0)
+        self.switch_tool(0)
+
         if sys.platform == "win32":
             ico_path = ThemeManager.get_resource_path("Assets", "icon.ico")
             hwnd = int(self.winId())
             QTimer.singleShot(100, lambda: force_windows_taskbar_icon(hwnd, ico_path))
+
+    def _lazy_load_tools(self):
+        tools_to_load = [
+            ImportTool, ChatTool, RSSTool, SettingsTool, LogTool, AboutTool
+        ]
+
+        for ToolClass in tools_to_load:
+            self.add_tool(ToolClass())
+            QApplication.processEvents()
+
+        self.sidebar.setCurrentRow(0)
+        self.clean_old_logs()
+        QTimer.singleShot(300, self.perform_startup_checks)
 
     def toggle_quick_translator(self):
         if self.translator_dialog.isHidden() or self.translator_dialog.windowOpacity() == 0.0:
@@ -211,7 +245,7 @@ class MainWindow(QMainWindow):
 
         for i in range(self.sidebar.count()):
             item = self.sidebar.item(i)
-            tool_name = self.tools[i].tool_name
+            tool_name = self.tool_classes[i][0]
             icon_name = self.icon_map.get(tool_name, "tag")
             item.setIcon(tm.icon(icon_name, "text_main"))
 
@@ -257,31 +291,7 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-    def _setup_mcp_status_bar(self):
-        status_widget = QWidget()
-        status_layout = QHBoxLayout(status_widget)
-        status_layout.setContentsMargins(5, 2, 15, 2)
-        status_layout.addStretch()
 
-        status_layout.addWidget(QLabel("MCP Servers:"))
-
-        # 内置MCP状态
-        builtin_status = QLabel("Built-in: Running")
-        builtin_status.setStyleSheet("color: #4caf50; font-weight: bold;")
-        status_layout.addWidget(builtin_status)
-
-        status_layout.addSpacing(10)
-
-        # 网络/自定义 MCP 状态
-        self.custom_status_label = QLabel("Custom: 0 Active")
-        self.custom_status_label.setStyleSheet("color: #888;")
-        status_layout.addWidget(self.custom_status_label)
-
-        self.statusBar().addPermanentWidget(status_widget)
-
-        self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self._update_mcp_status)
-        self.status_timer.start(5000)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -290,38 +300,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(10, lambda: set_window_titlebar_theme(self.winId(), is_dark))
 
 
-    def _update_mcp_status(self):
-        mcp_mgr = MCPManager.get_instance()
-        config_mgr = ConfigManager()
-        mcp_config = config_mgr.mcp_servers.get("mcpServers", {})
 
-        connected_count = 0
-        starting_count = 0
-        error_count = 0
-
-        for name, cfg in mcp_config.items():
-            if name != "builtin":
-                if cfg.get("enabled", False) or cfg.get("always_on", False):
-                    status = mcp_mgr.get_server_status(name)
-                    if status == "connected":
-                        connected_count += 1
-                    elif status in ["starting", "connecting"]:
-                        starting_count += 1
-                    elif "error" in status:
-                        error_count += 1
-
-        if starting_count > 0:
-            self.custom_status_label.setText(f"Custom: {starting_count} Starting...")
-            self.custom_status_label.setStyleSheet("color: #ffb86c; font-weight: bold;")
-        elif error_count > 0:
-            self.custom_status_label.setText(f"Custom: {connected_count} Active, {error_count} Error")
-            self.custom_status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
-        elif connected_count > 0:
-            self.custom_status_label.setText(f"Custom: {connected_count} Active")
-            self.custom_status_label.setStyleSheet("color: #4caf50; font-weight: bold;")
-        else:
-            self.custom_status_label.setText("Custom: 0 Active")
-            self.custom_status_label.setStyleSheet("color: #888;")
 
     def clean_old_logs(self):
         base_dir = ThemeManager.get_resource_path()
@@ -346,38 +325,153 @@ class MainWindow(QMainWindow):
                         pass
 
     def perform_startup_checks(self):
-        is_first = self.check_first_run()
-        if not is_first:
-            self.check_model_integrity()
+        self.show_mandatory_disclaimer()
+
+    def show_mandatory_disclaimer(self):
+        cfg = ConfigManager()
+        if not cfg.user_settings.get("agreement_accepted", False):
+            tm = ThemeManager()
+            dlg = BaseDialog(self, title="Terms of Service & AI Disclaimer", width=600)
+            # 强化弹窗置顶与模态
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+            dlg.footer_widget.setVisible(False)
+
+            disclaimer_html = f"""
+                            <div style="font-family: {tm.font_family()}; color: {tm.color('text_main')}; line-height: 1.6;">
+                                <h2 style="color: {tm.color('danger')}; text-align: center; margin-bottom: 20px;">
+                                    Important AI Usage Disclaimer
+                                </h2>
+
+                                <p><b>1. Accuracy & Hallucinations:</b><br>
+                                Scholar Navis utilizes Large Language Models. <b>AI-generated content may contain inaccuracies or hallucinations</b>, even with RAG and MCP tools.</p>
+
+                                <p><b>2. Mandatory Verification:</b><br>
+                                Users must manually verify all information via the <b>provided citations and source links</b>. Do not rely solely on AI summaries.</p>
+
+                                <p><b>3. Responsibility:</b><br>
+                                The developers are not liable for any research errors or academic misconduct resulting from the use of this software.</p>
+
+                                <hr style="border: 0; border-top: 1px solid {tm.color('border')}; margin: 20px 0;">
+
+                                <p style="text-align: center; font-weight: bold; color: {tm.color('accent')};">
+                                    Accepting these terms is required to use the software.
+                                </p>
+                            </div>
+                        """
+
+            lbl = QLabel(disclaimer_html)
+            lbl.setWordWrap(True)
+            lbl.setTextFormat(Qt.RichText)
+            lbl.setStyleSheet("background: transparent; border: none;")
+            dlg.content_layout.addWidget(lbl)
+
+            btn_box = QHBoxLayout()
+            btn_reject = QPushButton("Reject and Exit")
+            btn_accept = QPushButton("Accept and Continue")
+
+            # 样式美化
+            btn_accept.setStyleSheet(
+                f"background-color: {tm.color('accent')}; color: white; font-weight: bold; height: 36px;")
+            btn_reject.setStyleSheet(
+                f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_muted')}; height: 36px;")
+
+            btn_box.addWidget(btn_reject)
+            btn_box.addWidget(btn_accept)
+            dlg.content_layout.addLayout(btn_box)
+
+            # 绑定逻辑
+            btn_accept.clicked.connect(dlg.accept)
+            btn_reject.clicked.connect(dlg.reject)
+
+            if dlg.exec():  # 用户点击接受
+                cfg.user_settings.update({"agreement_accepted": True})
+                cfg.save_settings()
+                return True
+            else:  # 用户拒绝或直接关闭窗口
+                QApplication.quit()
+                sys.exit(0)
+        return True
+
+    def route_to_chat(self, context_text, prompt_text=""):
+        chat_index = 1  # ChatTool 在侧边栏的索引是 1
+        self.sidebar.setCurrentRow(chat_index)  # 切换标签（此时会自动实例化 ChatTool）
+        chat_tool = self.tools[chat_index]
+        if chat_tool:
+            chat_tool.handle_external_send(context_text, prompt_text)
+
+        # 激活并前置主窗口
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def route_to_chat_with_mcp(self, context_text, prompt_text, target_tag):
+        chat_index = 1
+        self.sidebar.setCurrentRow(chat_index)
+        chat_tool = self.tools[chat_index]
+        if chat_tool:
+            chat_tool.handle_external_send_with_mcp(context_text, prompt_text, target_tag)
+
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def add_tool(self, tool):
         self.tools.append(tool)
-        widget = tool.get_ui_widget()
-        self.tool_stack.addWidget(widget)
-
-        icon_name = self.icon_map.get(tool.tool_name, "tag")
-        item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {tool.tool_name}")
-        self.sidebar.addItem(item)
 
     def switch_tool(self, index):
+        current_index = self.tool_stack.currentIndex()
+
+        if index == current_index and self.tools[index] is not None:
+            self.sidebar.blockSignals(True)
+            self.sidebar.setCurrentRow(current_index)
+            self.sidebar.blockSignals(False)
+            return
+
+        if current_index >= 0 and self.tools[current_index] is not None:
+            current_tool = self.tools[current_index]
+            if hasattr(current_tool, 'check_unsaved_changes'):
+
+                def proceed_switch():
+                    self.sidebar.blockSignals(True)
+                    self.sidebar.setCurrentRow(index)
+                    self.sidebar.blockSignals(False)
+                    self._execute_tool_switch(index)
+
+                import inspect
+                sig = inspect.signature(current_tool.check_unsaved_changes)
+                if 'proceed_callback' in sig.parameters:
+                    can_switch = current_tool.check_unsaved_changes(proceed_callback=proceed_switch)
+                else:
+                    can_switch = current_tool.check_unsaved_changes()
+
+                if not can_switch:
+                    QTimer.singleShot(50, lambda: self._force_revert_sidebar(current_index))
+                    return
+
+        self._execute_tool_switch(index)
+
+    def _force_revert_sidebar(self, correct_index):
+        """延迟执行的方法：强行将侧边栏焦点拽回正确的索引"""
+        self.sidebar.blockSignals(True)
+        self.sidebar.setCurrentRow(correct_index)
+        self.sidebar.blockSignals(False)
+
+    def _execute_tool_switch(self, index):
+        if self.tools[index] is None:
+            name, ToolClass = self.tool_classes[index]
+            tool_instance = ToolClass()
+            self.tools[index] = tool_instance
+
+            widget = tool_instance.get_ui_widget()
+
+            old_widget = self.tool_stack.widget(index)
+            self.tool_stack.insertWidget(index, widget)
+            self.tool_stack.removeWidget(old_widget)
+            old_widget.deleteLater()
+
         self.tool_stack.setCurrentIndex(index)
 
-    def check_model_integrity(self):
-        cfg = ConfigManager()
 
-        embed_id = cfg.user_settings.get("current_model_id", "embed_auto")
-        rerank_id = cfg.user_settings.get("rerank_model_id", "rerank_auto")
-
-        self.integrity_task_mgr = TaskManager()
-        self.integrity_task_mgr.sig_result.connect(self._on_integrity_check_result)
-
-        self.integrity_task_mgr.start_task(
-            VerifyModelsTask,
-            task_id="startup_integrity_check",
-            mode=TaskMode.THREAD,
-            embed_id=embed_id,
-            rerank_id=rerank_id
-        )
 
     def _on_integrity_check_result(self, result):
         to_download = result.get("to_download",[])
@@ -390,13 +484,13 @@ class MainWindow(QMainWindow):
                 f"Please go to <b>Global Settings</b> to verify the path or download them."
             )
             dlg = StandardDialog(self, "System Check", msg)
-            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+
             dlg.exec()
             self._jump_to_settings()
 
     def _jump_to_settings(self):
-        self.switch_tool(6)
-        self.sidebar.setCurrentRow(6)
+        self.switch_tool(3)
+        self.sidebar.setCurrentRow(3)
 
     def check_first_run(self):
         cfg = ConfigManager()
@@ -428,6 +522,13 @@ class MainWindow(QMainWindow):
                                 <b style="color: {tm.color('danger')}; font-size: 14px;">🛡️ Security Notice</b><br>
                                 <span style="font-size: 13px; color: {tm.color('text_muted')}; display: inline-block; margin-top: 4px;">
                                 To ensure the absolute security of your academic data and system integrity, please make sure you are using a version downloaded directly from our official website. We are not responsible for any security breaches caused by unauthorized third-party distributions.
+                                </span>
+                            </div>
+
+                            <div style="background-color: {tm.color('bg_input')}; border-left: 4px solid {tm.color('success')}; padding: 12px 16px; margin: 15px 0; border-radius: 4px;">
+                                <b style="color: {tm.color('success')}; font-size: 14px;">🔑 API Keys & Rate Limits</b><br>
+                                <span style="font-size: 13px; color: {tm.color('text_muted')}; display: inline-block; margin-top: 4px;">
+                                NCBI PubMed and Semantic Scholar tools can function without API keys, but will be subject to strict rate limits. We strongly recommend configuring your free API keys in the settings for optimal performance and to avoid request timeouts.
                                 </span>
                             </div>
 
@@ -472,3 +573,5 @@ class MainWindow(QMainWindow):
                 })
                 cfg.save_settings()
                 self._jump_to_settings()
+            return True
+        return False

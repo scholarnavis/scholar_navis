@@ -1,23 +1,19 @@
 import asyncio
 import json
 import logging
-import threading
-import sys
 import os
+import sys
+import threading
 import time
-import secrets
 from contextlib import AsyncExitStack
+from typing import Dict
 
 import anyio
 import httpx
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
-from mcp.types import JSONRPCMessage
-
-from typing import Dict, List, Optional
+from mcp.client.stdio import stdio_client
 
 from src.core.config_manager import ConfigManager
 from src.core.signals import GlobalSignals
@@ -106,13 +102,13 @@ class MCPManager:
             safe_base_env["HTTPS_PROXY"] = proxy
             safe_base_env["http_proxy"] = proxy
             safe_base_env["https_proxy"] = proxy
+        else:
+            safe_base_env.pop("HTTP_PROXY", None)
+            safe_base_env.pop("HTTPS_PROXY", None)
+            safe_base_env.pop("http_proxy", None)
+            safe_base_env.pop("https_proxy", None)
 
-        builtin_env = safe_base_env.copy()
-        if user_cfg.get("ncbi_email"): builtin_env["NCBI_API_EMAIL"] = user_cfg.get("ncbi_email")
-        if user_cfg.get("ncbi_api_key"): builtin_env["NCBI_API_KEY"] = user_cfg.get("ncbi_api_key")
-        if user_cfg.get("s2_api_key"): builtin_env["S2_API_KEY"] = user_cfg.get("s2_api_key")
         if hasattr(self, 'log_port'):
-            builtin_env["MCP_LOG_PORT"] = str(self.log_port)
             safe_base_env["MCP_LOG_PORT"] = str(self.log_port)
 
         delay_ms = 500
@@ -123,7 +119,6 @@ class MCPManager:
 
             if is_enabled or always_on:
                 if not force_all:
-
                     status = self.server_status.get(server_name, "")
                     if status == "connected":
                         continue
@@ -131,37 +126,24 @@ class MCPManager:
                 self.server_status[server_name] = "starting"
                 run_cfg = dict(srv_cfg)
 
-                if server_name == "builtin":
-                    logger.info(f"Bootstrapping Core MCP Server: [{server_name}] immediately.")
-                    is_frozen = getattr(sys, 'frozen', False) or not sys.executable.endswith('python.exe')
-                    run_cfg['command'] = sys.executable
-                    if is_frozen:
-                        run_cfg['args'] =["--run-builtin-mcp"]
-                    else:
-                        run_cfg['args'] =["-c", "from plugins.academic_mcp_server import mcp; mcp.run(transport='stdio')"]
+                logger.info(f"Scheduled Lazy Load for External MCP Server: [{server_name}] in {delay_ms}ms")
 
-                    run_cfg['env'] = builtin_env
-                    self._async_start(server_name, run_cfg)
+                if run_cfg.get('type') == 'stdio' and run_cfg.get('command') == 'python':
+                    ext_py = config_mgr.user_settings.get("external_python_path", "")
+                    run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
 
-                else:
-                    logger.info(f"Scheduled Lazy Load for External MCP Server:[{server_name}] in {delay_ms}ms")
+                if run_cfg.get('type') == 'stdio':
+                    custom_env = safe_base_env.copy()
+                    user_defined_env = run_cfg.get('env', {})
+                    if isinstance(user_defined_env, dict):
+                        custom_env.update({k: str(v) for k, v in user_defined_env.items()})
+                    run_cfg['env'] = custom_env
 
-                    if run_cfg.get('type') == 'stdio' and run_cfg.get('command') == 'python':
-                        ext_py = config_mgr.user_settings.get("external_python_path", "")
-                        run_cfg['command'] = ext_py if ext_py and ext_py != "python" else sys.executable
+                def start_lazy_server(name=server_name, cfg=run_cfg):
+                    self._async_start(name, cfg)
 
-                    if run_cfg.get('type') == 'stdio':
-                        custom_env = safe_base_env.copy()
-                        user_defined_env = run_cfg.get('env', {})
-                        if isinstance(user_defined_env, dict):
-                            custom_env.update({k: str(v) for k, v in user_defined_env.items()})
-                        run_cfg['env'] = custom_env
-
-                    def start_lazy_server(name=server_name, cfg=run_cfg):
-                        self._async_start(name, cfg)
-
-                    QTimer.singleShot(delay_ms, start_lazy_server)
-                    delay_ms += 2000
+                self._loop.call_soon_threadsafe(self._loop.call_later, delay_ms / 1000.0, start_lazy_server)
+                delay_ms += 2000
 
             else:
                 if server_name in self.sessions or server_name in self.server_status:
@@ -200,72 +182,43 @@ class MCPManager:
                     write_tx, write_rx = anyio.create_memory_object_stream(100)
 
                     async def http_poster():
-
                         import json
-
-                        # [修复] 增加超时时间，防止工具调用执行时间过长被意外截断
-
                         async with httpx.AsyncClient(timeout=120.0) as client:
-
                             async with write_rx:
-
                                 async for message in write_rx:
-
                                     try:
-
-                                        # [修复] 严格排除 None 值，防止外部服务端严格校验格式时报错
-
                                         if hasattr(message, "model_dump"):
-
                                             payload = message.model_dump(mode='json', exclude_none=True)
-
                                         elif hasattr(message, "dict"):
-
                                             payload = message.dict(exclude_none=True)
-
                                         else:
-
                                             payload = json.loads(json.dumps(message, default=lambda o: o.__dict__))
 
                                         post_headers = {k: v for k, v in headers.items() if k.lower() != 'accept'}
-
                                         post_headers['Content-Type'] = 'application/json'
-
                                         await client.post(url, json=payload, headers=post_headers)
-
                                     except Exception as e:
-
                                         logger.error(f"HTTP POST failed: {e}")
 
                     async def http_receiver():
 
                         from pydantic import TypeAdapter
-
                         from mcp.types import JSONRPCMessage
 
-                        # [修复] JSONRPCMessage 是 Union 类型，必须借助 TypeAdapter 来反序列化
 
                         adapter = TypeAdapter(JSONRPCMessage)
 
                         async with read_tx:
-
                             try:
-
                                 limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-
                                 async with httpx.AsyncClient(timeout=None, limits=limits) as client:
-
                                     async with client.stream("GET", url, headers=headers) as resp:
-
                                         if resp.status_code != 200:
                                             logger.error(f"Abnormal HTTP status code: {resp.status_code}")
-
                                             return
 
                                         async for line in resp.aiter_lines():
-
                                             line = line.strip()
-
                                             if not line: continue
                                             if line.startswith("data: "):
                                                 line = line[6:].strip()
@@ -326,10 +279,10 @@ class MCPManager:
             def _unwrap_exception(exc):
                 if hasattr(exc, 'exceptions'):
                     return " | ".join(_unwrap_exception(sub_e) for sub_e in exc.exceptions)
-                return str(exc)
+                return f"{exc.__class__.__name__}({str(exc)})" if str(exc) else f"{exc.__class__.__name__}()"
 
             err_msg = _unwrap_exception(e)
-            if not err_msg.strip():
+            if not err_msg.strip() or err_msg == "()":
                 err_msg = repr(e)
 
             logger.error(f"[{server_name}] Connection error: {err_msg}")
@@ -344,27 +297,17 @@ class MCPManager:
             GlobalSignals().mcp_status_changed.emit()
 
 
-
-
-    def get_available_tags(self) -> list:
+    def get_available_mcp(self) -> list:
         """供 UI 获取所有可选标签"""
         tags = set()
         for schema in self.tool_schemas.values():
-            tags.update(self._get_tool_effective_tags(schema))
+            tags.update(self.get_external_mcp(schema))
         return sorted(list(tags))
 
-    def _get_tool_effective_tags(self, schema: dict) -> list:
+    def get_external_mcp(self, schema: dict) -> list:
         server_name = schema.get("server", "")
-        desc = schema.get("function", {}).get("description", "")
+        return [server_name] if server_name else ["Unknown Server"]
 
-        if server_name == "builtin":
-            import re
-            match = re.search(r"\[Tags:\s*(.*?)\]", str(desc), re.IGNORECASE)
-            if match:
-                return [t.strip() for t in match.group(1).split(",")]
-            return ["General Tools"]
-        else:
-            return [server_name] if server_name else ["Unknown Server"]
 
     def get_tools_schema_by_tags(self, selected_tags: list) -> list:
         if selected_tags is None:
@@ -375,10 +318,11 @@ class MCPManager:
 
         filtered_tools = []
         for schema in self.tool_schemas.values():
-            tool_tags = self._get_tool_effective_tags(schema)
+            tool_tags = self.get_external_mcp(schema)
             if any(tag in selected_tags for tag in tool_tags):
                 filtered_tools.append({
                     "type": schema.get("type", "function"),
+                    "server": schema.get("server", "Unknown Server"),
                     "function": schema.get("function", {})
                 })
 
@@ -416,8 +360,7 @@ class MCPManager:
             raise ValueError(f"Tool '{tool_name}' not found in any connected MCP server.")
 
         session = self.sessions.get(server_name)
-        is_trusted = server_name == "builtin"
-        timeout = 120.0 if is_trusted else self.TOOL_TIMEOUT
+        timeout = self.TOOL_TIMEOUT
 
         logger.info(f"Executing [{tool_name}] on [{server_name}] (Timeout: {timeout}s)")
 
@@ -449,6 +392,7 @@ class MCPManager:
         return [
             {
                 "type": schema.get("type", "function"),
+                "server": schema.get("server", "Unknown Server"),
                 "function": schema.get("function", {})
             }
             for schema in self.tool_schemas.values()
@@ -458,7 +402,6 @@ class MCPManager:
     def disconnect_server(self, server_name: str):
         if server_name in self.server_stops:
             self._loop.call_soon_threadsafe(self.server_stops[server_name].set)
-            time.sleep(0.02)
 
         if server_name in self.sessions:
             del self.sessions[server_name]

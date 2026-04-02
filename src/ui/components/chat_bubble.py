@@ -1,19 +1,19 @@
+import hashlib
 import os
 import re
-import hashlib
 import tempfile
 import time
 
-import markdown
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QTextBrowser, QScrollArea)
-from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer, QThread, QUrl
-from PySide6.QtGui import QClipboard, QGuiApplication, QCursor
+                               QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
+from src.core.core_task import TaskManager, TaskMode
 from src.core.theme_manager import ThemeManager
+from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
-from src.core.network_worker import LightNetworkWorker
 
 
 def hex_to_rgba(hex_color, alpha):
@@ -27,16 +27,28 @@ def hex_to_rgba(hex_color, alpha):
 
 
 class ChatBubbleWidget(QWidget):
+    # --- 1. 新增消息类型常量 (请放在类属性最顶端) ---
+    MSG_USER = 1
+    MSG_AI = 2
+    MSG_ERROR = 3
+
     sig_edit_confirmed = Signal(int, str)
     sig_link_clicked = Signal(str)
     sig_retry_clicked = Signal(int)
 
-    def __init__(self, text, is_user, index, context_html=None, parent=None):
+    # --- 2. 完整的 __init__ 方法 ---
+    def __init__(self, text, is_user, index, context_html=None, parent=None, msg_type=None):
         super().__init__(parent)
         self.original_text = text
         self.is_user = is_user
         self.index = index
         self.context_html = context_html
+
+        if msg_type is not None:
+            self.msg_type = msg_type
+        else:
+            self.msg_type = self.MSG_USER if is_user else self.MSG_AI
+
         self.is_editing = False
         self._can_edit = True
 
@@ -45,19 +57,21 @@ class ChatBubbleWidget(QWidget):
         self.loading_dots = 0
         self.is_loading = False
 
-        # 异步图片下载管理队列
         self.downloaded_images = {}
         self.downloading_urls = set()
         self.download_failed_urls = {}
-        self.image_threads = []
+        self.download_timeouts = {}
+        self.image_task_mgrs = {}
+
         self.image_loading_timer = QTimer(self)
         self.image_loading_timer.timeout.connect(self._animate_image_loading)
         self.image_loading_dots = 0
-        self.download_timeouts = {}
+
         self.init_ui()
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+    # --- 3. 完整的 init_ui 方法 ---
     def init_ui(self):
         tm = ThemeManager()
 
@@ -80,7 +94,6 @@ class ChatBubbleWidget(QWidget):
 
         font_family = tm.font_family()
 
-        # 附件上下文框 (现在支持 AI 和 User 双方)
         if self.context_html:
             self.ctx_frame = QFrame()
             self.ctx_frame.setObjectName("ContextFrame")
@@ -105,18 +118,25 @@ class ChatBubbleWidget(QWidget):
             ctx_layout.addWidget(self.ctx_content)
             self.content_layout.addWidget(self.ctx_frame)
 
-        # 正文文本框
-        self.lbl_text = QLabel()
-        self.lbl_text.setWordWrap(True)
-        self.lbl_text.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.lbl_text.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.lbl_text = QTextBrowser()
         self.lbl_text.setOpenExternalLinks(False)
-        self.lbl_text.linkActivated.connect(self.sig_link_clicked.emit)
+        self.lbl_text.setOpenLinks(False)
+        self.lbl_text.setFrameShape(QFrame.NoFrame)
+        self.lbl_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.lbl_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.lbl_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.lbl_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
+        self.lbl_text.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
 
-        if self.is_user:
+        self.lbl_text.document().documentLayout().documentSizeChanged.connect(self._adjust_browser_height)
+
+        # 布局逻辑：MSG_ERROR 靠左（类似 AI 气泡）
+        if self.msg_type == self.MSG_ERROR:
+            self.main_layout.addWidget(self.content_container)
+            self.main_layout.addWidget(self.spacer)
+            btn_alignment = Qt.AlignLeft
+        elif self.is_user:
             self.main_layout.addWidget(self.spacer)
             self.main_layout.addWidget(self.content_container)
             btn_alignment = Qt.AlignRight
@@ -125,9 +145,8 @@ class ChatBubbleWidget(QWidget):
             self.main_layout.addWidget(self.spacer)
             btn_alignment = Qt.AlignLeft
 
-        self.set_content(self.original_text)
+        self.set_content(self.original_text, msg_type=self.msg_type)
 
-        # 编辑输入框
         self.edit_input = QTextEdit()
         self.edit_input.setVisible(False)
         self.edit_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -137,7 +156,6 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.addWidget(self.lbl_text)
         self.content_layout.addWidget(self.edit_input)
 
-        # 底部按钮栏 (Copy, Edit, Retry 等)
         self.btn_widget = QWidget()
         self.btn_layout = QHBoxLayout(self.btn_widget)
         self.btn_layout.setContentsMargins(0, 0, 5, 0)
@@ -147,10 +165,16 @@ class ChatBubbleWidget(QWidget):
         self.btn_copy = QPushButton(" Copy")
         self.btn_copy.setIcon(tm.icon("copy", "text_muted"))
         self.btn_copy.setCursor(Qt.PointingHandCursor)
-        self.btn_copy.clicked.connect(self.copy_text)
+        self.btn_copy.clicked.connect(self.copy_plain_text)
         self.btn_layout.addWidget(self.btn_copy)
 
-        if not self.is_user:
+        self.btn_copy_md = QPushButton(" Copy MD")
+        self.btn_copy_md.setIcon(tm.icon("markdown_copy", "text_muted"))
+        self.btn_copy_md.setCursor(Qt.PointingHandCursor)
+        self.btn_copy_md.clicked.connect(self.copy_markdown)
+        self.btn_layout.addWidget(self.btn_copy_md)
+
+        if not self.is_user and self.msg_type != self.MSG_ERROR:
             self.btn_bubble_retry = QPushButton(" Retry")
             self.btn_bubble_retry.setIcon(tm.icon("refresh", "warning"))
             self.btn_bubble_retry.setCursor(Qt.PointingHandCursor)
@@ -171,7 +195,6 @@ class ChatBubbleWidget(QWidget):
 
         self.content_layout.addWidget(self.btn_widget)
 
-        # 编辑确认栏 (仅用户侧有)
         if self.is_user:
             self.edit_btn_widget = QWidget()
             self.edit_btn_layout = QHBoxLayout(self.edit_btn_widget)
@@ -202,12 +225,16 @@ class ChatBubbleWidget(QWidget):
         super().resizeEvent(event)
         parent = self.parentWidget()
         if parent:
-            self.lbl_text.setMinimumHeight(0)
-
             max_w = int(parent.width() * 0.80)
-            self.lbl_text.setMaximumWidth(max_w)
-            if hasattr(self, 'edit_input'):
-                self.edit_input.setMaximumWidth(max_w)
+
+            if self.lbl_text.maximumWidth() != max_w:
+                self.lbl_text.setMaximumWidth(max_w)
+                if hasattr(self, 'edit_input'):
+                    self.edit_input.setMaximumWidth(max_w)
+
+                self.lbl_text.updateGeometry()
+
+        self._adjust_browser_height()
 
     def adjust_edit_height(self):
         doc_h = int(self.edit_input.document().size().height())
@@ -245,13 +272,17 @@ class ChatBubbleWidget(QWidget):
         tm = ThemeManager()
         menu = QMenu(self)
         menu.setStyleSheet(f"""
-            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }} 
-            QMenu::item {{ padding: 6px 20px; border-radius: 2px; }}
-            QMenu::item:selected {{ background-color: {tm.color('btn_hover')}; }}
-        """)
+                    QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; }} 
+                    QMenu::item {{ padding: 6px 20px; border-radius: 2px; }}
+                    QMenu::item:selected {{ background-color: {tm.color('btn_hover')}; }}
+                """)
 
-        act_copy = menu.addAction(tm.icon("copy", "text_main"), "复制 (Copy)")
-        act_copy.triggered.connect(self.copy_text)
+        act_copy = menu.addAction(tm.icon("copy", "text_main"), "Copy Plain Text")
+        act_copy.triggered.connect(self.copy_plain_text)
+
+        act_copy_md = menu.addAction(tm.icon("file-text", "text_main"), "Copy Markdown")
+        act_copy_md.triggered.connect(self.copy_markdown)
+
 
         if self.is_user and self._can_edit:
             act_edit = menu.addAction(tm.icon("edit", "text_main"), "编辑 (Edit)")
@@ -270,29 +301,58 @@ class ChatBubbleWidget(QWidget):
         tm = ThemeManager()
         font_family = tm.font_family()
 
-        if self.is_user:
+        if self.msg_type == self.MSG_ERROR:
+            # 【关键修复】让外层的 QWidget 来承担背景色和红色左边框，这样就不会出现文字底纹了
+            danger_color = tm.color('danger')
+            is_dark = tm.current_theme == 'dark'
+            bg_color = hex_to_rgba(danger_color, 0.1) if is_dark else hex_to_rgba(danger_color, 0.05)
+
+            self.content_container.setStyleSheet(f"""
+                QWidget#BubbleWrapper {{
+                    background-color: {bg_color};
+                    border: 1px solid {tm.color('border')};
+                    border-left: 4px solid {danger_color};
+                    border-radius: 4px; 
+                }}
+            """)
+        elif self.is_user:
             bg_color = hex_to_rgba(tm.color('success'), 0.15) if tm.current_theme == 'dark' else hex_to_rgba(
                 tm.color('success'), 0.1)
             border_color = tm.color('success')
+            self.content_container.setStyleSheet(f"""
+                QWidget#BubbleWrapper {{
+                    background-color: {bg_color};
+                    border: 1px solid {border_color};
+                    border-radius: 8px;
+                }}
+            """)
         else:
             bg_color = tm.color('bg_card')
             border_color = tm.color('border')
-
-        self.content_container.setStyleSheet(f"""
-            QWidget#BubbleWrapper {{
-                background-color: {bg_color};
-                border: 1px solid {border_color};
-                border-radius: 8px;
-            }}
-        """)
+            self.content_container.setStyleSheet(f"""
+                QWidget#BubbleWrapper {{
+                    background-color: {bg_color};
+                    border: 1px solid {border_color};
+                    border-radius: 8px;
+                }}
+            """)
 
         self.lbl_text.setStyleSheet(f"""
-                   QLabel {{
-                       background-color: transparent; color: {tm.color('text_main')};
-                       border: none; padding: 0px; 
-                       font-size: 14px; font-family: {font_family};
-                   }}
-               """)
+                    QTextBrowser {{
+                        background-color: transparent; color: {tm.color('text_main')};
+                        border: none; padding: 0px; 
+                        font-size: 14px; font-family: {font_family};
+                    }}
+                    QScrollBar:horizontal {{
+                        background: transparent; height: 8px; margin: 0px;
+                    }}
+                    QScrollBar::handle:horizontal {{
+                        background: {hex_to_rgba(tm.color('text_muted'), 0.4) if 'hex_to_rgba' in globals() else 'rgba(150, 150, 150, 0.35)'}; 
+                        border-radius: 4px;
+                    }}
+                    QScrollBar::handle:horizontal:hover {{ background: {tm.color('accent')}; }}
+                    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+                """)
 
         self.edit_input.setStyleSheet(f"""
             QTextEdit {{ 
@@ -303,10 +363,10 @@ class ChatBubbleWidget(QWidget):
 
         btn_style = f"QPushButton {{ background-color: transparent; border: none; color: {tm.color('text_muted')}; font-size: 12px; padding: 2px 4px; border-radius: 4px; }} QPushButton:hover {{ color: {tm.color('text_main')}; background-color: {tm.color('btn_hover')}; }}"
         self.btn_copy.setStyleSheet(btn_style)
+        if hasattr(self, 'btn_copy_md'): self.btn_copy_md.setStyleSheet(btn_style)
         if hasattr(self, 'btn_edit'): self.btn_edit.setStyleSheet(btn_style)
         if hasattr(self, 'btn_cancel'): self.btn_cancel.setStyleSheet(btn_style)
 
-        # 动态更新附件的 Theme (支持日夜间模式)
         if hasattr(self, 'ctx_frame'):
             self.ctx_frame.setStyleSheet(f"""
                 QFrame#ContextFrame {{ background-color: {hex_to_rgba(tm.color('bg_input'), 0.5)}; border-left: 3px solid {tm.color('accent')}; border-radius: 4px; }}
@@ -320,31 +380,113 @@ class ChatBubbleWidget(QWidget):
         self.is_loading = loading
         if loading:
             self.loading_dots = 0
-            self.lbl_text.setText("Thinking")
-            self.loading_timer.start(500)
             self.btn_widget.hide()
+
+            if not self.original_text.strip():
+                self.lbl_text.setText("Thinking")
+                self.loading_timer.start(500)
+            else:
+                self.set_content(self.original_text)
         else:
             self.loading_timer.stop()
             self.btn_widget.show()
             self.set_content(self.original_text)
 
     def _animate_loading(self):
+        if self.original_text.strip():
+            self.loading_timer.stop()
+            return
+
         self.loading_dots = (self.loading_dots + 1) % 4
         self.lbl_text.setText("Thinking" + "." * self.loading_dots)
 
-    def set_content(self, text):
+
+    # --- 5. 完整的 set_content 方法 ---
+    def set_content(self, text, msg_type=None):
         self.original_text = text
-        if self.is_loading: return
+        if msg_type is not None:
+            self.msg_type = msg_type
+
+        if self.msg_type == self.MSG_ERROR:
+            import json
+            tm = ThemeManager()
+            try:
+                error_data = json.loads(text)
+                title = error_data.get('title', 'Error')
+                body = error_data.get('body', text)
+            except json.JSONDecodeError:
+                title = "Generation Terminated"
+                body = text
+
+            danger_color = tm.color('danger')
+
+            html = (
+                f"<div style='margin: 0px; padding: 4px 6px;'>"
+                f"<div style='color: {danger_color}; font-weight: bold; font-size: 14px; margin-bottom: 8px;'>"
+                f"⚠️ {title}</div>"
+                f"<div style='font-size: 13px; font-family: {tm.font_family()}; line-height: 1.5;'>"
+                f"{body.replace(chr(10), '<br>')}</div>"
+                f"</div>"
+            )
+            self.lbl_text.setText(html)
+            self._adjust_browser_height()
+            return
+
+        if self.is_loading:
+            if not text.strip():
+                if not self.loading_timer.isActive():
+                    self.loading_dots = 0
+                    self.lbl_text.setText("Thinking")
+                    self.loading_timer.start(500)
+                return
+            else:
+                if self.loading_timer.isActive():
+                    self.loading_timer.stop()
 
         try:
             html = TextFormatter.markdown_to_html(text)
+            tm = ThemeManager()
+            border_color = tm.color('border')
+            bg_header = hex_to_rgba(tm.color('bg_input'), 0.5) if tm.current_theme == 'dark' else '#f5f5f5'
+
+            html = html.replace('<table>',
+                                f'<table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; border-color: {border_color}; margin-top: 10px; margin-bottom: 10px; width: 100%; table-layout: fixed; word-break: break-all;">')
+
+            html = html.replace('<th>',
+                                f'<th style="background-color: {bg_header}; font-weight: bold; text-align: left;">')
 
             def repl_img(match):
                 raw_src_url = match.group(1)
                 src_url = raw_src_url.replace("&amp;", "&")
 
-                if src_url.startswith("file://") or src_url.startswith("data:image"):
-                    new_img_tag = f'<img width="420" style="border-radius: 8px; margin-top: 5px;" src="{src_url}" />'
+                if src_url.startswith("data:image"):
+                    try:
+                        header, encoded = src_url.split(",", 1)
+                        ext = header.split(";")[0].split("/")[1] if "/" in header else "png"
+                        import base64
+                        import hashlib
+                        import os
+                        import tempfile
+
+                        img_data = base64.b64decode(encoded)
+
+                        file_name = f"navis_base64_{hashlib.md5(img_data).hexdigest()[:12]}.{ext}"
+                        local_path = os.path.join(tempfile.gettempdir(), file_name)
+
+                        if not os.path.exists(local_path):
+                            with open(local_path, "wb") as f:
+                                f.write(img_data)
+
+                        self.downloaded_images[src_url] = local_path
+                        local_uri = f"file:///{local_path.replace(os.sep, '/')}"
+                        new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{local_uri}" title="Click to view full image" />'
+                        return f'<a href="{local_uri}">{new_img_tag}</a>'
+                    except Exception as e:
+                        print(f"Base64 image decode failed: {e}")
+                        return f'<img width="420" style="max-width: 100%;" src="{src_url}" />'
+
+                if src_url.startswith("file://"):
+                    new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{src_url}" title="Click to view full image" />'
                     return f'<a href="{src_url}">{new_img_tag}</a>'
 
                 if src_url.startswith("http"):
@@ -355,7 +497,7 @@ class ChatBubbleWidget(QWidget):
                         else:
                             local_uri = f"file://{local_path}"
 
-                        new_img_tag = f'<img width="420" style="border-radius: 8px; margin-top: 5px;" src="{local_uri}" />'
+                        new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{local_uri}" title="Click to view full image" />'
                         return f'<a href="{local_uri}">{new_img_tag}</a>'
 
                     elif src_url in getattr(self, 'download_failed_urls', {}):
@@ -363,6 +505,7 @@ class ChatBubbleWidget(QWidget):
                         return f'<div style="color:#ff6b6b; padding: 15px; border: 2px dashed #ff6b6b; border-radius: 8px; width: 400px; margin-top: 5px;">❌ <b>Image download failed.</b><br><span style="font-size: 12px;">{error_msg}</span></div>'
 
                     else:
+                        import time
                         if src_url not in self.downloading_urls:
                             self.downloading_urls.add(src_url)
                             self.download_timeouts[src_url] = time.time() + 30
@@ -386,7 +529,6 @@ class ChatBubbleWidget(QWidget):
 
         except Exception as e:
             self.lbl_text.setText(text)
-
             self.lbl_text.adjustSize()
             self.content_container.adjustSize()
             self.adjustSize()
@@ -488,44 +630,61 @@ class ChatBubbleWidget(QWidget):
                    }}
                """)
 
+    def _adjust_browser_height(self):
+        doc_height = int(self.lbl_text.document().size().height())
+        sb = self.lbl_text.horizontalScrollBar()
+        sb_height = 0
+
+        if sb.isVisible():
+            sb_height = sb.height()
+        else:
+            if self.lbl_text.document().idealWidth() > self.lbl_text.viewport().width():
+                sb_height = sb.sizeHint().height()
+
+        self.lbl_text.setFixedHeight(doc_height + sb_height + 15)
+
+
     def _start_image_download(self, url):
         ext = url.split("?")[0].split(".")[-1]
-        if ext.lower() not in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
+        if ext.lower() not in ['png', 'jpg', 'jpeg', 'gif', 'webp','svg']:
             ext = 'png'
         file_name = f"navis_img_{hashlib.md5(url.encode()).hexdigest()}.{ext}"
         save_path = os.path.join(tempfile.gettempdir(), file_name)
 
         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-            self._on_image_downloaded(True, url, save_path)
+            self._on_image_downloaded({"success": True, "url": url, "path": save_path})
             return
 
-        thread = QThread(self)
-        worker = LightNetworkWorker()
-        thread.worker = worker
-        worker.moveToThread(thread)
+        task_mgr = TaskManager()
+        task_mgr.sig_result.connect(self._on_image_downloaded)
+        self.image_task_mgrs[url] = task_mgr
 
-        worker.img_url = url
-        worker.img_save_path = save_path
+        task_mgr.start_task(
+            DownloadImageTask,
+            task_id=f"dl_img_{hashlib.md5(url.encode()).hexdigest()[:8]}",
+            mode=TaskMode.THREAD,
+            url=url,
+            save_path=save_path
+        )
 
-        thread.started.connect(worker.do_download_image)
-        worker.sig_image_downloaded.connect(self._on_image_downloaded)
-        worker.sig_image_downloaded.connect(thread.quit)
-        worker.sig_image_downloaded.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda t=thread: self.image_threads.remove(t) if t in self.image_threads else None)
-        self.image_threads.append(thread)
-        thread.start()
+    def _on_image_downloaded(self, result):
+        success = result.get("success", False)
+        url = result.get("url")
+        result_path = result.get("path")
 
-    def _on_image_downloaded(self, success, url, result_path):
         if url in self.downloading_urls:
             self.downloading_urls.remove(url)
+
+        # 清理已完成的任务管理器实例
+        if url in self.image_task_mgrs:
+            del self.image_task_mgrs[url]
 
         if success:
             self.downloaded_images[url] = result_path
         else:
             if not hasattr(self, 'download_failed_urls'):
                 self.download_failed_urls = {}
-            self.download_failed_urls[url] = result_path
+            self.download_failed_urls[url] = result.get("msg", "Network transmission error")
             print(f"Failed to fetch image: {result_path}")
 
         if not self.downloading_urls and hasattr(self, 'image_loading_timer'):
@@ -533,11 +692,46 @@ class ChatBubbleWidget(QWidget):
 
         self.set_content(self.original_text)
 
-    def copy_text(self):
+    def copy_plain_text(self):
         clipboard = QGuiApplication.clipboard()
-        text_to_copy = TextFormatter.clean_text_for_export(self.original_text, include_citations=not self.is_user)
+
+        # QTextBrowser's toPlainText() automatically parses HTML structures like tables
+        # into tab-spaced formats, providing an optimized baseline plain-text representation.
+        raw_text = self.lbl_text.toPlainText()
+
+        # Edge Case Mitigation 1: Remove potential dynamic UI artifacts (e.g., "Thinking...")
+        if self.is_loading:
+            raw_text = re.sub(r'^Thinking\.{0,3}\n*', '', raw_text)
+
+        # Edge Case Mitigation 2: Strip right-side trailing whitespaces per line to optimize
+        # spreadsheet pasting, while preserving the internal tab (\t) structures of tables.
+        lines = [line.rstrip() for line in raw_text.splitlines()]
+
+        # Edge Case Mitigation 3: Normalize excessive vertical spacing caused by block-level HTML conversion.
+        cleaned_text = '\n'.join(lines)
+        cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
+
+        clipboard.setText(cleaned_text)
+        ToastManager().show("Plain text successfully copied to clipboard.", "success")
+
+    def copy_markdown(self):
+        clipboard = QGuiApplication.clipboard()
+
+        raw_text = re.sub(r'<think>.*?</think>', '', self.original_text, flags=re.DOTALL | re.IGNORECASE)
+        raw_text = re.sub(r'<mcp_process>.*?</mcp_process>', '', raw_text, flags=re.DOTALL | re.IGNORECASE)
+
+        raw_text = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', raw_text)
+
+        if "<br><hr style='border:0; height:1px;" in raw_text:
+            raw_text = re.split(
+                r'<br><hr style=\'border:0; height:1px; background:#444; margin:15px 0;\'><b>.*?Cited Sources:</b><br>',
+                raw_text)[0]
+
+        text_to_copy = re.sub(r'\n{3,}', '\n\n', raw_text).strip()
+
         clipboard.setText(text_to_copy)
-        ToastManager().show("Copied to clipboard.", "success")
+        ToastManager().show("Markdown successfully copied to clipboard.", "success")
+
 
     def toggle_edit(self):
         if not self.is_editing:
@@ -591,3 +785,28 @@ class ChatBubbleWidget(QWidget):
 
         if new_text and new_text != self.original_text:
             self.sig_edit_confirmed.emit(self.index, new_text)
+
+
+
+def closeEvent(self, event):
+
+    # 1. 停止图片加载动画定时器
+    if hasattr(self, 'image_loading_timer') and self.image_loading_timer.isActive():
+        self.image_loading_timer.stop()
+        self.logger.debug("Image loading timer stopped.")
+
+    # 2. 遍历所有任务管理器，取消正在进行的下载任务
+    if hasattr(self, 'image_task_mgrs') and self.image_task_mgrs:
+
+        for url in list(self.image_task_mgrs.keys()):
+            task_mgr = self.image_task_mgrs[url]
+            task_mgr.cancel_task()
+
+            del self.image_task_mgrs[url]
+
+            self.logger.debug(f"Cancelled image download task for URL: {url[:30]}...")
+
+    if hasattr(self, 'downloading_urls'):
+        self.downloading_urls.clear()
+
+    super().closeEvent(event)

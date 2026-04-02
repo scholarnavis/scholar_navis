@@ -165,6 +165,9 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 })
 
                 def patched_update(tqdm_instance, n=1):
+                    if self.is_cancelled():
+                        raise InterruptedError("Download task was manually cancelled by user.")
+
                     res = _original_update(tqdm_instance, n)
                     unit = getattr(tqdm_instance, 'unit', '').lower()
 
@@ -218,6 +221,9 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 "progress": -1,
                 "msg": f"[{repo_id}] Converting to ONNX format (First time only)..."
             })
+
+            if self.is_cancelled():
+                raise InterruptedError("Download was cancelled by user before ONNX conversion.")
 
             try:
                 physical_cores = psutil.cpu_count(logical=False) or multiprocessing.cpu_count() - 1

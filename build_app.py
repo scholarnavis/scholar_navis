@@ -4,16 +4,17 @@ import shutil
 import platform
 import subprocess
 import re
+import zipfile
+
 import boto3
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
-from src.version import __version__, __app_name__, __description__, __company__
+from src.core.version import __version__, __app_name__
 
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 
 def sync_pyproject_version():
     toml_path = "pyproject.toml"
@@ -31,7 +32,6 @@ def sync_pyproject_version():
             f.write(new_content)
         print(f"[*] Synced pyproject.toml version to {__version__}")
 
-
 def get_r2_client():
     load_dotenv()
     account_id = os.getenv("R2_ACCOUNT_ID")
@@ -48,7 +48,6 @@ def get_r2_client():
         region_name="auto"
     )
 
-
 def upload_to_r2(s3_client, bucket_name, file_path, object_name):
     print(f"\n[*] Uploading {file_path} to R2 bucket '{bucket_name}'...")
     try:
@@ -56,7 +55,6 @@ def upload_to_r2(s3_client, bucket_name, file_path, object_name):
         print(f"[+] Upload complete: {object_name}")
     except ClientError as e:
         print(f"[-] Upload failed: {e}")
-
 
 def delete_old_r2_versions(s3_client, bucket_name, current_object_name):
     match = re.match(r"^(.*?_v)", current_object_name)
@@ -75,21 +73,30 @@ def delete_old_r2_versions(s3_client, bucket_name, current_object_name):
     except ClientError as e:
         print(f"[-] Failed to delete old versions: {e}")
 
-
 def build_app():
     sync_pyproject_version()
 
     sys_os = platform.system()
+    if sys_os != "Windows":
+        print(f"\n[-] Official packaging for {sys_os} is currently suspended. Please run from source.")
+        return
+
     dist_dir = "dist"
     build_dir = "build"
     app_name_safe = __app_name__.replace(" ", "_").lower()
     entry_point = "main.py"
 
-    print(f"\n[1/4] Preparing PyInstaller Build for {__app_name__} v{__version__} on {sys_os}...")
+    print(f"\n[1/4] Preparing PyInstaller Build for {__app_name__} v{__version__} on Windows...")
 
     for d in [dist_dir, build_dir]:
         if os.path.exists(d):
             shutil.rmtree(d)
+
+
+    hook_file = "torch_runtime_hook.py"
+    with open(hook_file, "w", encoding="utf-8") as f:
+        f.write("import torch\nimport torch.autograd\n")
+    print("[*] Generated PyTorch Runtime Hook to prevent circular imports.")
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -97,69 +104,79 @@ def build_app():
         "--onedir",
         "--windowed",
         f"--name={app_name_safe}",
+        f"--runtime-hook={hook_file}",  # 注入 Hook
     ]
+
 
     packages_to_collect = [
         "optimum", "transformers", "onnxruntime", "tokenizers",
-        "sklearn", "scipy", "chardet",
+        "chromadb"
+    ]
 
-        "chromadb",
-        "pydantic",
+    data_to_collect = ["docx","litellm"]
 
-        "langchain_text_splitters",
-        "pymupdf4llm",
-        "docx",
-        "markdown"
+    hidden_imports = [
+        "torch",
+        "torch.autograd",
+        "safetensors",
+        "huggingface_hub"
     ]
 
     for pkg in packages_to_collect:
         cmd.extend(["--collect-all", pkg])
+    for pkg in data_to_collect:
+        cmd.extend(["--collect-data", pkg])
+    for hi in hidden_imports:
+        cmd.extend(["--hidden-import", hi])
 
+    # 依然需要 Copy Metadata 骗过 transformers 的检查
     cmd.extend(["--copy-metadata", "transformers"])
     cmd.extend(["--copy-metadata", "tqdm"])
+    cmd.extend(["--copy-metadata", "regex"])
+    cmd.extend(["--copy-metadata", "torch"])
 
-    path_sep = ";" if sys_os == "Windows" else ":"
-    cmd.append(f"--add-data=Assets{path_sep}Assets")
+    cmd.append("--add-data=Assets;Assets")
 
     excludes = [
         "tkinter", "matplotlib", "seaborn", "jupyter", "notebook",
-        "IPython", "plotly", "pygame", "setuptools", "wheel",
-        "torchvision"
+        "IPython", "plotly", "pygame",
+        "torchvision", "nvidia", "triton", "torchaudio",
+        "PyQt6", "PyQt5"
     ]
     for ex in excludes:
         cmd.append(f"--exclude-module={ex}")
 
-    # 图标处理
-    if sys_os == "Windows" and os.path.exists("Assets/icon.ico"):
+    if os.path.exists("Assets/icon.ico"):
         cmd.append("--icon=Assets/icon.ico")
-    elif sys_os == "Linux" and os.path.exists("Assets/icon.png"):
-        cmd.append("--icon=Assets/icon.png")
 
     cmd.append(entry_point)
 
     print(f"\n[2/4] Executing PyInstaller (Packaging PySide6 & ONNXRuntime)...")
     result = subprocess.run(cmd)
 
+    # 无论打包成功失败，清理掉临时生成的 Hook 文件
+    if os.path.exists(hook_file):
+        os.remove(hook_file)
+
     if result.returncode != 0:
         print("\n[-] PyInstaller build failed.")
         return
 
-    # 压缩打包
-    output_archive_name = f"{app_name_safe}_{sys_os.lower()}_v{__version__}"
-    archive_format = "zip" if sys_os == "Windows" else "gztar"
+    output_archive_name = f"{app_name_safe}_win_v{__version__}"
     target_folder = os.path.join(dist_dir, app_name_safe)
+    archive_path = f"{output_archive_name}.zip"
 
-    print(f"\n[3/4] Build successful. Creating archive: {output_archive_name}.{archive_format}...")
+    print(f"\n[3/4] Build successful. Creating archive: {archive_path}...")
 
-    archive_path = shutil.make_archive(
-        base_name=output_archive_name,
-        format=archive_format,
-        root_dir=dist_dir,
-        base_dir=app_name_safe
-    )
+    with zipfile.ZipFile(archive_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
+        for root, dirs, files in os.walk(target_folder):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, dist_dir)
+                zipf.write(file_path, arcname)
+
     print(f"[+] Packed to {archive_path}")
 
-    # R2 云端上传逻辑
     print(f"\n[4/4] Cloudflare R2 Operations...")
     if os.getenv("GITHUB_ACTIONS") != "true":
         print("[*] Local environment detected. Skipping R2 upload.")
@@ -173,7 +190,6 @@ def build_app():
         upload_to_r2(s3_client, bucket_name, archive_path, object_name)
         delete_old_r2_versions(s3_client, bucket_name, object_name)
         print(f"\n[+] All GitHub Actions workflows completed successfully!")
-
 
 if __name__ == "__main__":
     build_app()

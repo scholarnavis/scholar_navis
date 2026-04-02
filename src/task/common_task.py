@@ -1,13 +1,12 @@
-# common_task.py
 import os
 import platform
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
-from src.core.models_registry import resolve_auto_model, get_model_conf, check_model_exists
+from src.core.models_registry import resolve_auto_model, get_model_conf
 from src.core.network_worker import create_robust_session
-from src.version import __latest__
+from src.core.version import __latest__
 
 
 class VersionCheckTask(BackgroundTask):
@@ -19,13 +18,18 @@ class VersionCheckTask(BackgroundTask):
 
             url = f"{__latest__}?os={os_name}"
 
+            self.logger.debug(f"Checking for updates at: {url}")
+
             response = session.get(url, timeout=5)
             if response.status_code == 200:
                 latest_version = response.text.strip()
+                self.logger.info(f"Successfully fetched latest version: {latest_version}")  # 新增：记录成功获取到的版本号
                 return {"latest_version": latest_version}
+            else:
+                self.logger.warning(
+                    f"Update check failed with status code: {response.status_code}")  # 新增：记录非 200 状态码的警告
         except Exception as e:
             self.logger.error(f"Failed to check for updates: {e}")
-        return {"latest_version": None}
 
 
 class VerifyModelsTask(BackgroundTask):
@@ -45,6 +49,9 @@ class VerifyModelsTask(BackgroundTask):
             return False
 
         for root, dirs, files in os.walk(model_dir):
+            if self.is_cancelled():
+                raise InterruptedError("Verification safely terminated by user.")
+
             if any(f.endswith('.onnx') for f in files):
                 self.logger.info(f"VerifyModelsTask: ONNX files successfully verified for '{repo_id}' at '{root}'")
                 return True
@@ -69,17 +76,21 @@ class VerifyModelsTask(BackgroundTask):
 
         to_download = []
 
+        # 修改点：在检查嵌入模型前更新进度条状态
+        self.update_progress(30, f"Checking Embedding model: {real_embed}...")
         e_conf = get_model_conf(real_embed, "embedding")
         if e_conf and not e_conf.get('is_network', False):
             if not self._check_local_onnx_exists(e_conf.get('hf_repo_id')):
                 to_download.append(e_conf['hf_repo_id'])
 
+        # 修改点：在检查重排序模型前更新进度条状态
+        self.update_progress(60, f"Checking Reranker model: {real_rerank}...")
         r_conf = get_model_conf(real_rerank, "reranker")
         if r_conf and not r_conf.get('is_network', False):
             if not self._check_local_onnx_exists(r_conf.get('hf_repo_id')):
                 to_download.append(r_conf['hf_repo_id'])
 
-        self.update_progress(90, "Verification complete.")
+        self.update_progress(100, "Verification complete.")
 
         return {
             "to_download": to_download,

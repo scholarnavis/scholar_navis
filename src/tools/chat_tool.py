@@ -1,8 +1,6 @@
 import base64
 import csv
 import datetime
-import functools
-import gc
 import hashlib
 import json
 import logging
@@ -10,70 +8,38 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from urllib.parse import urlparse, parse_qs, quote
 
-import markdown
-import torch
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve
+from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve, \
+    QEvent
 from PySide6.QtGui import QDesktopServices, QCursor, QAction, QPdfWriter, QTextDocument, QPageSize
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QCheckBox,
                                QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication, QComboBox)
-from langdetect import detect_langs
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode, TaskState
-from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.lang_detect import detect_primary_language
-from src.core.llm_impl import OpenAICompatibleLLM
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import get_model_conf, resolve_auto_model, ModelManager
-from src.core.rerank_engine import RerankEngine
+from src.core.models_registry import get_model_conf, ModelManager
 from src.core.signals import GlobalSignals
+from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager
-from src.task.chat_tasks import ProcessAttachmentTask
-from src.task.kb_tasks import _worker_load_model
+from src.task.chat_tasks import ProcessAttachmentTask, ChatGenerationTask
 from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
-from src.ui.components.chat_bubble import ChatBubbleWidget
+from src.ui.components.chat_bubble import ChatBubbleWidget, hex_to_rgba
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import StandardDialog, SelectKBFileDialog
 from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
-from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
+from src.ui.components.pdf_viewer import InternalPDFViewer
 from src.ui.components.pill_button import FollowUpGroupWidget
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
-
-
-@functools.lru_cache(maxsize=128)
-def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs):
-    if not llm_instance: return text
-
-    if direction == "to_en":
-        prompt = (
-            "You are an expert bioinformatician and translator. "
-            "Translate the following user query into precise academic English. "
-            "CRITICAL: DO NOT translate or alter any Latin taxonomic names (e.g., Gossypium, Arabidopsis) "
-            "or scientific abbreviations (e.g., scRNA-seq, qPCR). "
-            "Output ONLY the translated English text, nothing else."
-        )
-    else:
-        prompt = (
-            "You are an expert academic translator. Translate the following English text "
-            "into the language of the user's original query. \n"
-            "CRITICAL RULES:\n"
-            "1. KEEP ALL CITATION TAGS INTACT (e.g., [1], [2]).\n"
-            "2. DO NOT translate Latin taxonomic names (e.g., Gossypium) or scientific abbreviations.\n"
-            "3. PRESERVE all Markdown formatting, bolding, and structure.\n"
-        )
-
-    return llm_instance.chat([
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": text}
-    ], **kwargs).strip()
 
 
 class ChatDropTargetWidget(QWidget):
@@ -118,7 +84,7 @@ class ChatDropTargetWidget(QWidget):
     def dropEvent(self, event):
         self.overlay.hide()
 
-        supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx')
+        supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
         paths = [
             url.toLocalFile() for url in event.mimeData().urls()
             if url.isLocalFile() and url.toLocalFile().lower().endswith(supported_exts)
@@ -219,19 +185,31 @@ class ChatInputContainer(QFrame):
         main_layout.addWidget(self.context_banner)
 
         self.mcp_toolbar = QHBoxLayout()
-        self.chk_mcp_enable = QCheckBox("Enable advanced search (MCP Tools - Requires model support)")
-        self.chk_mcp_enable.setStyleSheet("color: #05B8CC; font-weight: bold;")
-        self.chk_mcp_enable.setChecked(True)
+        use_academic = self.config.user_settings.get("chat_use_academic_agent", True)
+        use_external = self.config.user_settings.get("chat_use_external_tools", False)
+
+        # 1. 学术 Agent 开关
+        self.chk_academic_agent = QCheckBox("Academic Agent")
+        self.chk_academic_agent.setStyleSheet("color: #05B8CC; font-weight: bold;")
+        self.chk_academic_agent.setChecked(use_academic)
+        self.chk_academic_agent.setToolTip("Enable built-in native academic skills (Zero Latency)")
+        self.chk_academic_agent.toggled.connect(lambda c: self._save_agent_state("chat_use_academic_agent", c))
+
+        # 2. 外部 Tools 开关
+        self.chk_external_tools = QCheckBox("External Tools")
+        self.chk_external_tools.setStyleSheet("color: #05B8CC; font-weight: bold;")
+        self.chk_external_tools.setChecked(use_external)
+        self.chk_external_tools.setToolTip("Enable external MCP servers and custom Python scripts")
+        self.chk_external_tools.toggled.connect(lambda c: self._save_agent_state("chat_use_external_tools", c))
 
         self.btn_mcp_tags = QToolButton()
-        self.btn_mcp_tags = QPushButton("Filter Tools: Loading...")
+        self.btn_mcp_tags = QPushButton("Filter Tools", self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
         self.btn_mcp_tags.setStyleSheet(
             "QPushButton { color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px; }"
             "QPushButton:hover { background: #333; }"
         )
-        self.btn_mcp_tags.setVisible(True)
 
         self.menu_mcp_tags = QMenu(self)
         self.menu_mcp_tags.setStyleSheet(
@@ -243,45 +221,13 @@ class ChatInputContainer(QFrame):
         self.user_deselected_tags = set()
         self.known_tags = set()
 
-        self.btn_mcp_guide = QPushButton("Prompt guide")
-
-        # 存储复选框动作的字典
-        self.tag_actions = {}
-
-        self.btn_mcp_guide = QPushButton("Prompt guide")
-        self.btn_mcp_guide.setCursor(Qt.PointingHandCursor)
-        self.btn_mcp_guide.setStyleSheet(
-            "color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px;")
-        self.btn_mcp_guide.setVisible(True)
-
-        self.mcp_toolbar.addWidget(self.chk_mcp_enable)
+        self.mcp_toolbar.addWidget(self.chk_academic_agent)
+        self.mcp_toolbar.addWidget(self.chk_external_tools)
         self.mcp_toolbar.addWidget(self.btn_mcp_tags)
-        self.mcp_toolbar.addWidget(self.btn_mcp_guide)
         self.mcp_toolbar.addStretch()
         main_layout.insertLayout(1, self.mcp_toolbar)
 
-        self.chk_mcp_enable.toggled.connect(self._on_mcp_enable_toggled)
-        self.menu_mcp_guide = QMenu(self)
-
-        prompts = [
-            "Search for the latest academic literature, preprints, and abstracts regarding a specific research topic.",
-            "Find the exact metadata and full-text Open Access PDF link for a specific article or DOI.",
-            "Trace the citation graph (references and citations) to find related literature for this DOI.",
-            "Query comprehensive functional annotations, sequences, and ID mappings for a specific gene or protein.",
-            "Retrieve protein-protein interaction networks and perform functional enrichment analysis for a set of targets.",
-            "Find 3D protein structures and detailed experimental metadata in the RCSB PDB.",
-            "Search for chemical properties, molecular weights, and drug targets for a specific compound.",
-            "Search for public omics datasets (GEO/SRA) related to specific experimental treatments.",
-            "Search GitHub for open-source repositories, software pipelines, or code related to this analysis.",
-            "Read and summarize the text content of a specific webpage or Wikipedia article."
-        ]
-
-        for p in prompts:
-            action = QAction(p, self)
-            action.triggered.connect(lambda checked, text=p: self.set_text(text))
-            self.menu_mcp_guide.addAction(action)
-
-        self.btn_mcp_guide.setMenu(self.menu_mcp_guide)
+        self.chk_external_tools.toggled.connect(self._on_external_tools_toggled)
 
         self.bottom_bar = QHBoxLayout()
         self.bottom_bar.setContentsMargins(0, 0, 0, 0)
@@ -314,19 +260,19 @@ class ChatInputContainer(QFrame):
 
         self.btn_send = QPushButton("Send")
         self.btn_send.setCursor(Qt.PointingHandCursor)
-        self.btn_send.setFixedSize(70, 32)
+        self.btn_send.setFixedSize(90, 32)  # 加宽以防止文字截断
         self.btn_send.setStyleSheet(f"""
-                    QPushButton {{ 
-                        background-color: #007acc; color: white; border-radius: 6px; 
-                        font-weight: bold; font-family: {ThemeManager().font_family()};
-                    }}
-                    QPushButton:hover {{ background-color: #0062a3; }}
-                """)
+                           QPushButton {{ 
+                               background-color: #007acc; color: white; border-radius: 6px; 
+                               font-weight: bold; font-family: {ThemeManager().font_family()};
+                           }}
+                           QPushButton:hover {{ background-color: #0062a3; }}
+                       """)
         self.bottom_bar.addWidget(self.btn_send)
 
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setCursor(Qt.PointingHandCursor)
-        self.btn_stop.setFixedSize(70, 32)
+        self.btn_stop.setFixedSize(90, 32)
         self.btn_stop.setVisible(False)
         self.bottom_bar.addWidget(self.btn_stop)
 
@@ -339,6 +285,14 @@ class ChatInputContainer(QFrame):
 
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
+        QTimer.singleShot(100, self.refresh_mcp)
+        if self.chk_external_tools.isChecked():
+            self.refresh_mcp()
+
+    def _save_agent_state(self, key, checked):
+        self.config.user_settings[key] = checked
+        self.config.save_settings()
+
 
     def _apply_theme(self):
         tm = ThemeManager()
@@ -346,11 +300,31 @@ class ChatInputContainer(QFrame):
             f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
 
         self.text_edit.setStyleSheet(f"""
-            QPlainTextEdit {{ background-color: transparent; color: {tm.color('text_main')}; border: none; font-size: 14px; font-family: {tm.font_family()}; }}
-            QScrollBar:vertical {{ background: transparent; width: 6px; }}
-            QScrollBar::handle:vertical {{ background: rgba(150, 150, 150, 0.35); border-radius: 3px; }}
-            QScrollBar::handle:vertical:hover {{ background: rgba(150, 150, 150, 0.65); }}
-        """)
+                    QPlainTextEdit {{ 
+                        background-color: transparent; 
+                        color: {tm.color('text_main')}; 
+                        border: none; 
+                        font-size: 14px; 
+                        font-family: {tm.font_family()}; 
+                    }}
+                    QScrollBar:vertical {{ 
+                        background: transparent; 
+                        width: 6px; 
+                        margin: 0px;
+                    }}
+                    QScrollBar::handle:vertical {{ 
+                        background: {hex_to_rgba(tm.color('text_muted'), 0.4) if 'hex_to_rgba' in globals() else 'rgba(150, 150, 150, 0.35)'}; 
+                        border-radius: 3px; 
+                        min-height: 20px;
+                    }}
+                    QScrollBar::handle:vertical:hover {{ 
+                        background: {tm.color('accent')}; 
+                    }}
+                    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                        height: 0px; 
+                    }}
+                """)
+
 
         tool_btn_style = f"""
                      QPushButton {{ background-color: transparent; color: {tm.color('text_muted')}; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: {tm.font_family()}; font-size: 13px; text-align: left; }}
@@ -374,23 +348,24 @@ class ChatInputContainer(QFrame):
             self.lbl_context_info.setStyleSheet(f"color: {tm.color('accent')}; font-size: 12px; border: none;")
 
         self.btn_clear_context.setIcon(tm.icon("close", "danger"))
-        self.btn_clear_context.setStyleSheet(
-            "QPushButton { border: none; background: transparent; padding: 2px; } QPushButton:hover { background: rgba(255, 107, 107, 0.2); border-radius: 4px; }")
+        self.btn_clear_context.setToolTip("Clear all attached contexts")
+        self.btn_clear_context.setStyleSheet(f"""
+                    QPushButton {{ border: none; background: transparent; padding: 4px; border-radius: 4px; }} 
+                    QPushButton:hover {{ background: {hex_to_rgba(tm.color('danger'), 0.2)}; }}
+                """)
 
         btn_mcp_style = f"""
-            QPushButton {{ color: {tm.color('text_muted')}; background: transparent; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
-            QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('text_main')}; }}
-        """
+                    QPushButton {{ color: {tm.color('text_muted')}; background: transparent; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
+                    QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('text_main')}; }}
+                """
         self.btn_mcp_tags.setIcon(tm.icon("filter", "text_muted"))
         self.btn_mcp_tags.setStyleSheet(btn_mcp_style)
-        self.btn_mcp_guide.setIcon(tm.icon("help", "text_muted"))
-        self.btn_mcp_guide.setStyleSheet(btn_mcp_style)
 
         self.btn_send.setIcon(tm.icon("send", "bg_main"))
         self.btn_send.setStyleSheet(f"""
-                    QPushButton {{ background-color: {tm.color('academic_blue')}; color: #ffffff; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
-                    QPushButton:hover {{ background-color: {tm.color('academic_blue_hover')}; }}
-                """)
+                            QPushButton {{ background-color: {tm.color('academic_blue')}; color: #ffffff; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
+                            QPushButton:hover {{ background-color: {tm.color('academic_blue_hover')}; }}
+                        """)
 
         self.btn_stop.setIcon(tm.icon("close", "bg_main"))
         self.btn_stop.setStyleSheet(f"""
@@ -399,15 +374,13 @@ class ChatInputContainer(QFrame):
                 """)
 
         menu_style = f"""
-            QMenu {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
-            QMenu::item {{ padding: 6px 12px; margin: 2px 0px; color: {tm.color('text_main')}; border-radius: 4px; }}
-            QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #ffffff; }}
-            QMenu QCheckBox {{ color: {tm.color('text_main')}; background-color: transparent; padding: 6px 12px; font-size: 13px; border-radius: 4px; }}
-            QMenu QCheckBox:hover {{ background-color: {tm.color('accent')}; color: #ffffff; }}
-        """
+                    QMenu {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
+                    QMenu::item {{ padding: 6px 12px; margin: 2px 0px; color: {tm.color('text_main')}; border-radius: 4px; }}
+                    QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #ffffff; }}
+                    QMenu QCheckBox {{ color: {tm.color('text_main')}; background-color: transparent; padding: 6px 12px; font-size: 13px; border-radius: 4px; }}
+                    QMenu QCheckBox:hover {{ background-color: {tm.color('accent')}; color: #ffffff; }}
+                """
         self.menu_mcp_tags.setStyleSheet(menu_style)
-        if hasattr(self, 'menu_mcp_guide'):
-            self.menu_mcp_guide.setStyleSheet(menu_style)
 
     def set_uploading(self, is_uploading: bool):
         self.btn_send.setEnabled(not is_uploading)
@@ -420,8 +393,10 @@ class ChatInputContainer(QFrame):
             self.btn_send.setToolTip("")
 
     def _on_mcp_status_changed(self):
-        if self.chk_mcp_enable.isChecked():
-            self.refresh_mcp_tags()
+        if hasattr(self, 'chk_external_tools') and self.chk_external_tools.isChecked():
+            self.refresh_mcp()
+        elif hasattr(self, 'chk_mcp_enable') and self.chk_mcp_enable.isChecked():
+            self.refresh_mcp()
 
     def _on_tag_toggled(self, tag, checked):
         if hasattr(self.config, 'toggle_mcp_tag'):
@@ -441,19 +416,16 @@ class ChatInputContainer(QFrame):
 
         self._update_tag_button_text()
 
-    def _on_mcp_enable_toggled(self, checked):
-        """当用户勾选/取消勾选 MCP 开关时触发"""
-        self.btn_mcp_guide.setVisible(checked)
+    def _on_external_tools_toggled(self, checked):
         self.btn_mcp_tags.setVisible(checked)
         if checked:
-            # 只要开启，就立刻主动刷新一次标签，而不是傻等用户点击菜单
-            self.refresh_mcp_tags()
+            self.refresh_mcp()
 
     def _show_filter_menu(self):
         self.btn_mcp_tags.setText("Filter Tools: Fetching...")
         QApplication.processEvents()
 
-        self.refresh_mcp_tags()
+        self.refresh_mcp()
 
         pos = self.btn_mcp_tags.mapToGlobal(self.btn_mcp_tags.rect().topLeft())
         menu_height = self.menu_mcp_tags.sizeHint().height()
@@ -461,11 +433,40 @@ class ChatInputContainer(QFrame):
 
         self.menu_mcp_tags.popup(pos)
 
-    def refresh_mcp_tags(self):
+    def get_all_available_tags(self) -> list:
+        """Fetch and aggregate tags from both MCP servers and internal/external SkillManagers."""
+        tags = set()
         try:
-            mcp_mgr = MCPManager.get_instance()
+            skill_mgr = SkillManager.get_instance()
+            import re
 
-            available_tags = mcp_mgr.get_available_tags()
+            # 1. Fetch Academic Skills with [ACADEMIC] prefix
+            for schema in skill_mgr.academic_schemas.values():
+                desc = schema.get("function", {}).get("description", "")
+                match = re.search(r"\[Tags:\s*(.*?)\]", desc)
+                if match:
+                    for t in match.group(1).split(","):
+                        tags.add(f"[ACADEMIC] {t.strip().title()}")
+
+            # 2. Fetch External Skills with [External] prefix
+            for schema in skill_mgr.external_schemas.values():
+                name = schema.get("function", {}).get("name", "Unknown")
+                tags.add(f"[External] {name}")
+
+            # 3. Fetch external MCP Server tags with [External] prefix
+            mcp_mgr = MCPManager.get_instance()
+            for server in mcp_mgr.get_available_mcp():
+                tags.add(f"[External] {server}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to fetch combined tags from SkillManager and MCPManager: {e}", exc_info=True)
+
+        return sorted(list(tags))
+
+
+    def refresh_mcp(self):
+        try:
+            available_tags = self.get_all_available_tags()
             deselected_tags = self.config.mcp_servers.get("deselected_mcp_tags", [])
 
             self.menu_mcp_tags.clear()
@@ -475,31 +476,42 @@ class ChatInputContainer(QFrame):
             if not available_tags:
                 self.btn_mcp_tags.setText("🏷️ Filter Tools: None")
                 from PySide6.QtGui import QAction
-                dummy = QAction("⏳ No active MCP servers...", self)
+                dummy = QAction("⏳ No active skills or MCP servers...", self)
                 dummy.setEnabled(False)
                 self.menu_mcp_tags.addAction(dummy)
                 return
 
-            tm = ThemeManager()
+            class MenuContainerWidget(QWidget):
+                def mousePressEvent(self, event):
+                    event.accept()
+
+                def mouseReleaseEvent(self, event):
+                    event.accept()
+
+            self.menu_container = MenuContainerWidget()
+            self.menu_layout = QVBoxLayout(self.menu_container)
+            self.menu_layout.setContentsMargins(6, 6, 6, 6)
+            self.menu_layout.setSpacing(4)
+
             for tag in available_tags:
                 chk = QCheckBox(f"  {tag}")
-
                 chk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 chk.setChecked(tag not in deselected_tags)
                 chk.setCursor(Qt.PointingHandCursor)
                 chk.toggled.connect(lambda checked, t=tag: self._on_tag_toggled(t, checked))
 
-                wa = QWidgetAction(self)
-                wa.setDefaultWidget(chk)
-                self.menu_mcp_tags.addAction(wa)
-
+                self.menu_layout.addWidget(chk)
                 self.tag_actions[tag] = chk
                 self.known_tags.add(tag)
+
+            wa = QWidgetAction(self)
+            wa.setDefaultWidget(self.menu_container)
+            self.menu_mcp_tags.addAction(wa)
 
             self._update_tag_button_text()
 
         except Exception as e:
-            self.logger.error(f"Error fetching MCP tags: {e}", exc_info=True)
+            self.logger.error(f"Error refreshing skill and tool tags: {e}", exc_info=True)
             self.btn_mcp_tags.setText("Filter Tools: Error")
 
     def _update_tag_button_text(self):
@@ -514,10 +526,11 @@ class ChatInputContainer(QFrame):
 
     def get_selected_tags(self) -> list:
         try:
-            available = MCPManager.get_instance().get_available_tags()
+            available = self.get_all_available_tags()
             deselected = self.config.mcp_servers.get("deselected_mcp_tags", [])
             return [t for t in available if t not in deselected]
-        except:
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve selected user tags: {e}")
             return []
 
     def _emit_send(self):
@@ -556,546 +569,6 @@ class ChatInputContainer(QFrame):
         self.lbl_context_info.setText("📎 Context Attached")
 
 
-class ChatWorker(QObject):
-    sig_token = Signal(str)
-    sig_finished = Signal()
-    sig_error = Signal(str)
-    sig_translated = Signal(str)
-
-    def __init__(self, main_config, trans_config, messages, kb_id, requires_translation=False, external_context=None,
-                 use_mcp=False):
-        super().__init__()
-        self.logger = logging.getLogger("ChatWorker")
-        self.main_config = main_config
-        self.trans_config = trans_config
-        self.messages = messages
-        self.kb_id = kb_id if kb_id != "none" else None
-        self.requires_translation = requires_translation
-        self.external_context = external_context
-        self.use_mcp = use_mcp
-        self.db = DatabaseManager()
-        self.kb_manager = KBManager()
-        self.full_response_cache = ""
-
-        # 实例长连接缓存
-        self.main_llm = None
-        self.trans_llm = None
-
-    def cancel(self):
-        self._is_cancelled = True
-        if self.main_llm: self.main_llm.cancel()
-        if self.trans_llm: self.trans_llm.cancel()
-
-    def _init_llms(self):
-        """初始化主模型与翻译模型池"""
-        if self.main_config and not self.main_llm:
-            cfg = self.main_config.copy()
-            if "tools" not in cfg:
-                cfg["tools"] = []
-            self.main_llm = OpenAICompatibleLLM(cfg)
-
-        if self.requires_translation and self.trans_config and not self.trans_llm:
-            self.trans_llm = OpenAICompatibleLLM(self.trans_config)
-
-    def run(self):
-        try:
-            self.config = ConfigManager()
-
-            self._init_llms()
-            original_user_query = self.messages[-1].get('display_text', self.messages[-1].get('content', ''))
-            search_query = original_user_query
-            domain = "General Academic"
-            context_str = ""
-            sources_map = {}
-
-            # Phase 1: Query Extraction & Translation (Cache Accelerated)
-            if self.requires_translation:
-                self.sig_token.emit("<i>Translating your query to academic English for precise retrieval...</i>\n\n")
-                try:
-                    trans_kwargs = {
-                        "is_translation": True,
-                        "stream": False
-                    }
-                    search_query = get_cached_translation(original_user_query, "to_en", self.trans_llm, **trans_kwargs)
-                    self.sig_translated.emit(search_query)
-                except Exception as e:
-                    self.sig_error.emit(
-                        f"Translation model request failed. Please check your translation API configuration.\nDetails: {e}")
-                    return
-
-            self.sig_token.emit("[CLEAR_SEARCH]")
-
-            # ==========================================
-            # Phase 2: Vector Retrieval & Reranking (Local KB)
-            # ==========================================
-            if self.kb_id and self.kb_id != "none":
-
-                kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
-
-                if kb_info and kb_info.get('doc_count', 0) == 0:
-                    self.logger.warning(f"Knowledge Base '{kb_info.get('name')}' is empty. Skipping vector retrieval.")
-                    pass
-                elif kb_info:
-                    self.sig_token.emit("<i>Loading local vector model and retrieving literature...</i>\n\n")
-                    domain = kb_info.get('domain', 'General Academic')
-                    model_id = kb_info.get('model_id', 'embed_auto')
-
-                    user_pref = self.config.user_settings.get("inference_device", "Auto")
-                    target_device = DeviceManager().parse_device_string(user_pref)
-
-                    conf = get_model_conf(model_id, "embedding")
-                    if not conf or conf.get('is_auto'):
-                        real_id = resolve_auto_model("embedding", target_device)
-                        conf = get_model_conf(real_id, "embedding")
-
-                    try:
-                        embed_fn = _worker_load_model(self.kb_id, self.config)
-                        if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
-                            self.sig_error.emit(f"Failed to switch to Knowledge Base: {self.kb_id}")
-                            return
-                    except Exception as e:
-                        self.sig_error.emit(f"Critical Model Error: {str(e)}")
-                        return
-
-                    history_context = ""
-                    if len(self.messages) >= 3:
-                        prev_assistant = self.messages[-2]['content'][:100]
-                        history_context = f" (Context: {prev_assistant})"
-
-                    expanded_queries = [
-                        search_query,
-                        f"{search_query}{history_context}",
-                        f"{domain} context: {search_query} research details"
-                    ]
-
-                    candidate_docs = []
-                    seen_contents = set()
-
-                    for eq in expanded_queries:
-                        raw_results = self.db.query(eq, n_results=20)
-                        if raw_results and raw_results.get('documents') and raw_results['documents'][0]:
-                            docs = raw_results['documents'][0]
-                            metas = raw_results['metadatas'][0]
-                            distances = raw_results.get('distances', [[0] * len(docs)])[0]
-
-                            for i, doc_text in enumerate(docs):
-                                clean_text = doc_text.strip()
-                                if clean_text not in seen_contents and len(clean_text) > 20:
-                                    seen_contents.add(clean_text)
-                                    candidate_docs.append({
-                                        "content": clean_text,
-                                        "metadata": metas[i],
-                                        "v_dist": distances[i]
-                                    })
-
-                    if candidate_docs:
-                        candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
-                        final_docs = self._process_rerank(search_query, candidate_docs, domain, 10)
-                        if final_docs is None:
-                            final_docs = candidate_docs[:10]
-
-                        current_ref_id = 1
-
-                        for doc in final_docs:
-                            sources_map[current_ref_id] = {
-                                "path": doc['metadata'].get('file_path', ''),
-                                "page": doc['metadata'].get('page', 1),
-                                "name": doc['metadata'].get('source', 'Local DB'),
-                                "search_text": doc['content'][:100]
-                            }
-                            context_str += (
-                                f"--- [Document {current_ref_id}] ---\n"
-                                f"Source: {doc['metadata'].get('source', 'Local')}\n"
-                                f"Content: {doc['content']}\n\n"
-                            )
-                            current_ref_id += 1
-
-            if not context_str.strip():
-                context_str = "No local database documents provided."
-
-            external_chunks = getattr(self, 'external_context', [])
-            images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
-                ('.png', '.jpg', '.jpeg', '.webp'))]
-            docs = [c for c in external_chunks if c not in images]
-
-            llm_content = []
-
-            # 3.1 处理上传的长文本 / PDF (启用 Reranker 降低幻觉)
-            if docs:
-                self.sig_token.emit("<i>Filtering and reranking attached documents...</i>\n\n")
-                cand_docs = [{"content": d.get("content", ""),
-                              "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
-
-                if len(cand_docs) > 5:
-                    reranked_docs = self._process_rerank(search_query, cand_docs, "General", 8)
-                    if reranked_docs is not None:
-                        cand_docs = reranked_docs
-                    else:
-                        cand_docs = cand_docs[:8]
-
-                files_dict = {}
-                for doc in cand_docs:
-                    f_name = doc["metadata"]["name"]
-                    page = doc["metadata"]["page"]
-                    if f_name not in files_dict:
-                        files_dict[f_name] = ""
-                    files_dict[f_name] += f"\n[Page {page}]\n{doc['content']}"
-
-                docs_json = json.dumps(files_dict, ensure_ascii=False)
-                llm_content.append({"type": "text", "text": f"User Uploaded Files (JSON Format):\n{docs_json}\n\n"})
-
-            # 3.2 正常用户文字输入
-            llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
-
-            # 3.3 处理多图顺序挂载
-            for img in images:
-                # 兼容不同来源的 base64 key
-                img_data = img.get("base64_url") or img.get("content")
-                if img_data:
-                    # 确保前缀符合 OpenAI 视觉标准
-                    if not img_data.startswith("data:image"):
-                        ext = str(img.get("path", ".jpeg")).split('.')[-1]
-                        img_data = f"data:image/{ext};base64,{img_data}"
-
-                    llm_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": img_data}
-                    })
-
-            self.sig_token.emit("[CLEAR_SEARCH]")
-
-            # Phase 4: Low VRAM Release
-            is_low_vram = self.config.user_settings.get("low_vram_mode", False)
-            if is_low_vram:
-                self.sig_token.emit("<i>[Low VRAM Mode] Unloading RAG models to free up memory for LLM...</i>\n\n")
-                if hasattr(self, 'db') and self.db:
-                    self.db.reload()
-
-                gc.collect()
-
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-            ## ==========================================
-            # Phase 5: Agentic Generation
-            # ==========================================
-            self.sig_token.emit("[START_LLM_NETWORK]")
-
-            mcp_mgr = MCPManager.get_instance()
-            mcp_tools = None
-
-            if self.use_mcp:
-                selected_tags = getattr(self, 'selected_mcp_tags', None)
-
-                # 1. 获取用户在 UI 层面允许的所有候选工具
-                raw_mcp_tools = []
-                if selected_tags is not None:
-                    raw_mcp_tools = mcp_mgr.get_tools_schema_by_tags(selected_tags)
-                else:
-                    raw_mcp_tools = mcp_mgr.get_all_tools_schema()
-
-                # 2. RAG 动态路由：从候选池中挑出最匹配的 Top-K 给大模型
-                if raw_mcp_tools:
-                    self.sig_token.emit("<i>Filtering ideal MCP tools based on query intent...</i>\n\n")
-                    mcp_tools = self.filter_tools_by_rag(search_query, raw_mcp_tools, top_k=4)
-                    self.sig_token.emit("[CLEAR_SEARCH]")
-
-            system_prompt = (
-                f"You are a Senior Research Scientist specializing in {domain}. "
-                "Your goal is to provide high-density, evidence-based academic responses.\n\n"
-
-                "### TOOL USE PROTOCOL (STRICT):\n"
-                "1. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
-                "2. SILENT EXECUTION: Never output your reasoning process for choosing a tool.\n"
-                "3. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
-                "4. If graphics need to be created, use mermaid uniformly.\n\n"
-
-                "### RESPONSE GUIDELINES:\n"
-                "### GROUNDING RULE (CRITICAL):\n"
-                "1. For Local Documents: Use [1], [2] based on the Context section.\n"
-                "2. For Tool Results: If a result contains an '_mcp_cite_id', you MUST use that ID (e.g., [101]) to cite it.\n"
-                "NEVER claim facts without appending the corresponding bracketed number. This allows users to trace back to the exact webpage or paper.\n\n"
-                
-                
-                "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
-                "At the very end of your response, you MUST output the exact string [FOLLOW_UPS] followed by exactly 6 follow-up questions using this EXACT format:\n"
-                "[FOLLOW_UPS]\n"
-                "💡 Suggested Follow-ups:\n"
-                "   - [Deep Dive] <Question about specific details or mechanisms>\n"
-                "   - [Critical] <Question about limitations, alternatives, or weaknesses>\n"
-                "   - [Broader] <Question about implications or future trends>\n"
-                "   - [Brainstorm] <A creative brainstorming question or hypothetical \"What if\" scenario>\n"
-                "   - [Similar] <Question connecting to a similar or parallel topic/concept>\n"
-                "   - [Application] <Question about real-world applications or cross-disciplinary use>\n\n"
-
-                f"### CONTEXT:\n{context_str}"
-            )
-
-            clean_history = [
-                {k: v for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in
-                self.messages[:-1]]
-            rag_messages = [{"role": "system", "content": system_prompt}] + clean_history
-            rag_messages.append({"role": "user", "content": llm_content})
-
-            tool_executed = False
-
-            # MCP 循环
-            if mcp_tools:
-                try:
-                    MAX_ITERATIONS = 5
-                    for iteration in range(MAX_ITERATIONS):
-                        response_msg = self.main_llm.chat(
-                            messages=rag_messages,
-                            tools=mcp_tools,
-                            tool_choice="auto"
-                        )
-
-                        if isinstance(response_msg, dict):
-                            tool_calls = response_msg.get('tool_calls')
-                            response_msg.pop("tools", None)
-                            if response_msg.get("content") is None:
-                                response_msg["content"] = ""
-                        else:
-                            tool_calls = getattr(response_msg, 'tool_calls', None)
-                            response_msg = {
-                                "role": getattr(response_msg, "role", "assistant") or "assistant",
-                                "content": getattr(response_msg, "content", "") or "",
-                                "tool_calls": [
-                                    {
-                                        "id": tc.id,
-                                        "type": tc.type,
-                                        "function": {
-                                            "name": tc.function.name,
-                                            "arguments": tc.function.arguments if isinstance(tc.function.arguments,
-                                                                                             str) else json.dumps(
-                                                tc.function.arguments)
-                                        }
-                                    } for tc in tool_calls
-                                ] if tool_calls else None
-                            }
-
-                        if not tool_calls:
-                            break
-
-                        tool_executed = True
-                        rag_messages.append(response_msg)
-
-                        for tool_call in tool_calls:
-                            tool_name = tool_call['function']['name']
-                            try:
-                                raw_args = tool_call['function']['arguments']
-                                tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-
-                                self.sig_token.emit(f"<br><i>📡 Requesting remote tool: <b>{tool_name}</b>...</i><br>")
-                                tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
-
-                                try:
-                                    res_data = json.loads(tool_result)
-                                    if isinstance(res_data, dict) and "results" in res_data:
-                                        for item in res_data["results"]:
-
-                                            source_url = item.get("url") or item.get("pdf_url") or item.get(
-                                                "landing_page_url")
-                                            source_title = item.get("title") or item.get("name") or item.get(
-                                                "pref_name") or item.get("display_name") or item.get(
-                                                "scientific_name") or f"Result from {tool_name}"
-
-                                            if source_url:
-                                                mcp_ref_id = len(sources_map) + 101
-
-                                                sources_map[mcp_ref_id] = {
-                                                    "path": source_url,  # 对于 Web，这里存 URL
-                                                    "page": 1,
-                                                    "name": f"[Online] {source_title}",
-                                                    "search_text": item.get("abstract", "")[:100]
-                                                }
-                                                item["_mcp_cite_id"] = mcp_ref_id
-
-                                        tool_result = json.dumps(res_data, ensure_ascii=False)
-                                except:
-                                    pass
-
-                            except Exception as e:
-                                self.logger.error(f"MCP tool {tool_name} failed: {e}")
-                                tool_result = f"Tool execution failed: {str(e)}"
-
-                            # 确保内容为字符串，防止部分工具返回原始 JSON 崩溃
-                            if not isinstance(tool_result, str):
-                                tool_result = json.dumps(tool_result, ensure_ascii=False)
-
-                            if "API Key" in tool_result or "error" in tool_result.lower() or "missing" in tool_result.lower():
-                                tool_result = (
-                                    f"[TOOL EXECUTION FAILED] The tool '{tool_name}' returned an error:\n"
-                                    f"\"{tool_result}\"\n\n"
-                                    f"INSTRUCTION TO AI:\n"
-                                    f"1. DO NOT claim the article, website, or data does not exist. It likely exists but access was blocked (e.g., paywalled, 403 Forbidden) or your input parameter was improperly formatted (e.g., 400 Bad Request).\n"
-                                    f"2. Explain to the user EXACTLY why the access failed (e.g., 'Cell Press actively blocks automated access', or 'The tool received an incorrectly formatted ID').\n"
-                                    f"3. Ask the user to provide the abstract text directly, or switch to other tools like search_academic_literature to correct the ID."
-                                )
-
-                            rag_messages.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call['id'],
-                                "name": tool_name,
-                                "content": tool_result
-                            })
-
-                except Exception as e:
-                    self.logger.warning(f"Tool calling loop failed: {e}")
-
-            if tool_executed:
-                silence_prompt = (
-                    "System Notification: Tool execution is complete. "
-                    "Please analyze the tool results and answer the user's original query.\n"
-                    "CRITICAL ANTI-HALLUCINATION RULE: If ANY tool returned an error (such as HTTP 403 Forbidden, 400 Bad Request, or connection failure), "
-                    "DO NOT pretend the requested target (like a paper, protein, or webpage) is fake or missing. "
-                    "Explicitly state that platform restrictions (like Elsevier/Cell Press paywalls) or API limitations prevented data retrieval, "
-                    "and provide your insights based on what you already know or retrieved successfully."
-                )
-                rag_messages.append({"role": "user", "content": silence_prompt})
-                self.sig_token.emit("[CLEAR_SEARCH]")
-
-            # --- LLM Output Streaming ---
-            for token in self.main_llm.stream_chat(rag_messages):
-                self.full_response_cache += token
-                self.sig_token.emit(token)
-
-            # ==========================================
-            # Phase 6: Dynamic Citation Mounting
-            # ==========================================
-            import re
-            has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
-            if sources_map and has_citation:
-                ref_html = "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'><b>📚 Cited Sources:</b><br>"
-                used_indices = set(int(ref) for ref in re.findall(r'\[(\d+)\]', self.full_response_cache))
-                displayed = 0
-                for rid, info in sources_map.items():
-                    if rid in used_indices:
-                        from urllib.parse import quote
-                        safe_path = quote(info['path'])
-                        safe_text = quote(info['search_text'])
-                        safe_name = quote(info['name'])
-
-                        link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}&name={safe_name}"
-                        ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']}</a></div>"
-                        displayed += 1
-                if displayed > 0:
-                    self.sig_token.emit(ref_html)
-
-        except Exception as e:
-            import traceback
-            self.sig_error.emit(f"Error: {str(e)}\n{traceback.format_exc()}")
-        finally:
-            self.sig_finished.emit()
-
-    def filter_tools_by_rag(self, user_query, raw_mcp_tools, top_k=4):
-        """
-        根据用户查询，使用 Reranker 对工具进行打分排序，仅提取 Top-K 工具。
-        如果模型不可用，静默降级并返回所有工具。
-        """
-        if not raw_mcp_tools or len(raw_mcp_tools) <= top_k:
-            return raw_mcp_tools
-
-        try:
-            candidate_docs = []
-            for tool in raw_mcp_tools:
-                func = tool.get("function", {})
-                content = f"Tool Name: {func.get('name', '')}. Description: {func.get('description', '')}"
-                candidate_docs.append({
-                    "content": content,
-                    "metadata": {"tool_schema": tool}
-                })
-
-            rerank_model_id = getattr(self, 'config', ConfigManager()).user_settings.get("rerank_model_id",
-                                                                                         "rerank_auto")
-            self.logger.info(
-                f"Invoking Reranker model [{rerank_model_id}] to evaluate and filter {len(raw_mcp_tools)} MCP tools...")
-
-            ranked_docs = self._process_rerank(user_query, candidate_docs, domain="Tool Selection", top_k=top_k,
-                                               emit_warning=False)
-
-            if ranked_docs is None:
-                self.logger.warning("Tool reranking failed or process terminated. Silently degrading to use all tools.")
-                return raw_mcp_tools
-
-            best_tools = [doc["metadata"]["tool_schema"] for doc in ranked_docs]
-
-            # 提取出排名前几的工具名称并在日志中展示
-            top_tool_names = [t.get("function", {}).get("name", "Unknown") for t in best_tools]
-            self.logger.info(f"Reranker successfully selected top tools for this query: {', '.join(top_tool_names)}")
-
-            self.logger.info(
-                f"Reranker filtering complete: Routed {len(best_tools)} tools out of {len(raw_mcp_tools)}.")
-            return best_tools
-
-        except Exception as e:
-            self.logger.warning(f"Exception during tool reranking: {e}. Silently degrading to use all selected tools.")
-            return raw_mcp_tools
-
-
-    def _process_rerank(self, query, docs, domain, top_k, emit_warning=True):
-        if not docs: return[]
-
-        import multiprocessing as mp
-        import queue as q
-        from src.core.core_task import TaskState, RunnerProcess
-        from src.task.kb_tasks import RerankTask
-
-        queue = mp.Queue()
-        worker = RunnerProcess(
-            RerankTask, "rerank_sync", queue,
-            {"query": query, "docs": docs, "domain": domain, "top_k": top_k}
-        )
-        worker.start()
-
-        ranked = None
-        while True:
-            if getattr(self, '_is_cancelled', False):
-                worker.terminate()
-                break
-            try:
-                data = queue.get(timeout=0.2)
-                state = data.get("state")
-
-                if state == TaskState.SUCCESS.value:
-                    if data.get("payload"):
-                        ranked = data["payload"]
-                    else:
-                        ranked = docs[:top_k]
-                    break
-                elif state == TaskState.FAILED.value:
-                    error_msg = data.get('msg', 'Unknown execution error')
-                    self.logger.error(f"Rerank process failed: {error_msg}")
-
-                    if emit_warning:
-                        warning_html = (
-                            f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
-                            f"⚠️ <b>Reranker Processing Skipped</b><br><br>"
-                            f"Failed to rerank documents: <i>{error_msg}</i>.<br>"
-                            f"If the model is missing, please go to <b>[Global Settings] -> [Models]</b> to manually download a Reranker model.<br><br>"
-                            f"<i>* Continuing analysis with default document ordering.</i>"
-                            f"</div><br>"
-                        )
-                        self.sig_token.emit(warning_html)
-                    break
-            except q.Empty:
-                if not worker.is_alive():
-                    self.logger.error("Rerank process died unexpectedly.")
-                    if emit_warning:
-                        self.sig_token.emit(
-                            f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
-                            f"⚠️ <b>Reranker Process Terminated</b><br><br>"
-                            f"The background reranking process terminated unexpectedly. This is often caused by missing models or insufficient memory.<br><br>"
-                            f"<i>* Continuing analysis with default document ordering.</i>"
-                            f"</div><br>"
-                        )
-                    break
-            except Exception:
-                if not worker.is_alive():
-                    break
-
-        return ranked
-
 
 class ChatTool(BaseTool):
     def __init__(self):
@@ -1119,16 +592,11 @@ class ChatTool(BaseTool):
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.connect(self.load_llm_configs)
 
-        if hasattr(GlobalSignals(), 'sig_send_to_chat'):
-            GlobalSignals().sig_send_to_chat.connect(self.handle_external_send)
-
-        if hasattr(GlobalSignals(), 'sig_route_to_chat_with_mcp'):
-            GlobalSignals().sig_route_to_chat_with_mcp.connect(self.handle_external_send_with_mcp)
 
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget
 
-        # 1. 主容器与全局布局
+        # 1. Main Container & Global Layout
         self.widget = ChatDropTargetWidget()
         self.widget.sig_files_dropped.connect(self.process_attached_files)
 
@@ -1136,33 +604,96 @@ class ChatTool(BaseTool):
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        top_bar = QVBoxLayout()
+        # --- Ribbon UI Implementation ---
+        self.top_bar_wrapper = QWidget()
+        self.top_bar_wrapper.setObjectName("TopBarWrapper")
+        top_bar = QVBoxLayout(self.top_bar_wrapper)
         top_bar.setSpacing(8)
         top_bar.setContentsMargins(0, 0, 0, 10)
 
         row1_layout = QHBoxLayout()
         self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
-                                                  model_key="chat_model_name")
+                                                  model_key="chat_model_name", vision_key="chat_vision_model_name")
+
+        self.collapsed_placeholder = QLabel(" ")
+        self.collapsed_placeholder.setVisible(False)
+
         row1_layout.addWidget(self.model_selector, 1)
+        row1_layout.addWidget(self.collapsed_placeholder, 1)
+
+        # Pin/Toggle Button for Ribbon State
+        tm = ThemeManager()
+        self.btn_ribbon_state = QPushButton(" Pinned")
+        self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
+        self.btn_ribbon_state.setCursor(Qt.PointingHandCursor)
+        self.btn_ribbon_state.setFixedWidth(90)
+        self.btn_ribbon_state.setStyleSheet("""
+                            QPushButton { background: transparent; border: 1px solid #555; border-radius: 4px; color: #aaa; font-size: 11px; padding: 2px 6px; text-align: left;}
+                            QPushButton:hover { background: #333; color: #fff; }
+                        """)
+        row1_layout.addWidget(self.btn_ribbon_state)
 
         row2_layout = QHBoxLayout()
         self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
-                                                  model_key="chat_trans_model_name")
+                                                  model_key="chat_trans_model_name", enable_vision=False)
 
-        lbl_kb = QLabel(" Knowledge Base:")
+        self.lbl_kb = QLabel(" Knowledge Base:")
         self.combo_kb = BaseComboBox(max_width=400)
         self.refresh_kb_list()
 
         row2_layout.addWidget(self.trans_selector)
         row2_layout.addSpacing(15)
-        row2_layout.addWidget(lbl_kb)
+        row2_layout.addWidget(self.lbl_kb)
         row2_layout.addWidget(self.combo_kb, 1)
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
-        main_layout.addLayout(top_bar)
+        main_layout.addWidget(self.top_bar_wrapper)
 
-        # 加载配置
+        self.ribbon_state = self.config.user_settings.get("chat_ribbon_state", "Pinned")
+
+        def set_ribbon_visible(visible):
+            self.model_selector.setVisible(visible)
+            self.collapsed_placeholder.setVisible(not visible)
+            self.trans_selector.setVisible(visible)
+            self.lbl_kb.setVisible(visible)
+            self.combo_kb.setVisible(visible)
+
+        def apply_ribbon_state(state):
+            tm = ThemeManager()
+            self.ribbon_state = state
+            self.config.user_settings["chat_ribbon_state"] = state
+            self.config.save_settings()
+
+            if state == "Pinned":
+                self.btn_ribbon_state.setText(" Pinned")
+                self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
+                set_ribbon_visible(True)
+            elif state == "Hover":
+                self.btn_ribbon_state.setText(" Hover")
+                self.btn_ribbon_state.setIcon(tm.icon("menu", "text_muted"))
+                set_ribbon_visible(False)
+            elif state == "Collapsed":
+                self.btn_ribbon_state.setText(" Collapsed")
+                self.btn_ribbon_state.setIcon(tm.icon("down", "text_muted"))
+                set_ribbon_visible(False)
+
+        def toggle_ribbon_state():
+            if self.ribbon_state == "Pinned":
+                apply_ribbon_state("Hover")
+            elif self.ribbon_state == "Hover":
+                apply_ribbon_state("Collapsed")
+            else:
+                apply_ribbon_state("Pinned")
+
+        self.btn_ribbon_state.clicked.connect(toggle_ribbon_state)
+
+        apply_ribbon_state(self.ribbon_state)
+
+        # Install event filter for Hover mechanics
+        self.top_bar_wrapper.installEventFilter(self)
+
+        # Load configurations
         self.load_llm_configs()
 
         # 3. 对话展示滚动区 (仅存放消息气泡)
@@ -1238,13 +769,31 @@ class ChatTool(BaseTool):
     def attach_from_local(self):
         """按钮点击触发的文件选择器"""
         paths, _ = QFileDialog.getOpenFileNames(
-            self.widget, "Select Document(s)", "",
-            #"All Supported (*.pdf *.md *.txt *.csv *.py *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
-           # "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
-            "Documents (*.pdf *.md *.txt *.csv *docx)"
+            self.widget, "Select Document(s) or Image(s)", "",
+            "Supported Files (*.pdf *.md *.txt *.csv *.docx *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "Documents (*.pdf *.md *.txt *.csv *.docx)"
         )
         if not paths: return
         self.process_attached_files(paths)
+
+    def eventFilter(self, obj, event):
+        if obj == self.top_bar_wrapper:
+            if self.ribbon_state == "Hover":
+                if event.type() == QEvent.Enter:
+                    self.model_selector.setVisible(True)
+                    self.collapsed_placeholder.setVisible(False)
+                    self.trans_selector.setVisible(True)
+                    self.lbl_kb.setVisible(True)
+                    self.combo_kb.setVisible(True)
+                elif event.type() == QEvent.Leave:
+                    if not self.top_bar_wrapper.geometry().contains(self.widget.mapFromGlobal(QCursor.pos())):
+                        self.model_selector.setVisible(False)
+                        self.collapsed_placeholder.setVisible(True)
+                        self.trans_selector.setVisible(False)
+                        self.lbl_kb.setVisible(False)
+                        self.combo_kb.setVisible(False)
+        return super().eventFilter(obj, event)
 
     def process_attached_files(self, items):
         if not hasattr(self, 'external_chunks'):
@@ -1263,22 +812,26 @@ class ChatTool(BaseTool):
                 file_infos.append(item)
                 if item.get("name", "").lower().endswith('.doc'): has_legacy_doc = True
 
-        # 如果检测到 .doc，弹出 Toast 警告
         if has_legacy_doc:
-            ToastManager().show("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx", "warning")
+            ToastManager().show("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx",
+                                "warning")
 
-        # 防止用户重复狂点
         self.input_container.set_uploading(True)
-        self.input_container.show_context_preview("Loading files into memory...")
 
         if hasattr(self, 'attach_task_mgr'):
             self.attach_task_mgr.cancel_task()
 
+        # 引入标准的 ProgressDialog，满足在执行期间可取消的交互需求
+        from src.ui.components.dialog import ProgressDialog
+        self.attach_pd = ProgressDialog(self.widget, "Processing Attachments", "Parsing files into memory...")
+        self.attach_pd.show()
+
         self.attach_task_mgr = TaskManager()
 
-        self.attach_task_mgr.sig_progress.connect(
-            lambda p, m: self.input_container.show_context_preview(f"⏳ {m}")
-        )
+        # 进度信号与取消操作桥接
+        self.attach_task_mgr.sig_progress.connect(self.attach_pd.update_progress)
+        self.attach_pd.sig_canceled.connect(self.attach_task_mgr.cancel_task)
+
         self.attach_task_mgr.sig_result.connect(self._on_attachment_result)
         self.attach_task_mgr.sig_state_changed.connect(self._on_attachment_state_changed)
 
@@ -1299,8 +852,14 @@ class ChatTool(BaseTool):
             self.combo_kb.setEnabled(enabled)
 
         if hasattr(self, 'input_container'):
-            if hasattr(self.input_container, 'chk_mcp_enable'):
+            if hasattr(self.input_container, 'chk_external_tools'):
+                self.input_container.chk_external_tools.setEnabled(enabled)
+            elif hasattr(self.input_container, 'chk_mcp_enable'):
                 self.input_container.chk_mcp_enable.setEnabled(enabled)
+
+            if hasattr(self.input_container, 'chk_academic_agent'):
+                self.input_container.chk_academic_agent.setEnabled(enabled)
+
             if hasattr(self.input_container, 'btn_mcp_tags'):
                 self.input_container.btn_mcp_tags.setEnabled(enabled)
 
@@ -1320,10 +879,12 @@ class ChatTool(BaseTool):
                 self.scroll_to_bottom()
 
     def _on_attachment_state_changed(self, state, msg):
-        if state == TaskState.FAILED.value:
+        if state == TaskState.SUCCESS.value:
+            self.attach_pd.show_finish_state(True, "Attachment Complete", "Files successfully loaded into memory.")
+        elif state == TaskState.FAILED.value or state == TaskState.TERMINATED.value:
             self.input_container.set_uploading(False)
             self.input_container.hide_context_preview()
-            ToastManager().show(f"Attachment failed: {msg}", "error")
+            self.attach_pd.show_finish_state(False, "Attachment Halted", f"Task ended: {msg}")
 
     def _on_attachment_result(self, result):
         self.input_container.set_uploading(False)
@@ -1369,20 +930,53 @@ class ChatTool(BaseTool):
             self.input_container.hide_context_preview()
 
     def export_chat_history(self):
-
         if not self.history:
             ToastManager().show("There are currently no chat records to export.", "warning")
             self.logger.warning("Attempted to export empty chat history.")
             return
 
-        path, ext = QFileDialog.getSaveFileName(
-            self.widget, "导出学术记录 (Export Academic Log)", "Scholar_Navis_Log",
-            "PDF Document (*.pdf);;Text File (*.txt);;CSV Data (*.csv)"
+        tm = ThemeManager()
+        menu = QMenu(self.widget)
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px;}} 
+            QMenu::item {{ padding: 6px 20px; border-radius: 4px;}}
+            QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
+        """)
+
+        # 使用 theme_manager 里的图标喵
+        act_pdf = menu.addAction(tm.icon("article", "text_main"), "Export as PDF")
+        act_txt = menu.addAction(tm.icon("file-text", "text_main"), "Export as TXT")
+        act_csv = menu.addAction(tm.icon("table", "text_main"), "Export as CSV")
+
+        # 在鼠标位置弹出菜单
+        action = menu.exec(QCursor.pos())
+        if not action:
+            return
+
+        # 根据选择设置后缀和过滤条件
+        if action == act_pdf:
+            filter_str = "PDF Document (*.pdf)"
+            default_ext = ".pdf"
+        elif action == act_txt:
+            filter_str = "Text File (*.txt)"
+            default_ext = ".txt"
+        else:
+            filter_str = "CSV Data (*.csv)"
+            default_ext = ".csv"
+
+        # 弹出系统保存对话框
+        path, _ = QFileDialog.getSaveFileName(
+            self.widget, "Export Log", f"Navis_Log{default_ext}", filter_str
         )
-        if not path: return
+
+        if not path:
+            return
+
+        # 如果你手滑忘记打后缀，咱们自动帮你补上喵
+        if not path.endswith(default_ext):
+            path += default_ext
 
         try:
-            tm = ThemeManager()
             font_family = tm.font_family()
 
             if path.endswith(".pdf"):
@@ -1390,23 +984,23 @@ class ChatTool(BaseTool):
                 date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 doc.setDefaultStyleSheet(f"""
-                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
-                    h1, h2, h3 {{ color: {tm.color('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
-                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
-                    .header-user {{ color: {tm.color('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                    .header-ai {{ color: {tm.color('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                    .content {{ margin-top: 5px; }}
-                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
-                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
-                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
-                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
-                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
-                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }}
-                    th {{ background-color: #f6f8fa; font-weight: bold; }}
-                    .doc-header {{ text-align: center; border-bottom: 2px solid {tm.color('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
-                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {tm.color('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
-                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
-                """)
+                                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
+                                    h1, h2, h3 {{ color: {tm.color('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
+                                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
+                                    .header-user {{ color: {tm.color('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                                    .header-ai {{ color: {tm.color('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                                    .content {{ margin-top: 5px; }}
+                                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
+                                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
+                                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
+                                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
+                                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
+                                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
+                                    th {{ background-color: #f6f8fa; font-weight: bold; }}
+                                    .doc-header {{ text-align: center; border-bottom: 2px solid {tm.color('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
+                                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {tm.color('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
+                                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
+                                """)
 
                 def _get_colored_svg_base64(icon_name, color_hex):
                     svg_path = tm.get_resource_path("assets", "icons", f"{icon_name}.svg")
@@ -1433,7 +1027,9 @@ class ChatTool(BaseTool):
 
                 for msg in self.history:
                     is_user = (msg['role'] == "user")
-                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                    raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
+                                         flags=re.DOTALL | re.IGNORECASE)
+                    clean_content = TextFormatter.clean_text_for_export(raw_content)
                     rendered_html = TextFormatter.markdown_to_html(clean_content)
 
                     if is_user:
@@ -1452,21 +1048,37 @@ class ChatTool(BaseTool):
                 writer.setResolution(300)
                 doc.print_(writer)
 
+
             elif path.endswith(".txt"):
-                txt = f"================ SCHOLAR NAVIS REPORT ================\nGenerated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                txt_lines = [
+                    "================ SCHOLAR NAVIS ACADEMIC REPORT ================",
+                    f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "===============================================================\n\n"
+                ]
                 for msg in self.history:
-                    role = "User Inquiry" if msg['role'] == "user" else "AI Analysis"
-                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
-                    txt += f"[{role}]:\n{clean_content}\n\n{'-' * 60}\n\n"
+                    role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
+
+                    raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
+                                         flags=re.DOTALL | re.IGNORECASE)
+
+                    clean_content = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', raw_content).strip()
+
+                    txt_lines.append(f"[{role}]")
+                    txt_lines.append(clean_content)
+                    txt_lines.append(f"\n{'-' * 70}\n")
+
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(txt)
+                    f.write("\n".join(txt_lines))
+
 
             elif path.endswith(".csv"):
                 with open(path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow(["Role", "Content"])
                     for msg in self.history:
-                        clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                        raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
+                                             flags=re.DOTALL | re.IGNORECASE)
+                        clean_content = TextFormatter.clean_text_for_export(raw_content)
                         writer.writerow(["User" if msg['role'] == 'user' else "AI", clean_content])
 
             ToastManager().show(f"Document successfully exported to: {os.path.basename(path)}", "success")
@@ -1526,35 +1138,7 @@ class ChatTool(BaseTool):
         if not kb_id:
             kb_id = "none"
 
-        # 2. 模型拦截校验
-        if kb_id != "none":
-            ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(kb_id)
-            if not ready:
-                msg = (
-                    f"<b>Model Missing - Action Blocked</b><br><br>"
-                    f"Required offline model is not installed: <br>"
-                    f"<font color='#ff6b6b'>• {missing_label}</font><br><br>"
-                    f"Please go to <b>[Global Settings]</b> and click 'Save' to download required models."
-                )
-                StandardDialog(self.widget, "Offline Security Intercept", msg, show_cancel=False).exec()
-                GlobalSignals().request_model_download.emit(missing_id, m_type)
-                return
 
-        trans_config = self.trans_selector.get_current_config()
-        if trans_config:
-            trans_config = trans_config.copy()
-            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
-
-        is_english = detect_primary_language(text) == 'en'
-        requires_translation = (not is_english) and (trans_config is not None)
-
-        if not is_english and trans_config is None:
-            if not getattr(self.__class__, '_has_shown_lang_warning', False):
-                ToastManager().show(
-                    "Non-English input detected, but translation model is not enabled. \nThe core model may not perfectly handle this language; please verify the accuracy of the results.",
-                    "warning"
-                )
-                self.__class__._has_shown_lang_warning = True
 
         # 4. 获取当前附件数据
         current_html = getattr(self, 'external_context_html', "")
@@ -1589,7 +1173,7 @@ class ChatTool(BaseTool):
 
         self.input_container.hide_context_preview()
         self.external_chunks = current_chunks
-        self.start_ai_response(kb_id, requires_translation)
+        self.start_ai_response(kb_id)
 
     def _restore_last_input(self):
         last_user_msg = None
@@ -1636,7 +1220,7 @@ class ChatTool(BaseTool):
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
             bubble.sig_link_clicked.connect(self.handle_link_click)
         else:
-            bubble.lbl_text.linkActivated.connect(self.handle_link_click)
+            bubble.lbl_text.anchorClicked.connect(self.handle_link_click)
 
         self.chat_layout.addWidget(bubble)
 
@@ -1679,6 +1263,9 @@ class ChatTool(BaseTool):
                     self.worker.cancel()
                     try:
                         self.worker.sig_token.disconnect()
+                        self.worker.sig_finished.disconnect()
+                        self.worker.sig_error.disconnect()
+                        self.worker.sig_translated.disconnect()
                     except Exception:
                         pass
                 if self.worker_thread.isRunning():
@@ -1696,46 +1283,23 @@ class ChatTool(BaseTool):
             self.worker_thread = None
             self.worker = None
 
-        # 获取最新的主模型配置与翻译配置
         main_config = self.model_selector.get_current_config()
         trans_config = self.trans_selector.get_current_config()
-        use_mcp_tools = self.input_container.chk_mcp_enable.isChecked() if hasattr(self.input_container,
-                                                                                   'chk_mcp_enable') else False
-        selected_mcp_tags = self.input_container.get_selected_tags() if use_mcp_tools else []
 
-        def _clean_model_name(name):
-            if not name: return ""
-            for suffix in [" [Custom]", " [Closed]"]:
-                if name.endswith(suffix): return name[:-len(suffix)]
-            return name
+        use_academic_agent = self.input_container.chk_academic_agent.isChecked() if hasattr(self.input_container,
+                                                                                            'chk_academic_agent') else True
+        use_external_tools = self.input_container.chk_external_tools.isChecked() if hasattr(self.input_container,
+                                                                                            'chk_external_tools') else False
 
-        if main_config:
-            main_config = main_config.copy()
-            combos_main = self.model_selector.findChildren(QComboBox)
-            if len(combos_main) >= 2:
-                raw_ui_model = combos_main[1].currentText()
-            else:
-                raw_ui_model = self.config.user_settings.get("chat_model_name", "")
+        selected_tags = self.input_container.get_selected_tags()
+        academic_tags = [t.replace("[ACADEMIC]", "").strip() for t in selected_tags if t.startswith("[ACADEMIC]")]
+        external_names = [t.replace("[External]", "").strip() for t in selected_tags if t.startswith("[External]")]
 
-            ui_model = _clean_model_name(raw_ui_model)
-            if ui_model:
-                main_config["model_name"] = ui_model
-                self.config.user_settings["chat_model_name"] = raw_ui_model
-                self.config.save_settings()
+        if use_academic_agent and not academic_tags:
+            use_academic_agent = False
 
-        if trans_config:
-            trans_config = trans_config.copy()
-            combos_trans = self.trans_selector.findChildren(QComboBox)
-            if len(combos_trans) >= 2:
-                raw_ui_trans = combos_trans[1].currentText()
-            else:
-                raw_ui_trans = self.config.user_settings.get("chat_trans_model_name", "")
-
-            ui_trans = _clean_model_name(raw_ui_trans)
-            if ui_trans:
-                trans_config["model_name"] = ui_trans
-                self.config.user_settings["chat_trans_model_name"] = raw_ui_trans
-                self.config.save_settings()
+        if use_external_tools and not external_names:
+            use_external_tools = False
 
         if main_config:
             actual_model = main_config.get("model_name", "").strip()
@@ -1746,50 +1310,66 @@ class ChatTool(BaseTool):
         self.current_ai_text = ""
         self.current_ai_bubble = self.add_bubble("", is_user=False)
         self.current_ai_bubble.set_loading(True)
+
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
+        self.input_container.btn_stop.setEnabled(True)
+        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setToolTip("")
         self.set_controls_enabled(False)
 
         self._is_rendering_dirty = False
         self._render_timer.start()
 
-        # 实例化后台 Worker
-        self.worker_thread = QThread()
+        # Cleanly abort previous tasks if any exist
+        if getattr(self, 'chat_task_mgr', None):
+            try:
+                self.chat_task_mgr.sig_progress.disconnect()
+                self.chat_task_mgr.sig_state_changed.disconnect()
+                self.chat_task_mgr.sig_result.disconnect()
+            except Exception:
+                pass
+            self.chat_task_mgr.cancel_task()
 
-        self.worker = ChatWorker(
-            main_config=main_config,
-            trans_config=trans_config,
-            messages=list(self.history),
-            kb_id=kb_id,
-            requires_translation=requires_translation,
-            external_context=getattr(self, 'external_chunks', []),
-            use_mcp=use_mcp_tools
-        )
-
-        self.worker.selected_mcp_tags = selected_mcp_tags
-        self.external_chunks = []
-        self.external_context_html = ""
-        self.input_container.hide_context_preview()
-        self.worker.moveToThread(self.worker_thread)
+        self.chat_task_mgr = TaskManager()
+        self.chat_task_mgr.sig_progress.connect(self._on_chat_progress)
+        self.chat_task_mgr.sig_state_changed.connect(self._on_chat_state_changed)
+        self.chat_task_mgr.sig_result.connect(self._on_chat_result)
 
         try:
             self.input_container.btn_stop.clicked.disconnect()
-        except:
+        except Exception:
             pass
         self.input_container.btn_stop.clicked.connect(self.cancel_generation)
 
-        self.worker_thread.started.connect(self.worker.run)
-        self.worker.sig_token.connect(self.update_ai_bubble)
-        self.worker.sig_finished.connect(self.on_chat_finished)
-        self.worker.sig_error.connect(self.on_chat_error)
-        self.worker.sig_finished.connect(self.worker_thread.quit)
-        self.worker.sig_finished.connect(self.worker.deleteLater)
-        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
-        self.worker.sig_translated.connect(self._on_query_translated)
-
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
-        self.worker.sig_finished.connect(self.worker_thread.quit)
-        self.worker_thread.start()
+
+        current_external_chunks = getattr(self, 'external_chunks', [])
+
+        QApplication.processEvents()
+
+        def _launch_task():
+            self.chat_task_mgr.start_task(
+                ChatGenerationTask,
+                task_id="chat_generation",
+                mode=TaskMode.THREAD,
+                main_config=main_config,
+                trans_config=trans_config,
+                messages=list(self.history),
+                kb_id=kb_id,
+                requires_translation=requires_translation,
+                external_context=current_external_chunks,
+                use_academic_agent=use_academic_agent,
+                academic_tags=academic_tags if use_academic_agent else [],
+                use_external_tools=use_external_tools,
+                external_tool_names=external_names if use_external_tools else []
+            )
+
+        QTimer.singleShot(100, _launch_task)
+
+        self.external_chunks = []
+        self.external_context_html = ""
+        self.input_container.hide_context_preview()
 
     def handle_edit_resend(self, index, new_text):
         if getattr(self, 'is_locked', False):
@@ -1861,48 +1441,18 @@ class ChatTool(BaseTool):
         })
 
         self.external_chunks = old_chunks
-
-        trans_config = self.trans_selector.get_current_config()
-        if trans_config:
-            trans_config = trans_config.copy()
-            trans_config["model_name"] = trans_config.get("trans_model_name", trans_config.get("model_name"))
-
-        is_english = detect_primary_language(new_text) == 'en'
-        requires_translation = (not is_english) and (trans_config is not None)
-
-        if not is_english and trans_config is None:
-            if not getattr(self.__class__, '_has_shown_lang_warning', False):
-                ToastManager().show(
-                    "Non-English input detected, but translation model is not enabled. \nThe core model may not perfectly handle this language; please verify the accuracy of the results.",
-                    "warning"
-                )
-                self.__class__._has_shown_lang_warning = True
-
-        self.start_ai_response(kb_id, requires_translation)
+        self.start_ai_response(kb_id)
 
     def cancel_generation(self):
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.cancel()
-            try:
-                self.worker.sig_token.disconnect()
-            except Exception:
-                pass
+        if not self.input_container.btn_stop.isEnabled():
+            return
 
-        try:
-            if getattr(self, 'worker_thread', None) is not None and self.worker_thread.isRunning():
-                if not hasattr(self, '_orphaned_threads'): self._orphaned_threads = []
-                old_t, old_w = self.worker_thread, self.worker
-                old_t.quit()
-                self._orphaned_threads.append((old_t, old_w))
-                old_t.finished.connect(
-                    lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self,
-                                                                                                        '_orphaned_threads',
-                                                                                                        []) else None)
-        except RuntimeError:
-            pass
+        self.input_container.btn_stop.setEnabled(False)
+        self.input_container.btn_stop.setText("Stopping...")
+        self.input_container.btn_stop.setToolTip("Waiting for background resources to safely release...")
 
-        self.worker_thread = None
-        self.worker = None
+        if getattr(self, 'chat_task_mgr', None):
+            self.chat_task_mgr.cancel_task()
 
         if hasattr(self, '_render_timer'): self._render_timer.stop()
         self.set_controls_enabled(True)
@@ -1911,19 +1461,13 @@ class ChatTool(BaseTool):
             self.current_ai_bubble.set_loading(False)
 
         tm = ThemeManager()
-        self.current_ai_text += f"\n\n<div style='color:{tm.color('warning')}; font-weight:bold;'>[Generation Cancelled by User]</div>"
+        self.current_ai_text += f"\n\n<div style='color:{tm.color('warning')}; font-weight:bold;'>[Generation Cancelling... Please wait]</div>"
 
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)
             self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
 
-        self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_send.setVisible(True)
-
-        if hasattr(self, '_restore_last_input'):
-            self._restore_last_input()
-
-        self.logger.info("AI generation cancelled by user.")
+        self.logger.info("AI generation cancellation requested by user. Task manager is gracefully terminating.")
         self.scroll_to_bottom()
 
     def _trigger_follow_up(self, text):
@@ -1952,13 +1496,18 @@ class ChatTool(BaseTool):
             self.scroll_to_bottom()
 
     def handle_external_send_with_mcp(self, context_text, prompt_text, target_tag):
+        self.get_ui_widget()
 
-        if hasattr(self, 'input_container') and hasattr(self.input_container, 'chk_mcp_enable'):
-            if not self.input_container.chk_mcp_enable.isChecked():
-                self.input_container.chk_mcp_enable.setChecked(True)
+        if hasattr(self, 'input_container'):
+            if hasattr(self.input_container, 'chk_external_tools'):
+                if not self.input_container.chk_external_tools.isChecked():
+                    self.input_container.chk_external_tools.setChecked(True)
+            elif hasattr(self.input_container, 'chk_mcp_enable'):
+                if not self.input_container.chk_mcp_enable.isChecked():
+                    self.input_container.chk_mcp_enable.setChecked(True)
 
         config_mgr = ConfigManager()
-        available_tags = MCPManager.get_instance().get_available_tags()
+        available_tags = MCPManager.get_instance().get_available_mcp()
 
         deselected = set(self.config.mcp_servers.get("deselected_mcp_tags", []))
         for tag in available_tags:
@@ -1971,11 +1520,12 @@ class ChatTool(BaseTool):
         self.config.save_mcp_servers()
 
         if hasattr(self, 'input_container') and hasattr(self.input_container, 'refresh_mcp_tags'):
-            self.input_container.refresh_mcp_tags()
+            self.input_container.refresh_mcp()
 
         self.handle_external_send(context_text, prompt_text)
 
     def handle_external_send(self, context_text, prompt_text=""):
+        self.get_ui_widget()
 
         temp_dir = tempfile.gettempdir()
         temp_path = os.path.join(temp_dir, "scholar_navis_external_context.txt")
@@ -1996,32 +1546,16 @@ class ChatTool(BaseTool):
         safe_name = quote("External Context.txt")
         link = f"cite://view?path={safe_path}&page=1&name={safe_name}"
 
-        # 提取前 80 个字符做预览，去掉换行符保持气泡紧凑
         preview_text = context_text[:80].replace('\n', ' ') + "..."
         self.external_context_html = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {preview_text} (Click to read more)</a></div>"
 
-        if hasattr(self, 'input_container') and hasattr(self.input_container, 'chk_mcp_enable'):
-            if not self.input_container.chk_mcp_enable.isChecked():
-                self.input_container.chk_mcp_enable.setChecked(True)
-
-        p = self.widget
-        while p:
-            if hasattr(p, 'setCurrentWidget'):
-                try:
-                    p.setCurrentWidget(self.widget)
-                    main_window = p.window()
-                    if hasattr(main_window, 'sidebar'):
-                        idx = p.indexOf(self.widget)
-                        if idx >= 0:
-                            main_window.sidebar.setCurrentRow(idx)
-                except:
-                    pass
-            p = p.parentWidget()
-
-        if self.widget.window():
-            self.widget.window().showNormal()
-            self.widget.window().raise_()
-            self.widget.window().activateWindow()
+        if hasattr(self, 'input_container'):
+            if hasattr(self.input_container, 'chk_external_tools'):
+                if not self.input_container.chk_external_tools.isChecked():
+                    self.input_container.chk_external_tools.setChecked(True)
+            elif hasattr(self.input_container, 'chk_mcp_enable'):
+                if not self.input_container.chk_mcp_enable.isChecked():
+                    self.input_container.chk_mcp_enable.setChecked(True)
 
         if prompt_text:
             self.process_send(prompt_text)
@@ -2081,10 +1615,15 @@ class ChatTool(BaseTool):
         is_at_bottom = (sb.maximum() - sb.value()) <= 15
         idx = getattr(self.current_ai_bubble, 'index', -1)
 
-        # 1. Handle clearing of status prompts via Regex
         if token == "[CLEAR_SEARCH]":
             self.current_ai_text = re.sub(
-                r'(?:<br>\s*)*<i>(?:Translating|Loading|Filtering|\[Low VRAM|📡).*?</i>\s*(?:<br>\s*)*(?:\n)*',
+                r"<div class=['\"]status-msg['\"].*?>.*?</div>\s*(?:<br>\s*)*(?:\n)*",
+                '',
+                self.current_ai_text,
+                flags=re.DOTALL | re.IGNORECASE
+            )
+            self.current_ai_text = re.sub(
+                r'(?:<br>\s*)*<i>(?:🌐\s*|📚\s*)?(?:Translating|Loading|Filtering|Extracting|\[Low VRAM).*?</i>\s*(?:<br>\s*)*(?:\n)*',
                 '',
                 self.current_ai_text,
                 flags=re.DOTALL | re.IGNORECASE
@@ -2092,6 +1631,7 @@ class ChatTool(BaseTool):
             self.current_ai_text = self.current_ai_text.lstrip()
             self._is_rendering_dirty = True
             return
+
 
         # 2. Handle LLM connection start
         if token == "[START_LLM_NETWORK]":
@@ -2159,46 +1699,104 @@ class ChatTool(BaseTool):
         if hasattr(self, '_render_timer'): self._render_timer.stop()
         self.set_controls_enabled(True)
 
-        # --- 翻译或生成失败处理 ---
-        # 显示重试按钮
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
         self._restore_last_input()
 
-        display_error = msg
+
+        error_title = "Generation Terminated"
+        display_msg = str(msg).strip()
+
+        try:
+            parsed = json.loads(display_msg)
+            error_title = parsed.get("title", error_title)
+            display_msg = parsed.get("body", display_msg)
+        except json.JSONDecodeError:
+            prefix_match = re.match(r'^\s*\[(.*?)\]\s*\n*(.*)', display_msg, re.DOTALL)
+            if prefix_match:
+                raw_title = prefix_match.group(1).strip()
+                display_msg = prefix_match.group(2).strip()
+
+                if "API Request Error" in raw_title:
+                    error_title = "Provider API Error"
+                    if "404" in raw_title and "404" not in display_msg:
+                        display_msg += "\n\nSuggestion: The selected model may not exist or your API endpoint path (e.g., /v1) is incorrect."
+                    elif ("401" in raw_title or "key" in display_msg.lower()) and "verify" not in display_msg.lower():
+                        error_title = "Authentication Required"
+                        display_msg += "\n\nSuggestion: Please verify your API Key in the Global Settings."
+                elif "Context Exceeded" in raw_title:
+                    error_title = "Context Window Exceeded"
+                elif "Rate Limit" in raw_title:
+                    error_title = "Rate Limit Reached"
+                elif "Timeout" in raw_title:
+                    error_title = "Connection Timeout"
+
+        # 处理特定的顶层网络拦截
         if "translation" in msg.lower() or "translator" in msg.lower():
-            ToastManager().show(f"Translation model error; conversation terminated: {msg}", "error")
-            display_error = f"Translation model error: {msg}"
+            error_title = "Translation Module Failure"
+            ToastManager().show("Translation model error. Please check your translator settings.", "error")
         elif "time" in msg.lower() or "connect" in msg.lower():
-            ToastManager().show("Network connection failed. Please check your API configuration or proxy settings.",
-                                "error")
-            display_error = "Network connection failed."
+            ToastManager().show("Network connection failed. Please check your API configuration or proxy.", "error")
 
-        if self.current_ai_bubble and self.current_ai_bubble.is_loading:
-            self.current_ai_bubble.set_loading(False)
-
-        self.current_ai_text += f"\n\n<div style='color:#ff6b6b; font-weight:bold;'>[AI Error]</div>\n<div style='color:#888; font-size:12px;'>{display_error}</div>"
+        error_json_str = json.dumps({"title": error_title, "body": display_msg})
 
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)
-            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
 
+            # 如果 AI 完全没有正常输出过内容，删掉它，换上错误气泡
+            if not self.current_ai_text.strip():
+                self.chat_layout.removeWidget(self.current_ai_bubble)
+                self.current_ai_bubble.deleteLater()
+
+                error_bubble = ChatBubbleWidget(
+                    text=error_json_str,
+                    is_user=False,
+                    index=idx,
+                    msg_type=ChatBubbleWidget.MSG_ERROR
+                )
+                self.chat_layout.addWidget(error_bubble)
+            else:
+                self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
+
+                idx += 1
+                error_bubble = ChatBubbleWidget(
+                    text=error_json_str,
+                    is_user=False,
+                    index=idx,
+                    msg_type=ChatBubbleWidget.MSG_ERROR
+                )
+                self.chat_layout.addWidget(error_bubble)
+
+        self.current_ai_bubble = None
         self.scroll_to_bottom()
 
-    def on_chat_finished(self):
-
+    def on_chat_finished(self, is_cancelled=False):
         if hasattr(self, '_render_timer'): self._render_timer.stop()
         self.set_controls_enabled(True)
 
-        # 强制进行最后一次全量渲染，确保不丢掉最后的 token
         if getattr(self, '_is_rendering_dirty', False):
             self._throttled_render()
 
         if not self.current_ai_bubble:
             return
 
+        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setEnabled(True)
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
+
+        # 检查是否是被主动中止的，履行“无论成功与否都要弹窗告知用户”的要求
+
+        if is_cancelled:
+            StandardDialog(self.widget, "Task Cancelled", "The AI generation has been stopped by the user.",
+                           show_cancel=False).exec()
+            if hasattr(self, '_restore_last_input'):
+                self._restore_last_input()
+            self.history.append({"role": "assistant", "content": self.current_ai_text})
+            self.current_ai_bubble = None
+            self.scroll_to_bottom()
+            return  # 提前返回，不再处理后续追问按钮逻辑
+
         try:
             self.input_container.btn_stop.clicked.disconnect()
         except Exception:
@@ -2217,36 +1815,46 @@ class ChatTool(BaseTool):
             cites_html = full_text[cite_match.start():]
             full_text = full_text[:cite_match.start()]
 
-        match = re.search(
-            r'(?:\[\s*FOLLOW[_-]?\s*UPS?\s*\]|(?:^|\n|<br>|<br/>)\s*\*?\*?(?:💡\s*)?Suggested\s*Follow[- ]?ups?(?:\s*questions?)?:?\*?\*?)\s*(.*)',
-            full_text, flags=re.IGNORECASE | re.DOTALL)
+        pattern = r'(?:\[\s*FOLLOW[_-]?\s*UPS?\s*\]|(?:^|\n|<br>|<br/>)\s*\*?\*?(?:💡\s*)?Suggested\s*Follow[- ]?ups?(?:\s*questions?)?:?\*?\*?)\s*'
+        matches = list(re.finditer(pattern, full_text, flags=re.IGNORECASE))
         questions = []
 
-        if match:
-            follow_up_block = match.group(1).replace('<br>', '\n').replace('<br/>', '\n')
-            clean_text = full_text[:match.start()].strip()
-            self.current_ai_text = clean_text + cites_html
+        if matches:
+            last_match = matches[-1]
+            follow_up_block = full_text[last_match.end():].replace('<br>', '\n').replace('<br/>', '\n')
 
-            for line in follow_up_block.split('\n'):
-                line = line.strip()
-                line = re.sub(r'^>\s*', '', line)
-                if re.match(r'^([-*]|\d+\.)', line):
-                    q = re.sub(r'^([-*\s]+|\d+\.\s*)', '', line).strip()
-                    q = q.replace('**', '').strip()
-                    if q:
-                        tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
-                        if tag_match:
-                            tag, text = tag_match.groups()
-                            questions.append({"tag": tag.strip(), "text": text.strip()})
-                        else:
-                            questions.append({"tag": "General", "text": q})
+            if len(follow_up_block) < 1500:
+                clean_text = full_text[:last_match.start()].strip()
+                self.current_ai_text = clean_text + cites_html
 
-            idx = getattr(self.current_ai_bubble, 'index', -1)
-            final_html = self._format_response(self.current_ai_text, idx)
-            self.current_ai_bubble.set_content(final_html)
+                for line in follow_up_block.split('\n'):
+                    line = line.strip()
+                    line = re.sub(r'^>\s*', '', line)
+                    if re.match(r'^([-*]|\d+\.)', line):
+                        q = re.sub(r'^([-*\s]+|\d+\.\s*)', '', line).strip()
+                        q = q.replace('**', '').strip()
+                        if q and len(q) > 4:  # 防止空行或者过短的字符
+                            tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
+                            if tag_match:
+                                tag, text = tag_match.groups()
+                                questions.append({"tag": tag.strip(), "text": text.strip()})
+                            else:
+                                questions.append({"tag": "General", "text": q})
 
-            if questions:
-                self.render_follow_up_buttons(questions)
+                # 更新气泡内容
+                idx = getattr(self.current_ai_bubble, 'index', -1)
+                final_html = self._format_response(self.current_ai_text, idx)
+                self.current_ai_bubble.set_content(final_html)
+
+                # 渲染追问按钮
+                if questions:
+                    self.render_follow_up_buttons(questions)
+            else:
+                self.current_ai_text = full_text + cites_html
+                idx = getattr(self.current_ai_bubble, 'index', -1)
+                final_html = self._format_response(self.current_ai_text,
+                                                   idx) if self.current_ai_text else "No response."
+                self.current_ai_bubble.set_content(final_html)
         else:
             self.current_ai_text = full_text + cites_html
             idx = getattr(self.current_ai_bubble, 'index', -1)
@@ -2311,7 +1919,11 @@ class ChatTool(BaseTool):
             elif item.spacerItem():
                 pass
 
-    def handle_link_click(self, url_str):
+    def handle_link_click(self, url):
+        if hasattr(url, 'toString'):
+            url_str = url.toString()
+        else:
+            url_str = str(url)
 
         if url_str.startswith("mermaid://"):
             parsed = urlparse(url_str)
@@ -2492,6 +2104,23 @@ class ChatTool(BaseTool):
                 self.fade_anim.finished.connect(self.btn_scroll_bottom.hide)
 
                 self.fade_anim.start()
+
+    def _on_chat_progress(self, progress, msg):
+        if progress == -1:
+            self.update_ai_bubble(msg)
+
+    def _on_chat_state_changed(self, state, msg):
+        if state == TaskState.SUCCESS.value:
+            self.on_chat_finished(is_cancelled=False)
+        elif state == TaskState.FAILED.value:
+            self.on_chat_error(msg)
+        elif state == TaskState.TERMINATED.value:
+            self.on_chat_finished(is_cancelled=True)
+
+    def _on_chat_result(self, payload):
+        if isinstance(payload, dict) and payload.get("event") == "translated":
+            self._on_query_translated(payload.get("text"))
+
 
     def _save_setting(self, key, value):
         self.config.user_settings[key] = value

@@ -1,11 +1,10 @@
+import asyncio
 import os
-import tempfile
-import traceback
 
 import httpx
-import numpy as np
 
 from src.core.core_task import BackgroundTask
+from src.core.encryption_service import SystemEncryptionService
 
 
 class FetchModelsTask(BackgroundTask):
@@ -16,9 +15,12 @@ class FetchModelsTask(BackgroundTask):
         api_key = self.kwargs.get("api_key", "")
 
         self.update_progress(20, "Connecting to API endpoint...")
-        proxy_url = self.config.user_settings.get("proxy_url", "").strip()
+        from src.core.config_manager import ConfigManager
+        proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
 
         url = f"{base_url.rstrip('/')}/models"
+        self.send_log("INFO", f"Fetching models from {url}")
+
         httpx_kwargs = {"timeout": 10.0}
 
         if proxy_url:
@@ -27,6 +29,10 @@ class FetchModelsTask(BackgroundTask):
             httpx_kwargs["trust_env"] = False
 
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+        if self.is_cancelled():
+            raise InterruptedError("API connection safely terminated by user.")
+
 
         try:
             with httpx.Client(**httpx_kwargs) as client:
@@ -39,6 +45,7 @@ class FetchModelsTask(BackgroundTask):
                 raise ValueError("API returned an empty model list.")
 
             self.update_progress(100, "Done")
+            self.send_log("INFO", f"API response successful. Found {len(models)} models.")
             return {"success": True, "models": models, "msg": f"Successfully fetched {len(models)} models."}
         except Exception as e:
             return {"success": False, "models": [], "msg": str(e)}
@@ -126,8 +133,10 @@ class TestApiTask(BackgroundTask):
         model_name = self.kwargs.get("model_name", "")
         custom_params = self.kwargs.get("custom_params", {})
 
+        self.send_log("INFO", f"Testing connectivity for model: {model_name}")
         self.update_progress(30, f"Sending test prompt to {model_name}...")
-        proxy_url = self.config.user_settings.get("proxy_url", "").strip()
+        from src.core.config_manager import ConfigManager
+        proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         httpx_kwargs = {"timeout": 15.0}
@@ -152,6 +161,9 @@ class TestApiTask(BackgroundTask):
             if k not in ["model", "messages", "stream"]:
                 payload[k] = v
 
+        if self.is_cancelled():
+            raise InterruptedError("API test safely terminated by user.")
+
         try:
             with httpx.Client(**httpx_kwargs) as client:
                 response = client.post(url, headers=headers, json=payload)
@@ -166,6 +178,132 @@ class TestApiTask(BackgroundTask):
             raw_content = msg_obj.get("content") or "[Empty Response]"
 
             self.update_progress(100, "Done")
+            self.send_log("INFO", f"API test passed for {model_name}")
             return {"success": True, "msg": f"Connection excellent!\nModel replied: '{raw_content.strip()}'"}
         except Exception as e:
             return {"success": False, "msg": str(e)}
+
+
+class HardwareAuthTask(BackgroundTask):
+    """Background task for securely authorizing hardware identity."""
+
+    def _execute(self):
+        try:
+            from src.core.encryption_service import SystemEncryptionService
+            service = SystemEncryptionService()
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            res = loop.run_until_complete(service.verify_identity("Authorize configuration export"))
+            loop.close()
+
+            return {"success": res}
+        except Exception as e:
+            self.send_log("WARNING", f"Hardware auth error: {e}")
+            return {"success": False, "msg": str(e)}
+
+
+class EmailVerifyTask(BackgroundTask):
+    """Background task for robustly verifying user email addresses without blocking the UI."""
+
+    def _execute(self):
+        email = self.kwargs.get("email")
+        if not email:
+            return {"success": True, "msg": ""}
+
+        try:
+            from src.core.email_check import verify_email_robust
+            res = verify_email_robust(email)
+
+            if not res.get("is_valid"):
+                detailed_error = res.get("error_msg", "Unknown email validation error.")
+                prompt_msg = (
+                    f"Email Validation Failed:\n"
+                    f"{detailed_error}\n\n"
+                    f"Please provide a valid email address or leave it completely empty (which will disable NCBI tools)."
+                )
+                return {"success": False, "msg": prompt_msg}
+            else:
+                return {"success": True, "msg": ""}
+        except Exception as e:
+            return {"success": False, "msg": f"Email validation encountered a system error: {e}"}
+
+
+class HWDetectTask(BackgroundTask):
+    """Background task for safely probing system hardware and ORT providers."""
+
+    def _execute(self):
+        try:
+            from src.core.device_manager import DeviceManager
+            dev_mgr = DeviceManager()
+            info = dev_mgr.get_sys_info()
+            info['gpu_info'] = dev_mgr.get_gpu_info()
+            devs = dev_mgr.get_available_devices()
+
+            return {"success": True, "info": info, "devs": devs}
+        except Exception as e:
+            self.send_log("ERROR", f"Hardware detection failed: {e}")
+            return {
+                "success": False,
+                "info": {"os": "Unknown OS", "error": str(e)},
+                "devs": [{"name": "Auto Detect", "id": "auto"}],
+                "msg": str(e)
+            }
+
+
+class ImportNativeSkillTask(BackgroundTask):
+    """
+    后台处理 Native Skill 的加密与安全落盘任务
+    """
+    def _execute(self):
+        self.update_progress(10, "Initializing encryption service...")
+        skill_name = self.kwargs.get("skill_name")
+        final_code = self.kwargs.get("final_code")
+        base_dir = self.kwargs.get("base_dir")
+
+        if not all([skill_name, final_code, base_dir]):
+            raise ValueError("Missing required arguments for skill import.")
+
+        workspace_dir = os.path.join(base_dir, 'tools', 'skill')
+        os.makedirs(workspace_dir, exist_ok=True)
+        target_path = os.path.join(workspace_dir, f"{skill_name}.enc")
+
+        self.update_progress(40, "Encrypting script using system-bound key...")
+        enc_service = SystemEncryptionService()
+        encrypted_bytes = enc_service.encrypt(final_code)
+
+        self.update_progress(80, "Writing to secure storage...")
+        with open(target_path, 'wb') as f:
+            f.write(encrypted_bytes)
+
+        self.update_progress(100, "Import completed.")
+        return {"success": True, "target_path": target_path}
+
+
+class TestMcpConnectionTask(BackgroundTask):
+    """
+    后台测试 MCP 服务器连接状态的统一任务
+    """
+
+    def _execute(self):
+        server_name = self.kwargs.get("server_name")
+        config = self.kwargs.get("config")
+
+        self.update_progress(20, f"Initializing connection to '{server_name}'...")
+
+        from src.core.mcp_manager import MCPManager
+        mcp_mgr = MCPManager.get_instance()
+
+        self.update_progress(50, "Handshaking and verifying MCP protocol...")
+
+        success = mcp_mgr._sync_start(server_name, config)
+
+        if success:
+            self.update_progress(90, "Connection successful. Reading tools schema...")
+            mcp_mgr.disconnect_server(server_name)
+            self.update_progress(100, "Test passed.")
+            return {"success": True, "msg": f"Successfully connected to '{server_name}' and verified protocol."}
+        else:
+            status = mcp_mgr.get_server_status(server_name)
+            mcp_mgr.disconnect_server(server_name)
+            return {"success": False, "msg": f"Handshake failed: {status}"}

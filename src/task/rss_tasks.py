@@ -1,17 +1,14 @@
 import concurrent
-import os
 import json
+import os
 import random
+import re
 import time
 import xml.etree.ElementTree as ET
-import requests
-import re
 from datetime import datetime
-import urllib.parse
 
 from src.core.core_task import BackgroundTask
 from src.core.network_worker import create_robust_session
-from src.core.oa import OAFetcher
 
 
 def _setup_worker_env():
@@ -43,12 +40,12 @@ class FetchRSSTask(BackgroundTask):
 
         # Read existing cache for incremental updates
         results = {}
-        if os.path.exists(save_path):
-            try:
-                with open(save_path, 'r', encoding='utf-8') as f:
-                    results = json.load(f)
-            except Exception:
-                pass
+        try:
+            from src.core.config_manager import ConfigManager
+            ConfigManager().save_json(save_path, results, encrypt=False)
+            self.send_log("INFO", f"Data persisted via ConfigManager to: {save_path}")
+        except Exception as e:
+            self.send_log("ERROR", f"Failed to persist cache: {e}")
 
         results["_meta"] = {"last_fetched": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -59,13 +56,17 @@ class FetchRSSTask(BackgroundTask):
         self.send_log("INFO",
                       f"Starting multi-threaded synchronization of {total} feeds with automated OA full-text sniffing...")
 
+        import threading
+        cancel_event = threading.Event()
+
         def process_single_feed(feed):
-            if self._is_cancelled:
+            if cancel_event.is_set():
                 return None
 
             session = create_robust_session()
             url = feed.get('url')
             name = feed.get('name', 'Unknown')
+            local_logs = []  # 建立局部日志缓冲队列
 
             try:
                 session.headers[
@@ -74,83 +75,97 @@ class FetchRSSTask(BackgroundTask):
                 resp = session.get(url, timeout=15)
                 resp.raise_for_status()
 
-                articles = self._parse_feed(resp.text, session)
+                # 静态调用并传入 cancel_event
+                articles = FetchRSSTask._parse_feed(resp.text, session, local_logs, cancel_event)
                 oa_count = sum(1 for a in articles if a.get('pdf_url'))
-                return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count}
+                return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count,
+                        "logs": local_logs}
+
             except Exception as e:
                 err_msg = str(e)
                 is_cf = False
                 if hasattr(e, 'response') and e.response is not None:
+                    status_code = e.response.status_code
                     body = e.response.text[:250].replace('\n', ' ').strip()
-                    if e.response.status_code in (403, 503) and (
-                            "Just a moment" in body or "cloudflare" in body.lower()):
+
+                    if status_code in (403, 503) and ("Just a moment" in body or "cloudflare" in body.lower()):
                         is_cf = True
                     else:
-                        err_msg = f"HTTP {e.response.status_code} | Server Reply: {body}"
+                        err_msg = f"HTTP {status_code} | Server Reply: {body}"
+                else:
+                    err_msg = f"Network Error: {type(e).__name__} - Check your proxy/internet settings."
 
-                # If not a Cloudflare challenge, return error directly
                 if not is_cf:
-                    return {"success": False, "url": url, "name": name, "error": err_msg}
+                    return {"success": False, "url": url, "name": name, "error": err_msg, "logs": local_logs}
 
-                # Strategy 2: Trigger public API proxy channel upon Cloudflare interception
-                self.send_log("WARNING", f"[{name}] Intercepted by Cloudflare JS challenge; switching proxy channel...")
+                # 将直接信号发射替换为缓冲队列写入
+                local_logs.append(("WARNING", f"[{name}] Intercepted by Cloudflare JS challenge; switching proxy channel..."))
                 try:
                     import urllib.parse
-                    # Bypass frontend validation using free rss2json API
                     proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote(url)}"
                     proxy_resp = session.get(proxy_url, timeout=20)
                     proxy_resp.raise_for_status()
-
                     data = proxy_resp.json()
                     if data.get("status") != "ok":
                         raise ValueError("Proxy API returned error.")
 
-                    articles = self._parse_proxy_json(data)
+                    articles = FetchRSSTask._parse_proxy_json(data, local_logs, cancel_event)
                     oa_count = sum(1 for a in articles if a.get('pdf_url'))
-                    return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count}
+                    return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count,
+                            "logs": local_logs}
+
                 except Exception as proxy_e:
                     return {"success": False, "url": url, "name": name,
-                            "error": f"Cloudflare interception persists and proxy failover failed: {str(proxy_e)}"}
+                            "error": f"Cloudflare interception persists and proxy failover failed: {str(proxy_e)}", "logs": local_logs}
             finally:
                 session.close()
 
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        future_to_feed = [executor.submit(process_single_feed, f) for f in feeds]
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_feed = [executor.submit(process_single_feed, f) for f in feeds]
-
+        try:
             for future in concurrent.futures.as_completed(future_to_feed):
-                if self._is_cancelled:
+                if self.is_cancelled():
                     self.send_log("WARNING", "⚠️ Task cancelled by user. Terminating fetch pool.")
+                    cancel_event.set()
                     break
 
                 completed_count += 1
                 res = future.result()
 
                 if res:
+                    # 主执行线程接管缓冲日志发射任务，确保线程亲和性
+                    for level, msg in res.get("logs", []):
+                        self.send_log(level, msg)
+
                     if res["success"]:
                         results[res["url"]] = res["articles"]
                         success_count += 1
-                        self.send_log("INFO",
-                                      f"{res['name']}: Fetched {len(res['articles'])} articles ({res['oa_count']} OA papers found)")
+                        self.send_log("INFO", f"{res['name']}: Fetched {len(res['articles'])} articles ({res['oa_count']} OA papers found)")
                     else:
                         self.send_log("ERROR", f"Failed to fetch {res['name']}: {res['error']}")
 
-                # Update progress bar
                 self.update_progress(int((completed_count / total) * 100), f"Syncing... {completed_count}/{total}")
+        finally:
+            cancel_event.set()
+            executor.shutdown(wait=True)
 
-        # Persist captured data regardless of success, failure, or cancellation
-        with open(save_path, 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
 
-        if self._is_cancelled:
-            self.send_log("INFO", "Sync interrupted by user; partial data saved.")
-        else:
-            self.update_progress(100, f"Sync complete. Success: {success_count}/{total}")
-            self.send_log("INFO", f"RSS concurrent fetch task completed; data persisted to disk.")
+            if self.is_cancelled():
+                self.send_log("INFO", "Sync interrupted by user; partial data saved.")
+                raise InterruptedError("RSS sync was safely terminated by user. Partial data saved.")
+            else:
+                self.update_progress(100, f"Sync complete. Success: {success_count}/{total}")
+                self.send_log("INFO", f"RSS concurrent fetch task completed; data persisted to disk.")
+        except RuntimeError:
+            pass
 
-    def _parse_feed(self, xml_string, base_session):
-        user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
-        if not user_email: user_email = "scholar.user@example.com"
+    @staticmethod
+    def _parse_feed(xml_string, base_session, local_logs, cancel_event):
+        user_email = os.environ.get("NCBI_API_EMAIL", "")
 
         raw_articles = []
         try:
@@ -205,28 +220,28 @@ class FetchRSSTask(BackgroundTask):
 
                 if len(raw_articles) >= 40: break
 
+
         except Exception as e:
-            self.send_log("WARNING", f"XML parsing exception: {str(e)}")
+            local_logs.append(("WARNING", f"XML parsing exception: {str(e)}"))
             return []
 
-        # Internal multi-threading to detect OA full-text status
         def _detect_oa_for_article(article):
-            if self._is_cancelled:
+            if cancel_event.is_set():
                 return article
 
-            # Add 0.2 ~ 0.8s random jitter to avoid triggering rate limits (429) on scholarly APIs
             time.sleep(random.uniform(0.2, 0.8))
 
             doi = article.get("doi")
             pdf_url = ""
             landing_url = article.get("link", "")
-
             if doi:
+
                 s2_key = os.environ.get("S2_API_KEY", "").strip()
+                ncbi_key = os.environ.get("NCBI_API_KEY", "").strip()
                 from src.core.oa import OAFetcher
                 fetcher = OAFetcher()
 
-                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, s2_key, None)
+                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, ncbi_api_key=ncbi_key)
 
                 if oa_result.get("is_oa"):
                     pdf_url = oa_result["pdf_url"]
@@ -240,13 +255,16 @@ class FetchRSSTask(BackgroundTask):
             return article
 
         final_articles = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        try:
             final_articles = list(executor.map(_detect_oa_for_article, raw_articles))
+        finally:
+            executor.shutdown(wait=True)
 
         return final_articles
 
-    def _parse_proxy_json(self, json_data):
-        """Specifically for handling data formats returned by the rss2json proxy"""
+    @staticmethod
+    def _parse_proxy_json(json_data, local_logs, cancel_event):
         raw_articles = []
         try:
             for item in json_data.get('items', []):
@@ -270,11 +288,11 @@ class FetchRSSTask(BackgroundTask):
                 })
                 if len(raw_articles) >= 40: break
         except Exception as e:
-            self.send_log("WARNING", f"Proxy data parsing exception: {str(e)}")
+            local_logs.append(("WARNING", f"Proxy data parsing exception: {str(e)}"))
             return []
 
         def _detect_oa_for_article(article):
-            if self._is_cancelled:
+            if cancel_event.is_set():
                 return article
 
             time.sleep(random.uniform(0.2, 0.8))
@@ -282,13 +300,13 @@ class FetchRSSTask(BackgroundTask):
             doi = article.get("doi")
             pdf_url = ""
             landing_url = article.get("link", "")
-            user_email = os.environ.get("NCBI_API_EMAIL", "scholar.user@example.com")
+            user_email = os.environ.get("NCBI_API_EMAIL","")
 
             if doi:
-                s2_key = os.environ.get("S2_API_KEY", "").strip()
+                ncbi_key = os.environ.get("NCBI_API_KEY", "").strip()
                 from src.core.oa import OAFetcher
                 fetcher = OAFetcher()
-                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, s2_key, None)
+                oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, ncbi_api_key=ncbi_key)
 
                 if oa_result.get("is_oa"):
                     pdf_url = oa_result["pdf_url"]
@@ -301,8 +319,102 @@ class FetchRSSTask(BackgroundTask):
             return article
 
         import concurrent.futures
-        final_articles = []
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             final_articles = list(executor.map(_detect_oa_for_article, raw_articles))
 
         return final_articles
+
+
+class SearchArticlesTask(BackgroundTask):
+    def _execute(self):
+        query = self.kwargs.get('query', '').lower().strip()
+        cache_file = self.kwargs.get('cache_file', 'scholar_workspace/rss_cache.json')
+
+        if not query:
+            return []
+
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            self.send_log("ERROR", f"Search failed: Unable to read cache. {e}")
+            return []
+
+        data.pop("_meta", None)
+        all_articles = []
+        for url, articles in data.items():
+            all_articles.extend(articles)
+
+        total_articles = len(all_articles)
+        self.send_log("INFO", f"Starting search across {total_articles} cached articles...")
+
+        query_terms = [t for t in re.split(r'\W+', query) if len(t) > 1]
+        results = []
+
+        for i, article in enumerate(all_articles):
+            if self.is_cancelled():
+                raise InterruptedError("Search operation was safely terminated by the user.")
+
+            if i % max(1, (total_articles // 20)) == 0:
+                self.update_progress(int((i / total_articles) * 100), f"Analyzing {i}/{total_articles}...")
+
+            title = article.get('title', '').lower()
+            summary = article.get('summary', '').lower()
+
+            score = 0
+
+            if query in title:
+                score += 50
+            if query in summary:
+                score += 20
+
+            for term in query_terms:
+                title_hits = title.count(term)
+                summary_hits = summary.count(term)
+
+                if title_hits > 0 or summary_hits > 0:
+                    score += (title_hits * 10) + (summary_hits * 2)
+
+            if score > 0:
+                res_art = article.copy()
+                res_art['_search_score'] = score
+                results.append(res_art)
+
+        results.sort(key=lambda x: x['_search_score'], reverse=True)
+
+        top_results = results[:150]
+        self.update_progress(100, "Search complete.")
+
+
+        return top_results
+
+
+class ExportRssTask(BackgroundTask):
+
+    def _execute(self):
+        feeds = self.kwargs.get('feeds', [])
+        export_path = self.kwargs.get('export_path')
+        try:
+            self.update_progress(50, "Exporting feeds to file...")
+            from src.core.config_manager import ConfigManager
+            ConfigManager().save_json(export_path, feeds, encrypt=False)
+            return {"success": True, "path": export_path}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+class ImportRssTask(BackgroundTask):
+
+    def _execute(self):
+        import_path = self.kwargs.get('import_path')
+        try:
+            self.update_progress(50, "Reading feeds from file...")
+            from src.core.config_manager import ConfigManager
+            imported_feeds = ConfigManager().load_json(import_path, encrypt=False)
+
+            if not isinstance(imported_feeds, list):
+                raise ValueError("Invalid format: expected a list of feeds.")
+            return {"success": True, "feeds": imported_feeds}
+        except Exception as e:
+            return {"success": False, "error": str(e)}

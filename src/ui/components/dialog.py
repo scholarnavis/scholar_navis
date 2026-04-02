@@ -1,76 +1,64 @@
+import ast
 import os
+import re
+import sys
 import time
+
 import psutil
 import torch
+from PySide6.QtCore import Qt, Signal, QTimer, QRegularExpression
+from PySide6.QtGui import QColor, QRegularExpressionValidator, QGuiApplication, QTextCharFormat, QSyntaxHighlighter, \
+    QFont
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
-                               QSizePolicy, QGraphicsDropShadowEffect, QHeaderView, QAbstractItemView, QTableWidget,
-                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea,
-                               QAbstractScrollArea)
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QRegularExpression, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QRegularExpressionValidator
+                               QSizePolicy, QHeaderView, QAbstractItemView, QTableWidget,
+                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea, QPlainTextEdit)
 
-from src.core.mcp_manager import MCPManager
+from src.core.core_task import TaskManager, TaskMode
 from src.core.models_registry import EMBEDDING_MODELS
-from src.ui.components.param_editor import ParamEditorWidget
 from src.core.theme_manager import ThemeManager
+from src.task.settings_tasks import TestMcpConnectionTask
+from src.ui.components.param_editor import ParamEditorWidget
+from src.ui.components.toast import ToastManager
 
 
 class BaseDialog(QDialog):
     def __init__(self, parent=None, title="Dialog", width=450):
         super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(
+            Qt.Dialog |
+            Qt.CustomizeWindowHint |
+            Qt.WindowTitleHint |
+            Qt.WindowCloseButtonHint
+        )
+        self.setWindowTitle(title)
+
+        self._target_width = width
         self.setFixedWidth(width)
-        self._drag_pos = None
 
-        self.setWindowOpacity(0.0)
         self._is_closing = False
-
         self.tm = ThemeManager()
         self._tracked_buttons = []
 
-        self.main_frame = QFrame(self)
-        self.main_frame.setObjectName("MainFrame")
-
-        # 阴影
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(15)
-        shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(0, 0, 0, 80))
-        self.main_frame.setGraphicsEffect(shadow)
-
-        self.v_layout = QVBoxLayout(self.main_frame)
+        self.v_layout = QVBoxLayout(self)
         self.v_layout.setContentsMargins(0, 0, 0, 0)
         self.v_layout.setSpacing(0)
 
-        # --- 标题栏 ---
-        self.title_bar = QWidget()
-        self.title_bar.setFixedHeight(40)
-        title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(15, 0, 10, 0)
-
-        self.lbl_title = QLabel(title)
-        title_layout.addWidget(self.lbl_title)
-        title_layout.addStretch()
-
-        self.btn_close = QPushButton("✕")
-        self.btn_close.setFixedSize(30, 30)
-        self.btn_close.clicked.connect(self.reject)
-        title_layout.addWidget(self.btn_close)
-        self.v_layout.addWidget(self.title_bar)
-
         # --- 内容区 ---
         self.content_widget = QWidget()
+        self.content_widget.setObjectName("ContentWidget")
+        self.content_widget.setAttribute(Qt.WA_StyledBackground, True)
+
         self.content_layout = QVBoxLayout(self.content_widget)
-        self.content_layout.setContentsMargins(20, 20, 20, 20)
-        self.content_layout.setSpacing(15)
+        self.content_layout.setContentsMargins(24, 24, 24, 24)
+        self.content_layout.setSpacing(16)
+
         self.v_layout.addWidget(self.content_widget, 1)
 
         # --- 底部按钮区 ---
         self.footer_widget = QWidget()
+        self.footer_widget.setAttribute(Qt.WA_StyledBackground, True)
         self.footer_widget.setFixedHeight(55)
 
         self.footer_layout = QHBoxLayout(self.footer_widget)
@@ -78,75 +66,219 @@ class BaseDialog(QDialog):
         self.footer_layout.addStretch()
         self.v_layout.addWidget(self.footer_widget)
 
-        window_layout = QVBoxLayout(self)
-        window_layout.setContentsMargins(10, 10, 10, 10)
-        window_layout.addWidget(self.main_frame)
-
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-
         self.tm.theme_changed.connect(self._apply_theme)
 
+        self._parent_ref = parent
+        QTimer.singleShot(0, self._adjust_and_anchor)
+
+    def _adjust_and_anchor(self):
+        """动态尺寸结算修复：去除套娃滚动条，利用原生 sizeHint 进行精准测量"""
+
+        self.content_widget.setFixedWidth(self._target_width)
+        self.layout().update()
+
+        # 获取 Qt 引擎根据所有子组件真实排版后算出的“理想高度”
+        ideal_height = self.layout().sizeHint().height()
+
+        min_allowed = self.minimumHeight()
+        ideal_height = max(ideal_height, min_allowed)
+
+        screen_geo = QGuiApplication.primaryScreen().availableGeometry()
+        max_allowed_height = int(screen_geo.height() * 0.85)
+
+        final_height = min(ideal_height, max_allowed_height)
+
+        self.setFixedSize(self._target_width, final_height)
+
+        self._anchor_to_center(self._parent_ref)
+
+    def _anchor_to_center(self, parent):
+        frame_geo = self.frameGeometry()
+
+        if parent and parent.window():
+            parent_geo = parent.window().geometry()
+            target_x = parent_geo.center().x() - (frame_geo.width() // 2)
+            target_y = parent_geo.center().y() - (frame_geo.height() // 2)
+        else:
+            screen_geo = QGuiApplication.primaryScreen().geometry()
+            target_x = screen_geo.center().x() - (frame_geo.width() // 2)
+            target_y = screen_geo.center().y() - (frame_geo.height() // 2)
+
+        self.move(target_x, target_y)
+
     def _apply_theme(self):
-        tm = self.tm
+        from src.core.theme_manager import ThemeManager
+        tm = ThemeManager()
 
-        self.main_frame.style().unpolish(self.main_frame)
-        self.title_bar.style().unpolish(self.title_bar)
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from PySide6.QtGui import QColor
 
-        self.main_frame.setStyleSheet(f"""
-            QFrame#MainFrame {{
+                # 提取当前背景色，通过亮度判断是否处于深色模式
+                is_dark = QColor(tm.color('bg_main')).lightness() < 128
+
+                hwnd = int(self.winId())
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                value = ctypes.c_int(1 if is_dark else 0)
+
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    ctypes.byref(value),
+                    ctypes.sizeof(value)
+                )
+            except Exception:
+                pass
+
+
+        self.setStyleSheet(f"""
+            QDialog, QWidget#ContentWidget {{
                 background-color: {tm.color('bg_main')};
+                color: {tm.color('text_main')};
+            }}
+
+            QLineEdit, QTextEdit, QComboBox, QSpinBox {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                border-radius: 4px;
+                padding: 6px;
+                selection-background-color: {tm.color('accent')};
+                selection-color: {tm.color('selection_fg')};
+            }}
+
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus {{
+                border: 1px solid {tm.color('accent')};
+            }}
+
+            QComboBox QAbstractItemView {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                selection-background-color: {tm.color('btn_hover')};
+                selection-color: {tm.color('text_main')};
+                outline: none;
+            }}
+
+            QScrollArea {{
+                background-color: transparent;
+                border: none;
+            }}
+            QScrollBar:vertical, QScrollBar:horizontal {{
+                background-color: transparent;
+                border: none;
+                width: 12px;
+                height: 12px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+                background-color: {tm.color('text_muted')}; /* 弃用过浅的 border 颜色，改用更醒目的 text_muted */
+                border-radius: 4px;
+                min-height: 30px;
+                min-width: 30px;
+                margin: 2px; 
+            }}
+            QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+                background-color: {tm.color('text_main')}; 
+            }}
+            QScrollBar::add-line, QScrollBar::sub-line,
+            QScrollBar::add-page, QScrollBar::sub-page {{
+                background: none; border: none; height: 0px; width: 0px;
+            }}
+
+            QTableWidget {{
+                background-color: {tm.color('bg_card')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                gridline-color: {tm.color('bg_main')};
+                outline: none;
+            }}
+            QHeaderView::section {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_muted')};
+                border: none;
+                border-bottom: 1px solid {tm.color('border')};
+                border-right: 1px solid {tm.color('border')};
+                padding: 8px;
+                font-weight: bold;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {tm.color('btn_hover')};
+                color: {tm.color('text_main')};
+            }}
+            QTableCornerButton::section {{
+                background-color: {tm.color('bg_input')};
+                border: none;
+            }}
+
+            QListWidget {{
+                background-color: {tm.color('bg_card')};
+                color: {tm.color('text_main')};
                 border: 1px solid {tm.color('border')};
                 border-radius: 6px;
+                outline: none;
             }}
-        """)
-
-        self.title_bar.setStyleSheet(f"""
-            background-color: {tm.color('bg_card')}; 
-            border-top-left-radius: 6px; 
-            border-top-right-radius: 6px; 
-            border-bottom: 1px solid {tm.color('border')};
-        """)
-
-        self.lbl_title.setStyleSheet(f"""
-            color: {tm.color('text_main')}; font-weight: bold; font-family: 'Segoe UI'; font-size: 13px; border: none;
-        """)
-
-        self.btn_close.setStyleSheet(f"""
-            QPushButton {{ border: none; color: {tm.color('text_muted')}; background: transparent; font-weight: bold; font-size: 14px; }}
-            QPushButton:hover {{ color: {tm.color('bg_main')}; background-color: {tm.color('danger')}; border-radius: 4px; }}
+            QListWidget::item {{
+                border-bottom: 1px solid {tm.color('bg_main')};
+                padding: 6px;
+            }}
+            QListWidget::item:hover {{
+                background-color: {tm.color('btn_hover')};
+            }}
+            QListWidget::item:selected {{
+                background-color: {tm.color('accent')};
+                color: {tm.color('selection_fg')};
+            }}
         """)
 
         self.footer_widget.setStyleSheet(f"""
             background-color: {tm.color('bg_card')}; 
-            border-bottom-left-radius: 6px; 
-            border-bottom-right-radius: 6px; 
             border-top: 1px solid {tm.color('border')};
         """)
 
-        # 更新所有被跟踪的按钮样式
+
+
+
         for btn, b_type in self._tracked_buttons:
             self._update_button_style(btn, b_type)
 
     def _update_button_style(self, btn, b_type):
         tm = self.tm
-        base_style = "QPushButton { border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500; }"
 
         if b_type == "primary":
-            style = base_style + f"""
-                QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border: 1px solid {tm.color('accent')}; }}
+            style = f"""
+                QPushButton {{ 
+                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    background-color: {tm.color('accent')}; 
+                    color: {tm.color('bg_main')}; 
+                    border: 1px solid {tm.color('accent')}; 
+                }}
                 QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
             """
         elif b_type == "danger":
-            style = base_style + f"""
-                QPushButton {{ background-color: transparent; color: {tm.color('danger')}; border: 1px solid {tm.color('danger')}; }}
+            style = f"""
+                QPushButton {{ 
+                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    background-color: transparent; 
+                    color: {tm.color('danger')}; 
+                    border: 1px solid {tm.color('danger')}; 
+                }}
                 QPushButton:hover {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; }}
             """
         else:
-            style = base_style + f"""
-                QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; }}
+            style = f"""
+                QPushButton {{ 
+                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    background-color: {tm.color('btn_bg')}; 
+                    color: {tm.color('text_main')}; 
+                    border: 1px solid {tm.color('border')}; 
+                }}
                 QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
             """
+
         btn.setStyleSheet(style)
+
 
     def add_button(self, text, callback, is_primary=False, is_danger=False):
         btn = QPushButton(text)
@@ -163,68 +295,12 @@ class BaseDialog(QDialog):
         self.footer_layout.addWidget(btn)
         return btn
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            global_pos = event.globalPosition().toPoint()
-            if self.title_bar.geometry().contains(self.main_frame.mapFromGlobal(global_pos)):
-                self._drag_pos = global_pos - self.frameGeometry().topLeft()
-                event.accept()
-                return
-        super().mousePressEvent(event)
 
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton and self._drag_pos:
-            global_pos = event.globalPosition().toPoint()
-            self.move(global_pos - self._drag_pos)
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_pos = None
-        super().mouseReleaseEvent(event)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.fade_in = QPropertyAnimation(self, b"windowOpacity")
-        self.fade_in.setDuration(150)
-        self.fade_in.setStartValue(0.0)
-        self.fade_in.setEndValue(1.0)
-        self.fade_in.setEasingCurve(QEasingCurve.OutQuad)
-        self.fade_in.start()
-
-    def _do_accept(self):
-        super().accept()
-
-    def _do_reject(self):
-        super().reject()
-
-
-    def accept(self):
-        if getattr(self, '_is_closing', False): return
-        self._is_closing = True
-        self._close_with_animation(self._do_accept)
-
-
-    def reject(self):
-        if getattr(self, '_is_closing', False): return
-        self._is_closing = True
-        self._close_with_animation(self._do_reject)
-
-
-    def _close_with_animation(self, close_callback):
-        self.fade_out = QPropertyAnimation(self, b"windowOpacity")
-        self.fade_out.setDuration(150)
-        self.fade_out.setStartValue(self.windowOpacity())
-        self.fade_out.setEndValue(0.0)
-        self.fade_out.setEasingCurve(QEasingCurve.InQuad)
-        self.fade_out.finished.connect(close_callback)
-        self.fade_out.start()
 
 
 class StandardDialog(BaseDialog):
-    def __init__(self, parent=None, title="Notification", message="", show_cancel=False):
-        super().__init__(parent, title=title, width=420)
+    def __init__(self, parent=None, title="Notification", message="", show_cancel=False, width=420):
+        super().__init__(parent, title=title, width=width)
 
         self.is_long_text = len(message) > 300 or message.count('\n') > 8
 
@@ -258,34 +334,7 @@ class StandardDialog(BaseDialog):
         self.msg_label.setStyleSheet(
             f"color: {tm.color('text_main')}; background-color: transparent; font-size: 14px; padding: 5px; border: none;"
         )
-
         if self.is_long_text:
-            self.scroll_area.setStyleSheet(f"""
-                QScrollArea {{ 
-                    background-color: transparent; 
-                    border: none; 
-                }}
-                QScrollBar:vertical {{ 
-                    border: none;
-                    background-color: transparent;
-                    width: 6px;
-                    margin: 0px;
-                }}
-                QScrollBar::handle:vertical {{ 
-                    background-color: {tm.color('border')};
-                    border-radius: 3px;
-                    min-height: 20px;
-                }}
-                QScrollBar::handle:vertical:hover {{
-                    background-color: {tm.color('text_muted')};
-                }}
-                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                    height: 0px; border: none; background: none;
-                }}
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-                    background: none;
-                }}
-            """)
             self.scroll_area.viewport().setStyleSheet("background-color: transparent;")
 
 
@@ -342,21 +391,6 @@ class FeedEditorDialog(BaseDialog):
 
         self._apply_theme()
 
-    def _apply_theme(self):
-        super()._apply_theme()
-        tm = self.tm
-
-        style = f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;"
-        disabled_style = f"background-color: {tm.color('bg_main')}; color: {tm.color('text_muted')}; border: 1px dashed {tm.color('border')}; padding: 6px; border-radius: 4px;"
-
-        if not self.inp_name.isReadOnly():
-            self.inp_name.setStyleSheet(style)
-            self.inp_url.setStyleSheet(style)
-            self.inp_category.setStyleSheet(style)
-        else:
-            self.inp_name.setStyleSheet(disabled_style)
-            self.inp_url.setStyleSheet(disabled_style)
-            self.inp_category.setStyleSheet(disabled_style)
 
     def get_data(self):
         return {
@@ -436,16 +470,6 @@ class FeedLibraryDialog(BaseDialog):
         super()._apply_theme()
         tm = self.tm
         self.btn_add_custom.setIcon(tm.icon("add", "text_main"))  # Added SVG
-
-        self.table.setStyleSheet(f"""
-            QTableWidget {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; gridline-color: {tm.color('bg_main')}; outline: none; }}
-            QHeaderView::section {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_muted')}; border: none; padding: 6px; border-right: 1px solid {tm.color('border')}; border-bottom: 1px solid {tm.color('border')}; font-weight: bold; }}
-            QTableWidget::item:selected {{ background-color: {tm.color('btn_hover')}; }}
-        """)
-        self.combo_category.setStyleSheet(
-            f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
-        self.inp_search_lib.setStyleSheet(
-            f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
         self.lbl_status.setStyleSheet(f"color: {tm.color('text_muted')}; font-weight: bold;")
 
         self._render_table(self.combo_category.currentText())
@@ -645,7 +669,11 @@ class McpConfigDialog(BaseDialog):
         desc_v_layout.setSpacing(4)
 
         self.inp_desc = QLineEdit()
-        self.inp_desc.setPlaceholderText("e.g. Provide 12306 train ticket search capabilities")
+        self.inp_desc.setPlaceholderText("Describe the tool's purpose (English only)...")  # 修改占位符，提示仅限英文
+
+        desc_regex = QRegularExpression(r"^[\x20-\x7E]*$")
+        desc_validator = QRegularExpressionValidator(desc_regex, self.inp_desc)
+        self.inp_desc.setValidator(desc_validator)
 
         self.desc_hint_widget = QWidget()
         hint_layout = QHBoxLayout(self.desc_hint_widget)
@@ -654,6 +682,11 @@ class McpConfigDialog(BaseDialog):
 
         self.lbl_desc_icon = QLabel()
         self.lbl_desc_icon.setFixedSize(14, 14)
+
+        self.lbl_desc_text = QLabel(
+            "<b>Crucial for AI:</b> Clearly describe the tool's purpose in English so the AI knows exactly when to use it.")
+        self.lbl_desc_text.setWordWrap(True)
+        self.lbl_desc_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self.lbl_desc_text = QLabel(
             "<b>Crucial for AI:</b> Clearly describe the tool's purpose so the AI knows exactly when to use it.")
@@ -737,17 +770,63 @@ class McpConfigDialog(BaseDialog):
         self._apply_theme()
         self.adjustSize()
 
+    def _setup_task_signals(self):
+        self.task_manager.connect_signals(
+            finished_callback=self._on_test_finished,
+            error_callback=self._on_test_error,
+            progress_callback=self._on_test_progress
+        )
+
+    def _on_test_clicked(self):
+        """测试连接（使用标准 TaskManager 管理）"""
+        name, cfg = self.get_config()
+        if not name or (not cfg.get("command") and not cfg.get("url")):
+            StandardDialog(self, "Missing Info", "Please enter at least a Server ID and Command/URL.").exec()
+            return
+
+        # 1. 取消现有任务
+        if self.task_mgr and hasattr(self.task_mgr, 'is_running') and self.task_mgr.is_running():
+            self.task_mgr.cancel_task()
+
+        self.btn_test.setEnabled(False)
+        self.pd = ProgressDialog(self, "Testing Connection", f"Connecting to [{name}]...\nPlease wait...")
+        self.pd.show()
+
+        self.task_mgr = TaskManager()
+        self.task_mgr.sig_progress.connect(self.pd.update_progress)
+        self.task_mgr.sig_result.connect(self._on_test_finished)
+        self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
+
+        # 3. 启动任务
+        self.task_mgr.start_task(
+            TestMcpConnectionTask,
+            task_id="test_mcp_conn",
+            mode=TaskMode.THREAD,
+            server_name=name,
+            config=cfg
+        )
+
+    def _on_test_finished(self, result):
+        """测试完成统一回调"""
+        self.btn_test.setEnabled(True)
+
+        if not hasattr(self, 'pd') or not self.pd:
+            return
+
+        success = result.get("success", False)
+        msg = result.get("msg", "Unknown result")
+
+        if success:
+            self.pd.show_success_state("Connection Successful", msg)
+        else:
+            self.pd.show_finish_state(False, "Connection Failed", f"Unable to connect to server:\n{msg}")
+
+
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
         self.form_widget.setStyleSheet(f"""
             QLabel {{ color: {tm.color('text_muted')}; font-size: 13px; border: none; }} 
-            QLineEdit, QComboBox {{ 
-                background-color: {tm.color('bg_input')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')}; 
-                border-radius: 4px; padding: 6px; selection-background-color: {tm.color('accent')}; selection-color: {tm.color('selection_fg')};
-            }} 
-            QLineEdit:focus, QComboBox:focus {{ border: 1px solid {tm.color('accent')}; }}
-            QLineEdit:disabled {{ background-color: {tm.color('bg_main')}; color: {tm.color('text_muted')}; }}
         """)
 
         self.lbl_desc_icon.setPixmap(tm.icon("help", "warning").pixmap(14, 14))
@@ -804,47 +883,6 @@ class McpConfigDialog(BaseDialog):
             if env_dict: cfg["headers"] = env_dict
 
         return name, cfg
-
-    def _on_test_clicked(self):
-        name, cfg = self.get_config()
-        if not name or (not cfg.get("command") and not cfg.get("url")):
-            StandardDialog(self, "Missing Info", "Please enter at least a Server ID and Command/URL.").exec()
-            return
-
-        self.btn_test.setEnabled(False)
-        self.pd = ProgressDialog(self, "Testing Connection", f"Connecting to [{name}]...\nPlease wait...")
-        self.pd.show()
-
-        self.test_thread = QThread()
-        self.test_worker = McpTestWorker(name, cfg)
-        self.test_worker.moveToThread(self.test_thread)
-        self.pd.sig_canceled.connect(self.test_thread.terminate)
-
-        def cleanup_test_mcp():
-            try:
-                MCPManager.get_instance().disconnect_server(f"test_{name}")
-            except Exception:
-                pass
-
-        self.pd.sig_canceled.connect(cleanup_test_mcp)
-
-        self.test_thread.started.connect(self.test_worker.run)
-        self.test_worker.sig_finished.connect(self._on_test_finished)
-        self.test_worker.sig_finished.connect(self.test_thread.quit)
-        self.test_worker.sig_finished.connect(self.test_worker.deleteLater)
-        self.test_thread.finished.connect(self.test_thread.deleteLater)
-
-        self.test_thread.start()
-
-    def _on_test_finished(self, success, msg):
-        self.btn_test.setEnabled(True)
-        self.pd.close_safe()
-        if success:
-            StandardDialog(self, "Connection Successful", f"{msg}").exec()
-        else:
-            err_dialog = StandardDialog(self, "Connection Failed", f"Unable to connect to server:\n{msg}")
-            err_dialog.setFixedWidth(500)
-            err_dialog.exec()
 
 
 
@@ -906,45 +944,6 @@ class SelectKBFileDialog(BaseDialog):
         super()._apply_theme()
         tm = self.tm
 
-        self.inp_search.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {tm.color('bg_input')};
-                color: {tm.color('text_main')};
-                border: 1px solid {tm.color('border')};
-                border-radius: 4px;
-                padding: 7px 10px;
-                font-size: 13px;
-                selection-background-color: {tm.color('accent')};
-                selection-color: {tm.color('selection_fg')};
-            }}
-            QLineEdit:focus {{ border: 1px solid {tm.color('accent')}; }}
-        """)
-
-        self.list_widget.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {tm.color('bg_card')};
-                color: {tm.color('text_main')};
-                border: 1px solid {tm.color('border')};
-                border-radius: 6px;
-                padding: 4px;
-                font-size: 13px;
-                outline: none;
-            }}
-            QListWidget::item {{
-                padding: 9px 8px;
-                border-radius: 4px;
-                border-bottom: 1px solid {tm.color('bg_main')};
-            }}
-            QListWidget::item:hover {{
-                background-color: {tm.color('btn_hover')};
-            }}
-            QListWidget::item:selected {{
-                background-color: {tm.color('accent')};
-                color: {tm.color('selection_fg')};
-                border-bottom: 1px solid {tm.color('accent')};
-            }}
-        """)
-
         self.lbl_status.setStyleSheet(
             f"color: {tm.color('text_muted')}; font-size: 12px; font-weight: bold;")
 
@@ -965,11 +964,6 @@ class AddModelDialog(BaseDialog):
 
         self._apply_theme()
 
-    def _apply_theme(self):
-        super()._apply_theme()
-        tm = self.tm
-        self.inp_name.setStyleSheet(
-            f"background: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px; border-radius: 4px;")
 
     def get_name(self):
         return self.inp_name.text().strip()
@@ -981,8 +975,8 @@ class ProgressDialog(BaseDialog):
     def __init__(self, parent=None, title="Processing", message="Please wait...", telemetry_config=None):
         super().__init__(parent, title=title, width=540)
         self.setWindowModality(Qt.ApplicationModal)
-        self.btn_close.setVisible(False)
 
+        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
         if telemetry_config is None:
             self.telemetry = {"cpu": True, "ram": True, "gpu": True, "net": False, "io": True}
         else:
@@ -1057,6 +1051,7 @@ class ProgressDialog(BaseDialog):
         tm = self.tm
         self.lbl_message.setStyleSheet(
             f"font-size: 13px; color: {tm.color('text_main')}; margin-bottom: 5px; border: none;")
+
         self.pbar.setStyleSheet(f"""
             QProgressBar {{ 
                 border: 1px solid {tm.color('border')}; 
@@ -1232,7 +1227,12 @@ class ProgressDialog(BaseDialog):
         self.stalled_warning_widget.setVisible(False)
 
         self.pbar.setVisible(False)
-        self.lbl_title.setText(title)
+
+        self.setWindowTitle(title)
+
+        self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
+        self.show()
+
         self.lbl_message.setText(message)
         self.btn_cancel.setText("OK")
         self.btn_cancel.setEnabled(True)
@@ -1249,20 +1249,18 @@ class ProgressDialog(BaseDialog):
             pass
         self.btn_cancel.clicked.connect(self.accept)
 
-
     def on_cancel_clicked(self):
-        self.lbl_message.setText("Stopping... forcing termination.")
-        self.btn_cancel.setEnabled(False)
+        # 1. 更新 UI 状态，隐藏取消按钮，提示用户等待
+        self.lbl_message.setText("Cancelling... waiting for background task to safely terminate.")
+        self.btn_cancel.setVisible(False)
+        self.stalled_warning_widget.setVisible(False)
 
-        # 1. 停止监控
+        # 2. 停止本地的性能监控器
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
         if hasattr(self, 'stall_timer'): self.stall_timer.stop()
 
-        # 2. 发送信号给 TaskManager 去杀进程
+        # 3. 发送取消请求给 TaskManager
         self.sig_canceled.emit()
-
-        # 3. 强制关闭窗口（不再无限等待后台）
-        QTimer.singleShot(500, self.reject)
 
     def close_safe(self):
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
@@ -1274,6 +1272,136 @@ class ProgressDialog(BaseDialog):
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
         if hasattr(self, 'stall_timer'): self.stall_timer.stop()
         super().closeEvent(event)
+
+    def show_finish_state(self, success: bool, title: str, message: str):
+        # 1. 清理监控器与隐藏旧 UI
+        if hasattr(self, 'metric_timer'): self.metric_timer.stop()
+        if hasattr(self, 'stall_timer'): self.stall_timer.stop()
+        self.lbl_metrics.setVisible(False)
+        self.stalled_warning_widget.setVisible(False)
+        self.pbar.setVisible(False)
+
+        # 2. 隐藏自身的弹窗界面，转而使用 StandardDialog 告知最终结果
+        self.hide()
+
+        # 3. 弹出最终结果对话框
+        from src.ui.components.dialog import StandardDialog
+        result_dialog = StandardDialog(
+            self.parent(),
+            title=title,
+            message=message,
+            show_cancel=False
+        )
+        result_dialog.exec()
+
+        self.accept()
+
+class UnsavedChangesDialog(BaseDialog):
+    def __init__(self, parent):
+        super().__init__(parent, title="Unsaved Modifications", width=460)
+        self.user_choice = "close"  # Default fallback action
+
+        # Configure the message label
+        msg_label = QLabel(
+            "You have unsaved configuration changes.\n"
+            "Please specify how you would like to proceed before navigating away:"
+        )
+        msg_label.setWordWrap(True)
+        msg_label.setStyleSheet(
+            f"color: {self.tm.color('text_main')}; font-size: 14px; border: none; background: transparent;"
+        )
+        self.content_layout.addWidget(msg_label)
+
+        # Callback generator for buttons
+        def set_choice(action, accept=False):
+            self.user_choice = action
+            self.accept() if accept else self.reject()
+
+        # Construct Footer Buttons
+        btn_close = self.add_button("Close", lambda: set_choice("close"))
+        btn_revert = self.add_button("Revert Changes", lambda: set_choice("revert"), is_danger=True)
+        btn_save = self.add_button("Save Settings", lambda: set_choice("save", True), is_primary=True)
+
+        btn_close.setFixedWidth(80)
+        btn_revert.setFixedWidth(130)
+        btn_save.setFixedWidth(130)
+
+
+
+class ExportPasswordDialog(BaseDialog):
+    def __init__(self, parent):
+        super().__init__(parent, title="Export Security", width=420)
+        self.password = None
+        self.is_cancelled = True
+        self.regex = re.compile(r'^[a-zA-Z0-9@_\-+=!#$&^*]+$')
+
+        lbl = QLabel(
+            "Set a password to encrypt the exported configuration.\nLeave completely blank for an unencrypted JSON export.")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(
+            f"color: {self.tm.color('text_main')}; font-size: 13px; border: none; background: transparent;")
+
+        self.inp_pass = QLineEdit()
+        self.inp_pass.setEchoMode(QLineEdit.Password)
+        self.inp_pass.setPlaceholderText("Min 6 chars (a-zA-Z0-9@_-+=!#$&^*)")
+
+        self.content_layout.addWidget(lbl)
+        self.content_layout.addWidget(self.inp_pass)
+
+        btn_cancel = self.add_button("Cancel", self.reject)
+        btn_confirm = self.add_button("Confirm", self._validate, is_primary=True)
+        btn_cancel.setFixedWidth(100)
+        btn_confirm.setFixedWidth(100)
+
+    def _validate(self):
+        pwd = self.inp_pass.text()
+        if not pwd:
+            self.is_cancelled = False
+            self.accept()
+            return
+
+        if len(pwd) < 6 or not self.regex.match(pwd):
+            ToastManager().show("Invalid password! Min 6 chars. Allowed: a-zA-Z0-9@_-+=!#$&^*", "error")
+            return
+
+        self.password = pwd
+        self.is_cancelled = False
+        self.accept()
+
+
+class ImportPasswordDialog(BaseDialog):
+    def __init__(self, parent):
+        super().__init__(parent, title="Encrypted Bundle Detected", width=420)
+        self.password = None
+        self.is_cancelled = True
+
+        lbl = QLabel("This configuration is encrypted.\nPlease enter the password to unlock:")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(
+            f"color: {self.tm.color('text_main')}; font-size: 13px; border: none; background: transparent;")
+
+        self.inp_pass = QLineEdit()
+        self.inp_pass.setEchoMode(QLineEdit.Password)
+        self.inp_pass.setPlaceholderText("Enter decryption password...")
+
+        self.content_layout.addWidget(lbl)
+        self.content_layout.addWidget(self.inp_pass)
+
+        btn_cancel = self.add_button("Cancel", self.reject)
+        btn_confirm = self.add_button("Confirm", self._validate, is_primary=True)
+        btn_cancel.setFixedWidth(100)
+        btn_confirm.setFixedWidth(100)
+
+    def _validate(self):
+        pwd = self.inp_pass.text()
+        if not pwd:
+            from src.ui.components.toast import ToastManager
+            ToastManager().show("Password cannot be empty.", "error")
+            return
+        self.password = pwd
+        self.is_cancelled = False
+        self.accept()
+
 
 class ProjectEditorDialog(BaseDialog):
     def __init__(self, parent=None, is_edit=False, current_data=None):
@@ -1335,14 +1463,11 @@ class ProjectEditorDialog(BaseDialog):
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
+
         self.form_widget.setStyleSheet(f"""
             QLabel {{ color: {tm.color('text_muted')}; font-size: 13px; border: none; }} 
-            QLineEdit, QTextEdit, QComboBox {{ 
-                background-color: {tm.color('bg_input')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')}; 
-                border-radius: 4px; padding: 5px; selection-background-color: {tm.color('accent')}; 
-            }} 
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{ border: 1px solid {tm.color('accent')}; }}
         """)
+
         if hasattr(self, 'model_warn'):
             self.model_warn.setStyleSheet(
                 f"color: {tm.color('warning')}; font-size: 11px; font-weight: bold; border: none;")
@@ -1359,38 +1484,290 @@ class ProjectEditorDialog(BaseDialog):
         }
 
 
-class McpTestWorker(QObject):
-    """后台测试 MCP 连接的线程，防止阻塞主 UI"""
-    sig_finished = Signal(bool, str)
+class SkillConfigDialog(BaseDialog):
+    def __init__(self, parent=None, skill_name="", script_path="", description=""):
+        super().__init__(parent, title="Native Skill Configuration", width=550)
 
-    def __init__(self, server_name, config):
-        super().__init__()
-        self.server_name = server_name
-        # 测试时强制起一个临时名字，防止污染实际的连接池
-        self.test_name = f"test_{server_name}"
-        self.config = config
+        tm = ThemeManager()
+        self.tm = tm
 
-    def run(self):
+        self.input_name = QLineEdit(skill_name)
+        self.input_name.setPlaceholderText("e.g., fetch_arxiv_summary")
+        self.input_name.setMinimumHeight(32)
+
+        self.input_path = QLineEdit(script_path)
+        self.input_path.setPlaceholderText("Select a Python (.py) script...")
+        self.input_path.setMinimumHeight(32)
+
+        self.desc_container = QWidget()
+        desc_v_layout = QVBoxLayout(self.desc_container)
+        desc_v_layout.setContentsMargins(0, 0, 0, 0)
+        desc_v_layout.setSpacing(4)
+
+        self.input_desc = QLineEdit(description)
+        self.input_desc.setPlaceholderText("Describe the tool's purpose (English only)...")  # 修改占位符，与 MCP 保持一致
+        self.input_desc.setMinimumHeight(32)
+
+        desc_regex = QRegularExpression(r"^[\x20-\x7E]*$")
+        desc_validator = QRegularExpressionValidator(desc_regex, self.input_desc)
+        self.input_desc.setValidator(desc_validator)
+
+        self.desc_hint_widget = QWidget()
+        hint_layout = QHBoxLayout(self.desc_hint_widget)
+        hint_layout.setContentsMargins(0, 0, 0, 0)
+        hint_layout.setSpacing(6)
+
+        self.lbl_desc_icon = QLabel()
+        self.lbl_desc_icon.setFixedSize(14, 14)
+
+        self.lbl_desc_text = QLabel(
+            "<b>Crucial for AI:</b> Clearly describe the tool's purpose in English so the AI knows exactly when to use it.")
+        self.lbl_desc_text.setWordWrap(True)
+        self.lbl_desc_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        hint_layout.addWidget(self.lbl_desc_icon, 0, Qt.AlignTop)
+        hint_layout.addWidget(self.lbl_desc_text, 1)
+
+        desc_v_layout.addWidget(self.input_desc)
+        desc_v_layout.addWidget(self.desc_hint_widget)
+
+        self.btn_browse = QPushButton()
+        self.btn_browse.setIcon(tm.icon("folder", "accent"))
+        self.btn_browse.setToolTip("Browse and select a .py script...")
+        self.btn_browse.setCursor(Qt.PointingHandCursor)
+        self.btn_browse.setStyleSheet("background: transparent; border: none; padding: 4px;")
+
+        self.btn_clear = QPushButton()
+        self.btn_clear.setIcon(tm.icon("delete", "danger"))
+        self.btn_clear.setToolTip("Clear selected path.")
+        self.btn_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_clear.setStyleSheet("background: transparent; border: none; padding: 4px;")
+
+        path_layout = QHBoxLayout()
+        path_layout.addWidget(self.input_path, stretch=1)
+        path_layout.addWidget(self.btn_browse)
+        path_layout.addWidget(self.btn_clear)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.setSpacing(4)
+
+        form = QFormLayout()
+        form.setSpacing(15)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        form.addRow("Tool Name:", self.input_name)
+        form.addRow("Description:", self.desc_container)
+        form.addRow("Script Path:", path_layout)
+
+        if hasattr(self, 'content_layout'):
+            self.content_layout.addLayout(form)
+        else:
+            self.v_layout.insertLayout(0, form)
+
+        self.add_button("Cancel", self.reject)
+        self.btn_ok = self.add_button("Confirm", self._validate_and_accept, is_primary=True)
+
+        self.btn_browse.clicked.connect(self._browse_file)
+        self.btn_clear.clicked.connect(self.input_path.clear)
+
+        self._apply_theme()
+        self._apply_inputs_theme(tm)
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.lbl_desc_icon.setPixmap(tm.icon("help", "warning").pixmap(14, 14))
+        self.lbl_desc_text.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 11.5px; font-style: italic; border: none; background: transparent;")
+        self.desc_hint_widget.setStyleSheet("background: transparent;")
+
+    def _apply_inputs_theme(self, tm):
+        input_style = f"""
+            QLineEdit {{
+                border: 1px solid {tm.color('border')};
+                border-radius: 4px;
+                padding: 6px 10px;
+                background: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {tm.color('accent')};
+            }}
+        """
+        self.input_name.setStyleSheet(input_style)
+        self.input_path.setStyleSheet(input_style)
+        self.input_desc.setStyleSheet(input_style)
+
+    def _browse_file(self):
+        from PySide6.QtWidgets import QFileDialog
+        import ast
+
+        path, _ = QFileDialog.getOpenFileName(self, "Select Native Skill Script", "", "Python Scripts (*.py)")
+        if path:
+            self.input_path.setText(path)
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    raw_code = f.read()
+                tree = ast.parse(raw_code)
+                for node in tree.body:
+                    if isinstance(node, ast.Assign):
+                        for target in node.targets:
+                            if isinstance(target, ast.Name) and target.id == "SCHEMA":
+                                schema_dict = ast.literal_eval(node.value)
+                                func_info = schema_dict.get("function", {})
+
+                                if func_info.get("name"):
+                                    self.input_name.setText(func_info.get("name"))
+                                if func_info.get("description"):
+                                    self.input_desc.setText(func_info.get("description"))
+            except Exception as e:
+                pass
+
+    def _validate_and_accept(self):
+        from src.ui.components.toast import ToastManager
+        if not self.input_name.text().strip():
+            ToastManager().show("Please enter a Tool Name.", "warning")
+            return
+        if not self.input_desc.text().strip():
+            ToastManager().show("Please enter a Tool Description.", "warning")
+            return
+        if not self.input_path.text().strip():
+            ToastManager().show("Please select a Script Path.", "warning")
+            return
+        self.accept()
+
+    def get_data(self):
+        return self.input_name.text().strip(), self.input_desc.text().strip(), self.input_path.text().strip()
+
+
+
+class SkillSecurityAnalyzer(ast.NodeVisitor):
+    DANGEROUS_IMPORTS = {'os', 'sys', 'subprocess', 'shutil', 'socket', 'requests', 'urllib', 'http'}
+    DANGEROUS_CALLS = {'eval', 'exec', 'open', '__import__'}
+
+    def __init__(self):
+        self.score = 100
+        self.warnings = []
+
+    def analyze(self, code_str: str) -> dict:
+        self.score = 100
+        self.warnings.clear()
+
         try:
-            mgr = MCPManager.get_instance()
+            tree = ast.parse(code_str)
+            self.visit(tree)
+        except SyntaxError as e:
+            return {"score": 0, "warnings": [f"Syntax Error: {e}"], "level": "Fatal"}
 
-            # 1. 尝试同步连接 (底层最多等待 10 秒)
-            success = mgr._sync_start(self.test_name, self.config)
-            status = mgr.get_server_status(self.test_name)
+        level = "Safe"
+        if self.score < 60:
+            level = "High Risk"
+        elif self.score < 80:
+            level = "Medium Risk"
 
-            # 2. 获取加载的工具数量作为成功提示
-            if success:
-                tool_count = sum(1 for v in mgr.tool_map.values() if v == self.test_name)
-                msg = f"连接成功！共加载了 {tool_count} 个可用工具。"
-            else:
-                msg = status
+        return {"score": max(0, self.score), "warnings": self.warnings, "level": level}
 
-            # 3. 测试完毕后立即断开清理，不占用系统资源
-            mgr.disconnect_server(self.test_name)
+    def visit_Import(self, node):
+        for alias in node.names:
+            if alias.name.split('.')[0] in self.DANGEROUS_IMPORTS:
+                self.score -= 20
+                self.warnings.append(f"Dangerous import detected: '{alias.name}'")
+        self.generic_visit(node)
 
-            self.sig_finished.emit(success, msg)
-        except Exception as e:
-            self.sig_finished.emit(False, str(e))
+    def visit_ImportFrom(self, node):
+        if node.module and node.module.split('.')[0] in self.DANGEROUS_IMPORTS:
+            self.score -= 20
+            self.warnings.append(f"Dangerous from...import detected: '{node.module}'")
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Name):
+            if node.func.id in self.DANGEROUS_CALLS:
+                self.score -= 30
+                self.warnings.append(f"Dangerous function call detected: '{node.func.id}'")
+        self.generic_visit(node)
+
+
+class PythonHighlighter(QSyntaxHighlighter):
+    def __init__(self, document, theme_mgr):
+        super().__init__(document)
+        self.highlighting_rules = []
+
+        keyword_format = QTextCharFormat()
+        keyword_format.setForeground(QColor(theme_mgr.color("accent")))
+        keyword_format.setFontWeight(QFont.Bold)
+        keywords = [
+            "def", "class", "import", "from", "return", "pass", "if", "elif", "else",
+            "try", "except", "finally", "with", "as", "for", "while", "in", "and", "or", "not"
+        ]
+        for word in keywords:
+            pattern = QRegularExpression(rf"\b{word}\b")
+            self.highlighting_rules.append((pattern, keyword_format))
+
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor(theme_mgr.color("success")))
+        self.highlighting_rules.append((QRegularExpression("\".*\""), string_format))
+        self.highlighting_rules.append((QRegularExpression("'.*'"), string_format))
+
+    def highlightBlock(self, text):
+        for pattern, format in self.highlighting_rules:
+            iterator = pattern.globalMatch(text)
+            while iterator.hasNext():
+                match = iterator.next()
+                self.setFormat(match.capturedStart(), match.capturedLength(), format)
+
+
+class SkillPreviewDialog(BaseDialog):
+    def __init__(self, parent=None, skill_name="", code_content="", is_importing=True):
+        title = f"Skill Review: {skill_name}" if is_importing else f"Edit Skill: {skill_name}"
+        super().__init__(parent, title=title, width=750)
+        self.setMinimumHeight(550)
+
+        self.code_content = code_content
+        self.is_importing = is_importing
+
+        # 1. 静态安全分析
+        analyzer = SkillSecurityAnalyzer()
+        report = analyzer.analyze(code_content)
+
+        # 2. 渲染顶部安全评分提示
+        lbl_info = QLabel(f"<b>Security Score: {report['score']}/100 ({report['level']})</b>")
+        if report['score'] < 60:
+            lbl_info.setStyleSheet(f"color: {self.tm.color('danger')}; font-size: 14px;")
+        elif report['score'] < 80:
+            lbl_info.setStyleSheet(f"color: {self.tm.color('warning')}; font-size: 14px;")
+        else:
+            lbl_info.setStyleSheet(f"color: {self.tm.color('success')}; font-size: 14px;")
+        self.content_layout.addWidget(lbl_info)
+
+        if report['warnings']:
+            lbl_warnings = QLabel("Warnings:\n- " + "\n- ".join(report['warnings']))
+            lbl_warnings.setStyleSheet(f"color: {self.tm.color('warning')}; font-size: 12px;")
+            self.content_layout.addWidget(lbl_warnings)
+
+        # 3. 渲染代码高亮编辑器
+        self.editor = QPlainTextEdit()
+        self.editor.setPlainText(code_content)
+        font = QFont("Consolas", 10)
+        self.editor.setFont(font)
+        self.editor.setStyleSheet(
+            f"background-color: {self.tm.color('bg_input')}; "
+            f"color: {self.tm.color('text_main')}; "
+            f"border: 1px solid {self.tm.color('border')}; "
+            f"border-radius: 4px;"
+        )
+        self.highlighter = PythonHighlighter(self.editor.document(), self.tm)
+
+        self.content_layout.addWidget(self.editor, stretch=1)
+
+        self.add_button("Cancel", self.reject)
+        btn_text = "Confirm Import" if is_importing else "Save Changes"
+        self.add_button(btn_text, self.accept, is_primary=True)
+
+        self._apply_theme()
+
+    def get_edited_code(self):
+        return self.editor.toPlainText()
+
 
 
 class ApiProvidersDialog(BaseDialog):
@@ -1399,22 +1776,41 @@ class ApiProvidersDialog(BaseDialog):
         self.setMinimumHeight(600)
 
         self.providers = [
-            ("NCBI Entrez", "Genomics & Literature", "Access to PubMed, Taxonomy, SRA, GEO, and other core databases."),
-            ("Semantic Scholar", "Literature Search", "AI-backed academic search and citation graph traversal."),
-            ("OpenAlex", "Literature Search", "Open catalog of the global research system and citation metrics."),
+            ("AlphaFold DB", "Structural Biology",
+             "Comprehensive database of high-accuracy protein structure predictions developed by Google DeepMind."),
+            ("ChEBI", "Metabolomics",
+             "Dictionary and ontology of molecular entities focused on small chemical compounds of biological interest."),
+            ("ChEMBL", "Pharmacology", "Manually curated database of bioactive molecules with drug-like properties."),
             ("Crossref", "Literature Search", "Digital Object Identifier (DOI) registration and metadata tracking."),
-            ("UniProt", "Protein Database", "Comprehensive resource for protein sequences, annotations, and mapping."),
+            ("EBI Expression Atlas", "Transcriptomics",
+             "Open science resource for gene and protein expression across species and biological conditions."),
+            ("Ensembl", "Genomics", "Centralized resource for genetics, molecular biology, and genomic annotations."),
+            ("Europe PMC", "Preprints", "Access to life sciences publications and preprints (bioRxiv, medRxiv)."),
+            ("GBIF", "Ecology & Taxonomy",
+             "Global Biodiversity Information Facility providing open access to species occurrence and distribution data."),
+            ("g:Profiler", "Systems Biology", "Functional enrichment analysis and gene identifier conversion tool."),
+            ("GitHub API", "Code & Repositories", "Search for open-source bioinformatics pipelines and academic code."),
+            ("JASPAR", "Gene Regulation",
+             "Open-access database of curated, non-redundant transcription factor binding profiles."),
+            ("KEGG", "Pathways", "Database resource for understanding high-level functions of the biological system."),
+            ("MyGene.info & TAIR", "Genomics",
+             "High-performance gene annotation API and The Arabidopsis Information Resource."),
+            ("NCBI Entrez", "Genomics & Literature", "Access to PubMed, Taxonomy, SRA, GEO, and other core databases."),
+            ("OpenAlex", "Literature Search", "Open catalog of the global research system and citation metrics."),
+            ("PubChem", "Cheminformatics", "World's largest collection of freely accessible chemical information."),
+            ("QuickGO", "Systems Biology",
+             "High-performance browser and API for Gene Ontology (GO) terms and functional annotations."),
             ("RCSB PDB", "Structural Biology",
              "Information about the 3D shapes of proteins, nucleic acids, and complexes."),
+            ("Search Engines (Web)", "General Web",
+             "Integration with DuckDuckGo, Google, Bing, and Baidu for general internet searches."),
+            ("Semantic Scholar", "Literature Search", "AI-backed academic search and citation graph traversal."),
             ("STRING DB", "Systems Biology",
              "Protein-protein interaction networks and functional enrichment analysis."),
-            ("Ensembl", "Genomics", "Centralized resource for genetics, molecular biology, and genomic annotations."),
-            ("KEGG", "Pathways", "Database resource for understanding high-level functions of the biological system."),
-            ("PubChem", "Cheminformatics", "World's largest collection of freely accessible chemical information."),
-            ("ChEMBL", "Pharmacology", "Manually curated database of bioactive molecules with drug-like properties."),
-            ("Europe PMC", "Preprints", "Access to life sciences publications and preprints (bioRxiv, medRxiv)."),
-            ("Wikipedia", "General Knowledge", "Free online encyclopedia for quick concept and entity summaries."),
-            ("GitHub API", "Code & Repositories", "Search for open-source bioinformatics pipelines and academic code.")
+            ("UniProt", "Protein Database", "Comprehensive resource for protein sequences, annotations, and mapping."),
+            ("Unpaywall", "Literature Search",
+             "Open database of free scholarly articles for fetching Open Access PDFs."),
+            ("Wikipedia", "General Knowledge", "Free online encyclopedia for quick concept and entity summaries.")
         ]
 
         self.providers.sort(key=lambda item: item[0].lower())
@@ -1488,26 +1884,22 @@ class ApiProvidersDialog(BaseDialog):
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
+
         self.table.setStyleSheet(f"""
-            QTableWidget {{ 
-                background-color: transparent; 
-                color: {tm.color('text_main')}; 
-                border: none;
-                alternate-background-color: {tm.color('bg_input')};
-            }}
-            QHeaderView::section {{ 
-                background-color: {tm.color('bg_card')}; 
-                color: {tm.color('text_muted')}; 
-                padding: 10px; 
-                border: none;
-                border-bottom: 2px solid {tm.color('border')};
-                font-weight: bold;
-            }}
-            QTableWidget::item {{ 
-                padding: 12px; 
-                border: none;
-            }}
-        """)
+                    QTableWidget {{ 
+                        background-color: transparent; 
+                        border: none;
+                        alternate-background-color: {tm.color('bg_input')};
+                    }}
+                    QHeaderView::section {{ 
+                        background-color: {tm.color('bg_card')}; 
+                        border-bottom: 2px solid {tm.color('border')};
+                    }}
+                    QTableWidget::item {{ 
+                        padding: 12px; 
+                        border: none;
+                    }}
+                """)
 
 class LicenseDialog(BaseDialog):
     def __init__(self, parent=None):
@@ -1602,36 +1994,38 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
         """
 
-
         self.licenses = [
-            ("PySide6", "LGPL v3", "Official Python bindings for Qt."),
-            ("PyMuPDF / 4LLM", "AGPL v3", "High-performance PDF & Document parsing."),
+            ("BeautifulSoup4", "MIT", "Screen-scraping library for HTML/XML."),
+            ("BioPython", "Biopython", "Tools for biological computation."),
+            ("Boto3", "Apache 2.0", "AWS SDK for Python."),
+            ("Chardet", "MIT", "Universal character encoding detector."),
             ("ChromaDB", "Apache 2.0", "AI-native open-source vector database."),
+            ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
+            ("Curl-cffi", "MIT", "Python binding for curl-impersonate."),
+            ("Disposable-email-domains", "MIT", "List of disposable email domains."),
+            ("Email-validator", "public domain", "Robust email syntax and deliverability validation."),
+            ("FastAPI", "MIT", "Modern, high-performance web framework for building APIs."),
+            ("hf_xet", "Apache Software License", "Efficient large-file storage for Hugging Face."),
+            ("Keyring", "MIT", "Store and access credentials safely."),
             ("LangChain / Splitters", "MIT", "Advanced text chunking and LLM framework."),
-            ("PyTorch", "BSD 3-Clause License", "Tensors and Dynamic neural networks."),
+            ("Langdetect", "MIT", "Language detection library port."),
+            ("LiteLLM", "MIT", "Unified interface for integrating various Large Language Model (LLM) providers."),
+            ("Markdown", "BSD-3-Clause", "Python implementation of Markdown."),
+            ("MCP SDK", "MIT", "Model Context Protocol Python SDK."),
+            ("Mermaid.js", "MIT", "Generation of diagrams and flowcharts."),
+            ("NetworkX", "BSD-3-Clause", "Study of complex networks and graphs."),
+            ("NVIDIA-ML-PY", "BSD-3-Clause", "Python bindings for NVIDIA Management Library."),
             ("ONNX Runtime", "MIT", "Cross-platform AI model accelerator."),
             ("Optimum / ONNX", "Apache 2.0", "Hardware-specific AI model optimization."),
-            ("Scikit-learn", "BSD-3-Clause", "Machine learning and data mining tools."),
-            ("BioPython", "Biopython", "Tools for biological computation."),
-            ("NetworkX", "BSD-3-Clause", "Study of complex networks and graphs."),
-            ("BeautifulSoup4", "MIT", "Screen-scraping library for HTML/XML."),
-            ("DuckDuckGo Search", "MIT", "Search engine integration without tracking."),
-            ("Curl-cffi", "MIT", "Python binding for curl-impersonate."),
-            ("OpenAI", "Apache 2.0", "OpenAI Python API library."),
-            ("MCP SDK", "MIT", "Model Context Protocol Python SDK."),
-            ("Cryptography", "Apache 2.0", "Core cryptographic recipes and primitives."),
             ("Psutil", "BSD-3-Clause", "Cross-platform process and system utilities."),
-            ("NVIDIA-ML-PY", "BSD-3-Clause", "Python bindings for NVIDIA Management Library."),
-            ("Keyring", "MIT", "Store and access credentials safely."),
-            ("Python-docx", "MIT", "Create and update Microsoft Word .docx files."),
-            ("Email-validator", "public domain", "Robust email syntax and deliverability validation."),
-            ("Ddisposable-email-domains", "MIT", "List of disposable email domains."),
-            ("Langdetect", "MIT", "Language detection library port."),
-            ("Markdown", "BSD-3-Clause", "Python implementation of Markdown."),
+            ("PyInstaller", "GPL-2.0", "Bundles a Python application into a single package."),
             ("PyQtDarkTheme", "MIT", "Flat dark theme for PySide/PyQt."),
-            ("Chardet", "MIT", "Universal character encoding detector."),
-            ("hf_xet", "Apache Software License", "Efficient large-file storage for Hugging Face."),
-            ("Mermaid.js", "MIT", "Generation of diagrams and flowcharts."),
+            ("PySide6", "LGPL v3", "Official Python bindings for Qt."),
+            ("PyTorch", "BSD 3-Clause License", "Tensors and Dynamic neural networks."),
+            ("Python-docx", "MIT", "Create and update Microsoft Word .docx files."),
+            ("PyMuPDF / 4LLM", "AGPL v3", "High-performance PDF & Document parsing."),
+            ("Scikit-learn", "BSD-3-Clause", "Machine learning and data mining tools."),
+            ("Uvicorn", "BSD-3-Clause", "High-speed ASGI server implementation for Python.")
         ]
 
         self.licenses.sort(key=lambda item: item[0].lower())
@@ -1697,22 +2091,15 @@ POSSIBILITY OF SUCH DAMAGE.
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
-        # 优化表格样式，使其融入主窗体
         self.table.setStyleSheet(f"""
             QTableWidget {{ 
                 background-color: transparent; 
-                color: {tm.color('text_main')}; 
                 border: none;
                 alternate-background-color: {tm.color('bg_input')};
             }}
             QHeaderView::section {{ 
                 background-color: {tm.color('bg_card')}; 
-                color: {tm.color('text_muted')}; 
-                padding: 10px; 
-                border: none;
                 border-bottom: 2px solid {tm.color('border')};
-                font-weight: bold;
-                font-family: 'Segoe UI';
             }}
             QTableWidget::item {{ 
                 padding: 12px; 

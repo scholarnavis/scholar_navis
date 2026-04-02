@@ -1,41 +1,46 @@
-import copy
+import base64
 import json
 import logging
 import os
-import re
-import shutil
-import subprocess
-import sys
 import time
+import zlib
 
 import qdarktheme
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QEvent, QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtSvgWidgets import QSvgWidget
+from PySide6.QtCore import Qt, QObject, QTimer, QEvent, QUrl
+from PySide6.QtGui import QDesktopServices, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
-                               QLabel, QPushButton, QGroupBox, QScrollArea, QHBoxLayout, QComboBox, QTableWidget,
+                               QLabel, QPushButton, QGroupBox, QScrollArea, QHBoxLayout, QTableWidget,
                                QAbstractItemView, QHeaderView,
-                               QTableWidgetItem, QCheckBox, QApplication, QFrame)
-from huggingface_hub import constants
+                               QTableWidgetItem, QCheckBox, QApplication, QFrame, QFileDialog)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
-from src.core.email_check import verify_email_robust
+from src.core.encryption_service import SystemEncryptionService
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
-                                      get_model_conf, check_model_exists, resolve_auto_model, get_onnx_cache_dir)
+                                      get_model_conf, resolve_auto_model, get_onnx_cache_dir)
 from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
+from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager
-from src.task.hf_download_task import RealTimeHFDownloadTask
-from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask
 from src.task.common_task import VerifyModelsTask
+from src.task.config_task import ExportConfigTask, ImportConfigTask
+from src.task.hf_download_task import RealTimeHFDownloadTask
+from src.task.settings_tasks import FetchModelsTask, TestApiTask, TestDeviceTask, HWDetectTask, EmailVerifyTask
 from src.tools.base_tool import BaseTool
+from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import ProgressDialog, StandardDialog, McpConfigDialog, AddModelDialog
+from src.ui.components.dialog import ProgressDialog, StandardDialog, AddModelDialog, \
+    UnsavedChangesDialog, ExportPasswordDialog, ImportPasswordDialog
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
+
+MINIMAX_DEFAULT_MODELS = [
+    "MiniMax-M2", "M2-her", "MiniMax-M2.1",
+    "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning"
+]
+
 
 
 class ScrollInterceptTableWidget(QTableWidget):
@@ -58,35 +63,6 @@ class FloatingOverlayFilter(QObject):
         return super().eventFilter(obj, event)
 
 
-class EmailVerifyWorker(QObject):
-    sig_finished = Signal(bool, str)
-
-    def __init__(self, email):
-        super().__init__()
-        self.email = email
-
-    def run(self):
-        try:
-            if not self.email:
-                self.sig_finished.emit(True, "")
-                return
-
-            from src.core.email_check import verify_email_robust
-            res = verify_email_robust(self.email)
-
-            if not res.get("is_valid"):
-                detailed_error = res.get("error_msg", "Unknown email validation error.")
-
-                prompt_msg = (
-                    f"Email Validation Failed:\n"
-                    f"{detailed_error}\n\n"
-                    f"Please provide a valid email address or leave it completely empty (which will disable NCBI tools)."
-                )
-                self.sig_finished.emit(False, prompt_msg)
-            else:
-                self.sig_finished.emit(True, "")
-        except Exception as e:
-            self.sig_finished.emit(False, f"Email validation encountered a system error: {e}")
 
 
 
@@ -122,7 +98,9 @@ class SettingsTool(BaseTool):
         self.init_llm_section()
         self.init_model_section()
         self.init_api_keys_section()
-        self.init_mcp_section()
+        self.init_agent_tool_section()
+
+        self.init_api_server_section()
 
         self.layout.addStretch()
         scroll.setWidget(scroll_content)
@@ -138,6 +116,14 @@ class SettingsTool(BaseTool):
         self.btn_save = QPushButton(" Save Settings")
         self.btn_save.clicked.connect(self.on_save_clicked)
 
+        self.btn_export = QPushButton(" Export Config")
+        self.btn_export.clicked.connect(self.on_export_clicked)
+
+        self.btn_import = QPushButton(" Import Config")
+        self.btn_import.clicked.connect(self.on_import_clicked)
+
+        btn_layout.addWidget(self.btn_export)
+        btn_layout.addWidget(self.btn_import)
         btn_layout.addWidget(self.btn_undo)
         btn_layout.addWidget(self.btn_save)
         main_layout.addLayout(btn_layout)
@@ -150,13 +136,40 @@ class SettingsTool(BaseTool):
         self.status_timer.timeout.connect(self._refresh_mcp_status)
         self.status_timer.start(5000)
 
+        self._cached_hw_info = {}
+
+        self.hw_task_mgr = TaskManager()
+        self.hw_task_mgr.sig_result.connect(self._on_hw_detected_result)
+        self.hw_task_mgr.start_task(HWDetectTask, "hw_detect", mode=TaskMode.THREAD)
+
         return self.widget
+
+    def _on_hw_detected_result(self, result):
+        info = result.get("info", {})
+        devs = result.get("devs", [{"name": "Auto Detect", "id": "auto"}])
+
+        self._cached_hw_info = info
+        self._update_hardware_html()
+
+        curr_device = self.config.user_settings.get("inference_device", "auto")
+        self.combo_device.blockSignals(True)
+        self.combo_device.clear()
+        for dev in devs:
+            self.combo_device.addItem(dev["name"], dev["id"])
+
+        idx_dev = self.combo_device.findData(curr_device)
+        if idx_dev >= 0:
+            self.combo_device.setCurrentIndex(idx_dev)
+        self.combo_device.blockSignals(False)
+
 
     def _setup_change_listeners(self):
         """挂载全部输入组件变更事件，跟踪是否发生了改动"""
         self.input_ncbi_email.textChanged.connect(self._mark_unsaved)
         self.input_ncbi_api_key.textChanged.connect(self._mark_unsaved)
+        self.input_openalex_api_key.textChanged.connect(self._mark_unsaved)
         self.input_s2_api_key.textChanged.connect(self._mark_unsaved)
+        self.input_s2_rate_limit.textChanged.connect(self._mark_unsaved)
         self.input_github_token.textChanged.connect(self._mark_unsaved)
         self.combo_proxy_mode.currentIndexChanged.connect(self._mark_unsaved)
         self.input_proxy.textChanged.connect(self._mark_unsaved)
@@ -164,10 +177,13 @@ class SettingsTool(BaseTool):
         self.combo_embed.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_rerank.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_device.currentIndexChanged.connect(self._mark_unsaved)
-        self.chk_low_vram.stateChanged.connect(self._mark_unsaved)
         self.combo_theme.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_log.currentIndexChanged.connect(self._mark_unsaved)
-        self.input_ext_python.textChanged.connect(self._mark_unsaved)
+
+        # API Server listeners
+        self.input_api_host.textChanged.connect(self._mark_unsaved)
+        self.input_api_port.textChanged.connect(self._mark_unsaved)
+        self.input_api_key.textChanged.connect(self._mark_unsaved)
 
         # LLM listeners
         self.input_llm_name.textChanged.connect(self._mark_unsaved)
@@ -176,8 +192,6 @@ class SettingsTool(BaseTool):
         self.combo_llm_preset.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_llm_model.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_model_param_strategy.currentIndexChanged.connect(self._mark_unsaved)
-        self.combo_trans_provider.currentIndexChanged.connect(self._mark_unsaved)
-        self.combo_trans_model.currentTextChanged.connect(self._mark_unsaved)
         self.editor_provider_params.sig_data_changed.connect(self._mark_unsaved)
         self.editor_model_params.sig_data_changed.connect(self._mark_unsaved)
 
@@ -194,6 +208,7 @@ class SettingsTool(BaseTool):
 
         # Update MCP Buttons
         if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setStyleSheet(self._get_btn_style(btn_type="success"))
+        if hasattr(self, 'btn_import_skill'): self.btn_import_skill.setStyleSheet(self._get_btn_style(btn_type="warning"))
         if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setStyleSheet(self._get_btn_style())
 
         # Update LLM/Model Buttons with Colors
@@ -213,7 +228,7 @@ class SettingsTool(BaseTool):
             self._get_btn_style(btn_type="success"))
 
         # Default styling for the rest
-        for btn_name in ['btn_help_params', 'btn_copy_params', 'btn_trans_refresh']:
+        for btn_name in ['btn_help_params', 'btn_copy_params']:
             if hasattr(self, btn_name):
                 getattr(self, btn_name).setStyleSheet(self._get_btn_style())
 
@@ -226,8 +241,6 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'lbl_rerank_status'):
             self.lbl_rerank_status.setStyleSheet(
                 f"color: {tm.color('text_muted')}; font-size: 11px; margin-bottom: 5px;")
-        if hasattr(self, 'chk_low_vram'):
-            self.chk_low_vram.setStyleSheet(f"color: {tm.color('warning')}; font-weight: bold; margin-top: 10px;")
 
         if hasattr(self, 'table_mcp'):
             for row in range(self.table_mcp.rowCount()):
@@ -238,13 +251,11 @@ class SettingsTool(BaseTool):
                         chk.setStyleSheet(
                             f"color: {tm.color('text_main')}; background: transparent; margin-left: 10px;")
 
-
     def _mark_unsaved(self, *args, **kwargs):
         if getattr(self, '_is_loading', False): return
         if not self.btn_undo.isEnabled():
             self.btn_undo.setEnabled(True)
             self.btn_save.setText(" Save Settings*")
-
 
     def _clear_unsaved(self):
         self.btn_undo.setEnabled(False)
@@ -273,7 +284,6 @@ class SettingsTool(BaseTool):
         if hasattr(self, 'combo_proxy_mode'):
             self._on_proxy_mode_changed(self.combo_proxy_mode.currentIndex())
 
-
     def _update_all_icons(self):
         """Re-assign icons to update their currentColor based on the tinted buttons"""
         tm = ThemeManager()
@@ -292,26 +302,35 @@ class SettingsTool(BaseTool):
 
         if hasattr(self, 'btn_help_params'): self.btn_help_params.setIcon(tm.icon("help", "text_main"))
         if hasattr(self, 'btn_copy_params'): self.btn_copy_params.setIcon(tm.icon("copy", "text_main"))
-        if hasattr(self, 'btn_trans_refresh'): self.btn_trans_refresh.setIcon(tm.icon("refresh", "text_main"))
 
         # 将这里的 btn_open_cache 后追加一行 test_device
         if hasattr(self, 'btn_open_cache'): self.btn_open_cache.setIcon(tm.icon("folder", "accent"))
         if hasattr(self, 'btn_test_device'): self.btn_test_device.setIcon(tm.icon("test", "accent"))
 
         if hasattr(self, 'btn_add_mcp'): self.btn_add_mcp.setIcon(tm.icon("add", "success"))
+        if hasattr(self, 'btn_import_skill'): self.btn_import_skill.setIcon(tm.icon("download", "warning"))
         if hasattr(self, 'btn_refresh_mcp'): self.btn_refresh_mcp.setIcon(tm.icon("refresh", "text_main"))
 
-    def _load_current_settings(self, is_undo=False):
+    def _load_current_settings(self, is_undo=False, reload_from_disk=True):
         self._is_loading = True
 
-        self.config.load_settings()
-        self.config.load_mcp_servers()
+        if reload_from_disk:
+            self.config.load_settings()
+            self.config.load_mcp_servers()
+            self.llm_configs = self._load_llm_config()
 
-        # 恢复全部文本框与复选框
+        # Load API Server settings into UI
+        self.input_api_host.setText(str(self.config.user_settings.get("api_server_host", "127.0.0.1")))
+        self.input_api_port.setText(str(self.config.user_settings.get("api_server_port", 8000)))
+        self.input_api_key.setText(self.config.user_settings.get("api_server_key", "navis-local-key"))
+
+
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
+        self.input_openalex_api_key.setText(self.config.user_settings.get("openalex_api_key", ""))
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
         self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
+        self.input_s2_rate_limit.setText(str(self.config.user_settings.get("s2_rate_limit", 1.0)))
 
         mode_map = {"system": 0, "off": 1, "custom": 2}
         self.combo_proxy_mode.setCurrentIndex(
@@ -331,10 +350,6 @@ class SettingsTool(BaseTool):
         idx_dev = self.combo_device.findData(curr_device)
         if idx_dev >= 0: self.combo_device.setCurrentIndex(idx_dev)
 
-        if hasattr(self, 'chk_low_vram'):
-            self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
-
-        self.llm_configs = self._load_llm_config()
         self.combo_llm_preset.blockSignals(True)
         self.combo_llm_preset.clear()
         for conf in self.llm_configs:
@@ -347,14 +362,8 @@ class SettingsTool(BaseTool):
             self.combo_llm_preset.setCurrentIndex(idx_to_select)
             self._on_llm_preset_changed(idx_to_select)
 
-        trans_id = self.config.user_settings.get("trans_llm_id", None)
-        idx_trans = self.combo_trans_provider.findData(trans_id)
-        if idx_trans >= 0:
-            self.combo_trans_provider.setCurrentIndex(idx_trans)
-
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
-        self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
 
         if hasattr(self, '_load_mcp_servers_to_ui'):
             self._load_mcp_servers_to_ui()
@@ -376,18 +385,35 @@ class SettingsTool(BaseTool):
         self.input_ncbi_email.setPlaceholderText("Required for NCBI Tools: e.g. user@university.edu")
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
 
-        self.input_ncbi_api_key = QLineEdit()
-        self.input_ncbi_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_ncbi_api_key = HoverRevealLineEdit()
         self.input_ncbi_api_key.setPlaceholderText("NCBI API Key (Optional but recommended)")
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
 
-        self.input_s2_api_key = QLineEdit()
-        self.input_s2_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_openalex_api_key = HoverRevealLineEdit()
+        self.input_openalex_api_key.setPlaceholderText("OpenAlex Premium API Key (Optional)")
+        self.input_openalex_api_key.setText(self.config.user_settings.get("openalex_api_key", ""))
+
+        self.input_s2_api_key = HoverRevealLineEdit()
         self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
 
-        self.input_github_token = QLineEdit()
-        self.input_github_token.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.input_s2_rate_limit = QLineEdit()
+        self.input_s2_rate_limit.setPlaceholderText("S2 Rate Limit (requests/sec, default: 1.0)")
+
+        from PySide6.QtGui import QDoubleValidator
+        validator = QDoubleValidator(0.01, 1000.0, 2, self.input_s2_rate_limit)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        self.input_s2_rate_limit.setValidator(validator)
+
+        current_limit = self.config.user_settings.get("s2_rate_limit", 1.0)
+        try:
+            val = float(current_limit)
+            if val <= 0: val = 1.0
+        except (ValueError, TypeError):
+            val = 1.0
+        self.input_s2_rate_limit.setText(str(val))
+
+        self.input_github_token = HoverRevealLineEdit()
         self.input_github_token.setPlaceholderText("GitHub Personal Access Token (Prevents rate limiting)")
         self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
 
@@ -399,7 +425,9 @@ class SettingsTool(BaseTool):
 
         layout.addRow("NCBI Email:", self.input_ncbi_email)
         layout.addRow("NCBI API Key:", self.input_ncbi_api_key)
+        layout.addRow("OpenAlex Key:", self.input_openalex_api_key)
         layout.addRow("S2 API Key:", self.input_s2_api_key)
+        layout.addRow("S2 Rate Limit (req/s):", self.input_s2_rate_limit)
         layout.addRow("GitHub Token:", self.input_github_token)
         layout.addRow("", self.lbl_api_hint)
 
@@ -410,11 +438,13 @@ class SettingsTool(BaseTool):
         tm = ThemeManager()
         self.lbl_api_hint.setText(
             f"<div style='line-height: 1.5;'>"
-            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>⚠️ NCBI STRICT POLICY:</span> "
-            f"You MUST provide a valid real email address. Empty or incorrectly formatted emails will <span style='color:{tm.color('danger')}; font-weight:bold;'>completely disable</span> the NCBI PubMed/Omics tools to prevent server IP bans.<br><br>"
+            f"<span style='color:{tm.color('warning')}; font-weight:bold;'>⚠️ NCBI RATE LIMITS:</span> "
+            f"You MUST provide a valid email address to use NCBI tools. An API Key is <span style='color:{tm.color('success')}; font-weight:bold;'>optional but highly recommended</span>. Without a key, tools will still function but under strict rate limits, which may slow down massive literature retrieval.<br><br>"
             f"<span style='color:{tm.color('accent')}; font-weight:bold;'>INFO & API Keys:</span><br>"
-            f"• <b>NCBI PubMed:</b> An API Key increases rate limits from 3 to 10 requests/sec. "
+            f"• <b>NCBI PubMed:</b> Email is mandatory. Adding an API key increases rate limits from 3 to 10 requests/sec. "
             f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for NCBI Key]</a><br>"
+            f"• <b>OpenAlex:</b> Can be used without a key, but <span style='color:{tm.color('warning')};'>highly prone to 429 Too Many Requests errors</span>. Premium API Key provides higher limits and faster responses. "
+            f"<a href='ttps://openalex.org/settings/api-key' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for OpenAlex Key]</a><br>"
             f"• <b>Semantic Scholar:</b> An API Key severely prevents '429 Too Many Requests' errors during massive literature retrieval. "
             f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for S2 Key]</a><br>"
             f"• <b>GitHub Token:</b> Increases search limits from 10/min to 30/min. "
@@ -422,16 +452,21 @@ class SettingsTool(BaseTool):
             f"</div>"
         )
 
-
     def _refresh_mcp_status(self):
         try:
+
             tm = ThemeManager()
             mcp_mgr = MCPManager.get_instance()
+            skill_mgr = SkillManager.get_instance()
 
             for row in range(self.table_mcp.rowCount()):
                 name_item = self.table_mcp.item(row, 1)
                 if not name_item: continue
                 name = name_item.text()
+
+                # 获取该行的工具类型 (SKILL 还是 stdio/sse)
+                cfg = name_item.data(Qt.UserRole)
+                tool_type = cfg.get("type", "stdio")
 
                 status_lbl = self.table_mcp.cellWidget(row, 5)
                 if not status_lbl: continue
@@ -441,23 +476,36 @@ class SettingsTool(BaseTool):
                 is_enabled = chk.isChecked() if chk else False
 
                 if is_enabled:
-                    status = mcp_mgr.get_server_status(name)
-                    if status == "connected":
-                        status_lbl.setText("Connected")
-                        status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
-                    elif "error" in status:
-                        status_lbl.setText("Error")
-                        status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
-                        status_lbl.setToolTip(status)
+                    # 分支 1: 处理 Native SKILL 的状态
+                    if tool_type == "SKILL":
+                        if skill_mgr.is_skill_available(name):
+                            status_lbl.setText("Ready (Native)")
+                            status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
+                        else:
+                            status_lbl.setText("Not Loaded")
+                            status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
+                            status_lbl.setToolTip("Script not found or failed to load. Check logs.")
+
+                    # 分支 2: 处理 MCP 服务的状态
                     else:
-                        status_lbl.setText(status.capitalize())
-                        status_lbl.setStyleSheet(f"color: {tm.color('warning')};")
+                        status = mcp_mgr.get_server_status(name)
+                        if status == "connected":
+                            status_lbl.setText("Connected")
+                            status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
+                        elif "error" in status:
+                            status_lbl.setText("Error")
+                            status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
+                            status_lbl.setToolTip(status)
+                        else:
+                            status_lbl.setText(status.capitalize())
+                            status_lbl.setStyleSheet(f"color: {tm.color('warning')};")
                 else:
                     status_lbl.setText("Disabled")
                     status_lbl.setStyleSheet(f"color: {tm.color('text_muted')};")
 
         except Exception as e:
             self.logger.error(f"Status refresh failed: {e}")
+
 
     def refresh_model_combos(self):
         curr_embed = self.combo_embed.currentData()
@@ -484,10 +532,8 @@ class SettingsTool(BaseTool):
         self.combo_rerank.blockSignals(False)
         self.check_models_status()
 
-
     def on_undo_clicked(self):
         self._load_current_settings(is_undo=True)
-
 
     def on_download_requested(self, model_id, model_type):
         self.refresh_model_combos()
@@ -510,13 +556,13 @@ class SettingsTool(BaseTool):
         self.group_hw = QGroupBox("System Hardware Info")
         self.group_hw.setObjectName("group_hw")
         layout = QVBoxLayout(self.group_hw)
-        self.lbl_hw_info = QLabel()
+
+        self.lbl_hw_info = QLabel("Scanning hardware info... Please wait.")
         self.lbl_hw_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_hw_info.setTextFormat(Qt.RichText)
         layout.addWidget(self.lbl_hw_info)
-        self.layout.addWidget(self.group_hw)
-        self._update_hardware_html()
 
+        self.layout.addWidget(self.group_hw)
 
     def _get_btn_style(self, btn_type="default"):
         tm = ThemeManager()
@@ -554,17 +600,17 @@ class SettingsTool(BaseTool):
         """
 
     def _update_hardware_html(self):
-        if not hasattr(self, 'lbl_hw_info'): return
+        if not hasattr(self, 'lbl_hw_info') or not getattr(self, '_cached_hw_info', None): return
 
         tm = ThemeManager()
-        info = self.dev_mgr.get_sys_info()
-
-        gpu_info_list = info.get('gpu_info', self.dev_mgr.get_gpu_info())
+        info = self._cached_hw_info
+        gpu_info_list = info.get('gpu_info', [])
 
         gpu_str = "<br>".join([
-            f"&nbsp;&nbsp;• {g['name']} <span style='color:{tm.color('accent')};'>[{g['vram']}]</span>"
+            f"&nbsp;&nbsp;• {g.get('name', 'Unknown')} <span style='color:{tm.color('accent')};'>[{g.get('vram', 'N/A')}]</span>"
             for g in gpu_info_list
         ])
+        if not gpu_str: gpu_str = "None detected"
 
         has_accel = any(p in info.get('ort_providers', []) for p in
                         ["CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider",
@@ -587,68 +633,26 @@ class SettingsTool(BaseTool):
         """
         self.lbl_hw_info.setText(html)
 
-    def init_ncbi_section(self):
-        group = QGroupBox("Academic Databases (NCBI & Semantic Scholar)")
-        layout = QFormLayout(group)
-        layout.setLabelAlignment(Qt.AlignRight)
-
-        self.input_ncbi_email = QLineEdit()
-        self.input_ncbi_email.setPlaceholderText("Required: e.g. user@university.edu")
-        self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
-
-        self.input_ncbi_api_key = QLineEdit()
-        self.input_ncbi_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
-        self.input_ncbi_api_key.setPlaceholderText("NCBI Key (Optional but recommended)")
-        self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
-
-        self.input_s2_api_key = QLineEdit()
-        self.input_s2_api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
-        self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
-        self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
-
-        self.lbl_ncbi_hint = QLabel()
-        self.lbl_ncbi_hint.setWordWrap(True)
-        self.lbl_ncbi_hint.setOpenExternalLinks(True)
-        ThemeManager().apply_class(self.lbl_ncbi_hint, "hint")
-        self._update_ncbi_html()
-
-        layout.addRow("NCBI Email:", self.input_ncbi_email)
-        layout.addRow("NCBI API Key:", self.input_ncbi_api_key)
-        layout.addRow("S2 API Key:", self.input_s2_api_key)
-        layout.addRow("", self.lbl_ncbi_hint)
-
-        self.layout.addWidget(group)
-
-
-    def _update_ncbi_html(self):
-        if not hasattr(self, 'lbl_ncbi_hint'): return
+    def init_agent_tool_section(self):
         tm = ThemeManager()
-        self.lbl_ncbi_hint.setText(
-            f"<div style='line-height: 1.5;'>"
-            f"<span style='color:{tm.color('accent')}; font-weight:bold;'>INFO & API Keys:</span><br>"
-            f"• <b>NCBI PubMed:</b> An API Key increases rate limits from 3 to 10 requests/sec. "
-            f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for NCBI Key]</a><br>"
-            f"• <b>Semantic Scholar:</b> An API Key severely prevents '429 Too Many Requests' errors during massive literature retrieval. "
-            f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for S2 Key]</a>"
-            f"</div>"
-        )
-
-    def init_mcp_section(self):
-        tm = ThemeManager()
-        group = QGroupBox("MCP Servers (Unified)")
+        group = QGroupBox("AI Agent & External Tools")
         layout = QVBoxLayout(group)
 
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("<b>Manage Local & Remote Tools:</b>"))
         header_layout.addStretch()
 
-        self.btn_add_mcp = QPushButton(" Add Server")
+        self.btn_add_mcp = QPushButton(" Add MCP Server")
         self.btn_add_mcp.clicked.connect(self._on_add_mcp_clicked)
+
+        self.btn_import_skill = QPushButton(" Import Native Skill")
+        self.btn_import_skill.clicked.connect(self._on_import_skill_clicked)
+        self.btn_import_skill.setStyleSheet(self._get_btn_style(btn_type="warning"))
 
         self.btn_refresh_mcp = QPushButton(" Refresh Status")
         self.btn_refresh_mcp.clicked.connect(self._on_refresh_mcp_clicked)
 
-
+        header_layout.addWidget(self.btn_import_skill)
         header_layout.addWidget(self.btn_add_mcp)
         header_layout.addWidget(self.btn_refresh_mcp)
         layout.addLayout(header_layout)
@@ -671,6 +675,33 @@ class SettingsTool(BaseTool):
 
         self.layout.addWidget(group)
 
+    def init_api_server_section(self):
+        group = QGroupBox("Local API Server (OpenAI Compatible)")
+        layout = QFormLayout(group)
+        layout.setLabelAlignment(Qt.AlignRight)
+
+        self.input_api_host = QLineEdit()
+        self.input_api_host.setPlaceholderText("e.g., 127.0.0.1 or 0.0.0.0")
+
+        self.input_api_port = QLineEdit()
+        self.input_api_port.setPlaceholderText("Default: 8000")
+
+        self.input_api_key = HoverRevealLineEdit()
+        self.input_api_key.setPlaceholderText("Set a custom API Key to secure your local endpoint (Optional)")
+
+        layout.addRow("Host Address:", self.input_api_host)
+        layout.addRow("Server Port:", self.input_api_port)
+        layout.addRow("Access Key:", self.input_api_key)
+
+        hint = QLabel(
+            "💡 <i>API Server runs in the background. It shares all active models, RAG, and MCP settings with the GUI. Restart the application to apply port/host changes.</i>")
+        ThemeManager().apply_class(hint, "hint")
+        hint.setWordWrap(True)
+        layout.addRow("", hint)
+
+        self.layout.addWidget(group)
+
+
     def _on_mcp_double_clicked(self, row, col):
         name_item = self.table_mcp.item(row, 1)
         if not name_item: return
@@ -684,36 +715,64 @@ class SettingsTool(BaseTool):
         self._on_edit_mcp_clicked(row)
 
     def _load_mcp_servers_to_ui(self):
-        servers = self.config.mcp_servers.get("mcpServers", {})
         self.table_mcp.setRowCount(0)
+
+        servers = self.config.mcp_servers.get("mcpServers", {})
+        dirty = False
+        for bad_name in ["built-in", "Academic Tool"]:
+            if bad_name in servers:
+                del servers[bad_name]
+                dirty = True
+        if dirty:
+            self.config.save_mcp_servers()
+
         for name, cfg in servers.items():
             self._add_mcp_row(name, cfg)
+
+        skills = self.config.mcp_servers.get("external_skills", {})
+        if isinstance(skills, dict) and "scripts" not in skills:
+            for name, info in skills.items():
+                if isinstance(info, str):
+                    cfg = {"type": "SKILL", "command": info, "enabled": True, "description": "Native Python Script"}
+                else:
+                    cfg = info
+                self._add_mcp_row(name, cfg)
 
     def _on_refresh_mcp_clicked(self):
         try:
             mcp_mgr = MCPManager.get_instance()
             mcp_mgr.bootstrap_servers(force_all=False)
-            from src.ui.components.toast import ToastManager
-            ToastManager().show("Retrying offline MCP servers...", "info")
+
+            from src.core.skill_manager import SkillManager
+            skill_mgr = SkillManager.get_instance()
+            if hasattr(skill_mgr, 'reload_external_skills'):
+                skill_mgr.reload_external_skills()
+
+            ToastManager().show("Refreshing external tool states...", "info")
             self._refresh_mcp_status()
         except Exception as e:
-            self.logger.error(f"Refresh MCP clicked failed: {e}")
+            self.logger.error(f"Refresh clicked failed: {e}")
 
-
-
-    def _add_mcp_row(self, name, cfg):
+    def _add_mcp_row(self, name, cfg, is_hardcoded=False):
         row = self.table_mcp.rowCount()
         self.table_mcp.insertRow(row)
 
         always_on = cfg.get("always_on", False)
         is_enabled = cfg.get("enabled", False) or always_on
 
-        # 0. Enabled Checkbox
         chk = QCheckBox()
         chk.setChecked(is_enabled)
-        if always_on:
+
+        tm = ThemeManager()
+        muted_color = QColor(tm.color("text_muted"))
+
+        if always_on or is_hardcoded:
             chk.setEnabled(False)
-            chk.setToolTip("Core service must remain enabled.")
+            if always_on:
+                chk.setToolTip("Core service must remain enabled.")
+            if is_hardcoded:
+                chk.setChecked(True)  # 强制勾选
+                chk.setToolTip("Built-in Academic Tools cannot be disabled here.")
 
         if hasattr(self, '_mark_unsaved'):
             chk.stateChanged.connect(self._mark_unsaved)
@@ -728,21 +787,29 @@ class SettingsTool(BaseTool):
         name_item = QTableWidgetItem(name)
         name_item.setData(Qt.UserRole, cfg)
         name_item.setFlags(name_item.flags() ^ Qt.ItemIsEditable)
+        if is_hardcoded:
+            name_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 1, name_item)
 
         desc_str = cfg.get("description", "")
         desc_item = QTableWidgetItem(desc_str)
         desc_item.setFlags(desc_item.flags() ^ Qt.ItemIsEditable)
+        if is_hardcoded:
+            desc_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 2, desc_item)
 
         stype = cfg.get("type", "stdio")
         type_item = QTableWidgetItem(stype)
         type_item.setFlags(type_item.flags() ^ Qt.ItemIsEditable)
+        if is_hardcoded:
+            type_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 3, type_item)
 
         target = cfg.get("command", "") if stype == "stdio" else cfg.get("url", "")
         target_item = QTableWidgetItem(target)
         target_item.setFlags(target_item.flags() ^ Qt.ItemIsEditable)
+        if is_hardcoded:
+            target_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 4, target_item)
 
         status_lbl = QLabel("Checking...")
@@ -754,7 +821,14 @@ class SettingsTool(BaseTool):
         al.setContentsMargins(0, 0, 0, 0)
         tm = ThemeManager()
 
-        if name != "builtin":
+        # 锁定 Academic Tool 和历史遗留的 builtin，不给编辑和删除按钮
+        if is_hardcoded or name == "builtin" or name == "Academic Tool":
+            lbl_lock = QLabel()
+            lbl_lock.setPixmap(tm.icon("lock", "text_muted").pixmap(16, 16))
+            lbl_lock.setAlignment(Qt.AlignCenter)
+            lbl_lock.setToolTip("Core system service (Read-only)")
+            al.addWidget(lbl_lock)
+        else:
             btn_edit = QPushButton()
             btn_edit.setIcon(tm.icon("edit", "accent"))
             btn_edit.setCursor(Qt.PointingHandCursor)
@@ -769,10 +843,11 @@ class SettingsTool(BaseTool):
                 btn_del.setStyleSheet("background: transparent; border: none;")
 
                 def delete_mcp_row(srv_name):
+                    from src.ui.components.dialog import StandardDialog
                     dlg = StandardDialog(
                         self.widget,
                         "Confirm Delete",
-                        f"Are you sure you want to delete MCP Server '{srv_name}'?\nThis will disconnect it immediately.",
+                        f"Are you sure you want to delete tool '{srv_name}'?\nThis will disconnect it immediately.",
                         show_cancel=True
                     )
 
@@ -790,39 +865,139 @@ class SettingsTool(BaseTool):
 
                 btn_del.clicked.connect(lambda _, n=name: delete_mcp_row(n))
                 al.addWidget(btn_del)
-        else:
-            lbl_lock = QLabel()
-            lbl_lock.setPixmap(tm.icon("lock", "text_muted").pixmap(16, 16))
-            lbl_lock.setAlignment(Qt.AlignCenter)
-            lbl_lock.setToolTip("Core system service (Read-only)")
-            al.addWidget(lbl_lock)
 
         self.table_mcp.setCellWidget(row, 6, action_widget)
 
     def _on_add_mcp_clicked(self):
+        tm = ThemeManager()
         warning_msg = (
             "<b>⚠️ Security Disclaimer for External MCP Servers</b><br><br>"
             "You are about to connect a third-party MCP server to Scholar Navis.<br>"
             "External servers are highly privileged and can execute code, read local files, or access the network on your behalf. "
-            "<span style='color:#ff6b6b; font-weight:bold;'>Only connect to servers from trusted developers.</span><br><br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>Only connect to servers from trusted developers.</span><br><br>"
             "<i>The Scholar Navis developers are not responsible for any data loss, security breaches, or system damage caused by third-party MCP servers.</i><br><br>"
             "Do you understand the risks and wish to proceed?"
         )
+
+        from src.ui.components.dialog import StandardDialog, McpConfigDialog
 
         dlg = StandardDialog(self.widget, "Security Warning", warning_msg, show_cancel=True)
         if not dlg.exec():
             return
 
-        # 用户同意后，才弹出真正的配置界面
         config_dlg = McpConfigDialog(self.widget)
         if config_dlg.exec():
             name, cfg = config_dlg.get_config()
             if not name: return
+
+            if name in ["builtin", "Academic Tool","built-in"]:
+                ToastManager().show(f"The name '{name}' is reserved for core system usage.", "error")
+                return
+
             cfg["enabled"] = True
             self._add_mcp_row(name, cfg)
 
             if hasattr(self, '_mark_unsaved'):
                 self._mark_unsaved()
+
+    def _on_import_skill_clicked(self):
+        tm = ThemeManager()
+        warning_msg = (
+            "<b>🚨 CRITICAL SECURITY WARNING: NATIVE SKILL IMPORT</b><br><br>"
+            "You are attempting to import a Native Python Skill (`.py` script) directly into the main process of Scholar Navis.<br><br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>1. ARBITRARY CODE EXECUTION:</span> These scripts run with the EXACT SAME privileges as the main application. Malicious scripts can steal your data, delete files, or compromise your system.<br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>2. STRICT SANDBOXING:</span> The script MUST ONLY import Python Standard Library modules (e.g., `os`, `json`, `urllib`). Importing third-party pip packages (like `requests`, `pandas`) that are not packaged with Navis will instantly crash the agent with a `ModuleNotFoundError`.<br><br>"
+            "<i>Only import scripts from absolutely trusted sources. Do you accept all risks and wish to proceed?</i>"
+        )
+
+        import ast
+
+        dlg = StandardDialog(self.widget, "⚠️ HIGH RISK OPERATION", warning_msg, show_cancel=True)
+        if not dlg.exec():
+            return
+
+        path, _ = QFileDialog.getOpenFileName(self.widget, "Import Native Skill", "", "Python Files (*.py)")
+        if not path: return
+
+        skill_name = os.path.basename(path).replace(".py", "")
+        with open(path, 'r', encoding='utf-8') as f:
+            raw_code = f.read()
+
+        parsed_name = skill_name
+        parsed_desc = "User Imported Native Script"
+        try:
+            tree = ast.parse(raw_code)
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id == "SCHEMA":
+                            # 安全地将代码中的字典结构转为 Python 字典
+                            schema_dict = ast.literal_eval(node.value)
+                            func_info = schema_dict.get("function", {})
+                            if func_info.get("name"):
+                                parsed_name = func_info.get("name")
+                            if func_info.get("description"):
+                                parsed_desc = func_info.get("description")
+        except Exception as e:
+            self.logger.warning(f"Failed to parse SCHEMA from skill: {e}")
+
+        from src.ui.components.dialog import SkillPreviewDialog, SkillConfigDialog
+
+        preview_dlg = SkillPreviewDialog(self.widget, parsed_name, raw_code, is_importing=True)
+        if not preview_dlg.exec():
+            return
+
+        final_code = preview_dlg.get_edited_code()
+
+        config_dlg = SkillConfigDialog(self.widget, skill_name=parsed_name, script_path=path, description=parsed_desc)
+        if not config_dlg.exec():
+            return
+
+        final_name, final_desc, final_path = config_dlg.get_data()
+
+        enc_service = SystemEncryptionService()
+        encrypted_bytes = enc_service.encrypt(final_code)
+
+        cfg = {
+            "description": final_desc,
+            "type": "SKILL",
+            "command": f"<Pending Edit: {final_name}>",
+            "enabled": True,
+            "_pending_bytes": encrypted_bytes,
+            "_is_new": True
+        }
+
+        self._add_mcp_row(final_name, cfg)
+
+        if hasattr(self, '_mark_unsaved'):
+            self._mark_unsaved()
+
+        ToastManager().show(f"Skill '{final_name}' staged. Click 'Save Settings' to commit.", "info")
+
+
+    def _on_import_skill_finished(self, result, skill_name):
+        if result.get("success"):
+            target_path = result.get("target_path")
+
+            # 写入表格并标记配置未保存
+            cfg = {
+                "description": "User Imported Native Script",
+                "type": "SKILL",
+                "command": target_path,
+                "enabled": True
+            }
+
+            self._add_mcp_row(skill_name, cfg)
+
+            if hasattr(self, '_mark_unsaved'):
+                self._mark_unsaved()
+
+            self.import_skill_pd.show_finish_state(True, "Import Successful",
+                                                   f"Skill '{skill_name}' has been encrypted and secured.")
+            ToastManager().show(f"Skill '{skill_name}' imported successfully.", "success")
+        else:
+            self.import_skill_pd.show_finish_state(False, "Import Failed",
+                                                   result.get("msg", "Unknown error during encryption."))
 
     def _on_edit_mcp_clicked(self, row):
         name_item = self.table_mcp.item(row, 1)
@@ -831,21 +1006,105 @@ class SettingsTool(BaseTool):
         old_name = name_item.text()
         old_cfg = name_item.data(Qt.UserRole)
 
-        dlg = McpConfigDialog(self.widget, server_name=old_name, server_config=old_cfg)
-        if dlg.exec():
-            new_name, new_cfg = dlg.get_config()
-            new_cfg["always_on"] = old_cfg.get("always_on", False)
-            new_cfg["enabled"] = old_cfg.get("enabled", True)
+        if old_cfg.get("type") == "SKILL":
+            from src.ui.components.dialog import SkillConfigDialog
 
-            name_item.setText(new_name)
-            name_item.setData(Qt.UserRole, new_cfg)
-            self.table_mcp.item(row, 2).setText(new_cfg.get("description", ""))
-            self.table_mcp.item(row, 3).setText(new_cfg.get("type", "stdio"))
-            target = new_cfg.get("command", "") if new_cfg.get("type", "stdio") == "stdio" else new_cfg.get("url", "")
-            self.table_mcp.item(row, 4).setText(target)
+            dlg = SkillConfigDialog(
+                self.widget,
+                skill_name=old_name,
+                script_path=old_cfg.get("command", ""),
+                description=old_cfg.get("description", "")
+            )
 
-            if hasattr(self, '_mark_unsaved'):
-                self._mark_unsaved()
+            if dlg.exec():
+                new_name, new_desc, new_path = dlg.get_data()
+
+                if new_name != old_name and new_name in ["built-in", "Academic Tool", "builtin"]:
+                    ToastManager().show(f"The name '{new_name}' is reserved for core system usage.", "error")
+                    return
+
+                new_cfg = old_cfg.copy()
+                new_cfg["description"] = new_desc  # 更新 Description
+
+                from src.ui.components.dialog import SkillPreviewDialog
+                from src.core.encryption_service import SystemEncryptionService
+
+
+                if new_path != old_cfg.get("command", "") and new_path.endswith(".py"):
+                    try:
+                        with open(new_path, 'r', encoding='utf-8') as f:
+                            raw_code = f.read()
+
+                        preview_dlg = SkillPreviewDialog(self.widget, new_name, raw_code, is_importing=True)
+                        if preview_dlg.exec():
+                            final_code = preview_dlg.get_edited_code()
+                            enc_service = SystemEncryptionService()
+                            encrypted_bytes = enc_service.encrypt(final_code)
+
+                            new_cfg["_pending_bytes"] = encrypted_bytes
+                            new_cfg["_is_edited"] = True
+                            new_path = f"<Pending Edit: {new_name}>"
+                        else:
+                            return
+                    except Exception as e:
+                        ToastManager().show(f"Failed to load new script: {e}", "error")
+                        return
+
+                elif new_path == old_cfg.get("command", "") and new_path.endswith(".enc") and os.path.exists(new_path):
+                    try:
+                        enc_service = SystemEncryptionService()
+                        with open(new_path, 'rb') as f:
+                            decrypted_code = enc_service.decrypt(f.read())
+
+                        preview_dlg = SkillPreviewDialog(self.widget, new_name, decrypted_code, is_importing=True)
+                        if preview_dlg.exec():
+                            final_code = preview_dlg.get_edited_code()
+                            encrypted_bytes = enc_service.encrypt(final_code)
+
+                            new_cfg["_pending_bytes"] = encrypted_bytes
+                            new_cfg["_is_edited"] = True
+                            new_path = f"<Pending Edit: {new_name}>"
+                        else:
+                            return
+                    except Exception as e:
+                        ToastManager().show(f"Failed to decrypt existing skill: {e}", "error")
+                        return
+
+                # 更新 UI 和内存中的数据配置
+                new_cfg["command"] = new_path
+                name_item.setText(new_name)
+                name_item.setData(Qt.UserRole, new_cfg)
+                self.table_mcp.item(row, 2).setText(new_desc)
+                self.table_mcp.item(row, 4).setText(new_path)
+
+                if hasattr(self, '_mark_unsaved'):
+                    self._mark_unsaved()
+
+        else:
+            from src.ui.components.dialog import McpConfigDialog
+            dlg = McpConfigDialog(self.widget, server_name=old_name, server_config=old_cfg)
+            if dlg.exec():
+                new_name, new_server_cfg = dlg.get_config()
+
+                if new_name != old_name and new_name in ["built-in", "Academic Tool", "builtin"]:
+                    ToastManager().show(f"The name '{new_name}' is reserved for core system usage.", "error")
+                    return
+
+                new_server_cfg["always_on"] = old_cfg.get("always_on", False)
+                new_server_cfg["enabled"] = old_cfg.get("enabled", True)
+
+                name_item.setText(new_name)
+                name_item.setData(Qt.UserRole, new_server_cfg)
+                self.table_mcp.item(row, 2).setText(new_server_cfg.get("description", ""))
+                self.table_mcp.item(row, 3).setText(new_server_cfg.get("type", "stdio"))
+
+                target = new_server_cfg.get("command", "") if new_server_cfg.get("type",
+                                                                                 "stdio") == "stdio" else new_server_cfg.get(
+                    "url", "")
+                self.table_mcp.item(row, 4).setText(target)
+
+                if hasattr(self, '_mark_unsaved'):
+                    self._mark_unsaved()
 
     def init_network_section(self):
         group = QGroupBox("Network Proxy")
@@ -957,14 +1216,7 @@ class SettingsTool(BaseTool):
 
         # --- 3. 硬件加速设备选择 ---
         self.combo_device = BaseComboBox()
-        dev_mgr = DeviceManager()
-        for dev in dev_mgr.get_available_devices():
-            self.combo_device.addItem(dev["name"], dev["id"])
-
-        curr_device = self.config.user_settings.get("inference_device", "auto")
-        idx_dev = self.combo_device.findData(curr_device)
-        self.combo_device.setCurrentIndex(max(0, idx_dev))
-
+        self.combo_device.addItem("Detecting devices...", "auto")
         layout.addRow("Compute Device:", self.combo_device)
 
         # --- 4. 其他模型设置 ---
@@ -974,26 +1226,12 @@ class SettingsTool(BaseTool):
         self.btn_test_device.clicked.connect(self._test_compute_device)
         layout.addRow("", self.btn_test_device)
 
-        self.chk_low_vram = QCheckBox("Low VRAM Mode (Release RAG models after search)")
-        self.chk_low_vram.setChecked(self.config.user_settings.get("low_vram_mode", False))
-        self.chk_low_vram.setToolTip(
-            "Enable this to prevent OOM errors. It will unload Embedding and Reranker models before the LLM starts generating.")
-
-        self.lbl_vram_desc = QLabel()
-        self.lbl_vram_desc.setWordWrap(True)
-        self.lbl_vram_desc.setTextFormat(Qt.RichText)
-        self._update_vram_html()
-
-        layout.addRow("", self.chk_low_vram)
-        layout.addRow("", self.lbl_vram_desc)
 
         self.layout.addWidget(group)
-        QThread.msleep(50)
-        self.check_models_status()
+        QTimer.singleShot(50, self.check_models_status)
 
         self.combo_embed.currentTextChanged.connect(self.combo_embed.setToolTip)
         self.combo_rerank.currentTextChanged.connect(self.combo_rerank.setToolTip)
-
 
     def _update_vram_html(self):
         if not hasattr(self, 'lbl_vram_desc'): return
@@ -1009,12 +1247,10 @@ class SettingsTool(BaseTool):
             f"</div>"
         )
 
-
     def _open_hf_cache(self):
         model_dir = os.path.join(self.config.BASE_DIR, "models")
         os.makedirs(model_dir, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
-
 
     def _test_compute_device(self):
         device_id = self.combo_device.currentData()
@@ -1036,18 +1272,10 @@ class SettingsTool(BaseTool):
         )
 
     def _on_test_device_finished(self, result):
-        if hasattr(self, 'test_dev_pd'):
-            self.test_dev_pd.close_safe()
-
-        def _show_result():
-            if result.get("success"):
-                StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
-            else:
-                ToastManager().show("Device Test Failed", "error")
-                StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
-
-        QTimer.singleShot(150, _show_result)
-
+        if result.get("success"):
+            self.test_dev_pd.show_finish_state(True, "Test Passed", result["msg"])
+        else:
+            self.test_dev_pd.show_finish_state(False, "Test Failed", result["msg"])
 
 
     def _load_llm_config(self):
@@ -1056,6 +1284,14 @@ class SettingsTool(BaseTool):
              "api_key": ""},
             {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
              "model_name": "", "api_key": ""},
+            {"id": "minimax", "name": "MiniMax","base_url": "https://api.minimaxi.com/anthropic",
+             "model_name": "MiniMax-M2.5", "api_key": "",
+             "fetched_models": [
+                 "MiniMax-M2", "M2-her", "MiniMax-M2.1",
+                 "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning",
+                 "MiniMax-M2.7"
+             ]},
+
             {"id": "gemini", "name": "Google Gemini",
              "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "",
              "api_key": ""},
@@ -1065,16 +1301,25 @@ class SettingsTool(BaseTool):
              "model_name": "", "api_key": ""},
             {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
              "model_name": "", "api_key": ""},
+            {"id": "mimo", "name": "Xiaomi MiMo", "base_url": "https://api.xiaomimimo.com/v1",
+             "model_name": "mimo-v2-pro", "api_key": "",
+             "fetched_models": ["mimo-v1", "mimo-v2", "mimo-v2-pro"]},
             {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
              "model_name": "", "api_key": ""},
             {"id": "siliconflow", "name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1",
              "model_name": "", "api_key": ""},
-            {"id": "custom", "name": "Local Custom (Ollama)", "base_url": "http://localhost:11434/v1",
+            {"id": "lmstudio", "name": "LM Studio", "base_url": "http://localhost:1234/v1", "model_name": "",
+             "api_key": "lm-studio"},
+            {"id": "ollma", "name": "Ollma", "base_url": "http://localhost:11434/v1",
              "model_name": "", "api_key": "ollama"}
         ]
 
         try:
-            loaded_configs  = self.config.load_llm_configs()
+            loaded_configs = self.config.load_llm_configs()
+
+            if not loaded_configs:
+                loaded_configs = []
+
             for cfg in loaded_configs:
                 cfg.pop("thinking_model_name", None)
                 if "model_params_mode" in cfg and "models_config" not in cfg:
@@ -1087,14 +1332,38 @@ class SettingsTool(BaseTool):
                     }
         except Exception as e:
             self.logger.error(f"Error loading llm_config.json: {e}")
+            loaded_configs = []
 
         existing_ids = {c.get("id") for c in loaded_configs}
         needs_resave = False
+        missing_ids = []
+
         for i, dc in enumerate(default_config):
             if dc["id"] not in existing_ids:
                 loaded_configs.insert(i, dc)
+                missing_ids.append(dc["id"])
                 needs_resave = True
+            else:
+                for cfg in loaded_configs:
+                    if cfg.get("id") == dc["id"] and "fetched_models" in dc:
+                        current_fetched = cfg.get("fetched_models", [])
+                        added_any = False
+                        for m in dc["fetched_models"]:
+                            if m not in current_fetched:
+                                current_fetched.append(m)
+                                added_any = True
+                        if added_any:
+                            cfg["fetched_models"] = current_fetched
+                            needs_resave = True
+                        break
 
+        if needs_resave:
+            self.logger.warning(
+                f"Required default LLM identifiers or models were missing: {missing_ids}. "
+                f"The system has automatically supplemented and persisted these records."
+            )
+            self.llm_configs = loaded_configs
+            self._save_llm_config()
 
         return loaded_configs if loaded_configs else default_config
 
@@ -1136,11 +1405,10 @@ class SettingsTool(BaseTool):
         header_layout.addWidget(self.btn_del_llm)
         header_layout.addWidget(self.btn_help_params)
 
-
         self.input_llm_name = QLineEdit()
         self.input_llm_url = QLineEdit()
         self.input_llm_key = QLineEdit()
-        self.input_llm_key.setEchoMode(QLineEdit.Password)
+        self.input_llm_key = HoverRevealLineEdit()
 
         self.editor_provider_params = ParamEditorWidget()
         self.btn_add_provider_param = QPushButton(" Add Provider Parameter")
@@ -1197,27 +1465,6 @@ class SettingsTool(BaseTool):
             lambda idx: self.model_param_container.setVisible(idx == 1)
         )
 
-        # --- 独立翻译层选择 ---
-        trans_group = QGroupBox("Translation Agent Configuration")
-        trans_layout = QFormLayout(trans_group)
-
-        trans_provider_layout = QHBoxLayout()
-        self.combo_trans_provider = BaseComboBox()
-        self.combo_trans_model = BaseComboBox()
-        self.btn_trans_refresh = QPushButton()
-        self.btn_trans_refresh.setIcon(ThemeManager().icon("refresh", "text_main"))
-        self.btn_trans_refresh.setToolTip("Refresh models from cache")
-
-        for conf in self.llm_configs:
-            self.combo_trans_provider.addItem(conf.get("name", "Unnamed Provider"), conf.get("id"))
-
-        trans_provider_layout.addWidget(self.combo_trans_provider, stretch=1)
-        trans_provider_layout.addWidget(self.btn_trans_refresh)
-
-        trans_layout.addRow("Translation Provider:", trans_provider_layout)
-        trans_layout.addRow("Translation Model:", self.combo_trans_model)
-
-
         layout.addRow("Service Provider:", header_layout)
         layout.addRow("Provider Name:", self.input_llm_name)
         layout.addRow("API Base URL:", self.input_llm_url)
@@ -1229,7 +1476,6 @@ class SettingsTool(BaseTool):
         layout.addRow("", self.model_param_container)
 
         self.layout.addWidget(group)
-        self.layout.addWidget(trans_group)
 
         self.combo_llm_preset.currentIndexChanged.connect(self._on_llm_preset_changed)
         self.input_llm_name.textChanged.connect(self._sync_llm_data)
@@ -1245,28 +1491,7 @@ class SettingsTool(BaseTool):
         self.combo_llm_preset.setCurrentIndex(idx_to_select)
         self._on_llm_preset_changed(idx_to_select)
 
-        trans_id = self.config.user_settings.get("trans_llm_id", None)
-        idx_trans = self.combo_trans_provider.findData(trans_id)
-        if idx_trans >= 0:
-            self.combo_trans_provider.setCurrentIndex(idx_trans)
 
-        self.combo_trans_provider.currentIndexChanged.connect(self._on_trans_provider_changed)
-        self.combo_trans_model.currentTextChanged.connect(self._sync_trans_model)
-        self.btn_trans_refresh.clicked.connect(self._on_trans_refresh_clicked)
-
-        self._on_trans_provider_changed(0)
-
-        self.combo_llm_model.currentTextChanged.connect(self.combo_llm_model.setToolTip)
-        self.combo_trans_model.currentTextChanged.connect(self.combo_trans_model.setToolTip)
-
-
-    def _on_trans_refresh_clicked(self):
-        self._refresh_trans_models_ui()
-        ToastManager().show("Translation models refreshed from cache.", "success")
-
-    def _on_trans_provider_changed(self, index):
-        if index < 0 or index >= len(self.llm_configs): return
-        self._refresh_trans_models_ui()
 
     def _on_manual_model_action(self, model_type, action):
 
@@ -1311,34 +1536,8 @@ class SettingsTool(BaseTool):
                     self.check_models_status()
 
 
-    def _refresh_trans_models_ui(self):
-        idx = self.combo_trans_provider.currentIndex()
-        if idx < 0: return
-        conf = self.llm_configs[idx]
 
-        curr_model = conf.get("trans_model_name", conf.get("model_name", ""))
-        fetched = conf.get("fetched_models", [])
 
-        self.combo_trans_model.blockSignals(True)
-        self.combo_trans_model.clear()
-
-        items = list(fetched)
-        if curr_model and curr_model not in items:
-            items.insert(0, curr_model)
-
-        self.combo_trans_model.addItems(items)
-        if curr_model:
-            self.combo_trans_model.setCurrentText(curr_model)
-        self.combo_trans_model.blockSignals(False)
-        self._sync_trans_model(self.combo_trans_model.currentText())
-
-    def _sync_trans_model(self, text):
-        idx = self.combo_trans_provider.currentIndex()
-        if idx >= 0:
-            self.llm_configs[idx]["trans_model_name"] = text.strip()
-            self._save_llm_config()
-            if hasattr(GlobalSignals(), 'llm_config_changed'):
-                GlobalSignals().llm_config_changed.emit()
 
     def _extract_real_model_name(self, display_text):
         for suffix in [" [Custom]", " [Closed]"]:
@@ -1346,12 +1545,7 @@ class SettingsTool(BaseTool):
                 return display_text[:-len(suffix)]
         return display_text
 
-
-
-
     def _on_copy_params_clicked(self):
-        from src.ui.components.dialog import StandardDialog
-        from src.ui.components.toast import ToastManager
 
         provider_params = self.editor_provider_params.extract_data()
         if not provider_params:
@@ -1413,7 +1607,7 @@ class SettingsTool(BaseTool):
     def _add_llm_model(self):
         dlg = AddModelDialog(self.widget)
         if dlg.exec():
-            new_model = dlg.get_name()
+            new_model = dlg.get_name().strip()
             if new_model:
                 idx = self.combo_llm_preset.currentIndex()
                 if idx >= 0:
@@ -1489,8 +1683,12 @@ class SettingsTool(BaseTool):
         self.combo_llm_model.blockSignals(True)
         self.combo_llm_model.clear()
 
-        fetched = list(conf.get("fetched_models", []))
+        fetched = [m for m in conf.get("fetched_models", []) if m.strip()]
         models_config = conf.get("models_config", {})
+
+        for m in models_config.keys():
+            if m.strip() and m not in fetched:
+                fetched.append(m)
 
         if curr_real and curr_real not in fetched:
             fetched.insert(0, curr_real)
@@ -1520,6 +1718,225 @@ class SettingsTool(BaseTool):
         self._is_updating_model_ui = False
 
         self._load_model_params_to_ui(conf, curr_real)
+
+    def on_export_clicked(self):
+        if not self.check_unsaved_changes(proceed_callback=self._execute_export):
+            return
+        self._execute_export()
+
+    def _execute_export(self):
+        # 1. 获取加密密码
+        from src.ui.components.dialog import ExportPasswordDialog, ProgressDialog
+        pwd_dlg = ExportPasswordDialog(self.widget)
+        pwd_dlg.exec()
+        if pwd_dlg.is_cancelled:
+            return
+        password = pwd_dlg.password
+
+        # 2. 选择保存路径
+        from PySide6.QtWidgets import QFileDialog
+        import os
+        path, _ = QFileDialog.getSaveFileName(
+            self.widget, "Save Config", "scholar_navis_config.json", "JSON (*.json)"
+        )
+        if not path:
+            return
+
+        # 3. 准备数据束
+        from src.core.encryption_service import SystemEncryptionService
+        import zlib
+        import base64
+
+        enc_service = SystemEncryptionService()
+        exported_skills_data = {}
+
+        for name, cfg in self.config.mcp_servers.get("external_skills", {}).items():
+            if name in ["built-in", "Academic Tool", "builtin"]: continue
+            skill_path = cfg.get("command", "")
+            if skill_path and os.path.exists(skill_path):
+                try:
+                    with open(skill_path, 'rb') as f:
+                        decrypted_data = enc_service.decrypt(f.read())
+
+                        if isinstance(decrypted_data, str):
+                            decrypted_data = decrypted_data.encode('utf-8')
+
+                        compressed_bytes = zlib.compress(decrypted_data, level=9)
+                        b64_str = base64.b64encode(compressed_bytes).decode('utf-8')
+
+                        exported_skills_data[name] = b64_str
+                except Exception as e:
+                    self.logger.warning(f"Failed to decrypt and compress skill {name} for export: {e}")
+
+        bundle = {
+            "settings": self.config.user_settings,
+            "mcp_servers": self.config.mcp_servers,
+            "llm_configs": self.llm_configs,
+            "skill_files_zlib_b64": exported_skills_data
+        }
+
+        self.btn_export.setEnabled(False)
+        pd = ProgressDialog(self.widget, "Security Export", "Performing compression, encryption & serialization...")
+        pd.show()
+
+        # 4. 启动异步导出任务，统一使用 export_task_mgr
+        self.export_task_mgr = TaskManager()
+        self.export_task_mgr.sig_progress.connect(pd.update_progress)
+        self.export_task_mgr.sig_result.connect(lambda res: self._finalize_export(res, path, pd))
+        self.export_task_mgr.start_task(
+            ExportConfigTask,
+            task_id="export_cfg",
+            path=path,
+            password=password,
+            bundle=bundle
+        )
+
+    def _finalize_export(self, result, path, pd):
+        """处理导出任务结果并持久化至磁盘"""
+        self.btn_export.setEnabled(True)
+
+        if result.get("success"):
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, indent=4, ensure_ascii=False)
+                pd.show_finish_state(True, "Export Successful", f"Configuration bundle has been securely saved to:\n{path}")
+            except Exception as e:
+                pd.show_finish_state(False, "Write Error", f"Failed to write file to disk: {e}")
+        else:
+            pd.show_finish_state(False, "Export Failed", result.get("msg", "An analytical error occurred during encryption."))
+
+
+    def on_import_clicked(self, auto_path=None):
+        if not self.check_unsaved_changes(proceed_callback=lambda: self._execute_import(auto_path)):
+            return
+        self._execute_import(auto_path)
+
+    def _execute_import(self, auto_path=None):
+        # Support retry flow without opening file dialog twice
+        path = auto_path
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self.widget, "Import Config Bundle", "", "JSON (*.json)")
+        if not path: return
+
+        # Quick Format Check
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                preview_bundle = json.load(f)
+            is_encrypted = "payload" in preview_bundle and "salt" in preview_bundle
+        except Exception as e:
+            StandardDialog(self.widget, "Import Error", f"Invalid JSON file: {e}").exec()
+            return
+
+        password = None
+        if is_encrypted:
+            pwd_dlg = ImportPasswordDialog(self.widget)
+            pwd_dlg.exec()
+            if pwd_dlg.is_cancelled:
+                return  # User cancelled the import process
+            password = pwd_dlg.password
+
+        self.btn_import.setEnabled(False)
+        pd = ProgressDialog(self.widget, "Importing", "Reading and decrypting...")
+        pd.show()
+
+        self.import_task_mgr = TaskManager()
+        self.import_task_mgr.sig_progress.connect(pd.update_progress)
+        self.import_task_mgr.sig_result.connect(lambda res: self._finalize_import(res, pd, path))
+        self.import_task_mgr.start_task(ImportConfigTask, "import_cfg", mode=TaskMode.THREAD, path=path,
+                                        password=password)
+
+
+    def _finalize_import(self, result, pd, path):
+        self.btn_import.setEnabled(True)
+
+        if not result.get("success"):
+            if "Decryption failed" in result.get("msg", ""):
+                pd.close_safe()
+                from src.ui.components.dialog import StandardDialog
+                dlg = StandardDialog(
+                    self.widget,
+                    "Decryption Failed",
+                    "Incorrect password or corrupted file.\nWould you like to try entering the password again?",
+                    show_cancel=True
+                )
+                if dlg.exec():
+                    self.on_import_clicked(auto_path=path)
+            else:
+                pd.show_finish_state(False, "Import Failed", result.get("msg", "Unknown error"))
+            return
+
+        try:
+            final_data = result.get("data", {})
+
+            if "skill_files_zlib_b64" in final_data:
+                from src.core.encryption_service import SystemEncryptionService
+                import zlib
+                import base64
+
+                enc_service = SystemEncryptionService()
+
+                for s_name, b64_str in final_data["skill_files_zlib_b64"].items():
+                    try:
+                        compressed_bytes = base64.b64decode(b64_str)
+                        plain_code_bytes = zlib.decompress(compressed_bytes)
+
+                        plain_code_str = plain_code_bytes.decode('utf-8')
+                        encrypted_data = enc_service.encrypt(plain_code_str)
+
+                        if isinstance(encrypted_data, str):
+                            encrypted_bytes = encrypted_data.encode('utf-8')
+                        else:
+                            encrypted_bytes = encrypted_data
+
+                        if "mcp_servers" in final_data and "external_skills" in final_data["mcp_servers"]:
+                            if s_name in final_data["mcp_servers"]["external_skills"]:
+                                final_data["mcp_servers"]["external_skills"][s_name]["_pending_bytes"] = encrypted_bytes
+                                final_data["mcp_servers"]["external_skills"][s_name]["_is_new"] = True
+                                final_data["mcp_servers"]["external_skills"][s_name][
+                                    "command"] = f"<Pending Edit: {s_name}>"
+
+                    except Exception as e:
+                        self.logger.error(f"💥 CRITICAL: Failed to decompress and stage skill '{s_name}': {e}")
+                        from src.ui.components.toast import ToastManager
+                        ToastManager().show(f"Failed to restore skill {s_name}: {e}", "error")
+
+            if "settings" in final_data:
+                imported_settings = final_data.get("settings", {}).copy()
+
+                imported_device = imported_settings.get("inference_device", "auto")
+                if self.combo_device.findData(imported_device) < 0:
+                    fallback_dev = "cpu" if self.combo_device.findData("cpu") >= 0 else "auto"
+                    imported_settings["inference_device"] = fallback_dev
+                    from src.ui.components.toast import ToastManager
+                    ToastManager().show(
+                        f"Imported device '{imported_device}' is unavailable. Defaulting to {fallback_dev.upper()}.",
+                        "warning"
+                    )
+
+                self.config.user_settings = imported_settings
+
+            if "mcp_servers" in final_data:
+                self.config.mcp_servers = final_data.get("mcp_servers", {}).copy()
+            if "llm_configs" in final_data:
+                self.llm_configs = final_data.get("llm_configs", []).copy()
+
+            self._load_current_settings(reload_from_disk=False)
+            self._mark_unsaved()
+
+            mode = result.get("mode", "unknown")
+            pd.show_finish_state(
+                True,
+                "Import Successful",
+                f"Configuration bundle ({mode}) has been loaded into the interface.\n\n"
+                "Please click 'Save Settings' at the bottom to apply these changes permanently."
+            )
+            from src.ui.components.toast import ToastManager
+            ToastManager().show(f"Configuration imported to UI ({mode}). Please save to apply.", "success")
+        except Exception as e:
+            self.logger.error(f"Import application failed: {e}")
+            from src.ui.components.dialog import StandardDialog
+            StandardDialog(self.widget, "Import Error", f"Failed to apply settings to UI:\n{e}").exec()
+
 
     def _update_current_model_marker(self, real_name, mode):
         self.combo_llm_model.blockSignals(True)
@@ -1576,14 +1993,24 @@ class SettingsTool(BaseTool):
         self.input_llm_key.blockSignals(False)
         self.combo_model_param_strategy.blockSignals(False)
 
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow","mimo",
+                       "lmstudio", "ollma", "minimax"]
         self.btn_del_llm.setEnabled(conf.get("id") not in default_ids)
 
-        self.btn_fetch_models.setToolTip("")
-        self.btn_fetch_models.setText(" Fetch")
+        is_minimax = conf.get("id") == "minimax"
+        tm = ThemeManager()
 
+        if is_minimax:
+            self.btn_fetch_models.setText(" Refresh")
+            self.btn_fetch_models.setIcon(tm.icon("refresh", "bg_main"))
+            self.btn_fetch_models.setToolTip("Model retrieval is currently unsupported by the MiniMax provider. "
+                                             "Click to restore predefined models.")
+        else:
+            self.btn_fetch_models.setText(" Fetch")
+            self.btn_fetch_models.setIcon(tm.icon("api", "bg_main"))
+            self.btn_fetch_models.setToolTip("")
 
-        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen"]
+        hide_url_providers = ["anthropic", "gemini", "zhipu", "qwen", "minimax", "deepseek", "openai", "mimo"]
         is_native = conf.get("id") in hide_url_providers
 
         form_layout = self.input_llm_url.parentWidget().layout()
@@ -1592,7 +2019,6 @@ class SettingsTool(BaseTool):
             if label:
                 label.setVisible(not is_native)
         self.input_llm_url.setVisible(not is_native)
-
 
         self._refresh_model_combo(conf)
 
@@ -1625,19 +2051,17 @@ class SettingsTool(BaseTool):
         self.combo_llm_preset.blockSignals(True)
         self.combo_llm_preset.setItemText(idx, conf["name"])
         self.combo_llm_preset.blockSignals(False)
-        self.combo_trans_provider.blockSignals(True)
-
-        for i in range(1, self.combo_trans_provider.count()):
-            if self.combo_trans_provider.itemData(i) == self.llm_configs[idx]["id"]:
-                self.combo_trans_provider.setItemText(i, self.llm_configs[idx]["name"])
-                break
-        self.combo_trans_provider.blockSignals(False)
         self._update_current_model_marker(curr_real, mode)
 
     def _start_fetch_task(self):
         self._sync_llm_data()
         idx = self.combo_llm_preset.currentIndex()
         conf = self.llm_configs[idx] if 0 <= idx < len(self.llm_configs) else {}
+
+        # 如果是 MiniMax，走本地刷新逻辑
+        if conf.get("id") == "minimax":
+            self._refresh_minimax_models(conf)
+            return
 
         base_url = conf.get("base_url", "").strip()
         api_key = conf.get("api_key", "").strip()
@@ -1660,24 +2084,31 @@ class SettingsTool(BaseTool):
             base_url=base_url, api_key=api_key, provider_id=provider_id
         )
 
+    def _refresh_minimax_models(self, conf):
+        current_models = conf.get("fetched_models", [])
+
+        for model in MINIMAX_DEFAULT_MODELS:
+            if model not in current_models:
+                current_models.append(model)
+
+        conf["fetched_models"] = current_models
+        self._refresh_model_combo(conf)
+
+        ToastManager().show("MiniMax model list refreshed (defaults restored).", "success")
+
+
     def _on_models_fetched(self, result):
-        self.net_pd.close_safe()
-
-        def _show_result():
-            if result.get("success"):
-                models = result["models"]
-                self.logger.info(f"Successfully fetched {len(models)} models from API.")
-                idx = self.combo_llm_preset.currentIndex()
-                if 0 <= idx < len(self.llm_configs):
-                    self.llm_configs[idx]["fetched_models"] = models
-                    self._refresh_model_combo(self.llm_configs[idx])
-                StandardDialog(self.widget, "Success", result["msg"]).exec()
-            else:
-                self.logger.warning(f"Failed to fetch models: {result['msg']}")
-                ToastManager().show(f"Fetch Models Failed: {result['msg']}", "error")
-
-        QTimer.singleShot(150, _show_result)
-
+        if result.get("success"):
+            models = result["models"]
+            self.logger.info(f"Successfully fetched {len(models)} models from API.")
+            idx = self.combo_llm_preset.currentIndex()
+            if 0 <= idx < len(self.llm_configs):
+                self.llm_configs[idx]["fetched_models"] = models
+                self._refresh_model_combo(self.llm_configs[idx])
+            self.net_pd.show_finish_state(True, "Success", result["msg"])
+        else:
+            self.logger.warning(f"Failed to fetch models: {result['msg']}")
+            self.net_pd.show_finish_state(False, "Fetch Failed", result['msg'])
 
     def _start_test_task(self):
         self._sync_llm_data()
@@ -1728,17 +2159,10 @@ class SettingsTool(BaseTool):
         )
 
     def _on_test_finished(self, result):
-        if hasattr(self, 'net_pd'):
-            self.net_pd.close_safe()
-
-        def _show_result():
-            if result.get("success"):
-                StandardDialog(self.widget, "Test Passed", result["msg"]).exec()
-            else:
-                ToastManager().show(f"API Test Failed", "error")
-                StandardDialog(self.widget, "Test Failed", result["msg"]).exec()
-
-        QTimer.singleShot(150, _show_result)
+        if result.get("success"):
+            self.net_pd.show_finish_state(True, "Test Passed", result["msg"])
+        else:
+            self.net_pd.show_finish_state(False, "Test Failed", result["msg"])
 
 
     def _add_llm_provider(self):
@@ -1759,7 +2183,8 @@ class SettingsTool(BaseTool):
         idx = self.combo_llm_preset.currentIndex()
         if idx < 0: return
         conf = self.llm_configs[idx]
-        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow", "custom"]
+        default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow","mimo",
+                       "lmstudio", "local"]
         if conf.get("id") in default_ids:
             StandardDialog(
                 self.widget,
@@ -1784,16 +2209,9 @@ class SettingsTool(BaseTool):
         self.combo_log.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
 
-        self.input_ext_python = QLineEdit()
-        self.input_ext_python.setPlaceholderText("e.g. /usr/bin/python3 or C:/Python310/python.exe")
-        self.input_ext_python.setText(self.config.user_settings.get("external_python_path", "python"))
-
         layout.addRow("Theme:", self.combo_theme)
         layout.addRow("Log Level:", self.combo_log)
-        layout.addRow("External Python Path:", self.input_ext_python)
         self.layout.addWidget(group)
-
-
 
     def _get_req_html(self, conf):
         if not conf or 'recommended_config' not in conf:
@@ -1835,8 +2253,6 @@ class SettingsTool(BaseTool):
             embed_id=embed_id,
             rerank_id=rerank_id
         )
-
-
 
     def _on_models_status_result(self, result):
         """Callback to update the UI based on VerifyModelsTask result."""
@@ -1903,10 +2319,33 @@ class SettingsTool(BaseTool):
             self.btn_dl_rerank.setStyleSheet(self._get_btn_style(btn_type="primary"))
             self.btn_dl_rerank.setIcon(tm.icon("download", "bg_main"))
 
-    def on_save_clicked(self):
+    def check_unsaved_changes(self, proceed_callback=None) -> bool:
+        """
+        Navigation Guard: Evaluates the current component state for the main router.
+        When unsaved changes exist, it intercepts the navigation with a custom modal.
+        @return: True (allow routing), False (block routing and stay on the current component)
+        """
+        if getattr(self, '_is_loading', False) or not self.btn_undo.isEnabled():
+            return True
+
+        dlg = UnsavedChangesDialog(self.widget)
+        dlg.exec()
+
+        if dlg.user_choice == "save":
+            self.on_save_clicked(on_success=proceed_callback)
+            return False
+        elif dlg.user_choice == "revert":
+            self.on_undo_clicked()
+            return True
+        else:
+            return False
+
+    def on_save_clicked(self, on_success=None):
+        self._pending_route_callback = on_success
         self.widget.setFocus()
 
         new_email = self.input_ncbi_email.text().strip()
+        old_email = self.config.user_settings.get("ncbi_email", "").strip()
 
         self.save_pd = ProgressDialog(
             self.widget, "Applying Settings",
@@ -1915,22 +2354,29 @@ class SettingsTool(BaseTool):
         )
         self.save_pd.pbar.setRange(0, 0)
         self.save_pd.show()
+        QApplication.processEvents()
 
-        self.email_thread = QThread()
-        self.email_worker = EmailVerifyWorker(new_email)
-        self.email_worker.moveToThread(self.email_thread)
+        # 如果email没有发生修改或为空，跳过耗时的email验证
+        if new_email == old_email or not new_email:
+            QTimer.singleShot(50, lambda: self._on_email_verified_result({"success": True, "msg": ""}))
+            return
 
-        self.save_pd.sig_canceled.connect(self.email_thread.quit)
+        self.email_task_mgr = TaskManager()
+        self.email_task_mgr.sig_result.connect(self._on_email_verified_result)
+        self.save_pd.sig_canceled.connect(self.email_task_mgr.cancel_task)
 
-        self.email_thread.started.connect(self.email_worker.run)
-        self.email_worker.sig_finished.connect(self._on_email_verified)
-        self.email_worker.sig_finished.connect(self.email_thread.quit)
-        self.email_worker.sig_finished.connect(self.email_worker.deleteLater)
-        self.email_thread.finished.connect(self.email_thread.deleteLater)
+        self.email_task_mgr.start_task(
+            EmailVerifyTask,
+            task_id="email_verify",
+            mode=TaskMode.THREAD,
+            email=new_email
+        )
 
-        self.email_thread.start()
+    def _on_email_verified_result(self, result):
+        success = result.get("success", False)
+        msg = result.get("msg", "")
 
-    def _on_email_verified(self, success, msg):
+        # Email validation failure fallback
         if not success:
             if hasattr(self, 'save_pd'):
                 self.save_pd.close_safe()
@@ -1942,6 +2388,7 @@ class SettingsTool(BaseTool):
             return
 
         self.save_pd.update_progress(-1, "Saving configurations...")
+        QApplication.processEvents()
 
         new_email = self.input_ncbi_email.text().strip()
 
@@ -1950,33 +2397,75 @@ class SettingsTool(BaseTool):
         self._save_llm_config()
 
         new_mcp_servers = {}
+        new_external_skills = {}
         if hasattr(self, 'table_mcp'):
+            active_skill_names = set()
             for row in range(self.table_mcp.rowCount()):
                 name_item = self.table_mcp.item(row, 1)
                 if not name_item: continue
 
                 name = name_item.text()
 
-                raw_cfg = name_item.data(Qt.UserRole)
-                cfg = copy.deepcopy(raw_cfg) if isinstance(raw_cfg, dict) else {}
+                if name == "Academic Tool":
+                    continue
+
+                cfg = name_item.data(Qt.UserRole).copy()
 
                 chk_widget = self.table_mcp.cellWidget(row, 0)
-                if chk_widget and chk_widget.layout():
+                if chk_widget:
                     chk = chk_widget.layout().itemAt(0).widget()
                     cfg["enabled"] = chk.isChecked()
+
+                if cfg.get("type") == "SKILL":
+                    active_skill_names.add(name)
+                    if "_pending_bytes" in cfg:
+                        workspace_dir = os.path.join(self.config.BASE_DIR, 'tools', 'skill')
+                        os.makedirs(workspace_dir, exist_ok=True)
+                        target_path = os.path.join(workspace_dir, f"{name}.enc")
+                        try:
+                            with open(target_path, 'wb') as f:
+                                f.write(cfg["_pending_bytes"])
+                            cfg["command"] = target_path
+                        except Exception as e:
+                            self.logger.error(f"Failed to write skill '{name}' to disk: {e}")
+
+                        for temp_key in ["_pending_bytes", "_is_new", "_is_edited"]:
+                            cfg.pop(temp_key, None)
+
+                    new_external_skills[name] = cfg
                 else:
-                    cfg["enabled"] = False
+                    new_mcp_servers[name] = cfg
 
-                new_mcp_servers[name] = cfg
+                old_skills = self.config.mcp_servers.get("external_skills", {})
+                import shutil
+                for old_name, old_cfg in old_skills.items():
+                    if old_name not in active_skill_names:
+                        old_path = old_cfg.get("command", "")
+                        if old_path and "tools" in old_path and "skill" in old_path:
+                            try:
+                                if os.path.exists(old_path):
+                                    os.remove(old_path)
+                                skill_workspace = os.path.join(self.config.BASE_DIR, 'tools', 'skill',
+                                                               f"{old_name}_workspace")
+                                if os.path.exists(skill_workspace) and os.path.isdir(skill_workspace):
+                                    shutil.rmtree(skill_workspace)
+                            except Exception as e:
+                                self.logger.warning(f"Failed to properly clean up deleted skill for '{old_name}': {e}")
 
-            if getattr(self.config, 'mcp_servers', None) is None or not isinstance(self.config.mcp_servers, dict):
-                self.config.mcp_servers = {}
-
-            self.config.mcp_servers["mcpServers"] = new_mcp_servers
-            self.config.save_mcp_servers()
+                self.config.mcp_servers["mcpServers"] = new_mcp_servers
+                self.config.mcp_servers["external_skills"] = new_external_skills
+                self.config.save_mcp_servers()
 
         new_key = self.input_ncbi_api_key.text().strip()
+        new_openalex_key = self.input_openalex_api_key.text().strip()
         new_s2_key = self.input_s2_api_key.text().strip()
+        s2_rate_text = self.input_s2_rate_limit.text().strip()
+        try:
+            val = float(s2_rate_text.replace(',', '.'))
+            if val <= 0: val = 1.0
+            s2_rate_text = str(val)
+        except ValueError:
+            s2_rate_text = "1.0"
 
         new_github_token = self.input_github_token.text().strip()
 
@@ -1990,6 +2479,11 @@ class SettingsTool(BaseTool):
         ThemeManager().set_theme(new_theme)
         qdarktheme.setup_theme(new_theme)
 
+        try:
+            api_port = int(self.input_api_port.text().strip())
+        except ValueError:
+            api_port = 8000
+
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
@@ -1998,15 +2492,17 @@ class SettingsTool(BaseTool):
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
-            "trans_llm_id": self.combo_trans_provider.currentData(),
             "theme": self.combo_theme.currentText(),
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
+            "openalex_api_key": new_openalex_key,
             "s2_api_key": new_s2_key,
+            "s2_rate_limit": s2_rate_text,
             "github_token": new_github_token,
-            "external_python_path": getattr(self, 'input_ext_python', QLineEdit()).text().strip(),
-            "low_vram_mode": getattr(self, 'chk_low_vram', None) and self.chk_low_vram.isChecked()
+            "api_server_host": self.input_api_host.text().strip(),
+            "api_server_port": api_port,
+            "api_server_key": self.input_api_key.text().strip(),
         })
 
         for old_key in ["external_mcp_enabled", "network_mcps", "network_mcp_enabled", "custom_network_models"]:
@@ -2014,7 +2510,53 @@ class SettingsTool(BaseTool):
 
         self.config.save_settings()
 
+        if new_s2_key:
+            os.environ["S2_API_KEY"] = new_s2_key
+        else:
+            os.environ.pop("S2_API_KEY", None)
+
+        if self.input_s2_rate_limit.text().strip():
+            os.environ["S2_RATE_LIMIT"] = self.input_s2_rate_limit.text().strip()
+        else:
+            os.environ.pop("S2_RATE_LIMIT", None)
+
+        if new_key:
+            os.environ["NCBI_API_KEY"] = new_key
+        else:
+            os.environ.pop("NCBI_API_KEY", None)
+
+        if new_openalex_key:
+            os.environ["OPENALEX_API_KEY"] = new_openalex_key
+        else:
+            os.environ.pop("OPENALEX_API_KEY", None)
+
+        if new_email:
+            os.environ["NCBI_API_EMAIL"] = new_email
+        else:
+            os.environ.pop("NCBI_API_EMAIL", None)
+
+        if new_github_token:
+            os.environ["GITHUB_TOKEN"] = new_github_token
+        else:
+            os.environ.pop("GITHUB_TOKEN", None)
+
+        if new_proxy_mode == "custom" and new_proxy_url:
+            os.environ["HTTP_PROXY"] = new_proxy_url
+            os.environ["HTTPS_PROXY"] = new_proxy_url
+            os.environ["http_proxy"] = new_proxy_url
+            os.environ["https_proxy"] = new_proxy_url
+        else:
+            for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+                os.environ.pop(k, None)
+
         setup_global_network_env()
+
+        try:
+            from src.task.s2_task import s2_manager
+            s2_manager.reload_config()
+            logging.info("S2 Task Manager configuration reloaded successfully.")
+        except Exception as e:
+            logging.error(f"Failed to reload S2 Task Manager: {e}")
 
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.emit()
@@ -2045,25 +2587,21 @@ class SettingsTool(BaseTool):
         )
 
     def _on_save_task_state_changed(self, state, msg):
-        if state == TaskState.FAILED.value:
+        if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
             if hasattr(self, 'save_pd'):
-                self.save_pd.close_safe()
-            self.logger.error(f"Save process failed: {msg}")
-            ToastManager().show(f"System Error: {msg}", "error")
-
+                self.save_pd.show_finish_state(False, "Process Halted", f"Save process ended: {msg}")
 
     def _on_save_task_result(self, result_dict):
         self._clear_unsaved()
 
-        if hasattr(self, 'save_pd'):
-            self.save_pd.close_safe()
-
-        # 启动 MCP
         def _bootstrap_mcp_async():
             try:
                 from src.core.mcp_manager import MCPManager
                 mcp_mgr = MCPManager.get_instance()
                 mcp_mgr.bootstrap_servers()
+                skill_mgr = SkillManager.get_instance()
+                if hasattr(skill_mgr, 'reload_external_skills'):
+                    skill_mgr.reload_external_skills()
 
                 if hasattr(self, '_refresh_mcp_status'):
                     self._refresh_mcp_status()
@@ -2072,15 +2610,19 @@ class SettingsTool(BaseTool):
 
         QTimer.singleShot(100, _bootstrap_mcp_async)
 
-        def _show_success_dialog():
-            msg = "Settings saved successfully."
-            if result_dict and result_dict.get("to_download"):
-                msg += "\n\nNote: Some selected models are missing locally. Please click 'Download' next to the models to fetch and convert them."
+        msg = "Settings saved successfully."
+        if result_dict and result_dict.get("to_download"):
+            msg += "\n\nNote: Some selected models are missing locally. Please click 'Download' next to the models to fetch and convert them."
 
-            StandardDialog(self.widget, "Settings Saved", msg).exec()
-            self.check_models_status()
+        if hasattr(self, 'save_pd'):
+            self.save_pd.show_finish_state(True, "Settings Saved", msg)
 
-        QTimer.singleShot(150, _show_success_dialog)
+        self.check_models_status()
+
+        if hasattr(self, '_pending_route_callback') and self._pending_route_callback:
+            cb = self._pending_route_callback
+            self._pending_route_callback = None
+            cb()
 
     def _get_active_llm_id(self):
         idx = self.combo_llm_preset.currentIndex()
@@ -2097,7 +2639,7 @@ class SettingsTool(BaseTool):
 
     def _download_next(self):
         if not self.pending_downloads:
-            self.pd.show_success_state(title="Complete", message="All downloads finished.")
+            self.pd.show_finish_state(True, "Complete", "All downloads finished.")
             self.check_models_status()
             GlobalSignals().kb_list_changed.emit()
             return
@@ -2116,6 +2658,7 @@ class SettingsTool(BaseTool):
             repo_id=self.current_repo
         )
 
+
     def on_task_state_changed(self, state, msg):
         if state == TaskState.SUCCESS.value:
             if hasattr(self, 'task_mgr') and self.task_mgr:
@@ -2125,8 +2668,5 @@ class SettingsTool(BaseTool):
                 except:
                     pass
             QTimer.singleShot(500, self._download_next)
-        elif state == TaskState.FAILED.value:
-            self.pd.pbar.setRange(0, 100)
-            self.pd.lbl_message.setText(f"Failed to download {self.current_repo}:\n{msg}")
-            self.pd.btn_cancel.setText("Close")
-            self.pd.btn_cancel.setEnabled(True)
+        elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
+            self.pd.show_finish_state(False, "Download Halted", f"Task ended: {msg}")
