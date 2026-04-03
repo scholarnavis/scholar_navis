@@ -172,7 +172,6 @@ class TaskManager(QObject):
 
     def _real_start(self, task_class, task_id: str, mode: TaskMode, kwargs: Dict):
 
-        # 强制将已知会引发 GIL 锁死的重型任务转移到独立进程，无视工具组件的原始请求
         heavy_tasks = []
         if task_class.__name__ in heavy_tasks:
             if mode == TaskMode.THREAD:
@@ -308,11 +307,9 @@ class TaskManager(QObject):
             worker_to_stop.join(timeout=1.0)
         elif self.current_mode == TaskMode.THREAD and worker_to_stop.isRunning():
             worker_to_stop.requestInterruption()
-            # 绝对不要在这里卡 UI，_active_threads 会默默负责给它送终
 
         self.sig_state_changed.emit(TaskState.TERMINATED.value, "Task has been terminated.")
 
-        # 安全调用 Hook，修复直接写死 key 的隐患
         if self.hooks.get("terminate"):
             self.hooks["terminate"]()
 

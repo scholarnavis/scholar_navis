@@ -308,55 +308,55 @@ def get_model_type_by_repo(repo_id):
     return "embedding"
 
 
-def ensure_onnx_model(repo_id, model_type=None):
+def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False):
     hf_home = _get_hf_home()
     onnx_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
     logger.info(f"Requesting model: {repo_id} | Target ONNX cache dir: {onnx_dir}")
-
+    # 检查本地是否已有 ONNX 缓存
     if os.path.exists(onnx_dir):
         for root, dirs, files in os.walk(onnx_dir):
             if any(f.endswith('.onnx') for f in files):
                 logger.info("Local ONNX cache hit, skipping download and conversion.")
                 return onnx_dir
-
     logger.info("Local ONNX cache miss, preparing for download and conversion...")
     logger.info("Loading heavy AI frameworks (Transformers/Optimum) into memory...")
     from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
     from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
-    model_path = snapshot_download(repo_id=repo_id)
-
-    source_has_onnx = False
-    for root, dirs, files in os.walk(model_path):
-        if any(f.endswith('.onnx') for f in files):
-            source_has_onnx = True
-            break
-
+    # [修改] 根据 onnx_files_available 标志位决定下载策略
+    if onnx_files_available:
+        logger.info("Remote ONNX detected. Downloading optimized fileset (skipping large weights).")
+        # 使用 ignore_patterns 过滤掉大权重文件，只下载 ONNX 和配置文件
+        ignore_patterns = ["*.bin", "*.safetensors", "*.h5", "*.msgpack", "*.pt", "*.pth"]
+        model_path = snapshot_download(repo_id=repo_id, ignore_patterns=ignore_patterns)
+        source_has_onnx = True  # 既然是远程检测到的，这里必然为 True
+    else:
+        # 原有逻辑：下载所有文件
+        model_path = snapshot_download(repo_id=repo_id)
+        source_has_onnx = False
+        for root, dirs, files in os.walk(model_path):
+            if any(f.endswith('.onnx') for f in files):
+                source_has_onnx = True
+                break
     should_export = not source_has_onnx
-
     if source_has_onnx:
         logger.info("Official ONNX model detected in downloaded source, skipping format conversion.")
     else:
         logger.info("No official ONNX model detected, starting PyTorch to ONNX engine...")
-
     if not model_type:
         model_type = get_model_type_by_repo(repo_id)
-
     is_trust_remote = False
     for m in EMBEDDING_MODELS + RERANKER_MODELS:
         if m.get('hf_repo_id') == repo_id:
             is_trust_remote = m.get('trust_remote_code', False)
             break
-
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             model_path,
             trust_remote_code=is_trust_remote
         )
-
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-
             if model_type == "embedding":
                 model = ORTModelForFeatureExtraction.from_pretrained(
                     model_path,
@@ -371,29 +371,24 @@ def ensure_onnx_model(repo_id, model_type=None):
                     provider="CPUExecutionProvider",
                     trust_remote_code=is_trust_remote
                 )
-
         os.makedirs(onnx_dir, exist_ok=True)
         model.save_pretrained(onnx_dir)
         tokenizer.save_pretrained(onnx_dir)
         logger.info(f"ONNX processing complete and saved to: {onnx_dir}")
-
     except Exception as e:
         logger.error(f"ONNX Export Failed (Possible Out of Memory for 7B+ models): {str(e)}")
         raise e
-
     finally:
         # 无论成功失败，尝试释放内存
         if 'model' in locals(): del model
         if 'tokenizer' in locals(): del tokenizer
         gc.collect()
-
         try:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except ImportError:
             pass
-
     folder_name = "models--" + repo_id.replace("/", "--")
     hf_model_dir = os.path.join(hf_home, "hub", folder_name)
     if os.path.exists(hf_model_dir):
@@ -402,7 +397,6 @@ def ensure_onnx_model(repo_id, model_type=None):
             logger.info(f"Cleaned up original PyTorch cache to save disk space: {hf_model_dir}")
         except Exception as e:
             logger.warning(f"Failed to clean original cache: {e}")
-
     return onnx_dir
 
 
