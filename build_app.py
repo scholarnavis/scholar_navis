@@ -122,7 +122,9 @@ def build_app():
         "safetensors",
         "huggingface_hub",
         "ssl",
-        "_ssl"
+        "_ssl",
+        "tiktoken_ext.openai_public",
+        "tiktoken_ext"
     ]
 
     ssl_search_paths = [
@@ -162,6 +164,7 @@ def build_app():
     cmd.extend(["--copy-metadata", "tqdm"])
     cmd.extend(["--copy-metadata", "regex"])
     cmd.extend(["--copy-metadata", "torch"])
+    cmd.extend(["--copy-metadata", "tiktoken"])
 
     cmd.append("--add-data=Assets;Assets")
 
