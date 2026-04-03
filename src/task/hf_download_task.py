@@ -139,7 +139,7 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 self.queue.put({
                     "state": TaskState.PROCESSING.value,
                     "progress": 50,  # 给一个假进度，表示正在处理
-                    "msg": f"⚡ Detected remote ONNX. Downloading optimized model directly..."
+                    "msg": f"Detected remote ONNX. Downloading optimized model directly..."
                 })
             else:
                 # --- 场景 B：远程仓库无 ONNX，走原有的 safetensors 下载逻辑 ---
