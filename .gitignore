@@ -231,6 +231,7 @@ dist/
 /scholar_workspace/
 /mcp_workspace/
 /tools
+/RSS
 
 nuitka-crash-report.xml
 .nuitka_cache
@@ -239,6 +240,7 @@ nuitka-crash-report.xml
 scholar_navis_win*
 scholar_navis_linux*
 scholar_navis_mac*
+torch_runtime_hook.py
 
 scholar_navis.exe
 _internal

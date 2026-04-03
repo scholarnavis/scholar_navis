@@ -1352,7 +1352,7 @@ class ChatTool(BaseTool):
             self.chat_task_mgr.start_task(
                 ChatGenerationTask,
                 task_id="chat_generation",
-                mode=TaskMode.THREAD,
+                mode=TaskMode.PROCESS,
                 main_config=main_config,
                 trans_config=trans_config,
                 messages=list(self.history),

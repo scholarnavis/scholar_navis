@@ -7,6 +7,7 @@ import tempfile
 import keyring
 from cryptography.fernet import Fernet, InvalidToken
 
+from src.core import BASE_DIR
 from src.core.encryption_service import SystemEncryptionService
 
 # 当前配置导出版本号，用于未来兼容性检查
@@ -30,15 +31,9 @@ class ConfigManager:
 
         self.logger = logging.getLogger("ConfigManager")
 
-        # 1. 确定根目录
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            current_path = os.path.abspath(__file__)
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_path)))
 
-        self.BASE_DIR = base_dir
-        self.CONFIG_DIR = os.path.join(base_dir, "config")
+        self.BASE_DIR = BASE_DIR
+        self.CONFIG_DIR = os.path.join(BASE_DIR, "config")
         self.SETTINGS_PATH = os.path.join(self.CONFIG_DIR, "settings.json")
         self.MCP_SERVERS_PATH = os.path.join(self.CONFIG_DIR, "mcp_servers.json")
         self.LLM_CONFIG_PATH = os.path.join(self.CONFIG_DIR, "llm_config.json")

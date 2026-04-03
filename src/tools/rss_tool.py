@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QListWidget, QSplitter, QListWidgetItem, QLineEdit, QCheckBox, QScrollArea,
                                QFileDialog, QFrame, QAbstractItemView, QMenu, QApplication)
 
+from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskState, TaskMode
 from src.core.signals import GlobalSignals
@@ -378,12 +379,10 @@ class RSSTool(BaseTool):
     def __init__(self):
         super().__init__("Literature Tracker")
 
-        base_dir = self.config.BASE_DIR
-
-        self.workspace_dir = os.path.join(base_dir, "scholar_workspace")
+        self.workspace_dir = os.path.join(BASE_DIR, "RSS")
         os.makedirs(self.workspace_dir, exist_ok=True)
 
-        config_dir = os.path.join(base_dir, "config")
+        config_dir = os.path.join(BASE_DIR, "config")
         os.makedirs(config_dir, exist_ok=True)
 
         self.feeds_file = os.path.join(config_dir, "rss_feed.json")

@@ -1,14 +1,13 @@
 import os
 import multiprocessing
-import os
 import sys
-import threading
 import time
+import traceback
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot, QCoreApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication, QMessageBox
 
 from src.core.core_task import TaskManager, TaskMode
 from src.task.startup_tasks import HardwareInitTask
@@ -25,9 +24,64 @@ os.environ["SCARF_NO_ANALYTICS"] = "true"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 
+
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    """拦截全局未捕获异常并弹窗显示"""
+    # 忽略键盘中断
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+
+    if 'global_logger' in globals():
+        try:
+            global_logger.error(f"Uncaught Exception:\n{tb_str}")
+        except Exception:
+            pass
+
+    try:
+        # 检查是否为 API 模式（非 GUI），如果是则只打印终端
+        app = QCoreApplication.instance()
+        if app and not isinstance(app, QApplication):
+            print(f"CRITICAL ERROR (API Mode): {exc_value}\n{tb_str}", file=sys.stderr)
+            sys.exit(1)
+
+        # 确保存在 QApplication 以便弹窗
+        if not app:
+            app = QApplication(sys.argv)
+
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Critical)
+        msg.setWindowTitle("Application Crash")
+        msg.setText("Scholar Navis encountered a fatal error and must close.")
+
+        # 针对 DLL 丢失的专门提示
+        if issubclass(exc_type, ImportError) and "DLL load failed" in str(exc_value):
+            msg.setInformativeText(
+                f"A required system component (DLL) could not be loaded.\n"
+                f"This might be caused by missing dependencies or antivirus interference.\n\n"
+                f"Error: {exc_value}"
+            )
+        else:
+            msg.setInformativeText(str(exc_value))
+
+        msg.setDetailedText(tb_str)
+        msg.exec()
+    except Exception:
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    sys.exit(1)
+
+
+sys.excepthook = global_exception_handler
+
+
+
 class StartupWorker(QThread):
     sig_progress = Signal(int, str)
     sig_finished = Signal()
+    sig_error = Signal(str, str)
 
     def __init__(self, logger):
         super().__init__()
@@ -79,8 +133,9 @@ class StartupWorker(QThread):
             self.sig_finished.emit()
 
         except Exception as e:
-            self.logger.error(f"Startup error: {e}")
-            self.sig_finished.emit()
+            tb_str = traceback.format_exc()
+            self.logger.error(f"Startup error: {e}\n{tb_str}")
+            self.sig_error.emit(str(e), tb_str)
 
 
 class SplashScreen(QWidget):
@@ -174,6 +229,7 @@ class AppController(QObject):
         self.worker = StartupWorker(self.logger)
         self.worker.sig_progress.connect(self.update_splash)
         self.worker.sig_finished.connect(self.on_startup_finished)
+        self.worker.sig_error.connect(self.on_startup_error)  # 绑定错误信号
         self.worker.start()
 
     @Slot(int, str)
@@ -188,7 +244,26 @@ class AppController(QObject):
         QApplication.processEvents()
         QTimer.singleShot(50, self._build_and_show_main_window)
 
+    @Slot(str, str)
+    def on_startup_error(self, err_msg, tb_str):
+        """处理启动线程中的异常错误"""
+        self.splash.hide()
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Critical)
+        msg.setWindowTitle("Startup Error")
+
+        if "DLL load failed" in err_msg:
+            msg.setText("A required component is missing (DLL load failed).")
+        else:
+            msg.setText("Application failed to initialize.")
+
+        msg.setInformativeText(err_msg)
+        msg.setDetailedText(tb_str)
+        msg.exec()
+        sys.exit(1)
+
     def _build_and_show_main_window(self):
+        # 这里的异常会被全局钩子 global_exception_handler 自动接管
         from src.ui.main_window import MainWindow
         from src.core.mcp_manager import MCPManager
 
@@ -203,6 +278,7 @@ class AppController(QObject):
 
         QTimer.singleShot(500, self.main_window.check_first_run)
         QTimer.singleShot(1500, lambda: MCPManager.get_instance().bootstrap_servers())
+
 
 if __name__ == "__main__":
 
@@ -221,9 +297,6 @@ if __name__ == "__main__":
         pass
 
     if is_admin:
-        from PySide6.QtWidgets import QApplication, QMessageBox
-        import sys
-
         temp_app = QApplication(sys.argv)
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
@@ -235,16 +308,13 @@ if __name__ == "__main__":
         msg_box.exec()
         sys.exit(1)
 
-    # 1. 判断启动模式
+    # 判断启动模式
     is_api_mode = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
 
-
-    # 2. 统一在最开始创建 Qt 应用实例，以支持 QLocalSocket 机制
+    # 2. 统一在最开始创建 Qt 应用实例
     if is_api_mode:
-        from PySide6.QtCore import QCoreApplication
         app = QCoreApplication(sys.argv)
     else:
-        from PySide6.QtWidgets import QApplication
         app = QApplication(sys.argv)
 
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -254,13 +324,10 @@ if __name__ == "__main__":
     socket = QLocalSocket()
     socket.connectToServer(unique_server_name)
 
-    # 如果能连上服务器，说明已经有一个实例（GUI 或 API）在运行
     if socket.waitForConnected(500):
         if is_api_mode:
             print("Initialization Failed: Scholar Navis (GUI or API) is currently executing.")
         else:
-            from PySide6.QtWidgets import QMessageBox
-
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Warning)
             msg_box.setWindowTitle("Execution Alert")
@@ -281,21 +348,19 @@ if __name__ == "__main__":
         os.environ["SCARF_NO_ANALYTICS"] = "true"
 
         from src.core.logger import setup_logger
+
         global_logger = setup_logger()
 
         from src.core.config_manager import ConfigManager
         from src.core.network_worker import setup_global_network_env
         from src.core.mcp_manager import MCPManager
 
-        # 初始化基础环境并读取配置
         ConfigManager()
         setup_global_network_env()
 
-        # 强制拉起 MCP 服务器
         global_logger.info("Bootstrapping MCP Servers for API mode...")
         MCPManager.get_instance().bootstrap_servers(force_all=True)
 
-        # 启动 API 服务器
         from src.api.api_server import run_server
 
         run_server()

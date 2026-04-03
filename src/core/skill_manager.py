@@ -5,6 +5,8 @@ import logging
 import os
 from typing import Dict, Callable, get_origin, Literal, get_args
 
+from src.core import BASE_DIR
+
 logger = logging.getLogger("Skill.Manager")
 
 
@@ -160,7 +162,6 @@ class SkillManager:
         from src.core.encryption_service import SystemEncryptionService
         enc_service = SystemEncryptionService()
 
-        APP_ROOT = config_mgr.BASE_DIR
 
         for skill_name, script_info in external_scripts.items():
             if isinstance(script_info, dict):
@@ -180,7 +181,7 @@ class SkillManager:
                     encrypted_data = f.read()
                 decrypted_code = enc_service.decrypt(encrypted_data)
 
-                workspace_dir = os.path.join(APP_ROOT, 'tools', 'skill', f"{skill_name}_workspace")
+                workspace_dir = os.path.join(BASE_DIR, 'tools', 'skill', f"{skill_name}_workspace")
                 os.makedirs(workspace_dir, exist_ok=True)
                 abs_workspace = os.path.abspath(workspace_dir)
 

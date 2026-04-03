@@ -1,7 +1,9 @@
 import glob
+import io
 import logging
 import multiprocessing
 import os
+import sys
 import threading
 import time
 import psutil
@@ -70,6 +72,12 @@ class DownloadCapture:
 
 class RealTimeHFDownloadTask(BackgroundTask):
     def _execute(self):
+
+        if sys.stdout is None:
+            sys.stdout = io.StringIO()
+        if sys.stderr is None:
+            sys.stderr = io.StringIO()
+
         setup_global_network_env()
         repo_id = self.kwargs.get("repo_id")
 

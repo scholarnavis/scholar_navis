@@ -1,3 +1,4 @@
+import glob
 import os
 import sys
 import shutil
@@ -88,10 +89,10 @@ def build_app():
 
     print(f"\n[1/4] Preparing PyInstaller Build for {__app_name__} v{__version__} on Windows...")
 
-    for d in [dist_dir, build_dir]:
-        if os.path.exists(d):
-            shutil.rmtree(d)
+    if os.path.exists(dist_dir):
+        shutil.rmtree(dist_dir)
 
+    os.makedirs(build_dir, exist_ok=True)
 
     hook_file = "torch_runtime_hook.py"
     with open(hook_file, "w", encoding="utf-8") as f:
@@ -110,7 +111,7 @@ def build_app():
 
     packages_to_collect = [
         "optimum", "transformers", "onnxruntime", "tokenizers",
-        "chromadb"
+        "chromadb", "anyio"
     ]
 
     data_to_collect = ["docx","litellm"]
@@ -119,8 +120,35 @@ def build_app():
         "torch",
         "torch.autograd",
         "safetensors",
-        "huggingface_hub"
+        "huggingface_hub",
+        "ssl",
+        "_ssl"
     ]
+
+    ssl_search_paths = [
+        sys.prefix,  # venv 根目录
+        os.path.join(sys.prefix, "DLLs"),  # venv DLLs
+        os.path.join(sys.prefix, "Scripts"),  # venv Scripts
+        sys.base_prefix,  # uv 底层基础 Python 根目录
+        os.path.join(sys.base_prefix, "DLLs"),  # uv 底层基础 Python DLLs
+        os.path.join(sys.base_prefix, "Scripts"),  # uv 底层基础 Python Scripts
+    ]
+
+    ssl_dlls_found = False
+    for path in set(ssl_search_paths):  # 用 set 去重
+        if not os.path.exists(path):
+            continue
+        dlls = glob.glob(os.path.join(path, "libcrypto*.dll")) + \
+               glob.glob(os.path.join(path, "libssl*.dll"))
+        for dll in dlls:
+            cmd.append(f"--add-binary={dll};.")
+            ssl_dlls_found = True
+
+    if not ssl_dlls_found:
+        print("\n[!] Warning: OpenSSL dynamic-link libraries (libcrypto/libssl) were not detected within the uv Python environment. Please verify the environment configuration should runtime errors occur.\n")
+    else:
+        print("\n[*] The OpenSSL DLLs have been successfully identified and integrated.")
+
 
     for pkg in packages_to_collect:
         cmd.extend(["--collect-all", pkg])

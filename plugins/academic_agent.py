@@ -11,23 +11,12 @@ from typing import Literal
 
 from Bio import Entrez
 
+from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.email_check import verify_email_robust
 from src.core.network_worker import setup_global_network_env, create_robust_session, GlobalRateLimiter, global_rate_limiter
 from src.core.oa import OAFetcher
 from src.task.s2_task import s2_request, is_s2_enabled
-
-
-def get_app_root():
-    if getattr(sys, 'frozen', False) or '__compiled__' in globals():
-        return os.path.dirname(sys.executable)
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-
-
-APP_ROOT = get_app_root()
-
-
 
 
 class UdpJsonHandler(logging.Handler):
@@ -117,7 +106,7 @@ if s2_api_key: logger.info("Using S2 API Key.")
 if github_token: logger.info("Using GitHub Token.")
 
 
-WORKSPACE_DIR = os.path.join(APP_ROOT, 'tools',"mcp")
+WORKSPACE_DIR = os.path.join(BASE_DIR, 'tools',"mcp")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 logger.info(f"Local Workspace initialized at: {WORKSPACE_DIR}")
 

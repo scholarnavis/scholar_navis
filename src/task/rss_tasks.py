@@ -7,6 +7,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
+from src.core import BASE_DIR
 from src.core.core_task import BackgroundTask
 from src.core.network_worker import create_robust_session
 
@@ -30,7 +31,7 @@ class FetchRSSTask(BackgroundTask):
         _setup_worker_env()
 
         feeds = self.kwargs.get('feeds', [])
-        save_path = self.kwargs.get('save_path', 'scholar_workspace/rss_cache.json')
+        save_path = self.kwargs.get('save_path', os.path.join(BASE_DIR,'rss',"rss_cache.json"))
 
         if not feeds:
             self.send_log("WARNING", "No RSS feeds provided.")

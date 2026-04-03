@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QAbstractItemView, QHeaderView,
                                QTableWidgetItem, QCheckBox, QApplication, QFrame, QFileDialog)
 
+from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
@@ -1248,7 +1249,7 @@ class SettingsTool(BaseTool):
         )
 
     def _open_hf_cache(self):
-        model_dir = os.path.join(self.config.BASE_DIR, "models")
+        model_dir = os.path.join(BASE_DIR, "models")
         os.makedirs(model_dir, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
 
@@ -2419,7 +2420,7 @@ class SettingsTool(BaseTool):
                 if cfg.get("type") == "SKILL":
                     active_skill_names.add(name)
                     if "_pending_bytes" in cfg:
-                        workspace_dir = os.path.join(self.config.BASE_DIR, 'tools', 'skill')
+                        workspace_dir = os.path.join(BASE_DIR, 'tools', 'skill')
                         os.makedirs(workspace_dir, exist_ok=True)
                         target_path = os.path.join(workspace_dir, f"{name}.enc")
                         try:
