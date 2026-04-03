@@ -95,9 +95,9 @@ class OAFetcher:
             openalex_api_key = os.environ.get("OPENALEX_API_KEY", "")
 
             openalex_rps = 9 if openalex_api_key else 2
-            global_rate_limiter.acquire("openalex", rps=openalex_rps)
 
             try:
+                global_rate_limiter.acquire("openalex", rps=openalex_rps)
                 url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
                 if openalex_api_key:
                     url += f"?api_key={openalex_api_key}"
@@ -118,9 +118,9 @@ class OAFetcher:
         # Unpaywall
         if source in ["auto", "unpaywall"]:
             self.logger.debug("Querying Unpaywall...")
-            global_rate_limiter.acquire("unpaywall", rps=2)
 
             try:
+                global_rate_limiter.acquire("unpaywall", rps=2)
                 res = request_func(f"https://api.unpaywall.org/v2/{encoded}?email={user_email}", timeout=15)
                 if res.status_code == 200:
                     data = res.json()
@@ -151,9 +151,9 @@ class OAFetcher:
             self.logger.debug("Querying PMC API...")
 
             ncbi_rps = 9 if ncbi_api_key else 4
-            global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
 
             try:
+                global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
                 idconv_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={encoded}&format=json&email={user_email}"
                 if ncbi_api_key:
                     idconv_url += f"&api_key={ncbi_api_key}"
@@ -193,15 +193,16 @@ class OAFetcher:
         if source in ["auto", "semantic_scholar"]:
             from src.task.s2_task import is_s2_enabled, s2_request
 
-            if is_s2_enabled():
-                self.logger.debug("Querying Semantic Scholar...")
+            try:
+                if is_s2_enabled():
+                    self.logger.debug("Querying Semantic Scholar...")
 
-                config_mgr = ConfigManager()
-                s2_rate_str = config_mgr.user_settings.get("s2_rate_limit") or os.environ.get("S2_RATE_LIMIT") or "1.0"
-                s2_rate = float(s2_rate_str)
-                global_rate_limiter.acquire("s2", rps=s2_rate)
+                    config_mgr = ConfigManager()
+                    s2_rate_str = config_mgr.user_settings.get("s2_rate_limit") or os.environ.get(
+                        "S2_RATE_LIMIT") or "1.0"
+                    s2_rate = float(s2_rate_str)
+                    global_rate_limiter.acquire("s2", rps=s2_rate)
 
-                try:
                     res = s2_request("GET",
                                      f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}?fields=isOpenAccess,openAccessPdf")
 
@@ -230,8 +231,11 @@ class OAFetcher:
                             self.logger.info(f"OA PDF found via Semantic Scholar: {pdf_url}")
                             return {"is_oa": True, "pdf_url": pdf_url, "landing_page_url": landing_url,
                                     "source": "Semantic Scholar"}
-                except Exception as e:
-                    self.logger.warning(f"Semantic Scholar query failed: {e}")
+                else:
+                    self.logger.debug("S2 OA skipped: S2 not enabled")
+
+            except Exception as e:
+                self.logger.warning(f"Semantic Scholar check/query failed: {repr(e)}")
             else:
                 self.logger.debug("S2 OA skipped: S2 not enabled")
         self.logger.info(f"No Open Access PDF found (Tested source: {source}).")

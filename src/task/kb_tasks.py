@@ -497,8 +497,11 @@ class ExportKBTask(BackgroundTask):
                         raise InterruptedError("Export task was safely terminated by the user.")
                     if file.endswith('.lock') or file.endswith('.tmp'): continue
 
-        self.send_log("INFO", f"Export successful: {dest_path}")
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, src_dir)
+                    zipf.write(file_path, arcname)
 
+        self.send_log("INFO", f"Export successful: {dest_path}")
 
 class ImportExternalKBTask(BackgroundTask):
     def _execute(self):

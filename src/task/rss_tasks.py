@@ -43,10 +43,12 @@ class FetchRSSTask(BackgroundTask):
         results = {}
         try:
             from src.core.config_manager import ConfigManager
-            ConfigManager().save_json(save_path, results, encrypt=False)
-            self.send_log("INFO", f"Data persisted via ConfigManager to: {save_path}")
+            loaded_data = ConfigManager().load_json(save_path, encrypt=False)
+            if loaded_data and isinstance(loaded_data, dict):
+                results = loaded_data
+            self.send_log("INFO", f"Data loaded via ConfigManager from: {save_path}")
         except Exception as e:
-            self.send_log("ERROR", f"Failed to persist cache: {e}")
+            self.send_log("ERROR", f"Failed to load cache: {e}")
 
         results["_meta"] = {"last_fetched": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -57,8 +59,23 @@ class FetchRSSTask(BackgroundTask):
         self.send_log("INFO",
                       f"Starting multi-threaded synchronization of {total} feeds with automated OA full-text sniffing...")
 
+        self.update_progress(0, f"Connecting to {total} sources and fetching XML...")
+
         import threading
         cancel_event = threading.Event()
+
+        progress_lock = threading.Lock()
+        active_progress = {}
+
+        def _progress_cb(done, total_arts, fname):
+            with progress_lock:
+                active_progress[fname] = done / total_arts if total_arts > 0 else 1.0
+
+                fractional_sum = sum(active_progress.values())
+                current_pct = int(((completed_count + fractional_sum) / total) * 100) if total > 0 else 0
+
+                self.update_progress(min(current_pct, 100), f"[{fname}] Sniffing OA: {done}/{total_arts}...")
+
 
         def process_single_feed(feed):
             if cancel_event.is_set():
@@ -69,18 +86,20 @@ class FetchRSSTask(BackgroundTask):
             name = feed.get('name', 'Unknown')
             local_logs = []  # 建立局部日志缓冲队列
 
-            try:
-                session.headers[
-                    'User-Agent'] = 'Feedly/1.0 (+http://www.feedly.com/fetcher.html; like FeedFetcher-Google)'
+            current_pct = int((completed_count / total) * 100) if total > 0 else 0
+            self.update_progress(current_pct, f"Sniffing OA full-texts: {name}...")
 
+            try:
                 resp = session.get(url, timeout=15)
                 resp.raise_for_status()
 
                 # 静态调用并传入 cancel_event
-                articles = FetchRSSTask._parse_feed(resp.text, session, local_logs, cancel_event)
+                articles = FetchRSSTask._parse_feed(resp.text, session, local_logs, cancel_event,
+                                                    progress_cb=_progress_cb, feed_name=name)
                 oa_count = sum(1 for a in articles if a.get('pdf_url'))
                 return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count,
                         "logs": local_logs}
+
 
             except Exception as e:
                 err_msg = str(e)
@@ -94,8 +113,7 @@ class FetchRSSTask(BackgroundTask):
                     else:
                         err_msg = f"HTTP {status_code} | Server Reply: {body}"
                 else:
-                    err_msg = f"Network Error: {type(e).__name__} - Check your proxy/internet settings."
-
+                    err_msg = f"Network Error: {repr(e)} - Check your proxy/internet settings."
                 if not is_cf:
                     return {"success": False, "url": url, "name": name, "error": err_msg, "logs": local_logs}
 
@@ -110,7 +128,8 @@ class FetchRSSTask(BackgroundTask):
                     if data.get("status") != "ok":
                         raise ValueError("Proxy API returned error.")
 
-                    articles = FetchRSSTask._parse_proxy_json(data, local_logs, cancel_event)
+                    articles = FetchRSSTask._parse_proxy_json(data, local_logs, cancel_event, progress_cb=_progress_cb,
+                                                              feed_name=name)
                     oa_count = sum(1 for a in articles if a.get('pdf_url'))
                     return {"success": True, "url": url, "name": name, "articles": articles, "oa_count": oa_count,
                             "logs": local_logs}
@@ -134,19 +153,28 @@ class FetchRSSTask(BackgroundTask):
                 completed_count += 1
                 res = future.result()
 
+
+                with progress_lock:
+                    completed_count += 1
+                    if res and res.get("name") in active_progress:
+                        del active_progress[res["name"]]
+
+                    fractional_sum = sum(active_progress.values())
+                    current_pct = int(((completed_count + fractional_sum) / total) * 100) if total > 0 else 0
+
                 if res:
-                    # 主执行线程接管缓冲日志发射任务，确保线程亲和性
                     for level, msg in res.get("logs", []):
                         self.send_log(level, msg)
 
                     if res["success"]:
                         results[res["url"]] = res["articles"]
                         success_count += 1
-                        self.send_log("INFO", f"{res['name']}: Fetched {len(res['articles'])} articles ({res['oa_count']} OA papers found)")
+                        self.send_log("INFO",
+                                      f"{res['name']}: Fetched {len(res['articles'])} articles ({res['oa_count']} OA papers found)")
                     else:
                         self.send_log("ERROR", f"Failed to fetch {res['name']}: {res['error']}")
 
-                self.update_progress(int((completed_count / total) * 100), f"Syncing... {completed_count}/{total}")
+                self.update_progress(min(current_pct, 100), f"Syncing... {completed_count}/{total}")
         finally:
             cancel_event.set()
             executor.shutdown(wait=True)
@@ -165,7 +193,7 @@ class FetchRSSTask(BackgroundTask):
             pass
 
     @staticmethod
-    def _parse_feed(xml_string, base_session, local_logs, cancel_event):
+    def _parse_feed(xml_string, base_session, local_logs, cancel_event, progress_cb=None, feed_name=""):
         user_email = os.environ.get("NCBI_API_EMAIL", "")
 
         raw_articles = []
@@ -245,27 +273,31 @@ class FetchRSSTask(BackgroundTask):
                 oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, ncbi_api_key=ncbi_key)
 
                 if oa_result.get("is_oa"):
-                    pdf_url = oa_result["pdf_url"]
+                    pdf_url = oa_result.get("pdf_url", "")
                     if not landing_url:
-                        landing_url = oa_result["landing_page_url"]
+                        landing_url = oa_result.get("landing_page_url", "")
                 elif not landing_url and "landing_page_url" in oa_result:
-                    landing_url = oa_result["landing_page_url"]
+                    landing_url = oa_result.get("landing_page_url", "")
 
             article["pdf_url"] = pdf_url
             article["link"] = landing_url
             return article
 
         final_articles = []
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
-        try:
-            final_articles = list(executor.map(_detect_oa_for_article, raw_articles))
-        finally:
-            executor.shutdown(wait=True)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_art = {executor.submit(_detect_oa_for_article, a): a for a in raw_articles}
+            completed_arts = 0
+            total_arts = len(raw_articles)
+            for future in concurrent.futures.as_completed(future_to_art):
+                final_articles.append(future.result())
+                completed_arts += 1
+                if progress_cb:
+                    progress_cb(completed_arts, total_arts, feed_name)
 
         return final_articles
 
     @staticmethod
-    def _parse_proxy_json(json_data, local_logs, cancel_event):
+    def _parse_proxy_json(json_data, local_logs, cancel_event, progress_cb=None, feed_name=""):
         raw_articles = []
         try:
             for item in json_data.get('items', []):
@@ -310,10 +342,11 @@ class FetchRSSTask(BackgroundTask):
                 oa_result = fetcher.fetch_best_oa_pdf(doi, user_email, ncbi_api_key=ncbi_key)
 
                 if oa_result.get("is_oa"):
-                    pdf_url = oa_result["pdf_url"]
-                    if not landing_url: landing_url = oa_result["landing_page_url"]
+                    pdf_url = oa_result.get("pdf_url", "")
+                    if not landing_url:
+                        landing_url = oa_result.get("landing_page_url", "")
                 elif not landing_url and "landing_page_url" in oa_result:
-                    landing_url = oa_result["landing_page_url"]
+                    landing_url = oa_result.get("landing_page_url", "")
 
             article["pdf_url"] = pdf_url
             article["link"] = landing_url
@@ -321,8 +354,16 @@ class FetchRSSTask(BackgroundTask):
 
         import concurrent.futures
 
+        final_articles = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            final_articles = list(executor.map(_detect_oa_for_article, raw_articles))
+            future_to_art = {executor.submit(_detect_oa_for_article, a): a for a in raw_articles}
+            completed_arts = 0
+            total_arts = len(raw_articles)
+            for future in concurrent.futures.as_completed(future_to_art):
+                final_articles.append(future.result())
+                completed_arts += 1
+                if progress_cb:
+                    progress_cb(completed_arts, total_arts, feed_name)
 
         return final_articles
 

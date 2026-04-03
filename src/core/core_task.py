@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import queue
-import signal
 import subprocess
 import sys
 import time
@@ -197,12 +196,17 @@ class TaskManager(QObject):
             self.worker = RunnerProcess(task_class, task_id, self.task_queue, kwargs)
 
         try:
-            self.worker.start()
+            if mode == TaskMode.PROCESS:
+                import threading
+                threading.Thread(target=self.worker.start, daemon=True).start()
+            else:
+                self.worker.start()
+
             self._queue_timer.start()
         except Exception as e:
             self.logger.error(f"Spawn FAILED: {e}")
             self.sig_state_changed.emit(TaskState.FAILED.value, f"Spawn FAILED: {e}")
-
+        # --- 修改结束 ---
 
 
     def _poll_queue(self):
