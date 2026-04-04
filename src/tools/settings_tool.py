@@ -2437,25 +2437,25 @@ class SettingsTool(BaseTool):
                 else:
                     new_mcp_servers[name] = cfg
 
-                old_skills = self.config.mcp_servers.get("external_skills", {})
-                import shutil
-                for old_name, old_cfg in old_skills.items():
-                    if old_name not in active_skill_names:
-                        old_path = old_cfg.get("command", "")
-                        if old_path and "tools" in old_path and "skill" in old_path:
-                            try:
-                                if os.path.exists(old_path):
-                                    os.remove(old_path)
-                                skill_workspace = os.path.join(self.config.BASE_DIR, 'tools', 'skill',
-                                                               f"{old_name}_workspace")
-                                if os.path.exists(skill_workspace) and os.path.isdir(skill_workspace):
-                                    shutil.rmtree(skill_workspace)
-                            except Exception as e:
-                                self.logger.warning(f"Failed to properly clean up deleted skill for '{old_name}': {e}")
+            old_skills = self.config.mcp_servers.get("external_skills", {})
+            import shutil
+            for old_name, old_cfg in old_skills.items():
+                if old_name not in active_skill_names:
+                    old_path = old_cfg.get("command", "")
+                    if old_path and "tools" in old_path and "skill" in old_path:
+                        try:
+                            if os.path.exists(old_path):
+                                os.remove(old_path)
+                            skill_workspace = os.path.join(self.config.BASE_DIR, 'tools', 'skill',
+                                                           f"{old_name}_workspace")
+                            if os.path.exists(skill_workspace) and os.path.isdir(skill_workspace):
+                                shutil.rmtree(skill_workspace)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to properly clean up deleted skill for '{old_name}': {e}")
 
-                self.config.mcp_servers["mcpServers"] = new_mcp_servers
-                self.config.mcp_servers["external_skills"] = new_external_skills
-                self.config.save_mcp_servers()
+            self.config.mcp_servers["mcpServers"] = new_mcp_servers
+            self.config.mcp_servers["external_skills"] = new_external_skills
+            self.config.save_mcp_servers()
 
         new_key = self.input_ncbi_api_key.text().strip()
         new_openalex_key = self.input_openalex_api_key.text().strip()
