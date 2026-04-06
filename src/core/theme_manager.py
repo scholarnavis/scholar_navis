@@ -106,6 +106,10 @@ class ThemeManager(QObject):
 
     def set_theme(self, theme_name: str):
         theme_name = theme_name.lower()
+
+        if theme_name == "auto":
+            theme_name = self._get_system_theme()
+
         if theme_name in self.themes and self.current_theme != theme_name:
             self.current_theme = theme_name
             self.theme_changed.emit()

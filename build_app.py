@@ -105,16 +105,15 @@ def build_app():
         "--onedir",
         "--windowed",
         f"--name={app_name_safe}",
-        f"--runtime-hook={hook_file}",  # 注入 Hook
+        f"--runtime-hook={hook_file}",
     ]
 
-
     packages_to_collect = [
-        "optimum", "transformers", "onnxruntime", "tokenizers",
+        "optimum", "transformers", "onnxruntime", "onnx", "tokenizers",
         "chromadb", "anyio"
     ]
 
-    data_to_collect = ["docx","litellm"]
+    data_to_collect = ["docx", "litellm"]
 
     hidden_imports = [
         "torch",
@@ -165,6 +164,9 @@ def build_app():
     cmd.extend(["--copy-metadata", "regex"])
     cmd.extend(["--copy-metadata", "torch"])
     cmd.extend(["--copy-metadata", "tiktoken"])
+    cmd.extend(["--copy-metadata", "onnx"])
+    cmd.extend(["--copy-metadata", "onnxruntime"])
+    cmd.extend(["--copy-metadata", "optimum"])
 
     cmd.append("--add-data=Assets;Assets")
 

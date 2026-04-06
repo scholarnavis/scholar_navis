@@ -122,22 +122,32 @@ class DeviceManager:
 
         sys_name = platform.system()
 
+        # 解绑 WMI 索引，修正笔记本 DXGI/CUDA 真实序号映射
+        cuda_idx = 0
+        is_hybrid = len(gpu_info_list) > 1 # 判断是否为双显卡环境
+
         for i, gpu_dict in enumerate(gpu_info_list):
             gpu_name = gpu_dict.get("name", "Unknown GPU")
             gpu_lower = gpu_name.lower()
 
             if "nvidia" in gpu_lower:
                 if has_cuda:
-                    devices.append({"id": f"cuda:{i}", "name": f"{gpu_name} (CUDA Accelerated)"})
+                    # CUDA 环境下，NVIDIA 独显永远从 0 开始算
+                    devices.append({"id": f"cuda:{cuda_idx}", "name": f"{gpu_name} (CUDA Accelerated)"})
+                    cuda_idx += 1
                 elif sys_name == "Windows" and has_dml:
-                    devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML Fallback)"})
+                    # DirectML 环境下，双显卡笔记本的独显大概率被 DXGI 分配在 Adapter 1
+                    target_id = 1 if is_hybrid else 0
+                    devices.append({"id": f"dml:{target_id}", "name": f"{gpu_name} (DirectML Fallback)"})
                 else:
                     devices.append({"id": f"unsupported_{i}", "name": f"{gpu_name} (Needs 'onnxruntime-gpu')"})
 
             elif "amd" in gpu_lower or "radeon" in gpu_lower:
                 if sys_name == "Windows":
                     if has_dml:
-                        devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML)"})
+                        # 启发式判断：若是双显卡且包含英伟达，AMD就是核显(0)，否则为独显
+                        target_id = 0 if is_hybrid and any("nvidia" in g.get("name", "").lower() for g in gpu_info_list) else (1 if is_hybrid else 0)
+                        devices.append({"id": f"dml:{target_id}", "name": f"{gpu_name} (DirectML)"})
                     else:
                         devices.append({"id": f"unsupported_{i}", "name": f"{gpu_name} (Needs 'onnxruntime-directml')"})
                 elif sys_name == "Linux":
@@ -152,7 +162,8 @@ class DeviceManager:
 
             elif "intel" in gpu_lower or "uhd" in gpu_lower or "iris" in gpu_lower:
                 if sys_name == "Windows" and has_dml:
-                    devices.append({"id": f"dml:{i}", "name": f"{gpu_name} (DirectML)"})
+                    # Intel 核显在 DXGI 中永远是 Adapter 0
+                    devices.append({"id": "dml:0", "name": f"{gpu_name} (DirectML)"})
                 else:
                     devices.append({"id": f"unsupported_{i}", "name": f"{gpu_name} (Needs DirectML or OpenVINO)"})
 
@@ -203,9 +214,15 @@ class DeviceManager:
     def get_optimal_device(self):
         providers = self.get_onnx_providers()
         if "CUDAExecutionProvider" in providers: return "cuda:0"
-        if "DmlExecutionProvider" in providers: return "dml:0"
+
+        if "DmlExecutionProvider" in providers:
+            if len(self.get_gpu_info()) > 1:
+                return "dml:1"
+            return "dml:0"
+
         if "CoreMLExecutionProvider" in providers: return "coreml"
         return "cpu"
+
 
     def parse_device_string(self, setting_str):
         if not setting_str or setting_str.lower() == "auto":

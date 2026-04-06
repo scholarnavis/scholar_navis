@@ -2475,10 +2475,9 @@ class SettingsTool(BaseTool):
         new_proxy_url = self.input_proxy.text().strip()
 
         new_theme = self.combo_theme.currentText().lower()
-        if new_theme == "auto": new_theme = "dark"
 
-        ThemeManager().set_theme(new_theme)
         qdarktheme.setup_theme(new_theme)
+        ThemeManager().set_theme(new_theme)
 
         try:
             api_port = int(self.input_api_port.text().strip())
