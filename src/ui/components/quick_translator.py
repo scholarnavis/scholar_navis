@@ -76,6 +76,11 @@ class QuickTranslatorWindow(QWidget):
         # UI相关
         self.current_out_text = ""
 
+        self._is_render_dirty = False
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(50)
+        self._render_timer.timeout.connect(self._throttled_render)
+
         # 设置UI
         self._setup_ui()
         self._update_pin_ui()
@@ -288,29 +293,45 @@ class QuickTranslatorWindow(QWidget):
             llm_config=trans_config
         )
 
-
     def _stop_translation(self):
-        """停止翻译任务"""
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setText("Stopping...")
+
         if self.translator_manager.is_running():
             self.translator_manager.cancel_translation()
-        self.output_box.append("<br><span style='color:#e6a23c;'><b>[Stopped by User]</b></span>")
-        self._reset_buttons()
 
-
+        if hasattr(self, '_render_timer'):
+            self._render_timer.stop()
 
     def _on_token(self, token: str):
         """处理接收到的token"""
         self.current_out_text += token
+        self._is_render_dirty = True
+
+        # 如果定时器没跑，就启动它
+        if not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def _throttled_render(self):
+        """实际执行渲染的函数，由定时器触发"""
+        if not self._is_render_dirty:
+            self._render_timer.stop()
+            return
+
         clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
 
         if self.chk_markdown.isChecked():
             html = TextFormatter.markdown_to_html(clean_text)
             self.output_box.setHtml(html)
         else:
-            self.output_box.setHtml(clean_text.replace('\n', '<br>'))
+            # 非 Markdown 模式下，直接替换换行符比 setHtml 快得多
+            self.output_box.setPlainText(clean_text)
 
         # 自动滚动到底部
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
+
+        # 重置标记
+        self._is_render_dirty = False
 
     def _on_translation_finished(self, result: dict = None):
         """翻译完成回调"""

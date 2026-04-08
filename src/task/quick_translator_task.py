@@ -64,13 +64,18 @@ class TranslatorTask(BackgroundTask):
 
             kwargs = {"is_translation": True}
 
+            buffer = ""
             for token in self.llm.stream_chat(messages, **kwargs):
                 if self.is_cancelled():
-                    return {"success": False, "msg": "Translation cancelled by user"}
+                    return {"success": False, "msg": "Cancelled"}
 
-                self._full_result += token
-                self._send_token(token)
-                self._token_count += 1
+                buffer += token
+                if len(buffer) > 5 or "\n" in token:
+                    self._send_token(buffer)
+                    buffer = ""
+
+            if buffer:
+                self._send_token(buffer)
 
             # 缓存结果
             if self._full_result:

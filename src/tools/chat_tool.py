@@ -972,7 +972,6 @@ class ChatTool(BaseTool):
         if not path:
             return
 
-        # 如果你手滑忘记打后缀，咱们自动帮你补上喵
         if not path.endswith(default_ext):
             path += default_ext
 
@@ -1449,23 +1448,16 @@ class ChatTool(BaseTool):
 
         self.input_container.btn_stop.setEnabled(False)
         self.input_container.btn_stop.setText("Stopping...")
-        self.input_container.btn_stop.setToolTip("Waiting for background resources to safely release...")
+
+        if hasattr(self, '_render_timer'):
+            self._render_timer.stop()
+            self._is_rendering_dirty = False
 
         if getattr(self, 'chat_task_mgr', None):
             self.chat_task_mgr.cancel_task()
 
-        if hasattr(self, '_render_timer'): self._render_timer.stop()
-        self.set_controls_enabled(True)
-
-        if self.current_ai_bubble and self.current_ai_bubble.is_loading:
-            self.current_ai_bubble.set_loading(False)
-
-        tm = ThemeManager()
-        self.current_ai_text += f"\n\n<div style='color:{tm.color('warning')}; font-weight:bold;'>[Generation Cancelling... Please wait]</div>"
-
         if self.current_ai_bubble:
-            idx = getattr(self.current_ai_bubble, 'index', -1)
-            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
+            self.current_ai_bubble.set_loading(False)
 
         self.logger.info("AI generation cancellation requested by user. Task manager is gracefully terminating.")
         self.scroll_to_bottom()
