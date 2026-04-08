@@ -948,6 +948,125 @@ class ChatGenerationTask(BackgroundTask):
             return docs[:top_k]
 
 
+
+class ExportChatTask(BackgroundTask):
+    """
+    后台任务：异步导出聊天记录（支持 PDF, MD, TXT, CSV）
+    """
+    def _execute(self):
+        history = self.kwargs.get('history', [])
+        path = self.kwargs.get('path')
+        export_fmt = self.kwargs.get('export_fmt')
+        colors = self.kwargs.get('colors', {})
+        font_family = self.kwargs.get('font_family', 'sans-serif')
+        user_icon = self.kwargs.get('user_icon', '')
+        ai_icon = self.kwargs.get('ai_icon', '')
+
+        import datetime
+        import csv
+        from src.ui.components.text_formatter import TextFormatter
+
+        # 过滤掉被标记为 interrupted 或 error 的历史消息
+        clean_history = [m for m in history if m.get("status") not in ["interrupted", "error"]]
+
+        if not clean_history:
+            return {"success": False, "msg": "No valid chat records to export after filtering interrupted/error messages."}
+
+        try:
+            if export_fmt == ".pdf":
+                from PySide6.QtGui import QPdfWriter, QTextDocument, QPageSize
+                from PySide6.QtCore import QMarginsF
+
+                doc = QTextDocument()
+                date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                doc.setDefaultStyleSheet(f"""
+                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
+                    h1, h2, h3 {{ color: {colors.get('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
+                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
+                    .header-user {{ color: {colors.get('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .header-ai {{ color: {colors.get('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .content {{ margin-top: 5px; }}
+                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
+                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
+                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
+                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
+                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
+                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
+                    th {{ background-color: #f6f8fa; font-weight: bold; }}
+                    .doc-header {{ text-align: center; border-bottom: 2px solid {colors.get('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
+                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {colors.get('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
+                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
+                """)
+
+                html = f"<html><body><div class='doc-header'><div class='doc-title'>Scholar Navis - Analysis Report</div><div class='doc-meta'>Generated on: {date_str} | Document Type: Academic Chat Log</div></div>"
+
+                for msg in clean_history:
+                    is_user = (msg['role'] == "user")
+                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                    rendered_html = TextFormatter.markdown_to_html(clean_content)
+
+                    if is_user:
+                        header = f"<div class='header-user'><img src='{user_icon}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
+                    else:
+                        header = f"<div class='header-ai'><img src='{ai_icon}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
+
+                    html += f"<div class='msg-box'>{header}<div class='content'>{rendered_html}</div></div>"
+
+                html += "</body></html>"
+                doc.setHtml(html)
+
+                writer = QPdfWriter(path)
+                writer.setPageSize(QPageSize(QPageSize.A4))
+                writer.setPageMargins(QMarginsF(15, 20, 15, 20))
+                writer.setResolution(300)
+                doc.print_(writer)
+
+            elif export_fmt == ".md":
+                md_lines = [
+                    "# Scholar Navis - Analysis Report\n\n",
+                    f"> **Generated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n",
+                    "---\n\n"
+                ]
+                for msg in clean_history:
+                    role = "🧑‍💻 User Inquiry" if msg['role'] == "user" else "🤖 AI Analysis"
+                    content = TextFormatter.clean_text_for_export(msg['content'])
+                    md_lines.append(f"### {role}\n\n{content}\n\n---\n\n")
+
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("".join(md_lines))
+
+            elif export_fmt == ".txt":
+                txt_lines = [
+                    "================ SCHOLAR NAVIS ACADEMIC REPORT ================",
+                    f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "===============================================================\n\n"
+                ]
+                for msg in clean_history:
+                    role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
+                    content = TextFormatter.clean_text_for_export(msg['content'])
+                    content = TextFormatter.markdown_to_plain_text(content)
+                    txt_lines.append(f"[{role}]")
+                    txt_lines.append(content)
+                    txt_lines.append(f"\n{'-' * 70}\n")
+
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(txt_lines))
+
+            elif export_fmt == ".csv":
+                with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Role", "Content"])
+                    for msg in clean_history:
+                        content = TextFormatter.clean_text_for_export(msg['content'])
+                        writer.writerow(["User" if msg['role'] == 'user' else "AI", content])
+
+            return {"success": True, "path": path}
+        except Exception as e:
+            self.send_log("ERROR", f"Export task failed: {str(e)}")
+            return {"success": False, "msg": str(e)}
+
+
 class DownloadImageTask(BackgroundTask):
     """
     异步图片下载任务。

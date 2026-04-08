@@ -731,6 +731,7 @@ class ChatTool(BaseTool):
         self.btn_scroll_bottom.setVisible(False)
         self.fade_anim = QPropertyAnimation(self.opacity_effect, b"opacity")
         self.fade_anim.setDuration(250)
+        self.fade_anim.finished.connect(self._on_fade_anim_finished)
         self.scroll_anim = QPropertyAnimation(self.scroll_area.verticalScrollBar(), b"value")
         self.scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.btn_scroll_bottom.clicked.connect(lambda: self.scroll_to_bottom(smooth=True))
@@ -943,8 +944,8 @@ class ChatTool(BaseTool):
             QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
         """)
 
-        # 使用 theme_manager 里的图标喵
         act_pdf = menu.addAction(tm.icon("article", "text_main"), "Export as PDF")
+        act_md = menu.addAction(tm.icon("markdown", "text_main"), "Export as MD")
         act_txt = menu.addAction(tm.icon("file-text", "text_main"), "Export as TXT")
         act_csv = menu.addAction(tm.icon("table", "text_main"), "Export as CSV")
 
@@ -955,14 +956,13 @@ class ChatTool(BaseTool):
 
         # 根据选择设置后缀和过滤条件
         if action == act_pdf:
-            filter_str = "PDF Document (*.pdf)"
-            default_ext = ".pdf"
+            filter_str, default_ext = "PDF Document (*.pdf)", ".pdf"
+        elif action == act_md:
+            filter_str, default_ext = "Markdown File (*.md)", ".md"
         elif action == act_txt:
-            filter_str = "Text File (*.txt)"
-            default_ext = ".txt"
+            filter_str, default_ext = "Text File (*.txt)", ".txt"
         else:
-            filter_str = "CSV Data (*.csv)"
-            default_ext = ".csv"
+            filter_str, default_ext = "CSV Data (*.csv)", ".csv"
 
         # 弹出系统保存对话框
         path, _ = QFileDialog.getSaveFileName(
@@ -975,117 +975,67 @@ class ChatTool(BaseTool):
         if not path.endswith(default_ext):
             path += default_ext
 
-        try:
-            font_family = tm.font_family()
+        def _get_colored_svg_base64(icon_name, color_hex):
+            svg_path = tm.get_resource_path("assets", "icons", f"{icon_name}.svg")
+            try:
+                with open(svg_path, "r", encoding="utf-8") as f:
+                    svg_content = f.read()
+                if "<svg" in svg_content:
+                    svg_content = re.sub(r'<svg', f'<svg fill="{color_hex}"', svg_content, count=1)
+                encoded = base64.b64encode(svg_content.encode('utf-8')).decode('utf-8')
+                return f"data:image/svg+xml;base64,{encoded}"
+            except Exception:
+                return ""
 
-            if path.endswith(".pdf"):
-                doc = QTextDocument()
-                date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        colors = {
+            'title_blue': tm.color('title_blue'),
+            'academic_blue': tm.color('academic_blue'),
+            'success': tm.color('success')
+        }
 
-                doc.setDefaultStyleSheet(f"""
-                                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
-                                    h1, h2, h3 {{ color: {tm.color('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
-                                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
-                                    .header-user {{ color: {tm.color('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                                    .header-ai {{ color: {tm.color('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                                    .content {{ margin-top: 5px; }}
-                                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
-                                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
-                                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
-                                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
-                                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
-                                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
-                                    th {{ background-color: #f6f8fa; font-weight: bold; }}
-                                    .doc-header {{ text-align: center; border-bottom: 2px solid {tm.color('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
-                                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {tm.color('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
-                                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
-                                """)
+        user_icon_b64 = _get_colored_svg_base64("user", tm.color('academic_blue'))
+        ai_icon_b64 = _get_colored_svg_base64("ai_model", tm.color('success'))
 
-                def _get_colored_svg_base64(icon_name, color_hex):
-                    svg_path = tm.get_resource_path("assets", "icons", f"{icon_name}.svg")
-                    try:
-                        with open(svg_path, "r", encoding="utf-8") as f:
-                            svg_content = f.read()
-                        if "<svg" in svg_content:
-                            svg_content = re.sub(r'<svg', f'<svg fill="{color_hex}"', svg_content, count=1)
-                        encoded = base64.b64encode(svg_content.encode('utf-8')).decode('utf-8')
-                        return f"data:image/svg+xml;base64,{encoded}"
-                    except Exception:
-                        return ""
+        # 初始化后台导出任务并连接弹窗
+        from src.ui.components.dialog import ProgressDialog
+        self.export_pd = ProgressDialog(self.widget, "Exporting Chat", "Processing file in background...")
+        self.export_pd.show()
 
-                user_icon_b64 = _get_colored_svg_base64("user", tm.color('academic_blue'))
-                ai_icon_b64 = _get_colored_svg_base64("ai_model", tm.color('success'))
+        self.export_task_mgr = TaskManager()
+        self.export_task_mgr.sig_progress.connect(self.export_pd.update_progress)
+        self.export_task_mgr.sig_state_changed.connect(self._on_export_state_changed)
+        self.export_task_mgr.sig_result.connect(self._on_export_result)
 
-                html = f"""
-                <html><body>
-                <div class='doc-header'>
-                    <div class='doc-title'>Scholar Navis - Analysis Report</div>
-                    <div class='doc-meta'>Generated on: {date_str} | Document Type: Academic Chat Log</div>
-                </div>
-                """
+        from src.task.chat_tasks import ExportChatTask
+        self.export_task_mgr.start_task(
+            ExportChatTask,
+            task_id="export_chat",
+            mode=TaskMode.THREAD,
+            history=self.history,
+            path=path,
+            export_fmt=default_ext,
+            colors=colors,
+            font_family=tm.font_family(),
+            user_icon=user_icon_b64,
+            ai_icon=ai_icon_b64
+        )
 
-                for msg in self.history:
-                    is_user = (msg['role'] == "user")
-                    raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
-                                         flags=re.DOTALL | re.IGNORECASE)
-                    clean_content = TextFormatter.clean_text_for_export(raw_content)
-                    rendered_html = TextFormatter.markdown_to_html(clean_content)
+    def _on_export_state_changed(self, state, msg):
+        from src.core.core_task import TaskState
+        if state == TaskState.FAILED.value:
+            self.export_pd.show_finish_state(False, "Export Failed", str(msg))
 
-                    if is_user:
-                        header = f"<div class='header-user'><img src='{user_icon_b64}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
-                    else:
-                        header = f"<div class='header-ai'><img src='{ai_icon_b64}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
+    def _on_export_result(self, result):
+        if result and result.get("success"):
+            self.export_pd.show_finish_state(True, "Export Complete",
+                                             f"Saved to {os.path.basename(result.get('path', ''))}")
+            ToastManager().show(f"Document successfully exported.", "success")
+            self.logger.info(f"Chat history successfully exported to: {result.get('path')}")
+        else:
+            self.export_pd.show_finish_state(False, "Export Failed",
+                                             result.get("msg", "Unknown error") if result else "Unknown error")
+            self.logger.error(f"Failed to export document: {result.get('msg') if result else 'None'}")
 
-                    html += f"<div class='msg-box'>{header}<div class='content'>{rendered_html}</div></div>"
-
-                html += "</body></html>"
-                doc.setHtml(html)
-
-                writer = QPdfWriter(path)
-                writer.setPageSize(QPageSize(QPageSize.A4))
-                writer.setPageMargins(QMarginsF(15, 20, 15, 20))
-                writer.setResolution(300)
-                doc.print_(writer)
-
-
-            elif path.endswith(".txt"):
-                txt_lines = [
-                    "================ SCHOLAR NAVIS ACADEMIC REPORT ================",
-                    f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    "===============================================================\n\n"
-                ]
-                for msg in self.history:
-                    role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
-
-                    raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
-                                         flags=re.DOTALL | re.IGNORECASE)
-
-                    clean_content = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', raw_content).strip()
-
-                    txt_lines.append(f"[{role}]")
-                    txt_lines.append(clean_content)
-                    txt_lines.append(f"\n{'-' * 70}\n")
-
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write("\n".join(txt_lines))
-
-
-            elif path.endswith(".csv"):
-                with open(path, "w", encoding="utf-8-sig", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Role", "Content"])
-                    for msg in self.history:
-                        raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
-                                             flags=re.DOTALL | re.IGNORECASE)
-                        clean_content = TextFormatter.clean_text_for_export(raw_content)
-                        writer.writerow(["User" if msg['role'] == 'user' else "AI", clean_content])
-
-            ToastManager().show(f"Document successfully exported to: {os.path.basename(path)}", "success")
-            self.logger.info(f"Chat history successfully exported to: {path}")
-
-        except Exception as e:
-            ToastManager().show(f"Failed to export document: {str(e)}", "error")
-            self.logger.error(f"Failed to export document: {str(e)}")
 
     def clear_follow_up_shelf(self):
         while self.follow_up_shelf_layout.count() > 0:
@@ -1734,8 +1684,8 @@ class ChatTool(BaseTool):
 
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)
+            self.current_ai_bubble.is_interrupted = True
 
-            # 如果 AI 完全没有正常输出过内容，删掉它，换上错误气泡
             if not self.current_ai_text.strip():
                 self.chat_layout.removeWidget(self.current_ai_bubble)
                 self.current_ai_bubble.deleteLater()
@@ -1777,17 +1727,18 @@ class ChatTool(BaseTool):
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
 
-        # 检查是否是被主动中止的，履行“无论成功与否都要弹窗告知用户”的要求
-
         if is_cancelled:
+            if self.current_ai_bubble:
+                self.current_ai_bubble.is_interrupted = True
             StandardDialog(self.widget, "Task Cancelled", "The AI generation has been stopped by the user.",
                            show_cancel=False).exec()
             if hasattr(self, '_restore_last_input'):
                 self._restore_last_input()
-            self.history.append({"role": "assistant", "content": self.current_ai_text})
+
+            self.history.append({"role": "assistant", "content": self.current_ai_text, "status": "interrupted"})
             self.current_ai_bubble = None
             self.scroll_to_bottom()
-            return  # 提前返回，不再处理后续追问按钮逻辑
+            return
 
         try:
             self.input_container.btn_stop.clicked.disconnect()
@@ -2065,6 +2016,12 @@ class ChatTool(BaseTool):
                 if hasattr(self, 'db'): self.db.switch_kb(kb_id)
                 break
 
+    def _on_fade_anim_finished(self):
+        """动画结束时的统一处理逻辑，避免反复 connect/disconnect 产生警告"""
+        if self.fade_anim.endValue() == 0.0:
+            self.btn_scroll_bottom.hide()
+
+
     def _check_scroll_position(self):
         sb = self.scroll_area.verticalScrollBar()
         should_show = (sb.maximum() - sb.value() > 200)
@@ -2075,12 +2032,6 @@ class ChatTool(BaseTool):
             self.fade_anim.stop()
             self.fade_anim.setStartValue(self.opacity_effect.opacity())
             self.fade_anim.setEndValue(1.0)
-
-            try:
-                self.fade_anim.finished.disconnect()
-            except:
-                pass
-
             self.fade_anim.start()
 
         elif not should_show and self.btn_scroll_bottom.isVisible():
@@ -2088,13 +2039,6 @@ class ChatTool(BaseTool):
                 self.fade_anim.stop()
                 self.fade_anim.setStartValue(self.opacity_effect.opacity())
                 self.fade_anim.setEndValue(0.0)
-
-                try:
-                    self.fade_anim.finished.disconnect()
-                except:
-                    pass
-                self.fade_anim.finished.connect(self.btn_scroll_bottom.hide)
-
                 self.fade_anim.start()
 
     def _on_chat_progress(self, progress, msg):

@@ -41,6 +41,35 @@ class TextFormatter:
         return text
 
     @staticmethod
+    def markdown_to_plain_text(text):
+        """将 Markdown 转换为适合纯文本阅读的格式（例如去除加粗、格式化表格制表符）"""
+        # 去除 LaTeX 包装符
+        text = re.sub(r'\$\$(.*?)\$\$', r'\1', text, flags=re.DOTALL)
+        text = re.sub(r'\$(.*?)\$', r'\1', text)
+        # 去除标题符
+        text = re.sub(r'^#{1,6}\s*(.*)', r'\1', text, flags=re.MULTILINE)
+        # 去除加粗和斜体
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+        text = re.sub(r'\*(.*?)\*', r'\1', text)
+        # 去除链接，保留文本
+        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+
+        # 格式化表格
+        lines = text.split('\n')
+        clean_lines = []
+        for line in lines:
+            if re.match(r'^\s*\|?.*\|.*\|?\s*$', line):
+                if re.match(r'^\s*\|?[\s\-\:\|]+\|?\s*$', line):  # 跳过 Markdown 表格分隔线
+                    continue
+                # 按列拆分，并使用制表符对齐
+                row = [cell.strip() for cell in line.strip('| \t').split('|') if cell.strip() or cell == '']
+                clean_lines.append('\t'.join(row))
+            else:
+                clean_lines.append(line)
+        return '\n'.join(clean_lines)
+
+
+    @staticmethod
     def format_chat_text(text, index, expanded_indices, user_toggled_thinks):
         tm = ThemeManager()
         accent_color = tm.color('accent')
@@ -300,9 +329,11 @@ class TextFormatter:
         else:
             text = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
 
-        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[\s*FOLLOW[_-]?\s*UPS?\s*\]", "", text,
-                      flags=re.IGNORECASE)
+        # 全局清理不需要的运行标识与文字
+        text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[\s*FOLLOW[_-]?\s*UPS?\s*\]", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\[AI is reasoning in the background\.\.\.\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"Initializing\.\.\.", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"Reasoning & Tool Execution", "", text, flags=re.IGNORECASE)
 
         if include_citations and "<b>📚 Cited Sources:</b>" in text:
             parts = text.split("<b>📚 Cited Sources:</b><br>")

@@ -51,6 +51,7 @@ class ChatBubbleWidget(QWidget):
 
         self.is_editing = False
         self._can_edit = True
+        self.is_interrupted = False
 
         self.loading_timer = QTimer(self)
         self.loading_timer.timeout.connect(self._animate_loading)
@@ -693,34 +694,42 @@ class ChatBubbleWidget(QWidget):
         self.set_content(self.original_text)
 
     def copy_plain_text(self):
+        if self.msg_type == self.MSG_ERROR or getattr(self, 'is_interrupted', False):
+            ToastManager().show("Cannot copy interrupted or error messages.", "warning")
+            return
+
         clipboard = QGuiApplication.clipboard()
 
-        # QTextBrowser's toPlainText() automatically parses HTML structures like tables
-        # into tab-spaced formats, providing an optimized baseline plain-text representation.
         raw_text = self.lbl_text.toPlainText()
 
-        # Edge Case Mitigation 1: Remove potential dynamic UI artifacts (e.g., "Thinking...")
         if self.is_loading:
             raw_text = re.sub(r'^Thinking\.{0,3}\n*', '', raw_text)
 
-        # Edge Case Mitigation 2: Strip right-side trailing whitespaces per line to optimize
-        # spreadsheet pasting, while preserving the internal tab (\t) structures of tables.
+        raw_text = re.sub(r'Initializing\.\.\.', '', raw_text, flags=re.IGNORECASE)
+        raw_text = re.sub(r'Reasoning & Tool Execution', '', raw_text, flags=re.IGNORECASE)
+
         lines = [line.rstrip() for line in raw_text.splitlines()]
 
-        # Edge Case Mitigation 3: Normalize excessive vertical spacing caused by block-level HTML conversion.
         cleaned_text = '\n'.join(lines)
         cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
 
         clipboard.setText(cleaned_text)
         ToastManager().show("Plain text successfully copied to clipboard.", "success")
 
+
     def copy_markdown(self):
+        if self.msg_type == self.MSG_ERROR or getattr(self, 'is_interrupted', False):
+            ToastManager().show("Cannot copy interrupted or error messages.", "warning")
+            return
+
         clipboard = QGuiApplication.clipboard()
 
         raw_text = re.sub(r'<think>.*?</think>', '', self.original_text, flags=re.DOTALL | re.IGNORECASE)
         raw_text = re.sub(r'<mcp_process>.*?</mcp_process>', '', raw_text, flags=re.DOTALL | re.IGNORECASE)
 
         raw_text = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', raw_text)
+        raw_text = re.sub(r'Initializing\.\.\.', '', raw_text, flags=re.IGNORECASE)
+        raw_text = re.sub(r'Reasoning & Tool Execution', '', raw_text, flags=re.IGNORECASE)
 
         if "<br><hr style='border:0; height:1px;" in raw_text:
             raw_text = re.split(
