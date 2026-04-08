@@ -694,7 +694,7 @@ class ChatBubbleWidget(QWidget):
         self.set_content(self.original_text)
 
     def copy_plain_text(self):
-        if self.msg_type == self.MSG_ERROR or getattr(self, 'is_interrupted', False):
+        if  getattr(self, 'is_interrupted', False):
             ToastManager().show("Cannot copy interrupted or error messages.", "warning")
             return
 
@@ -718,7 +718,7 @@ class ChatBubbleWidget(QWidget):
 
 
     def copy_markdown(self):
-        if self.msg_type == self.MSG_ERROR or getattr(self, 'is_interrupted', False):
+        if  getattr(self, 'is_interrupted', False):
             ToastManager().show("Cannot copy interrupted or error messages.", "warning")
             return
 

@@ -2484,6 +2484,8 @@ class SettingsTool(BaseTool):
         except ValueError:
             api_port = 8000
 
+        new_theme = self.combo_theme.currentText()
+
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
@@ -2492,7 +2494,7 @@ class SettingsTool(BaseTool):
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
-            "theme": self.combo_theme.currentText(),
+            "theme": new_theme,
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
@@ -2509,6 +2511,10 @@ class SettingsTool(BaseTool):
             self.config.user_settings.pop(old_key, None)
 
         self.config.save_settings()
+
+        new_theme_lower = new_theme.lower()
+        qdarktheme.setup_theme(new_theme_lower)
+        ThemeManager().set_theme(new_theme_lower)
 
         if new_s2_key:
             os.environ["S2_API_KEY"] = new_s2_key

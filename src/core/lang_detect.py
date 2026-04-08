@@ -10,6 +10,11 @@ def detect_primary_language(text):
     if not text.strip():
         return "unknown"
 
+    # 纯 ASCII (英文/数字/符号) 快速检测，防止短句 (如 "Generate an image") 被 langdetect 误判
+    if re.match(r'^[\x00-\x7F]+$', text.strip()):
+        if re.search(r'[a-zA-Z]', text):
+            return 'en'
+
     # 匹配 CJK (中日韩) 统一表意文字
     chinese_chars = re.findall(r'[\u4e00-\u9fff]', text)
 
