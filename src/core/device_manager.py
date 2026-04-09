@@ -1,7 +1,6 @@
 import platform
 import subprocess
 import logging
-import psutil
 import sys
 
 
@@ -178,6 +177,7 @@ class DeviceManager:
         return unique_devices
 
     def get_sys_info(self):
+        import psutil
         info = {}
         info['os'] = platform.platform()
         info['python_ver'] = sys.version.split()[0]

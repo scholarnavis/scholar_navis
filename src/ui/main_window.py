@@ -3,17 +3,14 @@ import os
 import sys
 
 from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QSettings
-from PySide6.QtGui import QShortcut, QKeySequence, QIcon
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem,
                                QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.core_task import TaskManager, TaskMode
-from src.core.mcp_manager import MCPManager
 from src.core.theme_manager import ThemeManager
-from src.task.common_task import VerifyModelsTask
 from src.tools.about_tool import AboutTool
 from src.tools.chat_tool import ChatTool
 from src.tools.import_tool import ImportTool

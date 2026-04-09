@@ -1,23 +1,17 @@
-import gc
-import json
-import os
 import base64
+import json
 import mimetypes
+import os
 import re
-import sys
 import time
 import uuid
-import multiprocessing as mp
-import queue as q
 from urllib.parse import quote
 
 import chardet
 
-
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
-from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
 
@@ -161,6 +155,7 @@ class ChatGenerationTask(BackgroundTask):
         if hasattr(self, 'vision_llm') and self.vision_llm: self.vision_llm.cancel()
 
     def _init_llms(self):
+        from src.core.llm_impl import OpenAICompatibleLLM
         if self.main_config and not getattr(self, 'main_llm', None):
             cfg = self.main_config.copy()
             if "tools" not in cfg:
@@ -185,6 +180,8 @@ class ChatGenerationTask(BackgroundTask):
         self._emit_state(TaskState.PROCESSING, -1, "", payload={"event": "translated", "text": text})
 
     def _execute(self):
+        from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
+
         self.send_log("INFO", f"Chat task started. KB_ID: {self.kwargs.get('kb_id')}")
         time.sleep(0.1)
 

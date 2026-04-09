@@ -323,7 +323,7 @@ def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False):
     from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
     from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
-    # [修改] 根据 onnx_files_available 标志位决定下载策略
+    # 根据 onnx_files_available 标志位决定下载策略
     if onnx_files_available:
         logger.info("Remote ONNX detected. Downloading optimized fileset (skipping large weights).")
         # 使用 ignore_patterns 过滤掉大权重文件，只下载 ONNX 和配置文件

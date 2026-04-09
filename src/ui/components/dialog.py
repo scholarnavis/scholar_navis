@@ -3,9 +3,7 @@ import os
 import re
 import sys
 import time
-
 import psutil
-import torch
 from PySide6.QtCore import Qt, Signal, QTimer, QRegularExpression
 from PySide6.QtGui import QColor, QRegularExpressionValidator, QGuiApplication, QTextCharFormat, QSyntaxHighlighter, \
     QFont
@@ -978,7 +976,7 @@ class ProgressDialog(BaseDialog):
 
         self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
         if telemetry_config is None:
-            self.telemetry = {"cpu": True, "ram": True, "gpu": True, "net": False, "io": True}
+            self.telemetry = {"cpu": True, "ram": True, "gpu": False, "net": False, "io": True}
         else:
             self.telemetry = telemetry_config
 
@@ -1152,39 +1150,6 @@ class ProgressDialog(BaseDialog):
                 write_spd = (curr_disk_io[1] - self._last_disk_io[1]) / dt
                 stats.append(f"I/O: R:{self._format_speed(read_spd)} W:{self._format_speed(write_spd)}")
                 self._last_disk_io = curr_disk_io
-
-            if self.telemetry.get("gpu"):
-                if HAS_NVML:
-                    try:
-                        app_vram_mb = 0
-                        sys_used_vram_gb = 0
-                        gpu_usage = 0
-                        device_count = pynvml.nvmlDeviceGetCount()
-                        for i in range(device_count):
-                            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                            gpu_usage = max(gpu_usage, util.gpu)
-                            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                            sys_used_vram_gb += mem_info.used / (1024 ** 3)
-                            gpu_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-                            for gp in gpu_procs:
-                                if gp.pid in pids and gp.usedGpuMemory is not None:
-                                    app_vram_mb += gp.usedGpuMemory / (1024 ** 2)
-                        if app_vram_mb > 0:
-                            stats.append(f"App VRAM: {app_vram_mb:.0f} MB [GPU: {gpu_usage}%]")
-                        else:
-                            stats.append(f"Sys VRAM: {sys_used_vram_gb:.1f}G [GPU: {gpu_usage}%]")
-                    except:
-                        stats.append("GPU: Active")
-                elif torch.cuda.is_available():
-                    try:
-                        free, total = torch.cuda.mem_get_info()
-                        used_gb = (total - free) / (1024 ** 3)
-                        stats.append(f"Sys VRAM: {used_gb:.1f}G")
-                    except:
-                        stats.append("GPU: Active")
-                else:
-                    stats.append("GPU: N/A")
 
             if self.telemetry.get("net"):
                 curr_net_io = psutil.net_io_counters()

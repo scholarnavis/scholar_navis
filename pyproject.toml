@@ -48,7 +48,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "boto3>=1.42.62",
+    "nuitka>=4.0.7",
     "pyinstaller>=6.19.0",
+    "tuna>=0.5.11",
 ]
 
 

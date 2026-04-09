@@ -115,17 +115,8 @@ class AutoResizingTextEdit(QPlainTextEdit):
         fixed_height = int((line_h * 5) + base_padding + 2)
         self.setFixedHeight(fixed_height)
 
-    # 修改后
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return and not event.modifiers() & Qt.ShiftModifier:
-            parent = self.parent()
-            while parent is not None:
-                if hasattr(parent, 'btn_send'):
-                    if not parent.btn_send.isEnabled():
-                        event.accept()
-                        return
-                    break
-                parent = parent.parent()
             self.sig_send.emit()
             event.accept()
         else:

@@ -244,3 +244,5 @@ torch_runtime_hook.py
 
 scholar_navis.exe
 _internal
+
+*.prof

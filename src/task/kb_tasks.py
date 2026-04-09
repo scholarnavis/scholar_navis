@@ -5,11 +5,7 @@ import shutil
 import uuid
 import zipfile
 import onnxruntime as ort
-import torch
-import torch.nn.functional as F
 from chromadb import Documents, Embeddings, EmbeddingFunction
-from optimum.onnxruntime import ORTModelForFeatureExtraction
-from transformers import AutoTokenizer
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
@@ -74,6 +70,9 @@ def _worker_load_model(kb_id, config):
 class ONNXEmbeddingFunction(EmbeddingFunction):
 
     def __init__(self, onnx_cache_dir, device="cpu"):
+        from optimum.onnxruntime import ORTModelForFeatureExtraction
+        from transformers import AutoTokenizer
+
         logger = logging.getLogger("Worker.ONNXProvider")
 
         self.tokenizer = AutoTokenizer.from_pretrained(onnx_cache_dir, local_files_only=True)
@@ -135,6 +134,7 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
             raise RuntimeError(fallback_msg)
 
     def __call__(self, input: Documents) -> Embeddings:
+        import torch.nn.functional as F
         if not input:
             return []
 
@@ -163,6 +163,7 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
             if len(emb_array.shape) == 3:
                 emb_array = emb_array[:, 0, :]
 
+            import torch
             embeddings = torch.tensor(emb_array)
 
         embeddings = F.normalize(embeddings, p=2, dim=1)

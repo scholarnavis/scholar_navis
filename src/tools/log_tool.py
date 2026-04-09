@@ -1,16 +1,14 @@
 import html
 import os
-import shutil
-import sys
-import subprocess
-import urllib.parse
-from PySide6.QtCore import Qt, QUrl, QUrlQuery, QTimer
-from PySide6.QtGui import QShortcut, QKeySequence, QTextDocument, QTextCursor, QTextCharFormat, QColor, QIcon
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTextBrowser,
-                               QHBoxLayout, QPushButton, QLabel, QLineEdit)
-from src.tools.base_tool import BaseTool
+
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QShortcut, QKeySequence, QTextCursor, QTextCharFormat, QColor
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit, QTextEdit,
+                               QPlainTextEdit)
+
 from src.core.logger import get_qt_log_handler
 from src.core.theme_manager import ThemeManager
+from src.tools.base_tool import BaseTool
 
 
 class LogTool(BaseTool):
@@ -96,11 +94,9 @@ class LogTool(BaseTool):
 
         layout.addLayout(top_bar)
 
-        self.log_viewer = QTextBrowser()
+        self.log_viewer = QPlainTextEdit()
         self.log_viewer.setReadOnly(True)
-        self.log_viewer.setOpenLinks(False)
-        self.log_viewer.anchorClicked.connect(self._handle_link_clicked)
-        self.log_viewer.document().setMaximumBlockCount(self.MAX_LOGS)
+        self.log_viewer.setMaximumBlockCount(self.MAX_LOGS)
         layout.addWidget(self.log_viewer)
 
         # 全局快捷键映射
@@ -168,7 +164,7 @@ class LogTool(BaseTool):
                 break
             self._search_cursors.append(cursor)
 
-            selection = QTextBrowser.ExtraSelection()
+            selection = QTextEdit.ExtraSelection()
             selection.format = format
             selection.cursor = cursor
             extra_selections.append(selection)
@@ -210,29 +206,6 @@ class LogTool(BaseTool):
             self._current_search_index = (self._current_search_index - 1) % len(self._search_cursors)
             self._highlight_current_match()
 
-    def _handle_link_clicked(self, url: QUrl):
-        if url.scheme() == "ide":
-            query = QUrlQuery(url)
-            file_path = urllib.parse.unquote(query.queryItemValue("file"))
-            line = query.queryItemValue("line")
-
-            if os.path.exists(file_path):
-                if shutil.which('code'):
-                    subprocess.Popen(['code', '-g', f'{file_path}:{line}'], shell=(sys.platform == 'win32'))
-                elif shutil.which('pycharm'):
-                    subprocess.Popen(['pycharm', '--line', str(line), file_path], shell=(sys.platform == 'win32'))
-                elif shutil.which('pycharm64'):
-                    subprocess.Popen(['pycharm64', '--line', str(line), file_path], shell=(sys.platform == 'win32'))
-                else:
-                    try:
-                        if sys.platform == 'win32':
-                            os.startfile(file_path)
-                        elif sys.platform == 'darwin':
-                            subprocess.Popen(['open', file_path])
-                        else:
-                            subprocess.Popen(['xdg-open', file_path])
-                    except Exception as e:
-                        print(f"Failed to open file: {e}")
 
     def _apply_theme(self):
         tm = ThemeManager()
@@ -272,19 +245,19 @@ class LogTool(BaseTool):
         self.btn_close_search.setText("✕" if self.btn_close_search.icon().isNull() else "")
 
         self.search_input.setStyleSheet(f"""
-            QLineEdit {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 4px 8px; border-radius: 3px; }}
-        """)
+                    QLineEdit {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 4px 8px; border-radius: 3px; }}
+                """)
 
         self.log_viewer.setStyleSheet(f"""
-            QTextBrowser {{
-                background-color: {tm.color('bg_input')}; 
-                color: {tm.color('text_main')};
-                selection-background-color: {tm.color('accent')};
-                selection-color: {tm.color('bg_base')};
-                font-family: 'Consolas', monospace; font-size: 13px;
-                border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 10px;
-            }}
-        """)
+                    QPlainTextEdit {{
+                        background-color: {tm.color('bg_input')}; 
+                        color: {tm.color('text_main')};
+                        selection-background-color: {tm.color('accent')};
+                        selection-color: {tm.color('bg_base')};
+                        font-family: 'Consolas', monospace; font-size: 13px;
+                        border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 10px;
+                    }}
+                """)
 
         if self.log_viewer:
             sb = self.log_viewer.verticalScrollBar()
@@ -292,7 +265,7 @@ class LogTool(BaseTool):
 
             self.log_viewer.clear()
             for lvl, msg, path, line in self._all_logs:
-                self._render_html(lvl, msg, path, line)
+                self._render_text(lvl, msg, path, line)
 
             sb.setValue(val)
 
@@ -315,12 +288,13 @@ class LogTool(BaseTool):
             self._log_buffer.append((level, msg, path, line))
             return
 
-        self._render_html(level, msg, path, line)
+        self._render_text(level, msg, path, line)
 
         if hasattr(self, 'search_widget') and self.search_widget.isVisible() and self.search_input.text():
             self._search_timer.start(500)
 
-    def _render_html(self, level, msg, path="", line=0):
+
+    def _render_text(self, level, msg, path="", line=0):
         tm = ThemeManager()
         color = tm.color('text_muted')
         if level == "INFO":
@@ -330,22 +304,18 @@ class LogTool(BaseTool):
         elif level in ["ERROR", "CRITICAL"]:
             color = tm.color('danger')
 
-        safe_msg = html.escape(str(msg))
-        is_compiled = getattr(sys, 'frozen', False) or hasattr(sys, 'compiled') or "nuitka" in sys.modules
-
-        if path and line and not is_compiled:
-            safe_path = urllib.parse.quote(path)
-            file_url = f"ide://open?file={safe_path}&line={line}"
-            level_tag = f'<a href="{file_url}" style="color:{color}; text-decoration: none; font-weight: bold; cursor: pointer;">[{level}]</a>'
+        if path and line:
+            file_name = os.path.basename(path)
+            log_text = html.escape(f"[{level}] {msg} ({file_name}:{line})").replace('\n', '<br>')
         else:
-            level_tag = f'<span style="color:{color}; font-weight: bold;">[{level}]</span>'
+            log_text = html.escape(f"[{level}] {msg}").replace('\n', '<br>')
 
-        html_str = f'<div style="color:{color}; margin-bottom: 2px; white-space: pre-wrap;">{level_tag} {safe_msg}</div>'
+        colored_html = f'<span style="color:{color}; white-space: pre-wrap;">{log_text}</span>'
 
         sb = self.log_viewer.verticalScrollBar()
         is_at_bottom = sb.value() >= (sb.maximum() - 15)
 
-        self.log_viewer.append(html_str)
+        self.log_viewer.appendHtml(colored_html)
 
         if is_at_bottom:
             sb.setValue(sb.maximum())

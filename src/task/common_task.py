@@ -20,14 +20,15 @@ class VersionCheckTask(BackgroundTask):
 
             self.logger.debug(f"Checking for updates at: {url}")
 
-            response = session.get(url, timeout=5)
+            response = session.get(url, timeout=15)
+
             if response.status_code == 200:
                 latest_version = response.text.strip()
-                self.logger.info(f"Successfully fetched latest version: {latest_version}")  # 新增：记录成功获取到的版本号
+                self.logger.info(f"Successfully fetched latest version: {latest_version}")
                 return {"latest_version": latest_version}
             else:
                 self.logger.warning(
-                    f"Update check failed with status code: {response.status_code}")  # 新增：记录非 200 状态码的警告
+                    f"Update check failed with status code: {response.status_code}")
         except Exception as e:
             self.logger.error(f"Failed to check for updates: {e}")
 

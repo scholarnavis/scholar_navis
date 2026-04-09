@@ -1,9 +1,6 @@
 import logging
 import threading
 
-from optimum.onnxruntime import ORTModelForSequenceClassification
-from transformers import AutoTokenizer
-
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.models_registry import resolve_auto_model, get_model_conf, ensure_onnx_model, ModelManager, \
@@ -26,6 +23,9 @@ class RerankEngine:
         return cls._instance
 
     def load_model(self):
+        from optimum.onnxruntime import ORTModelForSequenceClassification
+        from transformers import AutoTokenizer
+
         if self.model is not None:
             return
 

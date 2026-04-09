@@ -76,6 +76,12 @@ class SettingsTool(BaseTool):
         self.llm_configs = []
         self._is_updating_model_ui = False
 
+        # 防抖器
+        self._sync_timer = QTimer(self.widget)
+        self._sync_timer.setSingleShot(True)
+        self._sync_timer.setInterval(300)
+        self._sync_timer.timeout.connect(self._sync_llm_data_execute)
+
         GlobalSignals().request_model_download.connect(self.on_download_requested)
         ThemeManager().theme_changed.connect(self._apply_theme)
 
@@ -1396,13 +1402,12 @@ class SettingsTool(BaseTool):
         self.layout.addWidget(group)
 
         self.combo_llm_preset.currentIndexChanged.connect(self._on_llm_preset_changed)
-        self.input_llm_name.textChanged.connect(self._sync_llm_data)
-        self.input_llm_url.textChanged.connect(self._sync_llm_data)
-        self.input_llm_key.textChanged.connect(self._sync_llm_data)
-        self.combo_llm_model.currentIndexChanged.connect(self._on_model_index_changed)
-        self.combo_model_param_strategy.currentIndexChanged.connect(self._sync_llm_data)
-        self.editor_provider_params.sig_data_changed.connect(self._sync_llm_data)
-        self.editor_model_params.sig_data_changed.connect(self._sync_llm_data)
+        self.input_llm_name.textChanged.connect(self._sync_llm_data_debounced)
+        self.input_llm_url.textChanged.connect(self._sync_llm_data_debounced)
+        self.input_llm_key.textChanged.connect(self._sync_llm_data_debounced)
+        self.combo_model_param_strategy.currentIndexChanged.connect(self._sync_llm_data_debounced)
+        self.editor_provider_params.sig_data_changed.connect(self._sync_llm_data_debounced)
+        self.editor_model_params.sig_data_changed.connect(self._sync_llm_data_debounced)
 
         active_id = self.config.user_settings.get("active_llm_id", "openai")
         idx_to_select = next((i for i, c in enumerate(self.llm_configs) if c.get("id") == active_id), 0)
@@ -1509,7 +1514,7 @@ class SettingsTool(BaseTool):
         except TypeError:
             self.editor_model_params.load_data(merged_params)
 
-        self._sync_llm_data()
+        self._sync_llm_data_execute()
         ToastManager().show("Parameters copied and merged successfully.", "success")
 
     def _on_model_index_changed(self, index):
@@ -1569,7 +1574,7 @@ class SettingsTool(BaseTool):
                 self.combo_llm_model.blockSignals(False)
 
                 self._refresh_model_combo(conf)
-                self._sync_llm_data()
+                self._sync_llm_data_execute()
 
     def _load_model_params_to_ui(self, conf, model_name):
         self._is_updating_model_ui = True
@@ -1940,7 +1945,10 @@ class SettingsTool(BaseTool):
 
         self._refresh_model_combo(conf)
 
-    def _sync_llm_data(self):
+    def _sync_llm_data_debounced(self):
+        self._sync_timer.start()
+
+    def _sync_llm_data_execute(self):
         if self._is_updating_model_ui: return
         idx = self.combo_llm_preset.currentIndex()
         if idx < 0 or idx >= len(self.llm_configs): return
@@ -1972,7 +1980,7 @@ class SettingsTool(BaseTool):
         self._update_current_model_marker(curr_real, mode)
 
     def _start_fetch_task(self):
-        self._sync_llm_data()
+        self._sync_llm_data_execute()
         idx = self.combo_llm_preset.currentIndex()
         conf = self.llm_configs[idx] if 0 <= idx < len(self.llm_configs) else {}
 
@@ -2029,7 +2037,7 @@ class SettingsTool(BaseTool):
             self.net_pd.show_finish_state(False, "Fetch Failed", result['msg'])
 
     def _start_test_task(self):
-        self._sync_llm_data()
+        self._sync_llm_data_execute()
         idx = self.combo_llm_preset.currentIndex()
         conf = self.llm_configs[idx] if 0 <= idx < len(self.llm_configs) else {}
 
@@ -2311,7 +2319,7 @@ class SettingsTool(BaseTool):
         new_email = self.input_ncbi_email.text().strip()
 
         if hasattr(self, '_sync_llm_data'):
-            self._sync_llm_data()
+            self._sync_llm_data_execute()
         self._save_llm_config()
 
         new_mcp_servers = {}
