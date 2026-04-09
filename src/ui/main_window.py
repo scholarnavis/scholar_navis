@@ -2,7 +2,7 @@ import ctypes
 import os
 import sys
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QSettings
 from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
@@ -200,6 +200,24 @@ class MainWindow(QMainWindow):
             ico_path = ThemeManager.get_resource_path("Assets", "icon.ico")
             hwnd = int(self.winId())
             QTimer.singleShot(100, lambda: force_windows_taskbar_icon(hwnd, ico_path))
+
+        self.settings = QSettings("ScholarNavis", "MainApp")
+        if self.settings.value("geometry"):
+            self.restoreGeometry(self.settings.value("geometry"))
+        if self.settings.value("windowState"):
+            self.restoreState(self.settings.value("windowState"))
+
+    def closeEvent(self, event):
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("windowState", self.saveState())
+
+        if hasattr(self, 'translator_dialog') and self.translator_dialog:
+            self.translator_dialog.close()
+
+        super().closeEvent(event)
+
+        QApplication.quit()
+
 
     def _lazy_load_tools(self):
         tools_to_load = [

@@ -187,7 +187,6 @@ class ConfigManager:
             "s2_api_key": "",
             "s2_rate_limit": "1.0",
             "github_token": "",
-            "quick_trans_is_pinned": True,
             "quick_trans_markdown": True,
             "trans_source_lang": "Auto Detect",
             "trans_target_lang": "English",
@@ -217,6 +216,15 @@ class ConfigManager:
                     current_settings[key] = default_val
                     is_modified = True
 
+                # 数据清洗
+            keys_to_purge = [
+                "quick_trans_is_pinned",
+            ]
+            for k in keys_to_purge:
+                if k in current_settings:
+                    del current_settings[k]
+                    is_modified = True
+
         self.user_settings = current_settings
         if is_modified:
             self.save_settings()
@@ -227,13 +235,94 @@ class ConfigManager:
         self.apply_env_vars()
 
     def load_llm_configs(self) -> list:
+        default_config = [
+            {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "",
+             "api_key": ""},
+            {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1", "model_name": "",
+             "api_key": ""},
+            {"id": "minimax", "name": "MiniMax", "base_url": "https://api.minimaxi.com/anthropic",
+             "model_name": "MiniMax-M2.5", "api_key": "",
+             "fetched_models": ["MiniMax-M2", "M2-her", "MiniMax-M2.1", "MiniMax-M2.1-lightning", "MiniMax-M2.5",
+                                "MiniMax-M2.5-lightning", "MiniMax-M2.7"]},
+            {"id": "gemini", "name": "Google Gemini",
+             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "", "api_key": ""},
+            {"id": "anthropic", "name": "Anthropic", "base_url": "https://api.anthropic.com/v1", "model_name": "",
+             "api_key": ""},
+            {"id": "nvidia", "name": "Nvidia Build", "base_url": "https://integrate.api.nvidia.com/v1",
+             "model_name": "", "api_key": ""},
+            {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+             "model_name": "", "api_key": ""},
+            {"id": "mimo", "name": "Xiaomi MiMo", "base_url": "https://api.xiaomimimo.com/v1",
+             "model_name": "mimo-v2-pro", "api_key": "",
+             "fetched_models": ["mimo-v1", "mimo-v2", "mimo-v2-pro"]},
+            {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4", "model_name": "",
+             "api_key": ""},
+            {"id": "siliconflow", "name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1", "model_name": "",
+             "api_key": ""},
+            {"id": "lmstudio", "name": "LM Studio", "base_url": "http://localhost:1234/v1", "model_name": "",
+             "api_key": "lm-studio"},
+            {"id": "ollma", "name": "Ollma", "base_url": "http://localhost:11434/v1", "model_name": "",
+             "api_key": "ollama"}
+        ]
+
         data = self.load_json(self.LLM_CONFIG_PATH, encrypt=True)
+
         if data is None:
-            return []
-        if isinstance(data, list):
-            return data
-        self.logger.warning("llm_config.json format unexpected, resetting to empty list.")
-        return []
+            loaded_configs = []
+        elif isinstance(data, list):
+            loaded_configs = data
+        else:
+            self.logger.warning("llm_config.json format unexpected, resetting to empty list.")
+            loaded_configs = []
+
+        # 处理旧版本配置兼容性迁移
+        try:
+            for cfg in loaded_configs:
+                cfg.pop("thinking_model_name", None)
+                if "model_params_mode" in cfg and "models_config" not in cfg:
+                    m_name = cfg.get("model_name", "default")
+                    cfg["models_config"] = {
+                        m_name: {
+                            "mode": cfg.get("model_params_mode", "inherit"),
+                            "params": cfg.get("model_params", [])
+                        }
+                    }
+        except Exception as e:
+            self.logger.error(f"Error migrating LLM configurations: {e}")
+
+        # 检查并补全缺失的默认配置
+        existing_ids = {c.get("id") for c in loaded_configs}
+        needs_resave = False
+        missing_ids = []
+
+        for i, dc in enumerate(default_config):
+            if dc["id"] not in existing_ids:
+                loaded_configs.insert(i, dc)
+                missing_ids.append(dc["id"])
+                needs_resave = True
+            else:
+                for cfg in loaded_configs:
+                    if cfg.get("id") == dc["id"] and "fetched_models" in dc:
+                        current_fetched = cfg.get("fetched_models", [])
+                        added_any = False
+                        for m in dc["fetched_models"]:
+                            if m not in current_fetched:
+                                current_fetched.append(m)
+                                added_any = True
+                        if added_any:
+                            cfg["fetched_models"] = current_fetched
+                            needs_resave = True
+                        break
+
+        if needs_resave:
+            if missing_ids:
+                self.logger.warning(
+                    f"Required default LLM identifiers or models were missing: {missing_ids}. "
+                    f"The system has automatically supplemented and persisted these records."
+                )
+            self.save_llm_configs(loaded_configs)
+
+        return loaded_configs if loaded_configs else default_config
 
     def save_llm_configs(self, configs: list):
         self.save_json(self.LLM_CONFIG_PATH, configs, encrypt=True)

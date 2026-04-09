@@ -1278,99 +1278,11 @@ class SettingsTool(BaseTool):
         else:
             self.test_dev_pd.show_finish_state(False, "Test Failed", result["msg"])
 
-
     def _load_llm_config(self):
-        default_config = [
-            {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "",
-             "api_key": ""},
-            {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "minimax", "name": "MiniMax","base_url": "https://api.minimaxi.com/anthropic",
-             "model_name": "MiniMax-M2.5", "api_key": "",
-             "fetched_models": [
-                 "MiniMax-M2", "M2-her", "MiniMax-M2.1",
-                 "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning",
-                 "MiniMax-M2.7"
-             ]},
-
-            {"id": "gemini", "name": "Google Gemini",
-             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "",
-             "api_key": ""},
-            {"id": "anthropic", "name": "Anthropic", "base_url": "https://api.anthropic.com/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "nvidia", "name": "Nvidia Build", "base_url": "https://integrate.api.nvidia.com/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "mimo", "name": "Xiaomi MiMo", "base_url": "https://api.xiaomimimo.com/v1",
-             "model_name": "mimo-v2-pro", "api_key": "",
-             "fetched_models": ["mimo-v1", "mimo-v2", "mimo-v2-pro"]},
-            {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
-             "model_name": "", "api_key": ""},
-            {"id": "siliconflow", "name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "lmstudio", "name": "LM Studio", "base_url": "http://localhost:1234/v1", "model_name": "",
-             "api_key": "lm-studio"},
-            {"id": "ollma", "name": "Ollma", "base_url": "http://localhost:11434/v1",
-             "model_name": "", "api_key": "ollama"}
-        ]
-
-        try:
-            loaded_configs = self.config.load_llm_configs()
-
-            if not loaded_configs:
-                loaded_configs = []
-
-            for cfg in loaded_configs:
-                cfg.pop("thinking_model_name", None)
-                if "model_params_mode" in cfg and "models_config" not in cfg:
-                    m_name = cfg.get("model_name", "default")
-                    cfg["models_config"] = {
-                        m_name: {
-                            "mode": cfg.get("model_params_mode", "inherit"),
-                            "params": cfg.get("model_params", [])
-                        }
-                    }
-        except Exception as e:
-            self.logger.error(f"Error loading llm_config.json: {e}")
-            loaded_configs = []
-
-        existing_ids = {c.get("id") for c in loaded_configs}
-        needs_resave = False
-        missing_ids = []
-
-        for i, dc in enumerate(default_config):
-            if dc["id"] not in existing_ids:
-                loaded_configs.insert(i, dc)
-                missing_ids.append(dc["id"])
-                needs_resave = True
-            else:
-                for cfg in loaded_configs:
-                    if cfg.get("id") == dc["id"] and "fetched_models" in dc:
-                        current_fetched = cfg.get("fetched_models", [])
-                        added_any = False
-                        for m in dc["fetched_models"]:
-                            if m not in current_fetched:
-                                current_fetched.append(m)
-                                added_any = True
-                        if added_any:
-                            cfg["fetched_models"] = current_fetched
-                            needs_resave = True
-                        break
-
-        if needs_resave:
-            self.logger.warning(
-                f"Required default LLM identifiers or models were missing: {missing_ids}. "
-                f"The system has automatically supplemented and persisted these records."
-            )
-            self.llm_configs = loaded_configs
-            self._save_llm_config()
-
-        return loaded_configs if loaded_configs else default_config
+        return self.config.load_llm_configs()
 
     def _save_llm_config(self):
-        config_path = os.path.join(self.config.CONFIG_DIR, "llm_config.json")
-        self.config.save_json(config_path, self.llm_configs, encrypt=True)
+        self.config.save_llm_configs(self.llm_configs)
 
     def init_llm_section(self):
 

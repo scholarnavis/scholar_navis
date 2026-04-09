@@ -1,11 +1,13 @@
+import ctypes
 import locale
 import logging
 import re
+import sys
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
                                QTextBrowser, QPushButton, QLabel, QApplication,
                                QComboBox, QCheckBox, QSizeGrip)
-from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal
+from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal, QSettings
 
 from src.core.config_manager import ConfigManager
 from src.core.theme_manager import ThemeManager
@@ -50,8 +52,9 @@ class QuickTranslatorWindow(QWidget):
         self.cfg_mgr = ConfigManager()
         self.logger = logging.getLogger("QuickTranslator")
 
-        # 窗口置顶设置
-        self.is_pinned = self.cfg_mgr.user_settings.get("quick_trans_is_pinned", True)
+        self.settings = QSettings("ScholarNavis", "QuickTranslator")
+        pinned_val = self.settings.value("is_pinned", True)
+        self.is_pinned = pinned_val if isinstance(pinned_val, bool) else str(pinned_val).lower() == 'true'
 
         flags = Qt.Window | Qt.FramelessWindowHint
         if self.is_pinned:
@@ -84,7 +87,12 @@ class QuickTranslatorWindow(QWidget):
         # 设置UI
         self._setup_ui()
         self._update_pin_ui()
-        self._center_on_screen()
+
+        # 恢复窗口大小与位置
+        if self.settings.value("geometry"):
+            self.restoreGeometry(self.settings.value("geometry"))
+        else:
+            self._center_on_screen()
 
         # 主题和配置
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -166,7 +174,8 @@ class QuickTranslatorWindow(QWidget):
         lang_bar = QHBoxLayout()
         lang_bar.addSpacing(30)
 
-        langs = ["Auto Detect", "English", "Chinese", "Japanese", "French", "German"]
+        langs = ["Auto Detect", "English", "Simplified Chinese", "Traditional Chinese", "Japanese", "French", "German",
+                 "Russian"]
         sys_lang = get_system_language()
 
         saved_src = self.cfg_mgr.user_settings.get("trans_source_lang", "Auto Detect")
@@ -388,18 +397,21 @@ class QuickTranslatorWindow(QWidget):
     def _toggle_pin(self):
         """切换窗口置顶状态"""
         self.is_pinned = not self.is_pinned
-        self.cfg_mgr.user_settings["quick_trans_is_pinned"] = self.is_pinned
-        self.cfg_mgr.save_settings()
+        self.settings.setValue("is_pinned", self.is_pinned)
 
-        flags = self.windowFlags()
-        if self.is_pinned:
-            flags |= Qt.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowStaysOnTopHint
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, self.is_pinned)
 
-        self.setWindowFlags(flags)
-        self._update_pin_ui()
         self.show()
+
+        if sys.platform == "win32":
+            hwnd = int(self.winId())
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            insert_after = HWND_TOPMOST if self.is_pinned else HWND_NOTOPMOST
+            flags = 0x0002 | 0x0001 | 0x0010  # SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            ctypes.windll.user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
+
+        self._update_pin_ui()
 
     def _save_lang(self, key, val):
         """保存语言设置"""
@@ -425,7 +437,8 @@ class QuickTranslatorWindow(QWidget):
         self.anim.start()
 
     def hide_with_fade(self):
-        """淡出隐藏"""
+        self.settings.setValue("geometry", self.saveGeometry())
+
         self.anim = QPropertyAnimation(self, b"windowOpacity")
         self.anim.setDuration(200)
         self.anim.setStartValue(self.windowOpacity())
@@ -437,6 +450,10 @@ class QuickTranslatorWindow(QWidget):
         """窗口居中"""
         screen = QApplication.primaryScreen().geometry()
         self.move((screen.width() - self.width()) // 2, int((screen.height() - self.height()) // 2))
+
+    def closeEvent(self, event):
+        self.settings.setValue("geometry", self.saveGeometry())
+        super().closeEvent(event)
 
     def _clear_all(self):
         """清空所有内容"""

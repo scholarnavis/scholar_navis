@@ -1,6 +1,4 @@
 import base64
-import csv
-import datetime
 import hashlib
 import json
 import logging
@@ -8,23 +6,21 @@ import os
 import re
 import shutil
 import tempfile
-import time
 from urllib.parse import urlparse, parse_qs, quote
 
-from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve, \
+from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QPropertyAnimation, QEasingCurve, \
     QEvent
-from PySide6.QtGui import QDesktopServices, QCursor, QAction, QPdfWriter, QTextDocument, QPageSize
+from PySide6.QtGui import QDesktopServices, QCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QCheckBox,
-                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication, QComboBox)
+                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode, TaskState
 from src.core.kb_manager import KBManager, DatabaseManager
-from src.core.lang_detect import detect_primary_language
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import get_model_conf, ModelManager
+from src.core.models_registry import get_model_conf
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager
@@ -947,26 +943,22 @@ class ChatTool(BaseTool):
         act_pdf = menu.addAction(tm.icon("article", "text_main"), "Export as PDF")
         act_md = menu.addAction(tm.icon("markdown", "text_main"), "Export as MD")
         act_txt = menu.addAction(tm.icon("file-text", "text_main"), "Export as TXT")
-        act_csv = menu.addAction(tm.icon("table", "text_main"), "Export as CSV")
 
         # 在鼠标位置弹出菜单
         action = menu.exec(QCursor.pos())
         if not action:
             return
 
-        # 根据选择设置后缀和过滤条件
         if action == act_pdf:
             filter_str, default_ext = "PDF Document (*.pdf)", ".pdf"
         elif action == act_md:
             filter_str, default_ext = "Markdown File (*.md)", ".md"
-        elif action == act_txt:
-            filter_str, default_ext = "Text File (*.txt)", ".txt"
         else:
-            filter_str, default_ext = "CSV Data (*.csv)", ".csv"
+            filter_str, default_ext = "Text File (*.txt)", ".txt"
 
         # 弹出系统保存对话框
         path, _ = QFileDialog.getSaveFileName(
-            self.widget, "Export Log", f"Navis_Log{default_ext}", filter_str
+            self.widget, "Export Log", f"Scholar_Navis_Log{default_ext}", filter_str
         )
 
         if not path:
