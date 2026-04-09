@@ -1,7 +1,7 @@
 import html
 import os
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QObject, Slot
 from PySide6.QtGui import QShortcut, QKeySequence, QTextCursor, QTextCharFormat, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit, QTextEdit,
                                QPlainTextEdit)
@@ -9,6 +9,19 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, Q
 from src.core.logger import get_qt_log_handler
 from src.core.theme_manager import ThemeManager
 from src.tools.base_tool import BaseTool
+
+
+class LogReceiver(QObject):
+    """
+    代理接收器：通过 @Slot 强制将后台线程发出的日志信号调度到主线程执行，防止跨线程操作 UI 导致静默失败
+    """
+    def __init__(self, callback):
+        super().__init__()
+        self._callback = callback
+
+    @Slot(str, str, str, int)
+    def receive_log(self, level, msg, path, line):
+        self._callback(level, msg, path, line)
 
 
 class LogTool(BaseTool):
@@ -23,6 +36,7 @@ class LogTool(BaseTool):
 
         self._search_cursors = []
         self._current_search_index = -1
+        self._receiver = LogReceiver(self.append_log)
 
         handler = get_qt_log_handler()
         for log_entry in handler.log_history:
@@ -38,7 +52,7 @@ class LogTool(BaseTool):
         if len(self._all_logs) > self.MAX_LOGS:
             self._all_logs = self._all_logs[-self.MAX_LOGS:]
 
-        handler.new_log_signal.connect(self.append_log)
+        handler.new_log_signal.connect(self._receiver.receive_log)
 
     def get_ui_widget(self) -> QWidget:
         if self.widget: return self.widget

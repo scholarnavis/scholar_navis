@@ -8,6 +8,7 @@ from typing import Dict, Callable, get_origin, Literal, get_args
 from src.core import BASE_DIR
 
 logger = logging.getLogger("Skill.Manager")
+logger.setLevel(logging.INFO)
 
 
 class SkillManager:
@@ -187,21 +188,30 @@ class SkillManager:
 
                 # 拦截原生 open 函数
                 original_open = builtins.open
-                def safe_open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
+
+                def safe_open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True,
+                              opener=None):
                     abs_target = os.path.abspath(os.path.join(abs_workspace, str(file)))
                     if not abs_target.startswith(abs_workspace):
                         logger.error(f"Sandbox Escape Blocked: [{skill_name}] tried to access '{file}'")
                         raise PermissionError(f"Security Violation: Access denied to paths outside '{abs_workspace}'")
                     return original_open(abs_target, mode, buffering, encoding, errors, newline, closefd, opener)
 
+                # 拦截 print，将输出重定向到主程序的 logger 系统
+                def safe_print(*args, **kwargs):
+                    msg = " ".join(map(str, args))
+                    logging.getLogger(skill_name).info(msg)
+
                 # 构造受限的内置函数字典
                 sandbox_builtins = builtins.__dict__.copy()
-                sandbox_builtins['open'] = safe_open  # 替换为安全的 open
+                sandbox_builtins['open'] = safe_open
+                sandbox_builtins['print'] = safe_print
 
                 # 构建执行环境的全局变量
                 sandbox_globals = {
                     '__builtins__': sandbox_builtins,
                     '__name__': skill_name,
+                    'logging': logging,
                     'WORKSPACE_DIR': abs_workspace
                 }
 

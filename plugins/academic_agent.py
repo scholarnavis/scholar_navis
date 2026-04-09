@@ -50,15 +50,8 @@ class UdpJsonHandler(logging.Handler):
             pass
 
 
-udp_handler = UdpJsonHandler()
-
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-root_logger.addHandler(udp_handler)
-
 logger = logging.getLogger("Academic.Server")
-stderr_handler = logging.StreamHandler(sys.stderr)
-root_logger.addHandler(stderr_handler)
+logger.setLevel(logging.INFO)
 
 ConfigManager()
 setup_global_network_env()

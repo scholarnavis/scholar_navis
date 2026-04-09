@@ -26,6 +26,22 @@ class TaskMode(Enum):
     PROCESS = "process"
     THREAD = "thread"
 
+class IPCLogHandler(logging.Handler):
+    def __init__(self, task_queue):
+        super().__init__()
+        self.task_queue = task_queue
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.task_queue.put({
+                "type": "log",
+                "level": record.levelname,
+                "msg": f"[{record.name}] {msg}"
+            })
+        except Exception:
+            pass
+
 
 class BackgroundTask:
     """后台任务逻辑基类：只负责任务执行、进度和日志发送，不包含具体业务"""
@@ -42,6 +58,15 @@ class BackgroundTask:
         self._throttle_interval = 0.05
 
     def run(self):
+        if mp.current_process().name != 'MainProcess':
+            root_logger = logging.getLogger()
+            root_logger.handlers.clear()
+
+            ipc_handler = IPCLogHandler(self.queue)
+            ipc_handler.setFormatter(logging.Formatter('%(message)s'))
+            root_logger.addHandler(ipc_handler)
+            root_logger.setLevel(logging.INFO)
+
         self.logger.debug(f"Start. PID: {os.getpid()} | Task: {self.task_id}")
         self._emit_state(TaskState.PROCESSING, -1, "Initializing...")
         try:

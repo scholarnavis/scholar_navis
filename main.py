@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot, QCoreAppl
 from PySide6.QtGui import QIcon
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication, QMessageBox
-
+from src.core.logger import setup_logger
 from src.core.core_task import TaskManager, TaskMode
 from src.task.startup_tasks import HardwareInitTask
 
@@ -347,7 +347,6 @@ if __name__ == "__main__":
     if is_api_mode:
         os.environ["SCARF_NO_ANALYTICS"] = "true"
 
-        from src.core.logger import setup_logger
 
         global_logger = setup_logger()
 
