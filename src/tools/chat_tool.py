@@ -191,7 +191,7 @@ class ChatInputContainer(QFrame):
         self.chk_external_tools.toggled.connect(lambda c: self._save_agent_state("chat_use_external_tools", c))
 
         self.btn_mcp_tags = QToolButton()
-        self.btn_mcp_tags = QPushButton("Filter Tools", self)
+        self.btn_mcp_tags = QPushButton("Tools Filter", self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
         self.btn_mcp_tags.setStyleSheet(
@@ -424,12 +424,10 @@ class ChatInputContainer(QFrame):
         self._update_tag_button_text()
 
     def _on_external_tools_toggled(self, checked):
-        self.btn_mcp_tags.setVisible(checked)
-        if checked:
             self.refresh_mcp()
 
     def _show_filter_menu(self):
-        self.btn_mcp_tags.setText("Filter Tools: Fetching...")
+        self.btn_mcp_tags.setText("Tools Filter: Fetching...")
         QApplication.processEvents()
 
         self.refresh_mcp()
@@ -481,7 +479,7 @@ class ChatInputContainer(QFrame):
             self.known_tags.clear()
 
             if not available_tags:
-                self.btn_mcp_tags.setText("🏷️ Filter Tools: None")
+                self.btn_mcp_tags.setText("🏷️ Tools Filter: None")
                 from PySide6.QtGui import QAction
                 dummy = QAction("⏳ No active skills or MCP servers...", self)
                 dummy.setEnabled(False)
@@ -519,17 +517,17 @@ class ChatInputContainer(QFrame):
 
         except Exception as e:
             self.logger.error(f"Error refreshing skill and tool tags: {e}", exc_info=True)
-            self.btn_mcp_tags.setText("Filter Tools: Error")
+            self.btn_mcp_tags.setText("Tools Filter: Error")
 
     def _update_tag_button_text(self):
         selected = self.get_selected_tags()
         total = len(self.tag_actions)
         if total == 0:
-            self.btn_mcp_tags.setText("Filter Tools: None")
+            self.btn_mcp_tags.setText("Tools Filter: None")
         elif len(selected) == total:
-            self.btn_mcp_tags.setText("Filter Tools: All")
+            self.btn_mcp_tags.setText("Tools Filter: All")
         else:
-            self.btn_mcp_tags.setText(f"Filter Tools: {len(selected)} selected")
+            self.btn_mcp_tags.setText(f"Tools Filter: {len(selected)} selected")
 
     def get_selected_tags(self) -> list:
         try:
