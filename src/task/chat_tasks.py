@@ -1106,3 +1106,28 @@ class DownloadImageTask(BackgroundTask):
         except Exception as e:
             self.send_log("ERROR", f"Image download failed for {url}: {str(e)}")
             return {"success": False, "url": url, "path": save_path, "msg": str(e)}
+
+
+class FetchHardwareStatusTask(BackgroundTask):
+    """
+    异步获取硬件状态，避免阻塞主 UI 线程
+    """
+
+    def _execute(self):
+        from src.core.device_manager import DeviceManager
+        from src.core.config_manager import ConfigManager
+
+        dev_mgr = DeviceManager()
+        config = ConfigManager()
+
+        curr_id = config.user_settings.get("inference_device", "auto")
+        parsed_id = dev_mgr.parse_device_string(curr_id)
+
+        dev_name = parsed_id
+        for d in dev_mgr.get_available_devices():
+            if d['id'] == parsed_id:
+                dev_name = d['name']
+                break
+
+        return {"dev_name": dev_name}
+

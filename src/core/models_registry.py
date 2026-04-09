@@ -268,9 +268,9 @@ class ModelManager:
         return cls._instance
 
     def verify_chat_models(self, kb_id):
-
         config = ConfigManager()
-        dev = self.dev_mgr.get_optimal_device()
+        user_pref = config.user_settings.get("inference_device", "auto")
+        dev = self.dev_mgr.parse_device_string(user_pref)
 
         # --- 校验 A: Embedding 模型 ---
         kb_info = KBManager().get_kb_by_id(kb_id)

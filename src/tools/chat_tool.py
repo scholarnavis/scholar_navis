@@ -80,7 +80,8 @@ class ChatDropTargetWidget(QWidget):
     def dropEvent(self, event):
         self.overlay.hide()
 
-        supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+        #supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+        supported_exts = ('.pdf', '.md', '.txt', '.docx')
         paths = [
             url.toLocalFile() for url in event.mimeData().urls()
             if url.isLocalFile() and url.toLocalFile().lower().endswith(supported_exts)
@@ -338,6 +339,25 @@ class ChatInputContainer(QFrame):
         self.btn_attach.setText("Attach")
         self.btn_attach.setIcon(tm.icon("link", "text_muted"))
         self.btn_attach.setStyleSheet(tool_btn_style)
+
+        if hasattr(self, 'lbl_hardware_status'):
+            self.lbl_hardware_status.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 11px; font-weight: bold; padding-left: 4px;"
+            )
+
+        if hasattr(self, 'btn_ribbon_state'):
+            self.btn_ribbon_state.setStyleSheet(f"""
+                        QPushButton {{ background: transparent; border: 1px solid {tm.color('border')}; border-radius: 4px; color: {tm.color('text_muted')}; font-size: 11px; padding: 2px 6px; text-align: left;}}
+                        QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('text_main')}; }}
+                    """)
+
+            state_icons = {
+                "Pinned": "keep",
+                "Hover": "menu",
+                "Collapsed": "down"
+            }
+            if hasattr(self, 'ribbon_state') and self.ribbon_state in state_icons:
+                self.btn_ribbon_state.setIcon(tm.icon(state_icons[self.ribbon_state], "text_muted"))
 
         if hasattr(self, 'lbl_context_icon'):
             self.lbl_context_icon.setPixmap(tm.icon("link", "accent").pixmap(14, 14))
@@ -609,13 +629,18 @@ class ChatTool(BaseTool):
 
         row1_layout = QHBoxLayout()
         self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
-                                                  model_key="chat_model_name", vision_key="chat_vision_model_name")
+                                                  model_key="chat_model_name", enable_vision=False)
 
         self.collapsed_placeholder = QLabel(" ")
         self.collapsed_placeholder.setVisible(False)
 
         row1_layout.addWidget(self.model_selector, 1)
         row1_layout.addWidget(self.collapsed_placeholder, 1)
+
+        # 硬件状态显示标签
+        self.lbl_hardware_status = QLabel()
+        self._update_hardware_status()
+        row1_layout.addWidget(self.lbl_hardware_status)
 
         # Pin/Toggle Button for Ribbon State
         tm = ThemeManager()
@@ -644,6 +669,11 @@ class ChatTool(BaseTool):
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
+
+        self.lbl_hardware_status = QLabel("Compute Device: Detecting...")
+        top_bar.addWidget(self.lbl_hardware_status)
+        self._update_hardware_status()
+
         main_layout.addWidget(self.top_bar_wrapper)
 
         self.ribbon_state = self.config.user_settings.get("chat_ribbon_state", "Pinned")
@@ -654,6 +684,9 @@ class ChatTool(BaseTool):
             self.trans_selector.setVisible(visible)
             self.lbl_kb.setVisible(visible)
             self.combo_kb.setVisible(visible)
+
+            if hasattr(self, 'lbl_hardware_status'):
+                self.lbl_hardware_status.setVisible(visible)
 
         def apply_ribbon_state(state):
             tm = ThemeManager()
@@ -763,16 +796,36 @@ class ChatTool(BaseTool):
 
         return self.widget
 
+    def _update_hardware_status(self):
+        """异步获取当前推理设备，防止阻塞主界面"""
+        from src.task.chat_tasks import FetchHardwareStatusTask
+        self.hw_task_mgr = TaskManager()
+        self.hw_task_mgr.sig_result.connect(self._on_hw_status_result)
+        self.hw_task_mgr.start_task(FetchHardwareStatusTask, task_id="fetch_hw_chat", mode=TaskMode.THREAD)
+
+    def _on_hw_status_result(self, result):
+        if result and "dev_name" in result:
+            self.lbl_hardware_status.setText(f"Compute Device: {result['dev_name']}")
+
+
     def attach_from_local(self):
         """按钮点击触发的文件选择器"""
+        """
         paths, _ = QFileDialog.getOpenFileNames(
             self.widget, "Select Document(s) or Image(s)", "",
             "Supported Files (*.pdf *.md *.txt *.csv *.docx *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
             "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
             "Documents (*.pdf *.md *.txt *.csv *.docx)"
         )
+        """
+        paths, _ = QFileDialog.getOpenFileNames(
+            self.widget, "Select Document(s)", "",
+            "Supported Files (*.pdf *.md *.txt *.docx);;"
+            "Documents (*.pdf *.md *.txt *.docx)"
+        )
         if not paths: return
         self.process_attached_files(paths)
+
 
     def eventFilter(self, obj, event):
         if obj == self.top_bar_wrapper:
@@ -783,6 +836,9 @@ class ChatTool(BaseTool):
                     self.trans_selector.setVisible(True)
                     self.lbl_kb.setVisible(True)
                     self.combo_kb.setVisible(True)
+                    if hasattr(self, 'lbl_hardware_status'):
+                        self.lbl_hardware_status.setVisible(True)
+
                 elif event.type() == QEvent.Leave:
                     if not self.top_bar_wrapper.geometry().contains(self.widget.mapFromGlobal(QCursor.pos())):
                         self.model_selector.setVisible(False)
@@ -790,7 +846,11 @@ class ChatTool(BaseTool):
                         self.trans_selector.setVisible(False)
                         self.lbl_kb.setVisible(False)
                         self.combo_kb.setVisible(False)
+                        if hasattr(self, 'lbl_hardware_status'):
+                            self.lbl_hardware_status.setVisible(False)
+
         return super().eventFilter(obj, event)
+
 
     def process_attached_files(self, items):
         if not hasattr(self, 'external_chunks'):

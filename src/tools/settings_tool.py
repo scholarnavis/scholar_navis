@@ -161,6 +161,10 @@ class SettingsTool(BaseTool):
         idx_dev = self.combo_device.findData(curr_device)
         if idx_dev >= 0:
             self.combo_device.setCurrentIndex(idx_dev)
+        else:
+            self.combo_device.addItem(f"Saved Device (Offline): {curr_device}", curr_device)
+            self.combo_device.setCurrentIndex(self.combo_device.count() - 1)
+
         self.combo_device.blockSignals(False)
 
 
@@ -1217,7 +1221,8 @@ class SettingsTool(BaseTool):
 
         # --- 3. 硬件加速设备选择 ---
         self.combo_device = BaseComboBox()
-        self.combo_device.addItem("Detecting devices...", "auto")
+        curr_device = self.config.user_settings.get("inference_device", "auto")
+        self.combo_device.addItem("Detecting devices...", curr_device)
         layout.addRow("Compute Device:", self.combo_device)
 
         # --- 4. 其他模型设置 ---

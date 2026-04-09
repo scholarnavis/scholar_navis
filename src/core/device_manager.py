@@ -109,6 +109,7 @@ class DeviceManager:
         gpu_info_list = self.get_gpu_info()
 
         devices = [
+            {"id": "auto", "name": "Auto Detect (Recommended)"},
             {"id": "cpu", "name": "CPU (Universal Fallback - Slow but Safe)"}
         ]
 
