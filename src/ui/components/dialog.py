@@ -17,6 +17,7 @@ from src.core.core_task import TaskManager, TaskMode
 from src.core.models_registry import EMBEDDING_MODELS
 from src.core.theme_manager import ThemeManager
 from src.task.settings_tasks import TestMcpConnectionTask
+from src.ui.components.combo import BaseComboBox
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
@@ -358,7 +359,7 @@ class FeedEditorDialog(BaseDialog):
         self.inp_name = QLineEdit(feed_data.get('name', '') if feed_data else '')
         self.inp_url = QLineEdit(feed_data.get('url', '') if feed_data else '')
 
-        self.inp_category = QComboBox()
+        self.inp_category = BaseComboBox()
         self.inp_category.setEditable(True)
         cats = categories or []
         if "Custom Sources" not in cats:
@@ -419,16 +420,16 @@ class FeedLibraryDialog(BaseDialog):
                 self.display_dict[cat].append(f.copy())
 
         top_bar = QHBoxLayout()
-        lbl_cat = QLabel("Category / Journal:")  # 🧹 Removed Emoji
-        self.combo_category = QComboBox()
+        lbl_cat = QLabel("Category / Journal:")
+        self.combo_category = BaseComboBox()
         self.combo_category.addItems(list(self.display_dict.keys()))
         self.combo_category.currentTextChanged.connect(self._render_table)
 
         self.inp_search_lib = QLineEdit()
-        self.inp_search_lib.setPlaceholderText("Search journal names...")  # 🧹 Removed Emoji
+        self.inp_search_lib.setPlaceholderText("Search journal names...")
         self.inp_search_lib.textChanged.connect(self._filter_library_table)
 
-        self.btn_add_custom = QPushButton(" Add Custom Source")  # 🧹 Removed Emoji
+        self.btn_add_custom = QPushButton(" Add Custom Source")
         self.btn_add_custom.setCursor(Qt.PointingHandCursor)
         self._tracked_buttons.append((self.btn_add_custom, "default"))
         self.btn_add_custom.clicked.connect(self._on_add_custom)
@@ -697,7 +698,7 @@ class McpConfigDialog(BaseDialog):
         desc_v_layout.addWidget(self.inp_desc)
         desc_v_layout.addWidget(self.desc_hint_widget)
 
-        self.combo_type = QComboBox()
+        self.combo_type = BaseComboBox()
         self.combo_type.addItems(["stdio", "sse"])
 
         self.inp_cmd_url = QLineEdit()
@@ -894,7 +895,7 @@ class SelectKBFileDialog(BaseDialog):
         lbl_kb = QLabel("Knowledge Base:")
         kb_layout.addWidget(lbl_kb)
 
-        self.combo_kb = QComboBox()
+        self.combo_kb = BaseComboBox()
 
         kb_layout.addWidget(self.combo_kb, stretch=1)
         self.content_layout.addLayout(kb_layout)
@@ -1453,7 +1454,7 @@ class ProjectEditorDialog(BaseDialog):
         self.inp_desc.setMaximumHeight(70)
         self.form_layout.addRow("Desc:", self.inp_desc)
 
-        self.combo_model = QComboBox()
+        self.combo_model = BaseComboBox()
         active_models = EMBEDDING_MODELS
         for m in active_models:
             self.combo_model.addItem(m['ui_name'], m['id'])
