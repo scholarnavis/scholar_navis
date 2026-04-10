@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal, QSettings
 
 from src.core.config_manager import ConfigManager
 from src.core.theme_manager import ThemeManager
+from src.ui.components.combo import BaseComboBox
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.core.signals import GlobalSignals
 from src.ui.components.text_formatter import TextFormatter
@@ -181,17 +182,13 @@ class QuickTranslatorWindow(QWidget):
         saved_src = self.cfg_mgr.user_settings.get("trans_source_lang", "Auto Detect")
         saved_tgt = self.cfg_mgr.user_settings.get("trans_target_lang", sys_lang)
 
-        self.combo_src = QComboBox()
+        self.combo_src = BaseComboBox()
         self.combo_src.addItems(langs)
         self.combo_src.setCurrentText(saved_src)
-        self.combo_src.setStyleSheet(
-            "background: #1e1e1e; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px;")
 
-        self.combo_tgt = QComboBox()
+        self.combo_tgt = BaseComboBox()
         self.combo_tgt.addItems([l for l in langs if l != "Auto Detect"] + ["Academic Polish"])
         self.combo_tgt.setCurrentText(saved_tgt)
-        self.combo_tgt.setStyleSheet(
-            "background: #1e1e1e; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px;")
 
         self.combo_src.currentTextChanged.connect(lambda t: self._save_lang("trans_source_lang", t))
         self.combo_tgt.currentTextChanged.connect(lambda t: self._save_lang("trans_target_lang", t))
@@ -505,20 +502,6 @@ class QuickTranslatorWindow(QWidget):
                        f"border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 8px;")
         self.input_box.setStyleSheet(input_style)
         self.output_box.setStyleSheet(input_style + " font-size: 14px;")
-
-        combo_style = f"""
-            QComboBox {{
-                background: {tm.color('bg_input')}; 
-                color: {tm.color('text_main')}; 
-                border: 1px solid {tm.color('border')}; 
-                border-radius: 4px;
-            }}
-            QComboBox:hover {{
-                border: 1px solid {tm.color('accent')};
-            }}
-        """
-        self.combo_src.setStyleSheet(combo_style)
-        self.combo_tgt.setStyleSheet(combo_style)
 
         self.chk_markdown.setStyleSheet(f"""
             QCheckBox {{

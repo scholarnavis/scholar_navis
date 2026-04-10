@@ -24,7 +24,7 @@ from src.core.models_registry import get_model_conf
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager
-from src.task.chat_tasks import ProcessAttachmentTask, ChatGenerationTask
+from src.task.chat_tasks import ChatGenerationTask
 from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget, hex_to_rgba
@@ -842,8 +842,8 @@ class ChatTool(BaseTool):
 
 
     def process_attached_files(self, items):
-        if not hasattr(self, 'external_chunks'):
-            self.external_chunks = []
+        if not hasattr(self, 'external_files'):
+            self.external_files = []
         if not hasattr(self, 'external_context_html'):
             self.external_context_html = ""
 
@@ -862,31 +862,28 @@ class ChatTool(BaseTool):
             ToastManager().show("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx",
                                 "warning")
 
-        self.input_container.set_uploading(True)
+        # 直接将文件路径保存，交由 Chat 进程去处理
+        self.external_files.extend(file_infos)
 
-        if hasattr(self, 'attach_task_mgr'):
-            self.attach_task_mgr.cancel_task()
+        for info in file_infos:
+            path = info['path']
+            f_name = info['name']
+            safe_path = quote(path)
+            safe_name = quote(f_name)
+            link = f"cite://view?path={safe_path}&page=1&name={safe_name}"
+            self.external_context_html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
 
-        # 引入标准的 ProgressDialog，满足在执行期间可取消的交互需求
-        from src.ui.components.dialog import ProgressDialog
-        self.attach_pd = ProgressDialog(self.widget, "Processing Attachments", "Parsing files into memory...")
-        self.attach_pd.show()
+        if self.external_files:
+            names = []
+            for c in self.external_files:
+                if c['name'] not in names:
+                    names.append(c['name'])
 
-        self.attach_task_mgr = TaskManager()
-
-        # 进度信号与取消操作桥接
-        self.attach_task_mgr.sig_progress.connect(self.attach_pd.update_progress)
-        self.attach_pd.sig_canceled.connect(self.attach_task_mgr.cancel_task)
-
-        self.attach_task_mgr.sig_result.connect(self._on_attachment_result)
-        self.attach_task_mgr.sig_state_changed.connect(self._on_attachment_state_changed)
-
-        self.attach_task_mgr.start_task(
-            ProcessAttachmentTask,
-            task_id="process_attachment",
-            mode=TaskMode.PROCESS,
-            file_infos=file_infos
-        )
+            display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(names)
+            QTimer.singleShot(100, lambda: self.input_container.show_context_preview(display_text))
+            ToastManager().show(f"Attached {len(names)} file(s).", "success")
+        else:
+            self.input_container.hide_context_preview()
 
     def set_controls_enabled(self, enabled: bool):
         """锁定或解锁对话控制区的关键配置"""
@@ -924,56 +921,9 @@ class ChatTool(BaseTool):
             if (sb.maximum() - sb.value()) <= 50:
                 self.scroll_to_bottom()
 
-    def _on_attachment_state_changed(self, state, msg):
-        if state == TaskState.SUCCESS.value:
-            self.attach_pd.show_finish_state(True, "Attachment Complete", "Files successfully loaded into memory.")
-        elif state == TaskState.FAILED.value or state == TaskState.TERMINATED.value:
-            self.input_container.set_uploading(False)
-            self.input_container.hide_context_preview()
-            self.attach_pd.show_finish_state(False, "Attachment Halted", f"Task ended: {msg}")
 
-    def _on_attachment_result(self, result):
-        self.input_container.set_uploading(False)
 
-        if not result: return
 
-        chunks = result.get("chunks", [])
-        html = result.get("html", "")
-
-        self.external_chunks.extend(chunks)
-        self.external_context_html += html
-
-        if self.external_chunks:
-            names = []
-            for c in self.external_chunks:
-                if c['name'] not in names:
-                    names.append(c['name'])
-
-            display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(names)
-
-            QTimer.singleShot(100, lambda: self.input_container.show_context_preview(display_text))
-
-            ToastManager().show(f"Attached {len(names)} file(s).", "success")
-        else:
-            self.input_container.hide_context_preview()
-
-    def _on_attachment_finished(self, chunks, html):
-        self.input_container.btn_attach.setEnabled(True)
-        self.input_container.btn_send.setEnabled(True)
-        self.external_chunks.extend(chunks)
-        self.external_context_html += html
-
-        if self.external_chunks:
-            names = []
-            for c in self.external_chunks:
-                if c['name'] not in names:
-                    names.append(c['name'])
-
-            display_text = f"{names[0]}, {names[1]} 等 {len(names)} 个文件" if len(names) > 2 else ", ".join(names)
-            self.input_container.show_context_preview(display_text)
-            ToastManager().show(f"Attached {len(names)} file(s).", "success")
-        else:
-            self.input_container.hide_context_preview()
 
     def export_chat_history(self):
         if not self.history:
@@ -1128,28 +1078,26 @@ class ChatTool(BaseTool):
         if not kb_id:
             kb_id = "none"
 
-
-
         # 4. 获取当前附件数据
         current_html = getattr(self, 'external_context_html', "")
-        current_chunks = getattr(self, 'external_chunks', [])
+        current_files = getattr(self, 'external_files', [])
         self.external_context_html = ""
-        self.external_chunks = []
+        self.external_files = []
 
         # 5. UI 切换与历史记录管理
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
 
-        self.logger.info(f"User asked: {text[:50]}... (KB: {kb_id})")
+        self.logger.info(f"User asked: {text[:50]}... (KB: {kb_id}) | Attached Files: {len(current_files)}")
         self.input_container.clear_text()
 
         # 将上下文的 HTML 链接渲染在气泡上方
         self.add_bubble(text, is_user=True, context_html=current_html if current_html else None)
 
         llm_text = text
-        if current_chunks:
+        if current_files:
             context_block = "\n".join(
-                [f"--- {c['name']} ---\n{c['content']}" for c in current_chunks]
+                [f"--- Attached File: {c['name']} ---" for c in current_files]
             )
             llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
 
@@ -1158,11 +1106,11 @@ class ChatTool(BaseTool):
             "content": llm_text,
             "display_text": text,
             "context_html": current_html if current_html else None,
-            "external_chunks": current_chunks
+            "external_files": current_files
         })
 
         self.input_container.hide_context_preview()
-        self.external_chunks = current_chunks
+        self.external_files = current_files
         self.start_ai_response(kb_id)
 
     def _restore_last_input(self):
@@ -1175,15 +1123,15 @@ class ChatTool(BaseTool):
         if last_user_msg:
             self.input_container.set_text(last_user_msg.get('display_text', ''))
 
-            chunks = last_user_msg.get('external_chunks', [])
+            files = last_user_msg.get('external_files', [])
             html = last_user_msg.get('context_html', '')
 
-            self.external_chunks = list(chunks) if chunks else []
+            self.external_files = list(files) if files else []
             self.external_context_html = html if html else ""
 
-            if self.external_chunks:
+            if self.external_files:
                 names = []
-                for c in self.external_chunks:
+                for c in self.external_files:
                     if c['name'] not in names:
                         names.append(c['name'])
                 display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(
@@ -1334,7 +1282,7 @@ class ChatTool(BaseTool):
 
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
 
-        current_external_chunks = getattr(self, 'external_chunks', [])
+        current_external_files = getattr(self, 'external_files', [])
 
         QApplication.processEvents()
 
@@ -1348,7 +1296,7 @@ class ChatTool(BaseTool):
                 messages=list(self.history),
                 kb_id=kb_id,
                 requires_translation=requires_translation,
-                external_context=current_external_chunks,
+                external_files=current_external_files,
                 use_academic_agent=use_academic_agent,
                 academic_tags=academic_tags if use_academic_agent else [],
                 use_external_tools=use_external_tools,
@@ -1357,7 +1305,7 @@ class ChatTool(BaseTool):
 
         QTimer.singleShot(100, _launch_task)
 
-        self.external_chunks = []
+        self.external_files = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()
 
@@ -1385,7 +1333,7 @@ class ChatTool(BaseTool):
 
         old_msg = self.history[index]
         old_context_html = old_msg.get('context_html')
-        old_chunks = old_msg.get('external_chunks', [])
+        old_files = old_msg.get('external_files', [])
 
         self.history = self.history[:index]
 
@@ -1413,9 +1361,9 @@ class ChatTool(BaseTool):
         self._is_editing = False
 
         llm_text = new_text
-        if old_chunks:
+        if old_files:
             context_block = "\n".join(
-                [f"--- {c['name']} ---\n{c['content']}" for c in old_chunks]
+                [f"--- Attached File: {c['name']} ---" for c in old_files]
             )
             llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{new_text}"
         elif "Context Info:\n" in old_msg['content'] and "\n\nQuestion:\n" in old_msg['content']:
@@ -1427,10 +1375,10 @@ class ChatTool(BaseTool):
             "content": llm_text,
             "display_text": new_text,
             "context_html": old_context_html,
-            "external_chunks": old_chunks
+            "external_files": old_files
         })
 
-        self.external_chunks = old_chunks
+        self.external_files = old_files
         self.start_ai_response(kb_id)
 
     def cancel_generation(self):
@@ -1518,7 +1466,7 @@ class ChatTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to write temp external context: {e}")
 
-        self.external_chunks = [{
+        self.external_files = [{
             "path": temp_path,
             "name": "External Context.txt",
             "page": 1,
@@ -1564,32 +1512,17 @@ class ChatTool(BaseTool):
         menu.exec(QCursor.pos())
 
     def clear_attached_context(self):
-        self.external_chunks = []
+        self.external_files = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()
 
     def attach_from_kb(self):
-        kb_data = self.combo_kb.currentData()
-        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-
-        if not kb_id or kb_id == "none":
-            ToastManager().show("Please select a Knowledge Base from the top dropdown first.", "warning")
-            return
-
-        files = self.kb_manager.get_kb_files(kb_id)
-        if not files:
-            ToastManager().show("The selected Knowledge Base is empty.", "warning")
-            return
-
-        dlg = SelectKBFileDialog(self.widget, files=files)
+        from src.ui.components.dialog import SelectKBFileDialog
+        dlg = SelectKBFileDialog(self.widget)
 
         if dlg.exec():
-            paths = dlg.get_selected_paths()
-            if paths:
-                file_infos = []
-                for p in paths:
-                    real_name = next((f["name"] for f in files if f["path"] == p), os.path.basename(p))
-                    file_infos.append({"path": p, "name": real_name})
+            file_infos = dlg.get_selected_file_infos()
+            if file_infos:
                 self.process_attached_files(file_infos)
 
     def update_ai_bubble(self, token):

@@ -883,12 +883,21 @@ class McpConfigDialog(BaseDialog):
         return name, cfg
 
 
-
 class SelectKBFileDialog(BaseDialog):
     def __init__(self, parent=None, files=None):
         super().__init__(parent, title="Select Files from Knowledge Base", width=580)
         self.setMinimumHeight(500)
         self._all_files = files or []
+
+        # --- KB 选择栏 ---
+        kb_layout = QHBoxLayout()
+        lbl_kb = QLabel("Knowledge Base:")
+        kb_layout.addWidget(lbl_kb)
+
+        self.combo_kb = QComboBox()
+
+        kb_layout.addWidget(self.combo_kb, stretch=1)
+        self.content_layout.addLayout(kb_layout)
 
         # --- 搜索栏 ---
         self.inp_search = QLineEdit()
@@ -904,8 +913,6 @@ class SelectKBFileDialog(BaseDialog):
         self.list_widget.itemSelectionChanged.connect(self._update_status)
         self.content_layout.addWidget(self.list_widget, stretch=1)
 
-        self._populate_list(self._all_files)
-
         # --- 底部状态提示 ---
         self.lbl_status = QLabel()
         self.footer_layout.insertWidget(0, self.lbl_status)
@@ -913,14 +920,46 @@ class SelectKBFileDialog(BaseDialog):
         self.add_button("Cancel", self.reject)
         self.btn_attach = self.add_button("Attach", self.accept, is_primary=True)
 
+        self.combo_kb.currentIndexChanged.connect(self._on_kb_changed)
+
+        # 初始化数据
+        self._load_kbs()
         self._update_status()
         self._apply_theme()
+
+    def _load_kbs(self):
+        from src.core.kb_manager import KBManager
+        self.kb_manager = KBManager()
+        kbs = self.kb_manager.get_all_kbs()
+
+        self.combo_kb.blockSignals(True)
+        self.combo_kb.clear()
+        self.combo_kb.addItem("Please select a Knowledge Base...", "none")
+
+        for kb in kbs:
+            if kb.get('status') == 'ready':
+                self.combo_kb.addItem(kb['name'], kb)
+
+        self.combo_kb.blockSignals(False)
+
+    def _on_kb_changed(self):
+        kb_data = self.combo_kb.currentData()
+        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
+
+        if not kb_id or kb_id == "none":
+            self._all_files = []
+        else:
+            self._all_files = self.kb_manager.get_kb_files(kb_id)
+
+        self.inp_search.clear()
+        self._populate_list(self._all_files)
+        self._update_status()
 
     def _populate_list(self, files):
         self.list_widget.clear()
         for f in files:
             item = QListWidgetItem(f"  {f['name']}")
-            item.setData(Qt.UserRole, f['path'])
+            item.setData(Qt.UserRole, f)
             item.setToolTip(f['path'])
             self.list_widget.addItem(item)
 
@@ -935,18 +974,32 @@ class SelectKBFileDialog(BaseDialog):
         total = self.list_widget.count()
         if selected > 0:
             self.lbl_status.setText(f"{selected} of {total} selected")
+            self.btn_attach.setEnabled(True)
         else:
             self.lbl_status.setText(f"{total} file(s) available")
+            self.btn_attach.setEnabled(False)
 
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
-
         self.lbl_status.setStyleSheet(
             f"color: {tm.color('text_muted')}; font-size: 12px; font-weight: bold;")
+        if hasattr(self, 'combo_kb') and hasattr(self.combo_kb, 'setStyleSheet'):
+            self.combo_kb.setStyleSheet(
+                f"QComboBox {{ border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; background: {tm.color('bg_input')}; color: {tm.color('text_main')}; }}")
+
+    def get_selected_file_infos(self):
+        infos = []
+        for item in self.list_widget.selectedItems():
+            data = item.data(Qt.UserRole)
+            if isinstance(data, dict):
+                infos.append(data)
+            else:
+                infos.append({"path": data, "name": os.path.basename(data)})
+        return infos
 
     def get_selected_paths(self):
-        return [item.data(Qt.UserRole) for item in self.list_widget.selectedItems()]
+        return [item['path'] for item in self.get_selected_file_infos()]
 
 
 

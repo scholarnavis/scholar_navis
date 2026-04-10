@@ -1,145 +1,13 @@
-import base64
 import json
-import mimetypes
-import os
 import re
 import time
 import uuid
-from urllib.parse import quote
-
-import chardet
-
 from src.core.config_manager import ConfigManager
-from src.core.core_task import BackgroundTask
+from src.core.core_task import BackgroundTask, TaskState
 from src.core.device_manager import DeviceManager
+from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
-
-
-class ProcessAttachmentTask(BackgroundTask):
-    def _execute(self):
-        file_infos = self.kwargs.get('file_infos', [])
-
-        if not file_infos:
-            paths = self.kwargs.get('paths', [])
-            file_infos = [{"path": p, "name": os.path.basename(p)} for p in paths]
-
-        chunks = []
-        html = ""
-        total = len(file_infos)
-
-        for i, info in enumerate(file_infos):
-            if self.is_cancelled():
-                self.send_log("INFO", "Attachment processing cancelled by user.")
-                raise InterruptedError("Task was safely terminated by the user.")
-
-            path = info['path']
-            f_name = info['name']
-
-            ext = f_name.lower()
-
-            try:
-                # 1. Image processing
-                if ext.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
-                    self.update_progress(int((i / total) * 100), f"Encoding image: {f_name}...")
-                    with open(path, "rb") as image_file:
-                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                        mime_type, _ = mimetypes.guess_type(f_name)
-                        mime_type = mime_type or 'image/jpeg'
-
-                        chunks.append({
-                            "path": path, "name": f_name, "page": 1,
-                            "type": "image",
-                            "base64_url": f"data:{mime_type};base64,{encoded_string}",
-                            "content": f"[Image Attached: {f_name}]"
-                        })
-
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>🖼️ {f_name}</a></div>"
-
-                # 2. PDF processing
-                elif ext.endswith('.pdf'):
-                    self.update_progress(int((i / total) * 100), f"Parsing PDF: {f_name}...")
-                    import pymupdf4llm
-                    md_chunks = pymupdf4llm.to_markdown(path, page_chunks=True)
-                    for chunk in md_chunks:
-                        text = chunk.get("text", "").strip()
-                        if len(text) > 10:
-                            chunks.append({
-                                "path": path, "name": f_name, "page": chunk.get("metadata", {}).get("page", 1),
-                                "content": text
-                            })
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
-
-                # 2.5 DOCX processing
-                elif ext.endswith('.docx'):
-                    self.update_progress(int((i / total) * 100), f"Parsing DOCX: {f_name}...")
-                    import docx
-                    doc = docx.Document(path)
-
-                    text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
-
-                    if len(text) > 10:
-                        chunks.append({
-                            "path": path, "name": f_name, "page": 1,
-                            "content": text
-                        })
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
-
-                # 2.6 老旧 DOC 拦截
-                elif ext.endswith('.doc'):
-                    self.send_log("ERROR",
-                                  f"Legacy .doc format is not natively supported. Please convert {f_name} to .docx")
-                    # 给用户一个 HTML 提示，不用提取内容
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#ffb86c; text-decoration:none;'>⚠️ {f_name} (Please convert to .docx)</a></div>"
-
-
-
-                # 3. Text processing
-                else:
-                    self.update_progress(int((i / total) * 100), f"Reading file: {f_name}...")
-                    text = ""
-
-                    with open(path, 'rb') as f:
-                        raw_data = f.read()
-                        detected = chardet.detect(raw_data)
-
-                        # 如果文件太小或特征不明显导致检测失败，默认回退到 utf-8
-                        encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
-                        text = raw_data.decode(encoding, errors='replace').strip()
-
-                    if text:
-                        chunks.append({
-                            "path": path, "name": f_name, "page": 1, "content": text
-                        })
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
-
-            except Exception as e:
-                self.send_log("ERROR", f"Failed to process {f_name}: {e}")
-                raise e
-
-        self.update_progress(100, "Finalizing...")
-
-        import json
-        import tempfile
-        import uuid
-
-        result_dict = {"chunks": chunks, "html": html}
-        temp_file_path = os.path.join(tempfile.gettempdir(), f"task_payload_{uuid.uuid4().hex}.json")
-
-        with open(temp_file_path, 'w', encoding='utf-8') as f:
-            json.dump(result_dict, f, ensure_ascii=False)
-
-        return {"_is_temp_file": True, "path": temp_file_path}
-
-
-# [Context: Imports at the top of chat_tasks.py]
-from src.core.core_task import BackgroundTask, TaskState
-from src.core.kb_manager import KBManager, DatabaseManager
 
 
 class ChatGenerationTask(BackgroundTask):
@@ -191,6 +59,101 @@ class ChatGenerationTask(BackgroundTask):
         self.kb_id = self.kwargs.get('kb_id')
         if self.kb_id == "none": self.kb_id = None
 
+        current_external_files = self.kwargs.get('external_files', [])
+        all_external_files = []
+
+        # 1. 遍历历史获取上下文遗留文件
+        for m in self.messages:
+            if m.get('external_files'):
+                for f in m['external_files']:
+                    if f not in all_external_files:
+                        all_external_files.append(f)
+
+        # 2. 合并当前上传文件
+        for f in current_external_files:
+            if f not in all_external_files:
+                all_external_files.append(f)
+
+        self.external_context = []
+
+        if all_external_files:
+            self.send_log("INFO", f"Loading {len(all_external_files)} attached file(s) into memory context...")
+            self._emit_token(
+                f"<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>📄 Loading {len(all_external_files)} attached file(s) into memory...</div>\n\n")
+            time.sleep(0.05)
+
+            import tempfile, hashlib, os, json
+            cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+
+            for info in all_external_files:
+                if self.is_cancelled(): break
+                path = info.get('path', '')
+                f_name = info.get('name', 'Unknown')
+                content = info.get('content', None)
+                ext = f_name.lower()
+
+                if content is not None:
+                    self.external_context.append(
+                        {"path": path, "name": f_name, "page": info.get('page', 1), "content": content})
+                    continue
+
+                if os.path.exists(path):
+                    file_stat = os.stat(path)
+                    hash_key = hashlib.md5(f"{path}_{file_stat.st_mtime}_{file_stat.st_size}".encode()).hexdigest()
+                    cache_file = os.path.join(cache_dir, f"{hash_key}.json")
+
+                    # 击中缓存，直接加载，实现秒进
+                    if os.path.exists(cache_file):
+                        try:
+                            with open(cache_file, 'r', encoding='utf-8') as cf:
+                                cached_data = json.load(cf)
+                            self.external_context.extend(cached_data)
+                            continue
+                        except:
+                            pass
+
+                    try:
+                        chunks = []
+                        if ext.endswith('.pdf'):
+                            import pymupdf4llm
+                            md_chunks = pymupdf4llm.to_markdown(path, page_chunks=True)
+                            for chunk in md_chunks:
+                                text = chunk.get("text", "").strip()
+                                if len(text) > 10:
+                                    chunks.append({
+                                        "path": path, "name": f_name, "page": chunk.get("metadata", {}).get("page", 1),
+                                        "content": text
+                                    })
+                        elif ext.endswith('.docx'):
+                            import docx
+                            doc = docx.Document(path)
+                            text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
+                            if len(text) > 10:
+                                chunks.append({"path": path, "name": f_name, "page": 1, "content": text})
+                        elif ext.endswith('.doc'):
+                            self.send_log("WARNING", f"Legacy .doc format skipped: {f_name}")
+                        elif ext.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
+                            self.send_log("INFO", f"Image upload is currently paused. Skipping image: {f_name}")
+                        else:
+                            import chardet
+                            with open(path, 'rb') as f:
+                                raw_data = f.read()
+                                detected = chardet.detect(raw_data)
+                                encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
+                                text = raw_data.decode(encoding, errors='replace').strip()
+                            if text:
+                                chunks.append({"path": path, "name": f_name, "page": 1, "content": text})
+
+                        if chunks:
+                            self.external_context.extend(chunks)
+                            with open(cache_file, 'w', encoding='utf-8') as cf:
+                                json.dump(chunks, cf, ensure_ascii=False)
+                    except Exception as e:
+                        self.send_log("ERROR", f"Failed to parse {f_name}: {e}")
+
+            self._emit_token("[CLEAR_SEARCH]")
+
         if self.kb_id:
             from src.core.models_registry import ModelManager
             ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(self.kb_id)
@@ -218,7 +181,6 @@ class ChatGenerationTask(BackgroundTask):
             self.logger.warning(f"Language detection failed in background: {e}")
             self.requires_translation = False
 
-        self.external_context = self.kwargs.get('external_context', [])
         self.use_academic_agent = self.kwargs.get('use_academic_agent', True)
         self.academic_tags = self.kwargs.get('academic_tags', [])
 
@@ -375,16 +337,13 @@ class ChatGenerationTask(BackgroundTask):
                 self.send_log("INFO",
                               f"Small attachment size ({len(cand_docs)} chunks), skipping rerank and using all content.")
 
-            files_dict = {}
             for doc in cand_docs:
                 f_name = doc["metadata"]["name"]
                 page = doc["metadata"]["page"]
-                if f_name not in files_dict:
-                    files_dict[f_name] = ""
-                files_dict[f_name] += f"\n[Page {page}]\n{doc['content']}"
-
-            docs_json = json.dumps(files_dict, ensure_ascii=False)
-            llm_content.append({"type": "text", "text": f"User Uploaded Files (JSON Format):\n{docs_json}\n\n"})
+                context_str += (
+                    f"--- [User Attached File: {f_name} (Page {page})] ---\n"
+                    f"Content: {doc['content']}\n\n"
+                )
 
         if images:
             vision_model_name = self.main_config.get("vision_model_name", "auto")
