@@ -10,7 +10,6 @@ from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication, QMessageBox
 from src.core.logger import setup_logger
 from src.core.core_task import TaskManager, TaskMode
-from src.task.startup_tasks import HardwareInitTask
 
 is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
@@ -22,7 +21,7 @@ else:
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["SCARF_NO_ANALYTICS"] = "true"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
@@ -112,6 +111,7 @@ class StartupWorker(QThread):
 
             self.sig_progress.emit(25, "Scanning local hardware & compute engines (Background)...")
             time.sleep(0.1)
+            from src.task.startup_tasks import HardwareInitTask
             self.hw_task_mgr.start_task(HardwareInitTask, task_id="hw_warmup", mode=TaskMode.THREAD)
 
             self.sig_progress.emit(40, "Mounting theme cache and UI assets...")
@@ -283,6 +283,11 @@ class AppController(QObject):
 if __name__ == "__main__":
 
     multiprocessing.freeze_support()
+
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
 
     # 1. 判断启动模式
     is_admin = False
