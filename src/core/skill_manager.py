@@ -1,8 +1,6 @@
-import importlib
 import inspect
 import json
 import logging
-import os
 from typing import Dict, Callable, get_origin, Literal, get_args
 
 from src.core import BASE_DIR
@@ -98,7 +96,7 @@ class SkillManager:
 
         try:
             # Import all 25 core academic functions directly from the agent module
-            from plugins.academic_agent import (
+            from src.core.academic_agent import (
                 search_academic_literature, traverse_citation_graph, fetch_open_access_pdf,
                 search_omics_datasets, fetch_sequence_fasta, fetch_taxonomy_info,
                 search_gbif_occurrences, universal_ncbi_summary, fetch_webpage_content,
