@@ -9,8 +9,6 @@ import traceback
 import multiprocessing as mp
 from enum import Enum
 from typing import Any, Dict, Optional
-
-import psutil
 from PySide6.QtCore import QObject, Signal, QThread, QTimer, QEventLoop
 
 
@@ -349,6 +347,7 @@ class TaskManager(QObject):
 
     @staticmethod
     def _kill_process_tree(pid: int):
+        import psutil
         try:
             if sys.platform == "win32":
                 subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)

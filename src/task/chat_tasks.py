@@ -82,7 +82,7 @@ class ChatGenerationTask(BackgroundTask):
                 f"<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>📄 Loading {len(all_external_files)} attached file(s) into memory...</div>\n\n")
             time.sleep(0.05)
 
-            import tempfile, hashlib, os, json
+            import tempfile, hashlib, os
             cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
             os.makedirs(cache_dir, exist_ok=True)
 

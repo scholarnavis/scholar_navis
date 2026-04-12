@@ -693,52 +693,110 @@ class ChatBubbleWidget(QWidget):
 
         self.set_content(self.original_text)
 
-    def copy_plain_text(self):
-        if  getattr(self, 'is_interrupted', False):
-            ToastManager().show("Cannot copy interrupted or error messages.", "warning")
-            return
+    def _extract_content_for_copy(self, is_markdown=False):
+        """核心提取逻辑：全局跨组件打捞 Mermaid 源码，精准清洗 Cite 链接"""
+        text = self.original_text
 
-        clipboard = QGuiApplication.clipboard()
-
-        raw_text = self.lbl_text.toPlainText()
-
+        # 1. 预处理：移除后台思考过程和系统标识
+        text = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'Initializing\.\.\.|Reasoning & Tool Execution|\[FINAL_ANSWER\]', '', text, flags=re.IGNORECASE)
         if self.is_loading:
-            raw_text = re.sub(r'^Thinking\.{0,3}\n*', '', raw_text)
+            text = re.sub(r'^Thinking\.{0,3}', '', text)
 
-        raw_text = re.sub(r'Initializing\.\.\.', '', raw_text, flags=re.IGNORECASE)
-        raw_text = re.sub(r'Reasoning & Tool Execution', '', raw_text, flags=re.IGNORECASE)
+        # 2. Mermaid 源码强行回填：全局搜索哈希缓存池
+        def restore_mermaid_full(match):
+            code_hash = match.group(1)
+            code = None
 
-        lines = [line.rstrip() for line in raw_text.splitlines()]
+            # 第一层级：顺着父组件树往上爬寻找
+            curr = self
+            while curr:
+                cache = getattr(curr, 'mermaid_cache', getattr(curr, 'mermaid_codes', None))
+                if cache is not None and code_hash in cache:
+                    code = cache[code_hash]
+                    break
+                curr = curr.parentWidget()
 
-        cleaned_text = '\n'.join(lines)
-        cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
+            # 第二层级：若父树断裂，直接在全局应用程序内搜索所有的顶层组件及其子组件
+            if not code:
+                from PySide6.QtWidgets import QApplication, QWidget
+                for top_widget in QApplication.topLevelWidgets():
+                    cache = getattr(top_widget, 'mermaid_cache', getattr(top_widget, 'mermaid_codes', None))
+                    if cache is not None and code_hash in cache:
+                        code = cache[code_hash]
+                        break
+                    for child in top_widget.findChildren(QWidget):
+                        cache = getattr(child, 'mermaid_cache', getattr(child, 'mermaid_codes', None))
+                        if cache is not None and code_hash in cache:
+                            code = cache[code_hash]
+                            break
+                    if code: break
 
-        clipboard.setText(cleaned_text)
+            if code:
+                return f"\n```mermaid\n{code}\n```\n"
+            return ""
+
+        # 彻底匹配 TextFormatter 注入的整块 UI HTML（提取哈希并替换为真源码）
+        pattern_ui = r"<br>\s*<div[^>]*>\s*<div[^>]*>\s*<b>Mermaid Diagram Generated</b>\s*</div>\s*<a href=['\"]mermaid://view\?hash=([a-f0-9]+)['\"][^>]*>.*?</a>\s*</div>\s*<br>"
+        text = re.sub(pattern_ui, restore_mermaid_full, text, flags=re.DOTALL | re.IGNORECASE)
+        # 兼容匹配遗漏的 Markdown/纯文本形式链接
+        text = re.sub(r'\[[^\]]*\]\(mermaid://view\?hash=([a-f0-9]+)\)', restore_mermaid_full, text,
+                      flags=re.IGNORECASE)
+        text = re.sub(r"mermaid://view\?hash=([a-f0-9]+)", restore_mermaid_full, text, flags=re.IGNORECASE)
+
+        # 扫尾：清除没匹配到的残留 UI 提示文字
+        text = re.sub(r"Mermaid Diagram Generated.*?Click here to view / edit interactive diagram", "", text,
+                      flags=re.DOTALL | re.IGNORECASE)
+
+        # 3. Cite 处理：彻底剔除超链接，精准保留内部原本的文字（例如 [1] 或 Smith 等）
+        text = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', text, flags=re.IGNORECASE)
+        text = re.sub(r'<a[^>]+href=[\'"]cite://[^\'"]+[\'"][^>]*>(.*?)</a>', r'\1', text, flags=re.IGNORECASE)
+
+        # 4. HTTP 与格式化处理
+        # 提前用占位符保护好已经捞回来的 Mermaid 代码，防止下一步剥离 HTML 标签时误伤箭头符号
+        mermaids = []
+
+        def protect_mermaid(match):
+            mermaids.append(match.group(0))
+            return f"__MERMAID_{len(mermaids) - 1}__"
+
+        text = re.sub(r'(```mermaid\s*\n.*?\n```)', protect_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
+
+        if not is_markdown:
+            # 纯文本模式：将 HTTP 转换为“文字 (URL)”格式
+            text = re.sub(r'<a[^>]+href=[\'"](https?://[^\'"]+)[\'"][^>]*>(.*?)</a>', r'\2 (\1)', text,
+                          flags=re.IGNORECASE)
+            text = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'\1 (\2)', text, flags=re.IGNORECASE)
+            # 剥离所有 HTML 标签
+            text = re.sub(r'<[^>]+>', '', text)
+        else:
+            # Markdown模式：HTTP 保持原状，但截断底部的引言区 UI
+            if "<b>📚 Cited Sources:</b>" in text or "Reference:" in text:
+                text = re.split(r"<br><hr[^>]*>|📚 Reference:", text)[0]
+
+        # 释放被保护的 Mermaid 代码
+        for i, m in enumerate(mermaids):
+            text = text.replace(f"__MERMAID_{i}__", m)
+
+        # 收尾：清除过多换行
+        lines = [line.rstrip() for line in text.splitlines()]
+        cleaned = '\n'.join(lines)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+        return cleaned
+
+    def copy_plain_text(self):
+        if getattr(self, 'is_interrupted', False): return
+        clipboard = QGuiApplication.clipboard()
+        cleaned = self._extract_content_for_copy(is_markdown=False)
+        clipboard.setText(cleaned)
         ToastManager().show("Plain text successfully copied to clipboard.", "success")
 
-
     def copy_markdown(self):
-        if  getattr(self, 'is_interrupted', False):
-            ToastManager().show("Cannot copy interrupted or error messages.", "warning")
-            return
-
+        if getattr(self, 'is_interrupted', False): return
         clipboard = QGuiApplication.clipboard()
-
-        raw_text = re.sub(r'<think>.*?</think>', '', self.original_text, flags=re.DOTALL | re.IGNORECASE)
-        raw_text = re.sub(r'<mcp_process>.*?</mcp_process>', '', raw_text, flags=re.DOTALL | re.IGNORECASE)
-
-        raw_text = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', raw_text)
-        raw_text = re.sub(r'Initializing\.\.\.', '', raw_text, flags=re.IGNORECASE)
-        raw_text = re.sub(r'Reasoning & Tool Execution', '', raw_text, flags=re.IGNORECASE)
-
-        if "<br><hr style='border:0; height:1px;" in raw_text:
-            raw_text = re.split(
-                r'<br><hr style=\'border:0; height:1px; background:#444; margin:15px 0;\'><b>.*?Cited Sources:</b><br>',
-                raw_text)[0]
-
-        text_to_copy = re.sub(r'\n{3,}', '\n\n', raw_text).strip()
-
-        clipboard.setText(text_to_copy)
+        cleaned = self._extract_content_for_copy(is_markdown=True)
+        clipboard.setText(cleaned)
         ToastManager().show("Markdown successfully copied to clipboard.", "success")
 
 

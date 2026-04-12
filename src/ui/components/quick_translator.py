@@ -12,8 +12,10 @@ from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal, QSettings
 from src.core.config_manager import ConfigManager
 from src.core.theme_manager import ThemeManager
 from src.ui.components.combo import BaseComboBox
+from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.core.signals import GlobalSignals
+from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
 from src.ui.components.text_formatter import TextFormatter
 from src.task.quick_translator_task import TranslatorTaskManager
 
@@ -79,6 +81,9 @@ class QuickTranslatorWindow(QWidget):
 
         # UI相关
         self.current_out_text = ""
+        self.expanded_indices = set()
+        self.user_toggled_thinks = set()
+        self.mermaid_codes = {}
 
         self._is_render_dirty = False
         self._render_timer = QTimer(self)
@@ -245,6 +250,8 @@ class QuickTranslatorWindow(QWidget):
 
         # 输出框
         self.output_box = QTextBrowser()
+        self.output_box.setOpenLinks(False)
+        self.output_box.anchorClicked.connect(self._on_link_clicked)
         self.output_box.setStyleSheet(
             "background-color: #1e1e1e; color: #fff; border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 14px;")
         frame_layout.addWidget(self.output_box)
@@ -324,13 +331,13 @@ class QuickTranslatorWindow(QWidget):
             self._render_timer.stop()
             return
 
-        clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
-
         if self.chk_markdown.isChecked():
-            html = TextFormatter.markdown_to_html(clean_text)
+            # 使用带完整协议解析的渲染逻辑
+            html = self._format_response(self.current_out_text, index=0)
             self.output_box.setHtml(html)
         else:
-            # 非 Markdown 模式下，直接替换换行符比 setHtml 快得多
+            # 非 Markdown 模式下保持纯文本
+            clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
             self.output_box.setPlainText(clean_text)
 
         # 自动滚动到底部
@@ -338,6 +345,22 @@ class QuickTranslatorWindow(QWidget):
 
         # 重置标记
         self._is_render_dirty = False
+
+    def _format_response(self, text, index):
+        """统一代理给 TextFormatter"""
+        from src.ui.components.text_formatter import TextFormatter
+        if not hasattr(self, 'mermaid_codes'):
+            self.mermaid_codes = {}
+
+        return TextFormatter.format_response(
+            text, index,
+            getattr(self, 'expanded_indices', set()),
+            getattr(self, 'user_toggled_thinks', set()),
+            self.mermaid_codes
+        )
+
+
+
 
     def _on_translation_finished(self, result: dict = None):
         """翻译完成回调"""
@@ -383,13 +406,15 @@ class QuickTranslatorWindow(QWidget):
         if not self.current_out_text:
             return
 
-        clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
         if checked:
-            html_str = TextFormatter.markdown_to_html(clean_text)
+            html_str = self._format_response(self.current_out_text, index=0)
             self.output_box.setHtml(html_str)
         else:
+            clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
             self.output_box.setHtml(clean_text.replace('\n', '<br>'))
+
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
+
 
     def _toggle_pin(self):
         """切换窗口置顶状态"""
@@ -442,6 +467,33 @@ class QuickTranslatorWindow(QWidget):
         self.anim.setEndValue(0.0)
         self.anim.finished.connect(self.hide)
         self.anim.start()
+
+    def _on_link_clicked(self, url):
+        """统一代理链接路由"""
+        scheme = url.scheme()
+
+        # 拦截 Quick Translator 不支持的协议
+        if scheme in ["cite", "mermaid"]:
+            from src.ui.components.toast import ToastManager
+            ToastManager().show("This action is not supported in Quick Translator.", "warning")
+            return
+
+        from src.ui.components.text_formatter import TextFormatter
+
+        def trigger_render(idx=None):
+            self._is_render_dirty = True
+            self._throttled_render()
+
+        if not hasattr(self, 'mermaid_codes'): self.mermaid_codes = {}
+        if not hasattr(self, 'user_toggled_thinks'): self.user_toggled_thinks = set()
+        if not hasattr(self, 'expanded_indices'): self.expanded_indices = set()
+
+        TextFormatter.handle_link_click(
+            url=url, parent_widget=self, mermaid_cache=self.mermaid_codes,
+            user_toggled_thinks=self.user_toggled_thinks,
+            expanded_indices=self.expanded_indices,
+            render_callback=trigger_render
+        )
 
     def _center_on_screen(self):
         """窗口居中"""

@@ -1,7 +1,14 @@
 import re
 import markdown
+import os
+import tempfile
+import shutil
+import hashlib
+from urllib.parse import urlparse, parse_qs
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 from src.core.theme_manager import ThemeManager
-
+from src.ui.components.toast import ToastManager
 
 class TextFormatter:
 
@@ -372,3 +379,116 @@ class TextFormatter:
     @staticmethod
     def clean_text_for_copy(text):
         return TextFormatter.clean_text_for_export(text, include_citations=False)
+
+
+    @staticmethod
+    def format_response(text, index, expanded_indices, user_toggled_thinks, mermaid_cache):
+        """统一处理包含 Mermaid 图表和 Think 面板的对话渲染"""
+        if not text:
+            return ""
+
+        tm = ThemeManager()
+        pattern = r'```mermaid\s*\n(.*?)\n```'
+
+        def repl_mermaid(match):
+            code = match.group(1).strip()
+            code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()
+            mermaid_cache[code_hash] = code  # 存入外部传入的字典中
+            return (
+                f"<br><div style='padding:12px; margin: 8px 0; border:1px solid {tm.color('accent')}; border-radius:6px; background-color: transparent;'>"
+                f"<div style='margin-bottom: 5px;'><b>Mermaid Diagram Generated</b></div>"
+                f"<a href='mermaid://view?hash={code_hash}' style='color:{tm.color('accent')}; text-decoration:none; font-weight:bold;'>"
+                f"Click here to view / edit interactive diagram</a></div><br>")
+
+        processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
+        return TextFormatter.format_chat_text(processed_text, index, expanded_indices, user_toggled_thinks)
+
+    @staticmethod
+    def handle_link_click(url, parent_widget, mermaid_cache, user_toggled_thinks, expanded_indices,
+                          render_callback=None):
+        """统一分发系统的自定义链接路由 (mermaid://, think://, cite:// 等)"""
+        from PySide6.QtWidgets import QWidget
+        from PySide6.QtCore import QUrlQuery, QUrl
+        from PySide6.QtGui import QDesktopServices
+        import os, tempfile, shutil
+
+        qt_parent = parent_widget if isinstance(parent_widget, QWidget) else None
+
+        scheme = url.scheme()
+        query = QUrlQuery(url)
+
+        # 1. 处理 Mermaid 图表
+        if scheme == "mermaid":
+            code_hash = query.queryItemValue("hash")
+            code = mermaid_cache.get(code_hash, "")
+            if code:
+                if getattr(parent_widget, 'mermaid_viewer', None) is None:
+                    from src.ui.components.mermaid_viewer import MermaidViewer
+                    parent_widget.mermaid_viewer = MermaidViewer(qt_parent)
+                parent_widget.mermaid_viewer.load_diagram(code)
+            else:
+                ToastManager().show("Diagram data lost. Please ask the AI to generate it again.", "error")
+            return
+
+        # 2. 处理 Think 折叠面板
+        if scheme == "think":
+            # 兼容 host 或 path (应对归一化)
+            action = url.host() if url.host() else url.path().strip('/')
+            idx_str = query.queryItemValue("index")
+            idx = int(idx_str) if idx_str and idx_str.lstrip('-').isdigit() else -1
+
+            if idx != -1:
+                user_toggled_thinks.add(idx)
+                if action == 'expand':
+                    expanded_indices.add(idx)
+                else:
+                    expanded_indices.discard(idx)
+
+                if render_callback:
+                    render_callback(idx)
+            return
+
+        # 3. 处理文献/PDF引用跳转
+        if scheme == "cite":
+            file_path = query.queryItemValue("path")
+
+            if file_path.startswith(("http://", "https://")):
+                QDesktopServices.openUrl(QUrl(file_path))
+                return
+
+            text_snippet = query.queryItemValue("text")
+            source_name = query.queryItemValue("name")
+
+            if os.path.exists(file_path):
+                ext = source_name.lower().split('.')[-1] if '.' in source_name else ""
+
+                if ext == 'pdf':
+                    from src.ui.components.pdf_viewer import InternalPDFViewer
+                    if getattr(parent_widget, 'pdf_viewer', None) is None:
+                        parent_widget.pdf_viewer = InternalPDFViewer(qt_parent)
+                    parent_widget.pdf_viewer.load_document(file_path, 0, text_snippet, display_name=source_name)
+
+                elif ext in ['md', 'txt', 'csv', 'json']:
+                    from src.ui.components.pdf_viewer import InternalTextViewer
+                    if getattr(parent_widget, 'text_viewer', None) is None:
+                        parent_widget.text_viewer = InternalTextViewer(qt_parent)
+                    parent_widget.text_viewer.load_document(file_path, text_snippet, display_name=source_name)
+
+                else:
+                    temp_dir = tempfile.gettempdir()
+                    safe_name = source_name if source_name else "document.bin"
+                    temp_file_path = os.path.join(temp_dir, f"scholar_navis_view_{safe_name}")
+                    try:
+                        shutil.copy2(file_path, temp_file_path)
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(temp_file_path))
+                    except Exception as e:
+                        ToastManager().show(f"Failed to invoke external program: {str(e)}", "error")
+            else:
+                ToastManager().show(f"File not found: {source_name or file_path}", "error")
+            return
+
+        # 4. 普通网络链接交由系统默认浏览器
+        url_str = url.toString() if hasattr(url, 'toString') else str(url)
+        QDesktopServices.openUrl(QUrl(url_str))
+
+

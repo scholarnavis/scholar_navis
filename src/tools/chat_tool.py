@@ -1576,115 +1576,17 @@ class ChatTool(BaseTool):
         self._is_rendering_dirty = True
 
     def _format_response(self, text, index):
-        if not text:
-            return ""
+        """统一代理给 TextFormatter，保持内部调用无需修改"""
+        from src.ui.components.text_formatter import TextFormatter
+        if not hasattr(self, 'mermaid_codes'):
+            self.mermaid_codes = {}
 
-        try:
-            pattern = r'```mermaid\s*\n(.*?)\n```'
-            tm = ThemeManager()
-
-            def repl_mermaid(match):
-                code = match.group(1).strip()
-                code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()
-
-                if not hasattr(self, 'mermaid_codes'):
-                    self.mermaid_codes = {}
-                self.mermaid_codes[code_hash] = code
-
-                return (
-                    f"<br><div style='padding:12px; margin: 8px 0; border:1px solid {tm.color('accent')}; border-radius:6px; background-color: transparent;'>"
-                    f"<div style='margin-bottom: 5px;'><b>Mermaid Diagram Generated</b></div>"
-                    f"<a href='mermaid://view?hash={code_hash}' style='color:{tm.color('accent')}; text-decoration:none; font-weight:bold;'>"
-                    f"Click here to view / edit interactive diagram</a></div><br>")
-
-            processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
-
-            return TextFormatter.format_chat_text(
-                processed_text, index, getattr(self, 'expanded_thinks', set()),
-                getattr(self, 'user_toggled_thinks', set())
-            )
-        except Exception as e:
-            self.logger.error(f"Error formatting response: {e}")
-            return str(text).replace('\n', '<br>')
-
-    def on_chat_error(self, msg):
-        self.logger.error(f"Chat generation encountered an error: {msg}")
-        if hasattr(self, 'slow_conn_timer'): self.slow_conn_timer.stop()
-        self._is_waiting_llm = False
-
-        if hasattr(self, '_render_timer'): self._render_timer.stop()
-        self.set_controls_enabled(True)
-
-        self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_send.setVisible(True)
-        self._restore_last_input()
-
-
-        error_title = "Generation Terminated"
-        display_msg = str(msg).strip()
-
-        try:
-            parsed = json.loads(display_msg)
-            error_title = parsed.get("title", error_title)
-            display_msg = parsed.get("body", display_msg)
-        except json.JSONDecodeError:
-            prefix_match = re.match(r'^\s*\[(.*?)\]\s*\n*(.*)', display_msg, re.DOTALL)
-            if prefix_match:
-                raw_title = prefix_match.group(1).strip()
-                display_msg = prefix_match.group(2).strip()
-
-                if "API Request Error" in raw_title:
-                    error_title = "Provider API Error"
-                    if "404" in raw_title and "404" not in display_msg:
-                        display_msg += "\n\nSuggestion: The selected model may not exist or your API endpoint path (e.g., /v1) is incorrect."
-                    elif ("401" in raw_title or "key" in display_msg.lower()) and "verify" not in display_msg.lower():
-                        error_title = "Authentication Required"
-                        display_msg += "\n\nSuggestion: Please verify your API Key in the Global Settings."
-                elif "Context Exceeded" in raw_title:
-                    error_title = "Context Window Exceeded"
-                elif "Rate Limit" in raw_title:
-                    error_title = "Rate Limit Reached"
-                elif "Timeout" in raw_title:
-                    error_title = "Connection Timeout"
-
-        # 处理特定的顶层网络拦截
-        if "translation" in msg.lower() or "translator" in msg.lower():
-            error_title = "Translation Module Failure"
-            ToastManager().show("Translation model error. Please check your translator settings.", "error")
-        elif "time" in msg.lower() or "connect" in msg.lower():
-            ToastManager().show("Network connection failed. Please check your API configuration or proxy.", "error")
-
-        error_json_str = json.dumps({"title": error_title, "body": display_msg})
-
-        if self.current_ai_bubble:
-            idx = getattr(self.current_ai_bubble, 'index', -1)
-            self.current_ai_bubble.is_interrupted = True
-
-            if not self.current_ai_text.strip():
-                self.chat_layout.removeWidget(self.current_ai_bubble)
-                self.current_ai_bubble.deleteLater()
-
-                error_bubble = ChatBubbleWidget(
-                    text=error_json_str,
-                    is_user=False,
-                    index=idx,
-                    msg_type=ChatBubbleWidget.MSG_ERROR
-                )
-                self.chat_layout.addWidget(error_bubble)
-            else:
-                self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
-
-                idx += 1
-                error_bubble = ChatBubbleWidget(
-                    text=error_json_str,
-                    is_user=False,
-                    index=idx,
-                    msg_type=ChatBubbleWidget.MSG_ERROR
-                )
-                self.chat_layout.addWidget(error_bubble)
-
-        self.current_ai_bubble = None
-        self.scroll_to_bottom()
+        return TextFormatter.format_response(
+            text, index,
+            getattr(self, 'expanded_thinks', set()),
+            getattr(self, 'user_toggled_thinks', set()),
+            self.mermaid_codes
+        )
 
     def on_chat_finished(self, is_cancelled=False):
         if hasattr(self, '_render_timer'): self._render_timer.stop()
@@ -1837,118 +1739,33 @@ class ChatTool(BaseTool):
                 pass
 
     def handle_link_click(self, url):
-        if hasattr(url, 'toString'):
-            url_str = url.toString()
-        else:
-            url_str = str(url)
+        """统一代理链接路由"""
+        from src.ui.components.text_formatter import TextFormatter
 
-        if url_str.startswith("mermaid://"):
-            parsed = urlparse(url_str)
-            params = parse_qs(parsed.query)
-            code_hash = params.get('hash', [''])[0]
+        def trigger_render(idx):
+            # 仅寻找被点击的那个气泡进行局部重绘
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget():
+                    w = item.widget()
+                    from src.ui.components.chat_bubble import ChatBubbleWidget
+                    if isinstance(w, ChatBubbleWidget) and getattr(w, 'index', -1) == idx:
+                        raw_text = self.current_ai_text if w == getattr(self, 'current_ai_bubble', None) else (
+                            self.history[idx]['content'] if idx < len(self.history) else "")
+                        if raw_text:
+                            w.set_content(self._format_response(raw_text, idx))
+                        break
 
-            # 从缓存字典中取出真实的 Mermaid 代码
-            code = getattr(self, 'mermaid_codes', {}).get(code_hash, "")
-            if code:
-                # 延迟导入避免循环依赖
-                if not hasattr(self, 'mermaid_viewer') or self.mermaid_viewer is None:
-                    self.mermaid_viewer = MermaidViewer(None)
-                self.mermaid_viewer.load_diagram(code)
-            else:
-                ToastManager().show("Diagram data lost. Please ask the AI to generate it again.", "error")
-            return
+        if not hasattr(self, 'mermaid_codes'): self.mermaid_codes = {}
+        if not hasattr(self, 'user_toggled_thinks'): self.user_toggled_thinks = set()
+        if not hasattr(self, 'expanded_thinks'): self.expanded_thinks = set()
 
-        if url_str.startswith("think://"):
-            parsed = urlparse(url_str)
-            action = parsed.netloc
-            params = parse_qs(parsed.query)
-            idx = int(params.get('index', [-1])[0])
-
-            if idx != -1:
-                if not hasattr(self, 'user_toggled_thinks'):
-                    self.user_toggled_thinks = set()
-                self.user_toggled_thinks.add(idx)
-
-                if action == 'expand':
-                    self.expanded_thinks.add(idx)
-                else:
-                    self.expanded_thinks.discard(idx)
-
-                # 寻找对应的气泡重绘
-                for i in range(self.chat_layout.count()):
-                    item = self.chat_layout.itemAt(i)
-                    if item and item.widget():
-                        w = item.widget()
-                        if isinstance(w, ChatBubbleWidget) and getattr(w, 'index', -1) == idx:
-                            raw_text = self.current_ai_text if w == getattr(self, 'current_ai_bubble', None) else (
-                                self.history[idx]['content'] if idx < len(self.history) else "")
-                            if raw_text:
-                                w.set_content(self._format_response(raw_text, idx))
-                            break
-            return
-
-        if url_str.startswith("cite://"):
-            parsed = urlparse(url_str)
-            params = parse_qs(parsed.query)
-            file_path = params.get('path', [''])[0]
-
-            if file_path.startswith(("http://", "https://")):
-                QDesktopServices.openUrl(QUrl(file_path))
-                ToastManager().show(f"Opening online source...", "success")
-                return
-
-            # page_num = int(params.get('page', ['1'])[0]) - 1
-            page_num = 0
-            text_snippet = params.get('text', [''])[0]
-            source_name = params.get('name', [''])[0]
-
-            kb_data = self.combo_kb.currentData()
-            kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-
-            real_path = ""
-            if kb_id and source_name:
-                kb_meta = self.kb_manager.get_kb_by_id(kb_id)
-                if kb_meta:
-                    file_map = kb_meta.get("file_map", {})
-                    reverse_map = {v: k for k, v in file_map.items()}
-                    obf_name = reverse_map.get(source_name)
-                    if obf_name:
-                        real_path = os.path.join(self.kb_manager.WORKSPACE_DIR, kb_id, "documents", obf_name)
-
-            target_path = real_path if real_path and os.path.exists(real_path) else file_path
-
-            if os.path.exists(target_path):
-                ext = source_name.lower().split('.')[-1] if '.' in source_name else ""
-
-                # === 路由分发 ===
-                if ext == 'pdf':
-                    if self.pdf_viewer is None: self.pdf_viewer = InternalPDFViewer(None)
-                    self.pdf_viewer.load_document(target_path, page_num, text_snippet, display_name=source_name)
-                    ToastManager().show(f"Document opened.", "success")
-
-                elif ext in ['md', 'txt', 'csv', 'json']:
-                    if not hasattr(self, 'text_viewer') or self.text_viewer is None:
-                        from src.ui.components.pdf_viewer import InternalTextViewer
-                        self.text_viewer = InternalTextViewer(None)
-                    self.text_viewer.load_document(target_path, text_snippet, display_name=source_name)
-                    ToastManager().show("Document snippet opened", "success")
-
-                else:
-                    # 对于图片或无法渲染的格式，降级交给操作系统处理
-                    temp_dir = tempfile.gettempdir()
-                    safe_name = source_name if source_name else "document.bin"
-                    temp_file_path = os.path.join(temp_dir, f"scholar_navis_view_{safe_name}")
-
-                    try:
-                        shutil.copy2(target_path, temp_file_path)
-                        QDesktopServices.openUrl(QUrl.fromLocalFile(temp_file_path))
-                        ToastManager().show(f"Opening with system default application: {safe_name}", "success")
-                    except Exception as e:
-                        ToastManager().show(f"Failed to invoke external program: {str(e)}", "error")
-            else:
-                ToastManager().show(f"File not found: {source_name or file_path}", "error")
-        else:
-            QDesktopServices.openUrl(QUrl(url_str))
+        TextFormatter.handle_link_click(
+            url=url, parent_widget=self, mermaid_cache=self.mermaid_codes,
+            user_toggled_thinks=self.user_toggled_thinks,
+            expanded_indices=self.expanded_thinks,
+            render_callback=trigger_render
+        )
 
     def refresh_kb_list(self):
         self.load_llm_configs()
