@@ -120,7 +120,7 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 hf_logger.removeHandler(h)
         hf_logger.addHandler(HFLogHandler(self))
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
-        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
         # 预先初始化变量，防止作用域错误
         has_remote_onnx = False
         target_files = []
@@ -130,7 +130,6 @@ class RealTimeHFDownloadTask(BackgroundTask):
             self.queue.put({"state": TaskState.PROCESSING.value, "progress": -1, "msg": "Fetching model metadata..."})
             api = HfApi(endpoint=actual_endpoint)
             repo_info = api.repo_info(repo_id=repo_id, files_metadata=True)
-            # === 核心修改：检测远程是否有 ONNX ===
             has_remote_onnx = any(f.rfilename.endswith(".onnx") for f in repo_info.siblings)
             if has_remote_onnx:
                 # --- 场景 A：远程仓库包含 ONNX，直接下载 ONNX，跳过权重下载和转换 ---
@@ -138,7 +137,7 @@ class RealTimeHFDownloadTask(BackgroundTask):
                               f"[{repo_id}] Detected ONNX format in repository. Skipping large model weights download.")
                 self.queue.put({
                     "state": TaskState.PROCESSING.value,
-                    "progress": 50,  # 给一个假进度，表示正在处理
+                    "progress": -1,
                     "msg": f"Detected remote ONNX. Downloading optimized model directly..."
                 })
             else:
