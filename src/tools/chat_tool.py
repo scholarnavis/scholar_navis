@@ -1,16 +1,13 @@
 import base64
-import hashlib
-import json
 import logging
 import os
 import re
-import shutil
 import tempfile
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import quote
 
-from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QPropertyAnimation, QEasingCurve, \
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, \
     QEvent
-from PySide6.QtGui import QDesktopServices, QCursor
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QCheckBox,
@@ -29,12 +26,9 @@ from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget, hex_to_rgba
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import StandardDialog, SelectKBFileDialog
-from src.ui.components.mermaid_viewer import MermaidViewer
+from src.ui.components.dialog import StandardDialog
 from src.ui.components.model_selector import ModelSelectorWidget
-from src.ui.components.pdf_viewer import InternalPDFViewer
 from src.ui.components.pill_button import FollowUpGroupWidget
-from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
 
@@ -100,7 +94,7 @@ class AutoResizingTextEdit(QPlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText("Ask a question... (Enter to send, Shift+Enter for new line)")
+        self.setPlaceholderText("Ask a question... (Recommend English or enabling translator for best results. Enter to send, Shift+Enter for new line)")
         self.setStyleSheet("""
             QPlainTextEdit { background-color: transparent; border: none; font-size: 14px; }
         """)
@@ -205,6 +199,8 @@ class ChatInputContainer(QFrame):
         )
         self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
 
+        self.lbl_tool_hint = QLabel(" (Tip: Selecting fewer tools improves accuracy)")
+
         self.tag_actions = {}
         self.user_deselected_tags = set()
         self.known_tags = set()
@@ -212,6 +208,7 @@ class ChatInputContainer(QFrame):
         self.mcp_toolbar.addWidget(self.chk_academic_agent)
         self.mcp_toolbar.addWidget(self.chk_external_tools)
         self.mcp_toolbar.addWidget(self.btn_mcp_tags)
+        self.mcp_toolbar.addWidget(self.lbl_tool_hint)  # 新增：将标签加入水平布局
         self.mcp_toolbar.addStretch()
         main_layout.insertLayout(1, self.mcp_toolbar)
 
@@ -367,6 +364,10 @@ class ChatInputContainer(QFrame):
                 """
         self.btn_mcp_tags.setIcon(tm.icon("filter", "text_muted"))
         self.btn_mcp_tags.setStyleSheet(btn_mcp_style)
+
+        if hasattr(self, 'lbl_tool_hint'):
+            self.lbl_tool_hint.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 11px; font-style: italic; border: none;")
 
         self.btn_send.setIcon(tm.icon("send", "bg_main"))
         self.btn_send.setStyleSheet(f"""
@@ -560,7 +561,8 @@ class ChatInputContainer(QFrame):
 
     def unlock_input(self):
         self.text_edit.setEnabled(True)
-        self.text_edit.setPlaceholderText("Ask a question... (Enter to send, Shift+Enter for new line)")
+        self.text_edit.setPlaceholderText(
+            "Ask a question... (Recommend English or enabling translator for best results. Enter to send, Shift+Enter for new line)")
         self.btn_send.setEnabled(True)
 
     def show_context_preview(self, text_info):
@@ -580,7 +582,6 @@ class ChatTool(BaseTool):
         super().__init__("Chat Assistant")
         self.history = []
         self.widget = None
-        self.worker_thread = None
         self.kb_manager = KBManager()
         self.current_ai_text = ""
         self.current_ai_bubble = None
@@ -1195,32 +1196,6 @@ class ChatTool(BaseTool):
                     break
 
     def start_ai_response(self, kb_id, requires_translation=False):
-        if getattr(self, 'worker_thread', None) is not None:
-            try:
-                if getattr(self, 'worker', None):
-                    self.worker.cancel()
-                    try:
-                        self.worker.sig_token.disconnect()
-                        self.worker.sig_finished.disconnect()
-                        self.worker.sig_error.disconnect()
-                        self.worker.sig_translated.disconnect()
-                    except Exception:
-                        pass
-                if self.worker_thread.isRunning():
-                    if not hasattr(self, '_orphaned_threads'): self._orphaned_threads = []
-                    old_t, old_w = self.worker_thread, self.worker
-                    old_t.quit()
-                    self._orphaned_threads.append((old_t, old_w))
-                    old_t.finished.connect(
-                        lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self,
-                                                                                                            '_orphaned_threads',
-                                                                                                            []) else None)
-            except RuntimeError:
-                pass
-
-            self.worker_thread = None
-            self.worker = None
-
         main_config = self.model_selector.get_current_config()
         trans_config = self.trans_selector.get_current_config()
 
@@ -1847,6 +1822,47 @@ class ChatTool(BaseTool):
     def _on_chat_result(self, payload):
         if isinstance(payload, dict) and payload.get("event") == "translated":
             self._on_query_translated(payload.get("text"))
+
+    def on_chat_error(self, msg):
+        """处理对话任务抛出的异常，恢复 UI 状态并展示错误"""
+        if hasattr(self, '_render_timer'):
+            self._render_timer.stop()
+        self.set_controls_enabled(True)
+
+        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setEnabled(True)
+        self.input_container.btn_stop.setVisible(False)
+        self.input_container.btn_send.setVisible(True)
+
+        if self.current_ai_bubble:
+            self.current_ai_bubble.set_loading(False)
+            self.current_ai_bubble.is_interrupted = True
+
+        # 格式化错误信息以在聊天气泡中醒目展示
+        error_html = f"<div style='color: #ff6b6b; margin-top: 10px;'><b>⚠️ Generation Error:</b><br>{msg}</div>"
+
+        if self.current_ai_text.strip():
+            self.current_ai_text += error_html
+        else:
+            self.current_ai_text = error_html
+
+        # 渲染到气泡
+        if self.current_ai_bubble:
+            idx = getattr(self.current_ai_bubble, 'index', -1)
+            final_html = self._format_response(self.current_ai_text, idx)
+            self.current_ai_bubble.set_content(final_html)
+
+        # 记录到历史避免上下文结构断裂
+        self.history.append({
+            "role": "assistant",
+            "content": self.current_ai_text,
+            "status": "error"
+        })
+
+        self.current_ai_bubble = None
+        self.logger.error(f"Chat task failed: {msg}")
+        ToastManager().show("Generation failed due to an error.", "error")
+        self.scroll_to_bottom()
 
 
     def _save_setting(self, key, value):
