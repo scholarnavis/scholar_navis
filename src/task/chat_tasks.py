@@ -1,151 +1,13 @@
-import gc
 import json
-import os
-import base64
-import mimetypes
 import re
-import sys
 import time
 import uuid
-import multiprocessing as mp
-import queue as q
-from urllib.parse import quote
-
-import chardet
-
-
 from src.core.config_manager import ConfigManager
-from src.core.core_task import BackgroundTask
+from src.core.core_task import BackgroundTask, TaskState
 from src.core.device_manager import DeviceManager
-from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
+from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
-
-
-class ProcessAttachmentTask(BackgroundTask):
-    def _execute(self):
-        file_infos = self.kwargs.get('file_infos', [])
-
-        if not file_infos:
-            paths = self.kwargs.get('paths', [])
-            file_infos = [{"path": p, "name": os.path.basename(p)} for p in paths]
-
-        chunks = []
-        html = ""
-        total = len(file_infos)
-
-        for i, info in enumerate(file_infos):
-            if self.is_cancelled():
-                self.send_log("INFO", "Attachment processing cancelled by user.")
-                raise InterruptedError("Task was safely terminated by the user.")
-
-            path = info['path']
-            f_name = info['name']
-
-            ext = f_name.lower()
-
-            try:
-                # 1. Image processing
-                if ext.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
-                    self.update_progress(int((i / total) * 100), f"Encoding image: {f_name}...")
-                    with open(path, "rb") as image_file:
-                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                        mime_type, _ = mimetypes.guess_type(f_name)
-                        mime_type = mime_type or 'image/jpeg'
-
-                        chunks.append({
-                            "path": path, "name": f_name, "page": 1,
-                            "type": "image",
-                            "base64_url": f"data:{mime_type};base64,{encoded_string}",
-                            "content": f"[Image Attached: {f_name}]"
-                        })
-
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>🖼️ {f_name}</a></div>"
-
-                # 2. PDF processing
-                elif ext.endswith('.pdf'):
-                    self.update_progress(int((i / total) * 100), f"Parsing PDF: {f_name}...")
-                    import pymupdf4llm
-                    md_chunks = pymupdf4llm.to_markdown(path, page_chunks=True)
-                    for chunk in md_chunks:
-                        text = chunk.get("text", "").strip()
-                        if len(text) > 10:
-                            chunks.append({
-                                "path": path, "name": f_name, "page": chunk.get("metadata", {}).get("page", 1),
-                                "content": text
-                            })
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
-
-                # 2.5 DOCX processing
-                elif ext.endswith('.docx'):
-                    self.update_progress(int((i / total) * 100), f"Parsing DOCX: {f_name}...")
-                    import docx
-                    doc = docx.Document(path)
-
-                    text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
-
-                    if len(text) > 10:
-                        chunks.append({
-                            "path": path, "name": f_name, "page": 1,
-                            "content": text
-                        })
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
-
-                # 2.6 老旧 DOC 拦截
-                elif ext.endswith('.doc'):
-                    self.send_log("ERROR",
-                                  f"Legacy .doc format is not natively supported. Please convert {f_name} to .docx")
-                    # 给用户一个 HTML 提示，不用提取内容
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#ffb86c; text-decoration:none;'>⚠️ {f_name} (Please convert to .docx)</a></div>"
-
-
-
-                # 3. Text processing
-                else:
-                    self.update_progress(int((i / total) * 100), f"Reading file: {f_name}...")
-                    text = ""
-
-                    with open(path, 'rb') as f:
-                        raw_data = f.read()
-                        detected = chardet.detect(raw_data)
-
-                        # 如果文件太小或特征不明显导致检测失败，默认回退到 utf-8
-                        encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
-                        text = raw_data.decode(encoding, errors='replace').strip()
-
-                    if text:
-                        chunks.append({
-                            "path": path, "name": f_name, "page": 1, "content": text
-                        })
-                    link = f"cite://view?path={quote(path)}&page=1&name={quote(f_name)}"
-                    html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
-
-            except Exception as e:
-                self.send_log("ERROR", f"Failed to process {f_name}: {e}")
-                raise e
-
-        self.update_progress(100, "Finalizing...")
-
-        import json
-        import tempfile
-        import uuid
-
-        result_dict = {"chunks": chunks, "html": html}
-        temp_file_path = os.path.join(tempfile.gettempdir(), f"task_payload_{uuid.uuid4().hex}.json")
-
-        with open(temp_file_path, 'w', encoding='utf-8') as f:
-            json.dump(result_dict, f, ensure_ascii=False)
-
-        return {"_is_temp_file": True, "path": temp_file_path}
-
-
-# [Context: Imports at the top of chat_tasks.py]
-from src.core.core_task import BackgroundTask, TaskState
-from src.core.kb_manager import KBManager, DatabaseManager
 
 
 class ChatGenerationTask(BackgroundTask):
@@ -161,6 +23,7 @@ class ChatGenerationTask(BackgroundTask):
         if hasattr(self, 'vision_llm') and self.vision_llm: self.vision_llm.cancel()
 
     def _init_llms(self):
+        from src.core.llm_impl import OpenAICompatibleLLM
         if self.main_config and not getattr(self, 'main_llm', None):
             cfg = self.main_config.copy()
             if "tools" not in cfg:
@@ -185,6 +48,8 @@ class ChatGenerationTask(BackgroundTask):
         self._emit_state(TaskState.PROCESSING, -1, "", payload={"event": "translated", "text": text})
 
     def _execute(self):
+        from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
+
         self.send_log("INFO", f"Chat task started. KB_ID: {self.kwargs.get('kb_id')}")
         time.sleep(0.1)
 
@@ -193,6 +58,101 @@ class ChatGenerationTask(BackgroundTask):
         self.messages = self.kwargs.get('messages', [])
         self.kb_id = self.kwargs.get('kb_id')
         if self.kb_id == "none": self.kb_id = None
+
+        current_external_files = self.kwargs.get('external_files', [])
+        all_external_files = []
+
+        # 1. 遍历历史获取上下文遗留文件
+        for m in self.messages:
+            if m.get('external_files'):
+                for f in m['external_files']:
+                    if f not in all_external_files:
+                        all_external_files.append(f)
+
+        # 2. 合并当前上传文件
+        for f in current_external_files:
+            if f not in all_external_files:
+                all_external_files.append(f)
+
+        self.external_context = []
+
+        if all_external_files:
+            self.send_log("INFO", f"Loading {len(all_external_files)} attached file(s) into memory context...")
+            self._emit_token(
+                f"<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>📄 Loading {len(all_external_files)} attached file(s) into memory...</div>\n\n")
+            time.sleep(0.05)
+
+            import tempfile, hashlib, os
+            cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+
+            for info in all_external_files:
+                if self.is_cancelled(): break
+                path = info.get('path', '')
+                f_name = info.get('name', 'Unknown')
+                content = info.get('content', None)
+                ext = f_name.lower()
+
+                if content is not None:
+                    self.external_context.append(
+                        {"path": path, "name": f_name, "page": info.get('page', 1), "content": content})
+                    continue
+
+                if os.path.exists(path):
+                    file_stat = os.stat(path)
+                    hash_key = hashlib.md5(f"{path}_{file_stat.st_mtime}_{file_stat.st_size}".encode()).hexdigest()
+                    cache_file = os.path.join(cache_dir, f"{hash_key}.json")
+
+                    # 击中缓存，直接加载，实现秒进
+                    if os.path.exists(cache_file):
+                        try:
+                            with open(cache_file, 'r', encoding='utf-8') as cf:
+                                cached_data = json.load(cf)
+                            self.external_context.extend(cached_data)
+                            continue
+                        except:
+                            pass
+
+                    try:
+                        chunks = []
+                        if ext.endswith('.pdf'):
+                            import pymupdf4llm
+                            md_chunks = pymupdf4llm.to_markdown(path, page_chunks=True)
+                            for chunk in md_chunks:
+                                text = chunk.get("text", "").strip()
+                                if len(text) > 10:
+                                    chunks.append({
+                                        "path": path, "name": f_name, "page": chunk.get("metadata", {}).get("page", 1),
+                                        "content": text
+                                    })
+                        elif ext.endswith('.docx'):
+                            import docx
+                            doc = docx.Document(path)
+                            text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
+                            if len(text) > 10:
+                                chunks.append({"path": path, "name": f_name, "page": 1, "content": text})
+                        elif ext.endswith('.doc'):
+                            self.send_log("WARNING", f"Legacy .doc format skipped: {f_name}")
+                        elif ext.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
+                            self.send_log("INFO", f"Image upload is currently paused. Skipping image: {f_name}")
+                        else:
+                            import chardet
+                            with open(path, 'rb') as f:
+                                raw_data = f.read()
+                                detected = chardet.detect(raw_data)
+                                encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
+                                text = raw_data.decode(encoding, errors='replace').strip()
+                            if text:
+                                chunks.append({"path": path, "name": f_name, "page": 1, "content": text})
+
+                        if chunks:
+                            self.external_context.extend(chunks)
+                            with open(cache_file, 'w', encoding='utf-8') as cf:
+                                json.dump(chunks, cf, ensure_ascii=False)
+                    except Exception as e:
+                        self.send_log("ERROR", f"Failed to parse {f_name}: {e}")
+
+            self._emit_token("[CLEAR_SEARCH]")
 
         if self.kb_id:
             from src.core.models_registry import ModelManager
@@ -221,7 +181,6 @@ class ChatGenerationTask(BackgroundTask):
             self.logger.warning(f"Language detection failed in background: {e}")
             self.requires_translation = False
 
-        self.external_context = self.kwargs.get('external_context', [])
         self.use_academic_agent = self.kwargs.get('use_academic_agent', True)
         self.academic_tags = self.kwargs.get('academic_tags', [])
 
@@ -378,16 +337,13 @@ class ChatGenerationTask(BackgroundTask):
                 self.send_log("INFO",
                               f"Small attachment size ({len(cand_docs)} chunks), skipping rerank and using all content.")
 
-            files_dict = {}
             for doc in cand_docs:
                 f_name = doc["metadata"]["name"]
                 page = doc["metadata"]["page"]
-                if f_name not in files_dict:
-                    files_dict[f_name] = ""
-                files_dict[f_name] += f"\n[Page {page}]\n{doc['content']}"
-
-            docs_json = json.dumps(files_dict, ensure_ascii=False)
-            llm_content.append({"type": "text", "text": f"User Uploaded Files (JSON Format):\n{docs_json}\n\n"})
+                context_str += (
+                    f"--- [User Attached File: {f_name} (Page {page})] ---\n"
+                    f"Content: {doc['content']}\n\n"
+                )
 
         if images:
             vision_model_name = self.main_config.get("vision_model_name", "auto")
@@ -948,6 +904,125 @@ class ChatGenerationTask(BackgroundTask):
             return docs[:top_k]
 
 
+
+class ExportChatTask(BackgroundTask):
+    """
+    后台任务：异步导出聊天记录（支持 PDF, MD, TXT, CSV）
+    """
+    def _execute(self):
+        history = self.kwargs.get('history', [])
+        path = self.kwargs.get('path')
+        export_fmt = self.kwargs.get('export_fmt')
+        colors = self.kwargs.get('colors', {})
+        font_family = self.kwargs.get('font_family', 'sans-serif')
+        user_icon = self.kwargs.get('user_icon', '')
+        ai_icon = self.kwargs.get('ai_icon', '')
+
+        import datetime
+        import csv
+        from src.ui.components.text_formatter import TextFormatter
+
+        # 过滤掉被标记为 interrupted 或 error 的历史消息
+        clean_history = [m for m in history if m.get("status") not in ["interrupted", "error"]]
+
+        if not clean_history:
+            return {"success": False, "msg": "No valid chat records to export after filtering interrupted/error messages."}
+
+        try:
+            if export_fmt == ".pdf":
+                from PySide6.QtGui import QPdfWriter, QTextDocument, QPageSize
+                from PySide6.QtCore import QMarginsF
+
+                doc = QTextDocument()
+                date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                doc.setDefaultStyleSheet(f"""
+                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
+                    h1, h2, h3 {{ color: {colors.get('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
+                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
+                    .header-user {{ color: {colors.get('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .header-ai {{ color: {colors.get('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .content {{ margin-top: 5px; }}
+                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
+                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
+                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
+                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
+                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
+                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
+                    th {{ background-color: #f6f8fa; font-weight: bold; }}
+                    .doc-header {{ text-align: center; border-bottom: 2px solid {colors.get('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
+                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {colors.get('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
+                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
+                """)
+
+                html = f"<html><body><div class='doc-header'><div class='doc-title'>Scholar Navis - Analysis Report</div><div class='doc-meta'>Generated on: {date_str} | Document Type: Academic Chat Log</div></div>"
+
+                for msg in clean_history:
+                    is_user = (msg['role'] == "user")
+                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                    rendered_html = TextFormatter.markdown_to_html(clean_content)
+
+                    if is_user:
+                        header = f"<div class='header-user'><img src='{user_icon}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
+                    else:
+                        header = f"<div class='header-ai'><img src='{ai_icon}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
+
+                    html += f"<div class='msg-box'>{header}<div class='content'>{rendered_html}</div></div>"
+
+                html += "</body></html>"
+                doc.setHtml(html)
+
+                writer = QPdfWriter(path)
+                writer.setPageSize(QPageSize(QPageSize.A4))
+                writer.setPageMargins(QMarginsF(15, 20, 15, 20))
+                writer.setResolution(300)
+                doc.print_(writer)
+
+            elif export_fmt == ".md":
+                md_lines = [
+                    "# Scholar Navis - Analysis Report\n\n",
+                    f"> **Generated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n",
+                    "---\n\n"
+                ]
+                for msg in clean_history:
+                    role = "🧑‍💻 User Inquiry" if msg['role'] == "user" else "🤖 AI Analysis"
+                    content = TextFormatter.clean_text_for_export(msg['content'])
+                    md_lines.append(f"### {role}\n\n{content}\n\n---\n\n")
+
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("".join(md_lines))
+
+            elif export_fmt == ".txt":
+                txt_lines = [
+                    "================ SCHOLAR NAVIS ACADEMIC REPORT ================",
+                    f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "===============================================================\n\n"
+                ]
+                for msg in clean_history:
+                    role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
+                    content = TextFormatter.clean_text_for_export(msg['content'])
+                    content = TextFormatter.markdown_to_plain_text(content)
+                    txt_lines.append(f"[{role}]")
+                    txt_lines.append(content)
+                    txt_lines.append(f"\n{'-' * 70}\n")
+
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(txt_lines))
+
+            elif export_fmt == ".csv":
+                with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Role", "Content"])
+                    for msg in clean_history:
+                        content = TextFormatter.clean_text_for_export(msg['content'])
+                        writer.writerow(["User" if msg['role'] == 'user' else "AI", content])
+
+            return {"success": True, "path": path}
+        except Exception as e:
+            self.send_log("ERROR", f"Export task failed: {str(e)}")
+            return {"success": False, "msg": str(e)}
+
+
 class DownloadImageTask(BackgroundTask):
     """
     异步图片下载任务。
@@ -987,3 +1062,28 @@ class DownloadImageTask(BackgroundTask):
         except Exception as e:
             self.send_log("ERROR", f"Image download failed for {url}: {str(e)}")
             return {"success": False, "url": url, "path": save_path, "msg": str(e)}
+
+
+class FetchHardwareStatusTask(BackgroundTask):
+    """
+    异步获取硬件状态，避免阻塞主 UI 线程
+    """
+
+    def _execute(self):
+        from src.core.device_manager import DeviceManager
+        from src.core.config_manager import ConfigManager
+
+        dev_mgr = DeviceManager()
+        config = ConfigManager()
+
+        curr_id = config.user_settings.get("inference_device", "auto")
+        parsed_id = dev_mgr.parse_device_string(curr_id)
+
+        dev_name = parsed_id
+        for d in dev_mgr.get_available_devices():
+            if d['id'] == parsed_id:
+                dev_name = d['name']
+                break
+
+        return {"dev_name": dev_name}
+

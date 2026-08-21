@@ -69,15 +69,17 @@ async def openai_exception_handler(request: Request, exc: OpenAIException):
 def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
     config = ConfigManager()
     expected_key = config.user_settings.get("api_server_key", "").strip()
-    if expected_key:
-        if not credentials or credentials.credentials != expected_key:
-            raise OpenAIException(
-                message="Invalid or missing API Key. Please provide a valid Bearer token.",
-                status_code=401,
-                error_type="authentication_error"
-            )
-        return credentials.credentials
-    return None
+
+    if not expected_key:
+        return credentials.credentials if credentials else "anonymous"
+
+    if not credentials or credentials.credentials != expected_key:
+        raise OpenAIException(
+            message="Invalid or missing API Key. Please provide a valid Bearer token.",
+            status_code=401,
+            error_type="authentication_error"
+        )
+    return credentials.credentials
 
 
 # ==========================================
@@ -980,10 +982,12 @@ def run_server():
         port = int(config_mgr.user_settings.get("api_server_port", 8000))
     except (ValueError, TypeError):
         port = 8000
-    api_key = config_mgr.user_settings.get("api_server_key", "123456").strip()
+    api_key = config_mgr.user_settings.get("api_server_key", "").strip()
+
     logger.info(f"Starting Standalone API Server on {host}:{port}")
     if api_key:
         logger.info("API Key authentication is ENABLED.")
     else:
-        logger.warning("API Key authentication is DISABLED.")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+        logger.warning("API Key is NOT set! Authentication is DISABLED. Allowing anonymous access.")
+
+    uvicorn.run(app, host=host, port=port, log_config=None)

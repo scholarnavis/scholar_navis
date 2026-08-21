@@ -3,9 +3,7 @@ import os
 import re
 import sys
 import time
-
 import psutil
-import torch
 from PySide6.QtCore import Qt, Signal, QTimer, QRegularExpression
 from PySide6.QtGui import QColor, QRegularExpressionValidator, QGuiApplication, QTextCharFormat, QSyntaxHighlighter, \
     QFont
@@ -19,6 +17,7 @@ from src.core.core_task import TaskManager, TaskMode
 from src.core.models_registry import EMBEDDING_MODELS
 from src.core.theme_manager import ThemeManager
 from src.task.settings_tasks import TestMcpConnectionTask
+from src.ui.components.combo import BaseComboBox
 from src.ui.components.param_editor import ParamEditorWidget
 from src.ui.components.toast import ToastManager
 
@@ -360,7 +359,7 @@ class FeedEditorDialog(BaseDialog):
         self.inp_name = QLineEdit(feed_data.get('name', '') if feed_data else '')
         self.inp_url = QLineEdit(feed_data.get('url', '') if feed_data else '')
 
-        self.inp_category = QComboBox()
+        self.inp_category = BaseComboBox()
         self.inp_category.setEditable(True)
         cats = categories or []
         if "Custom Sources" not in cats:
@@ -421,16 +420,16 @@ class FeedLibraryDialog(BaseDialog):
                 self.display_dict[cat].append(f.copy())
 
         top_bar = QHBoxLayout()
-        lbl_cat = QLabel("Category / Journal:")  # 🧹 Removed Emoji
-        self.combo_category = QComboBox()
+        lbl_cat = QLabel("Category / Journal:")
+        self.combo_category = BaseComboBox()
         self.combo_category.addItems(list(self.display_dict.keys()))
         self.combo_category.currentTextChanged.connect(self._render_table)
 
         self.inp_search_lib = QLineEdit()
-        self.inp_search_lib.setPlaceholderText("Search journal names...")  # 🧹 Removed Emoji
+        self.inp_search_lib.setPlaceholderText("Search journal names...")
         self.inp_search_lib.textChanged.connect(self._filter_library_table)
 
-        self.btn_add_custom = QPushButton(" Add Custom Source")  # 🧹 Removed Emoji
+        self.btn_add_custom = QPushButton(" Add Custom Source")
         self.btn_add_custom.setCursor(Qt.PointingHandCursor)
         self._tracked_buttons.append((self.btn_add_custom, "default"))
         self.btn_add_custom.clicked.connect(self._on_add_custom)
@@ -699,7 +698,7 @@ class McpConfigDialog(BaseDialog):
         desc_v_layout.addWidget(self.inp_desc)
         desc_v_layout.addWidget(self.desc_hint_widget)
 
-        self.combo_type = QComboBox()
+        self.combo_type = BaseComboBox()
         self.combo_type.addItems(["stdio", "sse"])
 
         self.inp_cmd_url = QLineEdit()
@@ -885,12 +884,21 @@ class McpConfigDialog(BaseDialog):
         return name, cfg
 
 
-
 class SelectKBFileDialog(BaseDialog):
     def __init__(self, parent=None, files=None):
         super().__init__(parent, title="Select Files from Knowledge Base", width=580)
         self.setMinimumHeight(500)
         self._all_files = files or []
+
+        # --- KB 选择栏 ---
+        kb_layout = QHBoxLayout()
+        lbl_kb = QLabel("Knowledge Base:")
+        kb_layout.addWidget(lbl_kb)
+
+        self.combo_kb = BaseComboBox()
+
+        kb_layout.addWidget(self.combo_kb, stretch=1)
+        self.content_layout.addLayout(kb_layout)
 
         # --- 搜索栏 ---
         self.inp_search = QLineEdit()
@@ -906,8 +914,6 @@ class SelectKBFileDialog(BaseDialog):
         self.list_widget.itemSelectionChanged.connect(self._update_status)
         self.content_layout.addWidget(self.list_widget, stretch=1)
 
-        self._populate_list(self._all_files)
-
         # --- 底部状态提示 ---
         self.lbl_status = QLabel()
         self.footer_layout.insertWidget(0, self.lbl_status)
@@ -915,14 +921,46 @@ class SelectKBFileDialog(BaseDialog):
         self.add_button("Cancel", self.reject)
         self.btn_attach = self.add_button("Attach", self.accept, is_primary=True)
 
+        self.combo_kb.currentIndexChanged.connect(self._on_kb_changed)
+
+        # 初始化数据
+        self._load_kbs()
         self._update_status()
         self._apply_theme()
+
+    def _load_kbs(self):
+        from src.core.kb_manager import KBManager
+        self.kb_manager = KBManager()
+        kbs = self.kb_manager.get_all_kbs()
+
+        self.combo_kb.blockSignals(True)
+        self.combo_kb.clear()
+        self.combo_kb.addItem("Please select a Knowledge Base...", "none")
+
+        for kb in kbs:
+            if kb.get('status') == 'ready':
+                self.combo_kb.addItem(kb['name'], kb)
+
+        self.combo_kb.blockSignals(False)
+
+    def _on_kb_changed(self):
+        kb_data = self.combo_kb.currentData()
+        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
+
+        if not kb_id or kb_id == "none":
+            self._all_files = []
+        else:
+            self._all_files = self.kb_manager.get_kb_files(kb_id)
+
+        self.inp_search.clear()
+        self._populate_list(self._all_files)
+        self._update_status()
 
     def _populate_list(self, files):
         self.list_widget.clear()
         for f in files:
             item = QListWidgetItem(f"  {f['name']}")
-            item.setData(Qt.UserRole, f['path'])
+            item.setData(Qt.UserRole, f)
             item.setToolTip(f['path'])
             self.list_widget.addItem(item)
 
@@ -937,18 +975,32 @@ class SelectKBFileDialog(BaseDialog):
         total = self.list_widget.count()
         if selected > 0:
             self.lbl_status.setText(f"{selected} of {total} selected")
+            self.btn_attach.setEnabled(True)
         else:
             self.lbl_status.setText(f"{total} file(s) available")
+            self.btn_attach.setEnabled(False)
 
     def _apply_theme(self):
         super()._apply_theme()
         tm = self.tm
-
         self.lbl_status.setStyleSheet(
             f"color: {tm.color('text_muted')}; font-size: 12px; font-weight: bold;")
+        if hasattr(self, 'combo_kb') and hasattr(self.combo_kb, 'setStyleSheet'):
+            self.combo_kb.setStyleSheet(
+                f"QComboBox {{ border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; background: {tm.color('bg_input')}; color: {tm.color('text_main')}; }}")
+
+    def get_selected_file_infos(self):
+        infos = []
+        for item in self.list_widget.selectedItems():
+            data = item.data(Qt.UserRole)
+            if isinstance(data, dict):
+                infos.append(data)
+            else:
+                infos.append({"path": data, "name": os.path.basename(data)})
+        return infos
 
     def get_selected_paths(self):
-        return [item.data(Qt.UserRole) for item in self.list_widget.selectedItems()]
+        return [item['path'] for item in self.get_selected_file_infos()]
 
 
 
@@ -977,10 +1029,6 @@ class ProgressDialog(BaseDialog):
         self.setWindowModality(Qt.ApplicationModal)
 
         self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
-        if telemetry_config is None:
-            self.telemetry = {"cpu": True, "ram": True, "gpu": True, "net": False, "io": True}
-        else:
-            self.telemetry = telemetry_config
 
         # --- UI 初始化 ---
         self.lbl_message = QLabel(message)
@@ -994,10 +1042,6 @@ class ProgressDialog(BaseDialog):
         self.pbar.setTextVisible(True)
         self.content_layout.addWidget(self.pbar)
 
-        self.lbl_metrics = QLabel("Initializing App Profiler...")
-        self.lbl_metrics.setWordWrap(True)
-        self.content_layout.addWidget(self.lbl_metrics)
-
         self.stalled_warning_widget = QWidget()
         warn_layout = QHBoxLayout(self.stalled_warning_widget)
         warn_layout.setContentsMargins(5, 5, 5, 5)
@@ -1006,10 +1050,11 @@ class ProgressDialog(BaseDialog):
         self.lbl_warn_text = QLabel(
             "Task is still in progress. Large models or network latency may take extra time, please wait...")
         self.lbl_warn_text.setWordWrap(True)
+        self.lbl_warn_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.lbl_warn_text.setMinimumHeight(32)
         warn_layout.addWidget(self.lbl_warn_icon, 0, Qt.AlignTop)
         warn_layout.addWidget(self.lbl_warn_text, 1)
-        self.stalled_warning_widget.setVisible(False)
-        self.content_layout.addWidget(self.stalled_warning_widget)
+
 
         self.content_layout.addStretch()
 
@@ -1027,24 +1072,6 @@ class ProgressDialog(BaseDialog):
         self.main_process = psutil.Process(os.getpid())
 
         self.main_process.cpu_percent(interval=None)
-
-        if any(self.telemetry.values()):
-            self.metric_timer = QTimer(self)
-            self.metric_timer.timeout.connect(self._update_metrics)
-            self._last_time = time.time()
-            if self.telemetry.get("net"):
-                try:
-                    self._last_net_io = psutil.net_io_counters()
-                except:
-                    self.telemetry["net"] = False
-            if self.telemetry.get("io"):
-                try:
-                    self._last_disk_io = self._get_process_tree_io()
-                except:
-                    self.telemetry["io"] = False
-            self.metric_timer.start(1000)
-        else:
-            self.lbl_metrics.setVisible(False)
 
     def _apply_theme(self):
         super()._apply_theme()
@@ -1066,13 +1093,6 @@ class ProgressDialog(BaseDialog):
         """)
 
 
-        self.lbl_metrics.setStyleSheet(f"""
-                   QLabel {{
-                       font-family: 'Consolas', 'Courier New', monospace; 
-                       color: {tm.color('success')}; font-size: 11px; background-color: {tm.color('bg_main')};
-                       border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 6px; margin-top: 5px;
-                   }}
-               """)
 
         self.lbl_warn_icon.setPixmap(tm.icon("info", "warning").pixmap(16, 16))
 
@@ -1118,88 +1138,6 @@ class ProgressDialog(BaseDialog):
                 pass
         return read_bytes, write_bytes
 
-    def _update_metrics(self):
-        try:
-            stats = []
-            curr_time = time.time()
-            dt = curr_time - self._last_time
-            if dt <= 0: return
-
-            procs = self._get_process_tree()
-            pids = [p.pid for p in procs]
-
-            if self.telemetry.get("cpu"):
-                app_cpu = 0.0
-                for p in procs:
-                    try:
-                        app_cpu += p.cpu_percent(interval=None)
-                    except:
-                        pass
-                stats.append(f"CPU: {app_cpu:04.1f}%")
-
-            if self.telemetry.get("ram"):
-                app_ram = 0
-                for p in procs:
-                    try:
-                        app_ram += p.memory_info().rss
-                    except:
-                        pass
-                stats.append(f"RAM: {app_ram / (1024 ** 2):.1f} MB")
-
-            if self.telemetry.get("io"):
-                curr_disk_io = self._get_process_tree_io()
-                read_spd = (curr_disk_io[0] - self._last_disk_io[0]) / dt
-                write_spd = (curr_disk_io[1] - self._last_disk_io[1]) / dt
-                stats.append(f"I/O: R:{self._format_speed(read_spd)} W:{self._format_speed(write_spd)}")
-                self._last_disk_io = curr_disk_io
-
-            if self.telemetry.get("gpu"):
-                if HAS_NVML:
-                    try:
-                        app_vram_mb = 0
-                        sys_used_vram_gb = 0
-                        gpu_usage = 0
-                        device_count = pynvml.nvmlDeviceGetCount()
-                        for i in range(device_count):
-                            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                            gpu_usage = max(gpu_usage, util.gpu)
-                            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                            sys_used_vram_gb += mem_info.used / (1024 ** 3)
-                            gpu_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-                            for gp in gpu_procs:
-                                if gp.pid in pids and gp.usedGpuMemory is not None:
-                                    app_vram_mb += gp.usedGpuMemory / (1024 ** 2)
-                        if app_vram_mb > 0:
-                            stats.append(f"App VRAM: {app_vram_mb:.0f} MB [GPU: {gpu_usage}%]")
-                        else:
-                            stats.append(f"Sys VRAM: {sys_used_vram_gb:.1f}G [GPU: {gpu_usage}%]")
-                    except:
-                        stats.append("GPU: Active")
-                elif torch.cuda.is_available():
-                    try:
-                        free, total = torch.cuda.mem_get_info()
-                        used_gb = (total - free) / (1024 ** 3)
-                        stats.append(f"Sys VRAM: {used_gb:.1f}G")
-                    except:
-                        stats.append("GPU: Active")
-                else:
-                    stats.append("GPU: N/A")
-
-            if self.telemetry.get("net"):
-                curr_net_io = psutil.net_io_counters()
-                recv_spd = (curr_net_io.bytes_recv - self._last_net_io.bytes_recv) / dt
-                sent_spd = (curr_net_io.bytes_sent - self._last_net_io.bytes_sent) / dt
-                stats.append(f"Sys Net: ↓{self._format_speed(recv_spd)} ↑{self._format_speed(sent_spd)}")
-                self._last_net_io = curr_net_io
-
-            self._last_time = curr_time
-            if len(stats) > 3:
-                self.lbl_metrics.setText(f"{' | '.join(stats[:3])}\n{' | '.join(stats[3:])}")
-            else:
-                self.lbl_metrics.setText(" | ".join(stats))
-        except Exception as e:
-            self.lbl_metrics.setText(f"Profiler Error: {str(e)}")
 
 
     def update_progress(self, percent, msg=None):
@@ -1223,7 +1161,6 @@ class ProgressDialog(BaseDialog):
     def show_success_state(self, title="Success", message="Task completed successfully."):
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
         if hasattr(self, 'stall_timer'): self.stall_timer.stop()
-        self.lbl_metrics.setVisible(False)
         self.stalled_warning_widget.setVisible(False)
 
         self.pbar.setVisible(False)
@@ -1277,7 +1214,7 @@ class ProgressDialog(BaseDialog):
         # 1. 清理监控器与隐藏旧 UI
         if hasattr(self, 'metric_timer'): self.metric_timer.stop()
         if hasattr(self, 'stall_timer'): self.stall_timer.stop()
-        self.lbl_metrics.setVisible(False)
+
         self.stalled_warning_widget.setVisible(False)
         self.pbar.setVisible(False)
 
@@ -1285,7 +1222,6 @@ class ProgressDialog(BaseDialog):
         self.hide()
 
         # 3. 弹出最终结果对话框
-        from src.ui.components.dialog import StandardDialog
         result_dialog = StandardDialog(
             self.parent(),
             title=title,
@@ -1435,7 +1371,7 @@ class ProjectEditorDialog(BaseDialog):
         self.inp_desc.setMaximumHeight(70)
         self.form_layout.addRow("Desc:", self.inp_desc)
 
-        self.combo_model = QComboBox()
+        self.combo_model = BaseComboBox()
         active_models = EMBEDDING_MODELS
         for m in active_models:
             self.combo_model.addItem(m['ui_name'], m['id'])

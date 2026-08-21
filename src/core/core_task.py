@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import queue
-import signal
 import subprocess
 import sys
 import time
@@ -10,8 +9,6 @@ import traceback
 import multiprocessing as mp
 from enum import Enum
 from typing import Any, Dict, Optional
-
-import psutil
 from PySide6.QtCore import QObject, Signal, QThread, QTimer, QEventLoop
 
 
@@ -26,6 +23,22 @@ class TaskState(Enum):
 class TaskMode(Enum):
     PROCESS = "process"
     THREAD = "thread"
+
+class IPCLogHandler(logging.Handler):
+    def __init__(self, task_queue):
+        super().__init__()
+        self.task_queue = task_queue
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.task_queue.put({
+                "type": "log",
+                "level": record.levelname,
+                "msg": f"[{record.name}] {msg}"
+            })
+        except Exception:
+            pass
 
 
 class BackgroundTask:
@@ -43,6 +56,15 @@ class BackgroundTask:
         self._throttle_interval = 0.05
 
     def run(self):
+        if mp.current_process().name != 'MainProcess':
+            root_logger = logging.getLogger()
+            root_logger.handlers.clear()
+
+            ipc_handler = IPCLogHandler(self.queue)
+            ipc_handler.setFormatter(logging.Formatter('%(message)s'))
+            root_logger.addHandler(ipc_handler)
+            root_logger.setLevel(logging.INFO)
+
         self.logger.debug(f"Start. PID: {os.getpid()} | Task: {self.task_id}")
         self._emit_state(TaskState.PROCESSING, -1, "Initializing...")
         try:
@@ -173,7 +195,6 @@ class TaskManager(QObject):
 
     def _real_start(self, task_class, task_id: str, mode: TaskMode, kwargs: Dict):
 
-        # 强制将已知会引发 GIL 锁死的重型任务转移到独立进程，无视工具组件的原始请求
         heavy_tasks = []
         if task_class.__name__ in heavy_tasks:
             if mode == TaskMode.THREAD:
@@ -197,12 +218,17 @@ class TaskManager(QObject):
             self.worker = RunnerProcess(task_class, task_id, self.task_queue, kwargs)
 
         try:
-            self.worker.start()
+            if mode == TaskMode.PROCESS:
+                import threading
+                threading.Thread(target=self.worker.start, daemon=True).start()
+            else:
+                self.worker.start()
+
             self._queue_timer.start()
         except Exception as e:
             self.logger.error(f"Spawn FAILED: {e}")
             self.sig_state_changed.emit(TaskState.FAILED.value, f"Spawn FAILED: {e}")
-
+        # --- 修改结束 ---
 
 
     def _poll_queue(self):
@@ -304,11 +330,9 @@ class TaskManager(QObject):
             worker_to_stop.join(timeout=1.0)
         elif self.current_mode == TaskMode.THREAD and worker_to_stop.isRunning():
             worker_to_stop.requestInterruption()
-            # 绝对不要在这里卡 UI，_active_threads 会默默负责给它送终
 
         self.sig_state_changed.emit(TaskState.TERMINATED.value, "Task has been terminated.")
 
-        # 安全调用 Hook，修复直接写死 key 的隐患
         if self.hooks.get("terminate"):
             self.hooks["terminate"]()
 
@@ -323,6 +347,7 @@ class TaskManager(QObject):
 
     @staticmethod
     def _kill_process_tree(pid: int):
+        import psutil
         try:
             if sys.platform == "win32":
                 subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)

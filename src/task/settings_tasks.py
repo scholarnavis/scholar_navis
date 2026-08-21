@@ -80,14 +80,14 @@ class TestDeviceTask(BackgroundTask):
             elif device_id == "coreml":
                 provider = "CoreMLExecutionProvider"
 
-
             self.send_log("INFO", "Generating native dummy ONNX model in memory...")
             X = helper.make_tensor_value_info('X', TensorProto.FLOAT, [1, 3])
             Y = helper.make_tensor_value_info('Y', TensorProto.FLOAT, [1, 3])
             node_def = helper.make_node('Identity', inputs=['X'], outputs=['Y'])
             graph_def = helper.make_graph([node_def], 'test-model', [X], [Y])
-            model_def = helper.make_model(graph_def, producer_name='scholar-navis-test')
 
+            opset_import = helper.make_opsetid("", 14)
+            model_def = helper.make_model(graph_def, producer_name='scholar-navis-test', opset_imports=[opset_import])
 
             model_bytes = model_def.SerializeToString()
 

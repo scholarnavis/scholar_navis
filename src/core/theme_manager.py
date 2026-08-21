@@ -6,6 +6,7 @@ from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon, Qt
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtSvg import QSvgRenderer
 
+from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 
 
@@ -91,7 +92,7 @@ class ThemeManager(QObject):
     @staticmethod
     def get_resource_path(*paths):
         if '__compiled__' in globals():
-            base_dir = os.path.dirname(sys.executable)
+            base_dir = BASE_DIR
 
             if sys.platform == "darwin" and ".app/Contents/MacOS" in base_dir:
                 base_dir = os.path.abspath(os.path.join(base_dir, "..", "Resources"))
@@ -105,6 +106,10 @@ class ThemeManager(QObject):
 
     def set_theme(self, theme_name: str):
         theme_name = theme_name.lower()
+
+        if theme_name == "auto":
+            theme_name = self._get_system_theme()
+
         if theme_name in self.themes and self.current_theme != theme_name:
             self.current_theme = theme_name
             self.theme_changed.emit()
