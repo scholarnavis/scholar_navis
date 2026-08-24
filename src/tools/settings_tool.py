@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLineEdit,
                                QAbstractItemView, QHeaderView,
                                QTableWidgetItem, QCheckBox, QApplication, QFrame, QFileDialog)
 
+from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState, TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
@@ -74,6 +75,12 @@ class SettingsTool(BaseTool):
         self.widget = None
         self.llm_configs = []
         self._is_updating_model_ui = False
+
+        # 防抖器
+        self._sync_timer = QTimer(self.widget)
+        self._sync_timer.setSingleShot(True)
+        self._sync_timer.setInterval(300)
+        self._sync_timer.timeout.connect(self._sync_llm_data_execute)
 
         GlobalSignals().request_model_download.connect(self.on_download_requested)
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -160,6 +167,10 @@ class SettingsTool(BaseTool):
         idx_dev = self.combo_device.findData(curr_device)
         if idx_dev >= 0:
             self.combo_device.setCurrentIndex(idx_dev)
+        else:
+            self.combo_device.addItem(f"Saved Device (Offline): {curr_device}", curr_device)
+            self.combo_device.setCurrentIndex(self.combo_device.count() - 1)
+
         self.combo_device.blockSignals(False)
 
 
@@ -1216,7 +1227,8 @@ class SettingsTool(BaseTool):
 
         # --- 3. 硬件加速设备选择 ---
         self.combo_device = BaseComboBox()
-        self.combo_device.addItem("Detecting devices...", "auto")
+        curr_device = self.config.user_settings.get("inference_device", "auto")
+        self.combo_device.addItem("Detecting devices...", curr_device)
         layout.addRow("Compute Device:", self.combo_device)
 
         # --- 4. 其他模型设置 ---
@@ -1248,7 +1260,7 @@ class SettingsTool(BaseTool):
         )
 
     def _open_hf_cache(self):
-        model_dir = os.path.join(self.config.BASE_DIR, "models")
+        model_dir = os.path.join(BASE_DIR, "models")
         os.makedirs(model_dir, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
 
@@ -1277,99 +1289,11 @@ class SettingsTool(BaseTool):
         else:
             self.test_dev_pd.show_finish_state(False, "Test Failed", result["msg"])
 
-
     def _load_llm_config(self):
-        default_config = [
-            {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "",
-             "api_key": ""},
-            {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "minimax", "name": "MiniMax","base_url": "https://api.minimaxi.com/anthropic",
-             "model_name": "MiniMax-M2.5", "api_key": "",
-             "fetched_models": [
-                 "MiniMax-M2", "M2-her", "MiniMax-M2.1",
-                 "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning",
-                 "MiniMax-M2.7"
-             ]},
-
-            {"id": "gemini", "name": "Google Gemini",
-             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model_name": "",
-             "api_key": ""},
-            {"id": "anthropic", "name": "Anthropic", "base_url": "https://api.anthropic.com/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "nvidia", "name": "Nvidia Build", "base_url": "https://integrate.api.nvidia.com/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "qwen", "name": "Alibaba Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "mimo", "name": "Xiaomi MiMo", "base_url": "https://api.xiaomimimo.com/v1",
-             "model_name": "mimo-v2-pro", "api_key": "",
-             "fetched_models": ["mimo-v1", "mimo-v2", "mimo-v2-pro"]},
-            {"id": "zhipu", "name": "Zhipu GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
-             "model_name": "", "api_key": ""},
-            {"id": "siliconflow", "name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1",
-             "model_name": "", "api_key": ""},
-            {"id": "lmstudio", "name": "LM Studio", "base_url": "http://localhost:1234/v1", "model_name": "",
-             "api_key": "lm-studio"},
-            {"id": "ollma", "name": "Ollma", "base_url": "http://localhost:11434/v1",
-             "model_name": "", "api_key": "ollama"}
-        ]
-
-        try:
-            loaded_configs = self.config.load_llm_configs()
-
-            if not loaded_configs:
-                loaded_configs = []
-
-            for cfg in loaded_configs:
-                cfg.pop("thinking_model_name", None)
-                if "model_params_mode" in cfg and "models_config" not in cfg:
-                    m_name = cfg.get("model_name", "default")
-                    cfg["models_config"] = {
-                        m_name: {
-                            "mode": cfg.get("model_params_mode", "inherit"),
-                            "params": cfg.get("model_params", [])
-                        }
-                    }
-        except Exception as e:
-            self.logger.error(f"Error loading llm_config.json: {e}")
-            loaded_configs = []
-
-        existing_ids = {c.get("id") for c in loaded_configs}
-        needs_resave = False
-        missing_ids = []
-
-        for i, dc in enumerate(default_config):
-            if dc["id"] not in existing_ids:
-                loaded_configs.insert(i, dc)
-                missing_ids.append(dc["id"])
-                needs_resave = True
-            else:
-                for cfg in loaded_configs:
-                    if cfg.get("id") == dc["id"] and "fetched_models" in dc:
-                        current_fetched = cfg.get("fetched_models", [])
-                        added_any = False
-                        for m in dc["fetched_models"]:
-                            if m not in current_fetched:
-                                current_fetched.append(m)
-                                added_any = True
-                        if added_any:
-                            cfg["fetched_models"] = current_fetched
-                            needs_resave = True
-                        break
-
-        if needs_resave:
-            self.logger.warning(
-                f"Required default LLM identifiers or models were missing: {missing_ids}. "
-                f"The system has automatically supplemented and persisted these records."
-            )
-            self.llm_configs = loaded_configs
-            self._save_llm_config()
-
-        return loaded_configs if loaded_configs else default_config
+        return self.config.load_llm_configs()
 
     def _save_llm_config(self):
-        config_path = os.path.join(self.config.CONFIG_DIR, "llm_config.json")
-        self.config.save_json(config_path, self.llm_configs, encrypt=True)
+        self.config.save_llm_configs(self.llm_configs)
 
     def init_llm_section(self):
 
@@ -1478,13 +1402,12 @@ class SettingsTool(BaseTool):
         self.layout.addWidget(group)
 
         self.combo_llm_preset.currentIndexChanged.connect(self._on_llm_preset_changed)
-        self.input_llm_name.textChanged.connect(self._sync_llm_data)
-        self.input_llm_url.textChanged.connect(self._sync_llm_data)
-        self.input_llm_key.textChanged.connect(self._sync_llm_data)
-        self.combo_llm_model.currentIndexChanged.connect(self._on_model_index_changed)
-        self.combo_model_param_strategy.currentIndexChanged.connect(self._sync_llm_data)
-        self.editor_provider_params.sig_data_changed.connect(self._sync_llm_data)
-        self.editor_model_params.sig_data_changed.connect(self._sync_llm_data)
+        self.input_llm_name.textChanged.connect(self._sync_llm_data_debounced)
+        self.input_llm_url.textChanged.connect(self._sync_llm_data_debounced)
+        self.input_llm_key.textChanged.connect(self._sync_llm_data_debounced)
+        self.combo_model_param_strategy.currentIndexChanged.connect(self._sync_llm_data_debounced)
+        self.editor_provider_params.sig_data_changed.connect(self._sync_llm_data_debounced)
+        self.editor_model_params.sig_data_changed.connect(self._sync_llm_data_debounced)
 
         active_id = self.config.user_settings.get("active_llm_id", "openai")
         idx_to_select = next((i for i, c in enumerate(self.llm_configs) if c.get("id") == active_id), 0)
@@ -1591,7 +1514,7 @@ class SettingsTool(BaseTool):
         except TypeError:
             self.editor_model_params.load_data(merged_params)
 
-        self._sync_llm_data()
+        self._sync_llm_data_execute()
         ToastManager().show("Parameters copied and merged successfully.", "success")
 
     def _on_model_index_changed(self, index):
@@ -1651,7 +1574,7 @@ class SettingsTool(BaseTool):
                 self.combo_llm_model.blockSignals(False)
 
                 self._refresh_model_combo(conf)
-                self._sync_llm_data()
+                self._sync_llm_data_execute()
 
     def _load_model_params_to_ui(self, conf, model_name):
         self._is_updating_model_ui = True
@@ -2022,7 +1945,10 @@ class SettingsTool(BaseTool):
 
         self._refresh_model_combo(conf)
 
-    def _sync_llm_data(self):
+    def _sync_llm_data_debounced(self):
+        self._sync_timer.start()
+
+    def _sync_llm_data_execute(self):
         if self._is_updating_model_ui: return
         idx = self.combo_llm_preset.currentIndex()
         if idx < 0 or idx >= len(self.llm_configs): return
@@ -2054,7 +1980,7 @@ class SettingsTool(BaseTool):
         self._update_current_model_marker(curr_real, mode)
 
     def _start_fetch_task(self):
-        self._sync_llm_data()
+        self._sync_llm_data_execute()
         idx = self.combo_llm_preset.currentIndex()
         conf = self.llm_configs[idx] if 0 <= idx < len(self.llm_configs) else {}
 
@@ -2111,7 +2037,7 @@ class SettingsTool(BaseTool):
             self.net_pd.show_finish_state(False, "Fetch Failed", result['msg'])
 
     def _start_test_task(self):
-        self._sync_llm_data()
+        self._sync_llm_data_execute()
         idx = self.combo_llm_preset.currentIndex()
         conf = self.llm_configs[idx] if 0 <= idx < len(self.llm_configs) else {}
 
@@ -2393,7 +2319,7 @@ class SettingsTool(BaseTool):
         new_email = self.input_ncbi_email.text().strip()
 
         if hasattr(self, '_sync_llm_data'):
-            self._sync_llm_data()
+            self._sync_llm_data_execute()
         self._save_llm_config()
 
         new_mcp_servers = {}
@@ -2419,7 +2345,7 @@ class SettingsTool(BaseTool):
                 if cfg.get("type") == "SKILL":
                     active_skill_names.add(name)
                     if "_pending_bytes" in cfg:
-                        workspace_dir = os.path.join(self.config.BASE_DIR, 'tools', 'skill')
+                        workspace_dir = os.path.join(BASE_DIR, 'tools', 'skill')
                         os.makedirs(workspace_dir, exist_ok=True)
                         target_path = os.path.join(workspace_dir, f"{name}.enc")
                         try:
@@ -2436,25 +2362,25 @@ class SettingsTool(BaseTool):
                 else:
                     new_mcp_servers[name] = cfg
 
-                old_skills = self.config.mcp_servers.get("external_skills", {})
-                import shutil
-                for old_name, old_cfg in old_skills.items():
-                    if old_name not in active_skill_names:
-                        old_path = old_cfg.get("command", "")
-                        if old_path and "tools" in old_path and "skill" in old_path:
-                            try:
-                                if os.path.exists(old_path):
-                                    os.remove(old_path)
-                                skill_workspace = os.path.join(self.config.BASE_DIR, 'tools', 'skill',
-                                                               f"{old_name}_workspace")
-                                if os.path.exists(skill_workspace) and os.path.isdir(skill_workspace):
-                                    shutil.rmtree(skill_workspace)
-                            except Exception as e:
-                                self.logger.warning(f"Failed to properly clean up deleted skill for '{old_name}': {e}")
+            old_skills = self.config.mcp_servers.get("external_skills", {})
+            import shutil
+            for old_name, old_cfg in old_skills.items():
+                if old_name not in active_skill_names:
+                    old_path = old_cfg.get("command", "")
+                    if old_path and "tools" in old_path and "skill" in old_path:
+                        try:
+                            if os.path.exists(old_path):
+                                os.remove(old_path)
+                            skill_workspace = os.path.join(self.config.BASE_DIR, 'tools', 'skill',
+                                                           f"{old_name}_workspace")
+                            if os.path.exists(skill_workspace) and os.path.isdir(skill_workspace):
+                                shutil.rmtree(skill_workspace)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to properly clean up deleted skill for '{old_name}': {e}")
 
-                self.config.mcp_servers["mcpServers"] = new_mcp_servers
-                self.config.mcp_servers["external_skills"] = new_external_skills
-                self.config.save_mcp_servers()
+            self.config.mcp_servers["mcpServers"] = new_mcp_servers
+            self.config.mcp_servers["external_skills"] = new_external_skills
+            self.config.save_mcp_servers()
 
         new_key = self.input_ncbi_api_key.text().strip()
         new_openalex_key = self.input_openalex_api_key.text().strip()
@@ -2474,15 +2400,16 @@ class SettingsTool(BaseTool):
         new_proxy_url = self.input_proxy.text().strip()
 
         new_theme = self.combo_theme.currentText().lower()
-        if new_theme == "auto": new_theme = "dark"
 
-        ThemeManager().set_theme(new_theme)
         qdarktheme.setup_theme(new_theme)
+        ThemeManager().set_theme(new_theme)
 
         try:
             api_port = int(self.input_api_port.text().strip())
         except ValueError:
             api_port = 8000
+
+        new_theme = self.combo_theme.currentText()
 
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
@@ -2492,7 +2419,7 @@ class SettingsTool(BaseTool):
             "current_model_id": self.combo_embed.currentData(),
             "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
-            "theme": self.combo_theme.currentText(),
+            "theme": new_theme,
             "log_level": self.combo_log.currentText(),
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
@@ -2509,6 +2436,10 @@ class SettingsTool(BaseTool):
             self.config.user_settings.pop(old_key, None)
 
         self.config.save_settings()
+
+        new_theme_lower = new_theme.lower()
+        qdarktheme.setup_theme(new_theme_lower)
+        ThemeManager().set_theme(new_theme_lower)
 
         if new_s2_key:
             os.environ["S2_API_KEY"] = new_s2_key

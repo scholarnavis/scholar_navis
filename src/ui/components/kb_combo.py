@@ -1,4 +1,3 @@
-# src/ui/components/kb_combo.py
 from PySide6.QtWidgets import QComboBox, QStyledItemDelegate, QListView, QStyle
 from PySide6.QtCore import Qt, QRect, QSize
 from PySide6.QtGui import QColor, QPen, QFont, QBrush

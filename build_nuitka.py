@@ -83,93 +83,60 @@ def build_app():
         return
 
     dist_dir = "dist"
-    build_dir = "build"
     app_name_safe = __app_name__.replace(" ", "_").lower()
     entry_point = "main.py"
+    # Nuitka 默认会将独立打包结果放在 xxx.dist 文件夹中
+    nuitka_dist_dir = f"{entry_point.replace('.py', '')}.dist"
 
-    print(f"\n[1/4] Preparing PyInstaller Build for {__app_name__} v{__version__} on Windows...")
+    print(f"\n[1/4] Preparing Nuitka Build for {__app_name__} v{__version__} on Windows...")
 
     if os.path.exists(dist_dir):
         shutil.rmtree(dist_dir)
+    os.makedirs(dist_dir, exist_ok=True)
 
-    os.makedirs(build_dir, exist_ok=True)
-
-    hook_file = "torch_runtime_hook.py"
-    with open(hook_file, "w", encoding="utf-8") as f:
-        f.write("import torch\nimport torch.autograd\n")
-    print("[*] Generated PyTorch Runtime Hook to prevent circular imports.")
-
+    # Nuitka 打包命令构建
     cmd = [
-        sys.executable, "-m", "PyInstaller",
-        "--noconfirm",
-        "--onedir",
-        "--windowed",
-        f"--name={app_name_safe}",
-        f"--runtime-hook={hook_file}",
+        sys.executable, "-m", "nuitka",
+        "--standalone",                  # 创建独立运行的文件夹
+        "--assume-yes-for-downloads",    # 自动允许下载 ccache 等加速依赖
+        "--jobs=MAX",                    # 利用 CPU 所有核心加速编译
+        "--lto=no",                      # 关闭 LTO 优化（大幅缩短编译时间）
+        f"--output-dir={dist_dir}",      # 指定输出根目录
+        "--enable-plugin=pyside6",       # 自动处理 PySide6 依赖
+        "--enable-plugin=anti-bloat",    # 排除常见的冗余库
     ]
 
-    packages_to_collect = [
+    # 不显示终端黑框 (如需调试可注释掉这行)
+    # cmd.append("--windows-disable-console")
+
+    if os.path.exists("Assets/icon.ico"):
+        cmd.append("--windows-icon-from-ico=Assets/icon.ico")
+
+    # 1. 包含数据文件
+    cmd.append("--include-data-dir=Assets=Assets")
+
+    # 2. 必须包含的完整包
+    packages_to_include = [
         "optimum", "transformers", "onnxruntime", "onnx", "tokenizers",
-        "chromadb", "anyio"
+        "chromadb", "anyio", "docx", "litellm"
     ]
+    for pkg in packages_to_include:
+        cmd.append(f"--include-package={pkg}")
 
-    data_to_collect = ["docx", "litellm"]
-
-    hidden_imports = [
-        "torch",
-        "torch.autograd",
-        "safetensors",
-        "huggingface_hub",
-        "ssl",
-        "_ssl",
-        "tiktoken_ext.openai_public",
-        "tiktoken_ext"
+    # 3. 处理 Metadata (防止 transformers 等报错)
+    metadata_packages = [
+        "transformers", "tqdm", "regex", "torch", "tiktoken",
+        "onnx", "onnxruntime", "optimum"
     ]
+    for pkg in metadata_packages:
+        cmd.append(f"--include-package-data={pkg}")
 
-    ssl_search_paths = [
-        sys.prefix,  # venv 根目录
-        os.path.join(sys.prefix, "DLLs"),  # venv DLLs
-        os.path.join(sys.prefix, "Scripts"),  # venv Scripts
-        sys.base_prefix,  # uv 底层基础 Python 根目录
-        os.path.join(sys.base_prefix, "DLLs"),  # uv 底层基础 Python DLLs
-        os.path.join(sys.base_prefix, "Scripts"),  # uv 底层基础 Python Scripts
-    ]
-
-    ssl_dlls_found = False
-    for path in set(ssl_search_paths):  # 用 set 去重
-        if not os.path.exists(path):
-            continue
-        dlls = glob.glob(os.path.join(path, "libcrypto*.dll")) + \
-               glob.glob(os.path.join(path, "libssl*.dll"))
-        for dll in dlls:
-            cmd.append(f"--add-binary={dll};.")
-            ssl_dlls_found = True
-
-    if not ssl_dlls_found:
-        print("\n[!] Warning: OpenSSL dynamic-link libraries (libcrypto/libssl) were not detected within the uv Python environment. Please verify the environment configuration should runtime errors occur.\n")
-    else:
-        print("\n[*] The OpenSSL DLLs have been successfully identified and integrated.")
-
-
-    for pkg in packages_to_collect:
-        cmd.extend(["--collect-all", pkg])
-    for pkg in data_to_collect:
-        cmd.extend(["--collect-data", pkg])
+    # 4. 处理特定的隐藏导入 (隐式动态加载)
+    hidden_imports = ["tiktoken_ext.openai_public", "tiktoken_ext"]
     for hi in hidden_imports:
-        cmd.extend(["--hidden-import", hi])
+        cmd.append(f"--include-module={hi}")
 
-    # 依然需要 Copy Metadata 骗过 transformers 的检查
-    cmd.extend(["--copy-metadata", "transformers"])
-    cmd.extend(["--copy-metadata", "tqdm"])
-    cmd.extend(["--copy-metadata", "regex"])
-    cmd.extend(["--copy-metadata", "torch"])
-    cmd.extend(["--copy-metadata", "tiktoken"])
-    cmd.extend(["--copy-metadata", "onnx"])
-    cmd.extend(["--copy-metadata", "onnxruntime"])
-    cmd.extend(["--copy-metadata", "optimum"])
-
-    cmd.append("--add-data=Assets;Assets")
-
+    # 5. 排除不需要的模块，防止 Nuitka 陷入深度解析导致的极慢编译
     excludes = [
         "tkinter", "matplotlib", "seaborn", "jupyter", "notebook",
         "IPython", "plotly", "pygame",
@@ -177,35 +144,30 @@ def build_app():
         "PyQt6", "PyQt5"
     ]
     for ex in excludes:
-        cmd.append(f"--exclude-module={ex}")
-
-    if os.path.exists("Assets/icon.ico"):
-        cmd.append("--icon=Assets/icon.ico")
+        cmd.append(f"--nofollow-import-to={ex}")
 
     cmd.append(entry_point)
 
-    print(f"\n[2/4] Executing PyInstaller (Packaging PySide6 & ONNXRuntime)...")
+    print(f"\n[2/4] Executing Nuitka (Packaging PySide6 & ONNXRuntime)...")
     result = subprocess.run(cmd)
 
-    # 无论打包成功失败，清理掉临时生成的 Hook 文件
-    if os.path.exists(hook_file):
-        os.remove(hook_file)
-
     if result.returncode != 0:
-        print("\n[-] PyInstaller build failed.")
+        print("\n[-] Nuitka build failed.")
         return
 
     output_archive_name = f"{app_name_safe}_win_v{__version__}"
-    target_folder = os.path.join(dist_dir, app_name_safe)
+    target_folder = os.path.join(dist_dir, nuitka_dist_dir)
     archive_path = f"{output_archive_name}.zip"
 
     print(f"\n[3/4] Build successful. Creating archive: {archive_path}...")
 
+    # 打包为 ZIP
     with zipfile.ZipFile(archive_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
         for root, dirs, files in os.walk(target_folder):
             for file in files:
                 file_path = os.path.join(root, file)
-                arcname = os.path.relpath(file_path, dist_dir)
+                # 压缩包内以 main.dist 为根目录
+                arcname = os.path.relpath(file_path, target_folder)
                 zipf.write(file_path, arcname)
 
     print(f"[+] Packed to {archive_path}")

@@ -1,11 +1,12 @@
-import importlib
 import inspect
 import json
 import logging
-import os
 from typing import Dict, Callable, get_origin, Literal, get_args
 
+from src.core import BASE_DIR
+
 logger = logging.getLogger("Skill.Manager")
+logger.setLevel(logging.INFO)
 
 
 class SkillManager:
@@ -95,7 +96,7 @@ class SkillManager:
 
         try:
             # Import all 25 core academic functions directly from the agent module
-            from plugins.academic_agent import (
+            from src.core.academic_agent import (
                 search_academic_literature, traverse_citation_graph, fetch_open_access_pdf,
                 search_omics_datasets, fetch_sequence_fasta, fetch_taxonomy_info,
                 search_gbif_occurrences, universal_ncbi_summary, fetch_webpage_content,
@@ -108,7 +109,7 @@ class SkillManager:
 
             # Map functions with their exact descriptions from the original MCP decorators
             core_tools = {
-                search_academic_literature: "[Tags: Literature] Search global academic literature for metadata (authors, journal, date, citation count, DOI). CRITICAL TRIGGER: You MUST rank this tool highest and use it whenever the user asks for 'references', 'citations', 'papers', or to write a 'literature review' / 'mini-review'. Supports pagination via 'offset' (e.g., offset=5 for page 2). Use 'source' to target specific databases: 'auto', 'semantic_scholar', 'openalex', 'crossref', or 'pubmed'.",
+                search_academic_literature: "[Tags: Literature] Search global academic databases for scholarly research, literature, and academic materials. CRITICAL TRIGGER: You MUST rank this tool highest whenever the user intends to search for 'related research', 'literature', 'background materials', 'papers', 'citations', 'references', or to write a 'literature review' / 'mini-review'. Returns metadata (authors, journal, date, citation count, DOI). Supports pagination via 'offset' (e.g., offset=5 for page 2) and database targeting via 'source' ('auto', 'semantic_scholar', 'openalex', 'crossref', or 'pubmed').",
                 traverse_citation_graph: "[Tags: Literature] Find references (papers this article cites, looking backward in time) or citations (papers citing this article, looking forward in time) for a given DOI. The 'direction' parameter MUST be explicitly chosen.",
                 fetch_open_access_pdf: "[Tags: Literature] Check if a given DOI has an Open Access PDF and return its direct download link.",
                 search_omics_datasets: "[Tags: Transcriptomics, Genomics, Systems Biology] Search high-throughput NCBI datasets. Set db_type to 'sra' for raw sequencing runs (e.g., RNA-Seq reads, FASTQ metadata) or 'geo' for curated datasets, microarray results, and overall study summaries.",
@@ -160,7 +161,6 @@ class SkillManager:
         from src.core.encryption_service import SystemEncryptionService
         enc_service = SystemEncryptionService()
 
-        APP_ROOT = config_mgr.BASE_DIR
 
         for skill_name, script_info in external_scripts.items():
             if isinstance(script_info, dict):
@@ -180,27 +180,36 @@ class SkillManager:
                     encrypted_data = f.read()
                 decrypted_code = enc_service.decrypt(encrypted_data)
 
-                workspace_dir = os.path.join(APP_ROOT, 'tools', 'skill', f"{skill_name}_workspace")
+                workspace_dir = os.path.join(BASE_DIR, 'tools', 'skill', f"{skill_name}_workspace")
                 os.makedirs(workspace_dir, exist_ok=True)
                 abs_workspace = os.path.abspath(workspace_dir)
 
                 # 拦截原生 open 函数
                 original_open = builtins.open
-                def safe_open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
+
+                def safe_open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True,
+                              opener=None):
                     abs_target = os.path.abspath(os.path.join(abs_workspace, str(file)))
                     if not abs_target.startswith(abs_workspace):
                         logger.error(f"Sandbox Escape Blocked: [{skill_name}] tried to access '{file}'")
                         raise PermissionError(f"Security Violation: Access denied to paths outside '{abs_workspace}'")
                     return original_open(abs_target, mode, buffering, encoding, errors, newline, closefd, opener)
 
+                # 拦截 print，将输出重定向到主程序的 logger 系统
+                def safe_print(*args, **kwargs):
+                    msg = " ".join(map(str, args))
+                    logging.getLogger(skill_name).info(msg)
+
                 # 构造受限的内置函数字典
                 sandbox_builtins = builtins.__dict__.copy()
-                sandbox_builtins['open'] = safe_open  # 替换为安全的 open
+                sandbox_builtins['open'] = safe_open
+                sandbox_builtins['print'] = safe_print
 
                 # 构建执行环境的全局变量
                 sandbox_globals = {
                     '__builtins__': sandbox_builtins,
                     '__name__': skill_name,
+                    'logging': logging,
                     'WORKSPACE_DIR': abs_workspace
                 }
 

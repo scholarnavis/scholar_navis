@@ -2,18 +2,15 @@ import ctypes
 import os
 import sys
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent
-from PySide6.QtGui import QShortcut, QKeySequence, QIcon
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QSettings
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem,
                                QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.core_task import TaskManager, TaskMode
-from src.core.mcp_manager import MCPManager
 from src.core.theme_manager import ThemeManager
-from src.task.common_task import VerifyModelsTask
 from src.tools.about_tool import AboutTool
 from src.tools.chat_tool import ChatTool
 from src.tools.import_tool import ImportTool
@@ -201,6 +198,24 @@ class MainWindow(QMainWindow):
             hwnd = int(self.winId())
             QTimer.singleShot(100, lambda: force_windows_taskbar_icon(hwnd, ico_path))
 
+        self.settings = QSettings("ScholarNavis", "MainApp")
+        if self.settings.value("geometry"):
+            self.restoreGeometry(self.settings.value("geometry"))
+        if self.settings.value("windowState"):
+            self.restoreState(self.settings.value("windowState"))
+
+    def closeEvent(self, event):
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("windowState", self.saveState())
+
+        if hasattr(self, 'translator_dialog') and self.translator_dialog:
+            self.translator_dialog.close()
+
+        super().closeEvent(event)
+
+        QApplication.quit()
+
+
     def _lazy_load_tools(self):
         tools_to_load = [
             ImportTool, ChatTool, RSSTool, SettingsTool, LogTool, AboutTool
@@ -224,7 +239,7 @@ class MainWindow(QMainWindow):
             self.translator_dialog.hide_with_fade()
 
     def _update_logo_theme(self):
-        theme = ConfigManager().user_settings.get("theme", "Dark").lower()
+        theme = self.tm.current_theme
         filename = "logo_light.svg" if theme == "light" else "logo_dark.svg"
 
         logo_path = ThemeManager.get_resource_path("Assets", filename)
@@ -239,6 +254,7 @@ class MainWindow(QMainWindow):
         hwnd = int(self.winId())
         QTimer.singleShot(100, lambda: set_window_titlebar_theme(hwnd, is_dark))
 
+        self._update_logo_theme()
         self.setStyleSheet(f"QMainWindow {{ background-color: {tm.color('bg_main')}; }}")
         self.main_splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {tm.color('border')}; }}")
         self.tool_stack.setStyleSheet(f"background-color: {tm.color('bg_main')};")
@@ -291,16 +307,15 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-
-
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
+            # 如果是自动主题，让系统事件触发 ThemeManager 重新判定深浅色并向各组件广播
+            if ConfigManager().user_settings.get("theme", "Dark").lower() == "auto":
+                self.tm.set_theme("auto")
+
             is_dark = self.tm.current_theme == "dark"
             QTimer.singleShot(10, lambda: set_window_titlebar_theme(self.winId(), is_dark))
-
-
-
 
     def clean_old_logs(self):
         base_dir = ThemeManager.get_resource_path()

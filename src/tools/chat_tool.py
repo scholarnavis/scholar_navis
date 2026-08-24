@@ -1,44 +1,34 @@
 import base64
-import csv
-import datetime
-import hashlib
-import json
 import logging
 import os
 import re
-import shutil
 import tempfile
-import time
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import quote
 
-from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QPropertyAnimation, QMarginsF, QEasingCurve, \
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, \
     QEvent
-from PySide6.QtGui import QDesktopServices, QCursor, QAction, QPdfWriter, QTextDocument, QPageSize
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel,
                                QScrollArea, QFrame, QFileDialog, QMenu, QCheckBox,
-                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication, QComboBox)
+                               QToolButton, QWidgetAction, QSizePolicy, QGraphicsOpacityEffect, QApplication)
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode, TaskState
 from src.core.kb_manager import KBManager, DatabaseManager
-from src.core.lang_detect import detect_primary_language
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import get_model_conf, ModelManager
+from src.core.models_registry import get_model_conf
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager
-from src.task.chat_tasks import ProcessAttachmentTask, ChatGenerationTask
+from src.task.chat_tasks import ChatGenerationTask
 from src.tools.base_tool import BaseTool
 from src.tools.settings_tool import FloatingOverlayFilter
 from src.ui.components.chat_bubble import ChatBubbleWidget, hex_to_rgba
 from src.ui.components.combo import BaseComboBox
-from src.ui.components.dialog import StandardDialog, SelectKBFileDialog
-from src.ui.components.mermaid_viewer import MermaidViewer
+from src.ui.components.dialog import StandardDialog
 from src.ui.components.model_selector import ModelSelectorWidget
-from src.ui.components.pdf_viewer import InternalPDFViewer
 from src.ui.components.pill_button import FollowUpGroupWidget
-from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 
 
@@ -84,7 +74,8 @@ class ChatDropTargetWidget(QWidget):
     def dropEvent(self, event):
         self.overlay.hide()
 
-        supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+        #supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+        supported_exts = ('.pdf', '.md', '.txt', '.docx')
         paths = [
             url.toLocalFile() for url in event.mimeData().urls()
             if url.isLocalFile() and url.toLocalFile().lower().endswith(supported_exts)
@@ -103,7 +94,7 @@ class AutoResizingTextEdit(QPlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText("Ask a question... (Enter to send, Shift+Enter for new line)")
+        self.setPlaceholderText("Ask a question... (Recommend English or enabling translator for best results. Enter to send, Shift+Enter for new line)")
         self.setStyleSheet("""
             QPlainTextEdit { background-color: transparent; border: none; font-size: 14px; }
         """)
@@ -118,17 +109,8 @@ class AutoResizingTextEdit(QPlainTextEdit):
         fixed_height = int((line_h * 5) + base_padding + 2)
         self.setFixedHeight(fixed_height)
 
-    # 修改后
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return and not event.modifiers() & Qt.ShiftModifier:
-            parent = self.parent()
-            while parent is not None:
-                if hasattr(parent, 'btn_send'):
-                    if not parent.btn_send.isEnabled():
-                        event.accept()
-                        return
-                    break
-                parent = parent.parent()
             self.sig_send.emit()
             event.accept()
         else:
@@ -203,7 +185,7 @@ class ChatInputContainer(QFrame):
         self.chk_external_tools.toggled.connect(lambda c: self._save_agent_state("chat_use_external_tools", c))
 
         self.btn_mcp_tags = QToolButton()
-        self.btn_mcp_tags = QPushButton("Filter Tools", self)
+        self.btn_mcp_tags = QPushButton("Tools Filter", self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
         self.btn_mcp_tags.setStyleSheet(
@@ -217,6 +199,8 @@ class ChatInputContainer(QFrame):
         )
         self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
 
+        self.lbl_tool_hint = QLabel(" (Tip: Selecting fewer tools improves accuracy)")
+
         self.tag_actions = {}
         self.user_deselected_tags = set()
         self.known_tags = set()
@@ -224,6 +208,7 @@ class ChatInputContainer(QFrame):
         self.mcp_toolbar.addWidget(self.chk_academic_agent)
         self.mcp_toolbar.addWidget(self.chk_external_tools)
         self.mcp_toolbar.addWidget(self.btn_mcp_tags)
+        self.mcp_toolbar.addWidget(self.lbl_tool_hint)  # 新增：将标签加入水平布局
         self.mcp_toolbar.addStretch()
         main_layout.insertLayout(1, self.mcp_toolbar)
 
@@ -343,6 +328,25 @@ class ChatInputContainer(QFrame):
         self.btn_attach.setIcon(tm.icon("link", "text_muted"))
         self.btn_attach.setStyleSheet(tool_btn_style)
 
+        if hasattr(self, 'lbl_hardware_status'):
+            self.lbl_hardware_status.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 11px; font-weight: bold; padding-left: 4px;"
+            )
+
+        if hasattr(self, 'btn_ribbon_state'):
+            self.btn_ribbon_state.setStyleSheet(f"""
+                        QPushButton {{ background: transparent; border: 1px solid {tm.color('border')}; border-radius: 4px; color: {tm.color('text_muted')}; font-size: 11px; padding: 2px 6px; text-align: left;}}
+                        QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('text_main')}; }}
+                    """)
+
+            state_icons = {
+                "Pinned": "keep",
+                "Hover": "menu",
+                "Collapsed": "down"
+            }
+            if hasattr(self, 'ribbon_state') and self.ribbon_state in state_icons:
+                self.btn_ribbon_state.setIcon(tm.icon(state_icons[self.ribbon_state], "text_muted"))
+
         if hasattr(self, 'lbl_context_icon'):
             self.lbl_context_icon.setPixmap(tm.icon("link", "accent").pixmap(14, 14))
             self.lbl_context_info.setStyleSheet(f"color: {tm.color('accent')}; font-size: 12px; border: none;")
@@ -360,6 +364,10 @@ class ChatInputContainer(QFrame):
                 """
         self.btn_mcp_tags.setIcon(tm.icon("filter", "text_muted"))
         self.btn_mcp_tags.setStyleSheet(btn_mcp_style)
+
+        if hasattr(self, 'lbl_tool_hint'):
+            self.lbl_tool_hint.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 11px; font-style: italic; border: none;")
 
         self.btn_send.setIcon(tm.icon("send", "bg_main"))
         self.btn_send.setStyleSheet(f"""
@@ -417,12 +425,10 @@ class ChatInputContainer(QFrame):
         self._update_tag_button_text()
 
     def _on_external_tools_toggled(self, checked):
-        self.btn_mcp_tags.setVisible(checked)
-        if checked:
             self.refresh_mcp()
 
     def _show_filter_menu(self):
-        self.btn_mcp_tags.setText("Filter Tools: Fetching...")
+        self.btn_mcp_tags.setText("Tools Filter: Fetching...")
         QApplication.processEvents()
 
         self.refresh_mcp()
@@ -474,7 +480,7 @@ class ChatInputContainer(QFrame):
             self.known_tags.clear()
 
             if not available_tags:
-                self.btn_mcp_tags.setText("🏷️ Filter Tools: None")
+                self.btn_mcp_tags.setText("🏷️ Tools Filter: None")
                 from PySide6.QtGui import QAction
                 dummy = QAction("⏳ No active skills or MCP servers...", self)
                 dummy.setEnabled(False)
@@ -512,17 +518,17 @@ class ChatInputContainer(QFrame):
 
         except Exception as e:
             self.logger.error(f"Error refreshing skill and tool tags: {e}", exc_info=True)
-            self.btn_mcp_tags.setText("Filter Tools: Error")
+            self.btn_mcp_tags.setText("Tools Filter: Error")
 
     def _update_tag_button_text(self):
         selected = self.get_selected_tags()
         total = len(self.tag_actions)
         if total == 0:
-            self.btn_mcp_tags.setText("Filter Tools: None")
+            self.btn_mcp_tags.setText("Tools Filter: None")
         elif len(selected) == total:
-            self.btn_mcp_tags.setText("Filter Tools: All")
+            self.btn_mcp_tags.setText("Tools Filter: All")
         else:
-            self.btn_mcp_tags.setText(f"Filter Tools: {len(selected)} selected")
+            self.btn_mcp_tags.setText(f"Tools Filter: {len(selected)} selected")
 
     def get_selected_tags(self) -> list:
         try:
@@ -555,7 +561,8 @@ class ChatInputContainer(QFrame):
 
     def unlock_input(self):
         self.text_edit.setEnabled(True)
-        self.text_edit.setPlaceholderText("Ask a question... (Enter to send, Shift+Enter for new line)")
+        self.text_edit.setPlaceholderText(
+            "Ask a question... (Recommend English or enabling translator for best results. Enter to send, Shift+Enter for new line)")
         self.btn_send.setEnabled(True)
 
     def show_context_preview(self, text_info):
@@ -575,7 +582,6 @@ class ChatTool(BaseTool):
         super().__init__("Chat Assistant")
         self.history = []
         self.widget = None
-        self.worker_thread = None
         self.kb_manager = KBManager()
         self.current_ai_text = ""
         self.current_ai_bubble = None
@@ -613,13 +619,18 @@ class ChatTool(BaseTool):
 
         row1_layout = QHBoxLayout()
         self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
-                                                  model_key="chat_model_name", vision_key="chat_vision_model_name")
+                                                  model_key="chat_model_name", enable_vision=False)
 
         self.collapsed_placeholder = QLabel(" ")
         self.collapsed_placeholder.setVisible(False)
 
         row1_layout.addWidget(self.model_selector, 1)
         row1_layout.addWidget(self.collapsed_placeholder, 1)
+
+        # 硬件状态显示标签
+        self.lbl_hardware_status = QLabel()
+        self._update_hardware_status()
+        row1_layout.addWidget(self.lbl_hardware_status)
 
         # Pin/Toggle Button for Ribbon State
         tm = ThemeManager()
@@ -648,6 +659,11 @@ class ChatTool(BaseTool):
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
+
+        self.lbl_hardware_status = QLabel("Compute Device: Detecting...")
+        top_bar.addWidget(self.lbl_hardware_status)
+        self._update_hardware_status()
+
         main_layout.addWidget(self.top_bar_wrapper)
 
         self.ribbon_state = self.config.user_settings.get("chat_ribbon_state", "Pinned")
@@ -658,6 +674,9 @@ class ChatTool(BaseTool):
             self.trans_selector.setVisible(visible)
             self.lbl_kb.setVisible(visible)
             self.combo_kb.setVisible(visible)
+
+            if hasattr(self, 'lbl_hardware_status'):
+                self.lbl_hardware_status.setVisible(visible)
 
         def apply_ribbon_state(state):
             tm = ThemeManager()
@@ -731,6 +750,7 @@ class ChatTool(BaseTool):
         self.btn_scroll_bottom.setVisible(False)
         self.fade_anim = QPropertyAnimation(self.opacity_effect, b"opacity")
         self.fade_anim.setDuration(250)
+        self.fade_anim.finished.connect(self._on_fade_anim_finished)
         self.scroll_anim = QPropertyAnimation(self.scroll_area.verticalScrollBar(), b"value")
         self.scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.btn_scroll_bottom.clicked.connect(lambda: self.scroll_to_bottom(smooth=True))
@@ -766,16 +786,36 @@ class ChatTool(BaseTool):
 
         return self.widget
 
+    def _update_hardware_status(self):
+        """异步获取当前推理设备，防止阻塞主界面"""
+        from src.task.chat_tasks import FetchHardwareStatusTask
+        self.hw_task_mgr = TaskManager()
+        self.hw_task_mgr.sig_result.connect(self._on_hw_status_result)
+        self.hw_task_mgr.start_task(FetchHardwareStatusTask, task_id="fetch_hw_chat", mode=TaskMode.THREAD)
+
+    def _on_hw_status_result(self, result):
+        if result and "dev_name" in result:
+            self.lbl_hardware_status.setText(f"Compute Device: {result['dev_name']}")
+
+
     def attach_from_local(self):
         """按钮点击触发的文件选择器"""
+        """
         paths, _ = QFileDialog.getOpenFileNames(
             self.widget, "Select Document(s) or Image(s)", "",
             "Supported Files (*.pdf *.md *.txt *.csv *.docx *.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
             "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
             "Documents (*.pdf *.md *.txt *.csv *.docx)"
         )
+        """
+        paths, _ = QFileDialog.getOpenFileNames(
+            self.widget, "Select Document(s)", "",
+            "Supported Files (*.pdf *.md *.txt *.docx);;"
+            "Documents (*.pdf *.md *.txt *.docx)"
+        )
         if not paths: return
         self.process_attached_files(paths)
+
 
     def eventFilter(self, obj, event):
         if obj == self.top_bar_wrapper:
@@ -786,6 +826,9 @@ class ChatTool(BaseTool):
                     self.trans_selector.setVisible(True)
                     self.lbl_kb.setVisible(True)
                     self.combo_kb.setVisible(True)
+                    if hasattr(self, 'lbl_hardware_status'):
+                        self.lbl_hardware_status.setVisible(True)
+
                 elif event.type() == QEvent.Leave:
                     if not self.top_bar_wrapper.geometry().contains(self.widget.mapFromGlobal(QCursor.pos())):
                         self.model_selector.setVisible(False)
@@ -793,11 +836,15 @@ class ChatTool(BaseTool):
                         self.trans_selector.setVisible(False)
                         self.lbl_kb.setVisible(False)
                         self.combo_kb.setVisible(False)
+                        if hasattr(self, 'lbl_hardware_status'):
+                            self.lbl_hardware_status.setVisible(False)
+
         return super().eventFilter(obj, event)
 
+
     def process_attached_files(self, items):
-        if not hasattr(self, 'external_chunks'):
-            self.external_chunks = []
+        if not hasattr(self, 'external_files'):
+            self.external_files = []
         if not hasattr(self, 'external_context_html'):
             self.external_context_html = ""
 
@@ -816,31 +863,28 @@ class ChatTool(BaseTool):
             ToastManager().show("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx",
                                 "warning")
 
-        self.input_container.set_uploading(True)
+        # 直接将文件路径保存，交由 Chat 进程去处理
+        self.external_files.extend(file_infos)
 
-        if hasattr(self, 'attach_task_mgr'):
-            self.attach_task_mgr.cancel_task()
+        for info in file_infos:
+            path = info['path']
+            f_name = info['name']
+            safe_path = quote(path)
+            safe_name = quote(f_name)
+            link = f"cite://view?path={safe_path}&page=1&name={safe_name}"
+            self.external_context_html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
 
-        # 引入标准的 ProgressDialog，满足在执行期间可取消的交互需求
-        from src.ui.components.dialog import ProgressDialog
-        self.attach_pd = ProgressDialog(self.widget, "Processing Attachments", "Parsing files into memory...")
-        self.attach_pd.show()
+        if self.external_files:
+            names = []
+            for c in self.external_files:
+                if c['name'] not in names:
+                    names.append(c['name'])
 
-        self.attach_task_mgr = TaskManager()
-
-        # 进度信号与取消操作桥接
-        self.attach_task_mgr.sig_progress.connect(self.attach_pd.update_progress)
-        self.attach_pd.sig_canceled.connect(self.attach_task_mgr.cancel_task)
-
-        self.attach_task_mgr.sig_result.connect(self._on_attachment_result)
-        self.attach_task_mgr.sig_state_changed.connect(self._on_attachment_state_changed)
-
-        self.attach_task_mgr.start_task(
-            ProcessAttachmentTask,
-            task_id="process_attachment",
-            mode=TaskMode.PROCESS,
-            file_infos=file_infos
-        )
+            display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(names)
+            QTimer.singleShot(100, lambda: self.input_container.show_context_preview(display_text))
+            ToastManager().show(f"Attached {len(names)} file(s).", "success")
+        else:
+            self.input_container.hide_context_preview()
 
     def set_controls_enabled(self, enabled: bool):
         """锁定或解锁对话控制区的关键配置"""
@@ -878,56 +922,9 @@ class ChatTool(BaseTool):
             if (sb.maximum() - sb.value()) <= 50:
                 self.scroll_to_bottom()
 
-    def _on_attachment_state_changed(self, state, msg):
-        if state == TaskState.SUCCESS.value:
-            self.attach_pd.show_finish_state(True, "Attachment Complete", "Files successfully loaded into memory.")
-        elif state == TaskState.FAILED.value or state == TaskState.TERMINATED.value:
-            self.input_container.set_uploading(False)
-            self.input_container.hide_context_preview()
-            self.attach_pd.show_finish_state(False, "Attachment Halted", f"Task ended: {msg}")
 
-    def _on_attachment_result(self, result):
-        self.input_container.set_uploading(False)
 
-        if not result: return
 
-        chunks = result.get("chunks", [])
-        html = result.get("html", "")
-
-        self.external_chunks.extend(chunks)
-        self.external_context_html += html
-
-        if self.external_chunks:
-            names = []
-            for c in self.external_chunks:
-                if c['name'] not in names:
-                    names.append(c['name'])
-
-            display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(names)
-
-            QTimer.singleShot(100, lambda: self.input_container.show_context_preview(display_text))
-
-            ToastManager().show(f"Attached {len(names)} file(s).", "success")
-        else:
-            self.input_container.hide_context_preview()
-
-    def _on_attachment_finished(self, chunks, html):
-        self.input_container.btn_attach.setEnabled(True)
-        self.input_container.btn_send.setEnabled(True)
-        self.external_chunks.extend(chunks)
-        self.external_context_html += html
-
-        if self.external_chunks:
-            names = []
-            for c in self.external_chunks:
-                if c['name'] not in names:
-                    names.append(c['name'])
-
-            display_text = f"{names[0]}, {names[1]} 等 {len(names)} 个文件" if len(names) > 2 else ", ".join(names)
-            self.input_container.show_context_preview(display_text)
-            ToastManager().show(f"Attached {len(names)} file(s).", "success")
-        else:
-            self.input_container.hide_context_preview()
 
     def export_chat_history(self):
         if not self.history:
@@ -943,150 +940,94 @@ class ChatTool(BaseTool):
             QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
         """)
 
-        # 使用 theme_manager 里的图标喵
         act_pdf = menu.addAction(tm.icon("article", "text_main"), "Export as PDF")
+        act_md = menu.addAction(tm.icon("markdown", "text_main"), "Export as MD")
         act_txt = menu.addAction(tm.icon("file-text", "text_main"), "Export as TXT")
-        act_csv = menu.addAction(tm.icon("table", "text_main"), "Export as CSV")
 
         # 在鼠标位置弹出菜单
         action = menu.exec(QCursor.pos())
         if not action:
             return
 
-        # 根据选择设置后缀和过滤条件
         if action == act_pdf:
-            filter_str = "PDF Document (*.pdf)"
-            default_ext = ".pdf"
-        elif action == act_txt:
-            filter_str = "Text File (*.txt)"
-            default_ext = ".txt"
+            filter_str, default_ext = "PDF Document (*.pdf)", ".pdf"
+        elif action == act_md:
+            filter_str, default_ext = "Markdown File (*.md)", ".md"
         else:
-            filter_str = "CSV Data (*.csv)"
-            default_ext = ".csv"
+            filter_str, default_ext = "Text File (*.txt)", ".txt"
 
         # 弹出系统保存对话框
         path, _ = QFileDialog.getSaveFileName(
-            self.widget, "Export Log", f"Navis_Log{default_ext}", filter_str
+            self.widget, "Export Log", f"Scholar_Navis_Log{default_ext}", filter_str
         )
 
         if not path:
             return
 
-        # 如果你手滑忘记打后缀，咱们自动帮你补上喵
         if not path.endswith(default_ext):
             path += default_ext
 
-        try:
-            font_family = tm.font_family()
+        def _get_colored_svg_base64(icon_name, color_hex):
+            svg_path = tm.get_resource_path("assets", "icons", f"{icon_name}.svg")
+            try:
+                with open(svg_path, "r", encoding="utf-8") as f:
+                    svg_content = f.read()
+                if "<svg" in svg_content:
+                    svg_content = re.sub(r'<svg', f'<svg fill="{color_hex}"', svg_content, count=1)
+                encoded = base64.b64encode(svg_content.encode('utf-8')).decode('utf-8')
+                return f"data:image/svg+xml;base64,{encoded}"
+            except Exception:
+                return ""
 
-            if path.endswith(".pdf"):
-                doc = QTextDocument()
-                date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        colors = {
+            'title_blue': tm.color('title_blue'),
+            'academic_blue': tm.color('academic_blue'),
+            'success': tm.color('success')
+        }
 
-                doc.setDefaultStyleSheet(f"""
-                                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
-                                    h1, h2, h3 {{ color: {tm.color('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
-                                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
-                                    .header-user {{ color: {tm.color('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                                    .header-ai {{ color: {tm.color('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                                    .content {{ margin-top: 5px; }}
-                                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
-                                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
-                                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
-                                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
-                                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
-                                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
-                                    th {{ background-color: #f6f8fa; font-weight: bold; }}
-                                    .doc-header {{ text-align: center; border-bottom: 2px solid {tm.color('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
-                                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {tm.color('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
-                                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
-                                """)
+        user_icon_b64 = _get_colored_svg_base64("user", tm.color('academic_blue'))
+        ai_icon_b64 = _get_colored_svg_base64("ai_model", tm.color('success'))
 
-                def _get_colored_svg_base64(icon_name, color_hex):
-                    svg_path = tm.get_resource_path("assets", "icons", f"{icon_name}.svg")
-                    try:
-                        with open(svg_path, "r", encoding="utf-8") as f:
-                            svg_content = f.read()
-                        if "<svg" in svg_content:
-                            svg_content = re.sub(r'<svg', f'<svg fill="{color_hex}"', svg_content, count=1)
-                        encoded = base64.b64encode(svg_content.encode('utf-8')).decode('utf-8')
-                        return f"data:image/svg+xml;base64,{encoded}"
-                    except Exception:
-                        return ""
+        # 初始化后台导出任务并连接弹窗
+        from src.ui.components.dialog import ProgressDialog
+        self.export_pd = ProgressDialog(self.widget, "Exporting Chat", "Processing file in background...")
+        self.export_pd.show()
 
-                user_icon_b64 = _get_colored_svg_base64("user", tm.color('academic_blue'))
-                ai_icon_b64 = _get_colored_svg_base64("ai_model", tm.color('success'))
+        self.export_task_mgr = TaskManager()
+        self.export_task_mgr.sig_progress.connect(self.export_pd.update_progress)
+        self.export_task_mgr.sig_state_changed.connect(self._on_export_state_changed)
+        self.export_task_mgr.sig_result.connect(self._on_export_result)
 
-                html = f"""
-                <html><body>
-                <div class='doc-header'>
-                    <div class='doc-title'>Scholar Navis - Analysis Report</div>
-                    <div class='doc-meta'>Generated on: {date_str} | Document Type: Academic Chat Log</div>
-                </div>
-                """
+        from src.task.chat_tasks import ExportChatTask
+        self.export_task_mgr.start_task(
+            ExportChatTask,
+            task_id="export_chat",
+            mode=TaskMode.THREAD,
+            history=self.history,
+            path=path,
+            export_fmt=default_ext,
+            colors=colors,
+            font_family=tm.font_family(),
+            user_icon=user_icon_b64,
+            ai_icon=ai_icon_b64
+        )
 
-                for msg in self.history:
-                    is_user = (msg['role'] == "user")
-                    raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
-                                         flags=re.DOTALL | re.IGNORECASE)
-                    clean_content = TextFormatter.clean_text_for_export(raw_content)
-                    rendered_html = TextFormatter.markdown_to_html(clean_content)
+    def _on_export_state_changed(self, state, msg):
+        from src.core.core_task import TaskState
+        if state == TaskState.FAILED.value:
+            self.export_pd.show_finish_state(False, "Export Failed", str(msg))
 
-                    if is_user:
-                        header = f"<div class='header-user'><img src='{user_icon_b64}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
-                    else:
-                        header = f"<div class='header-ai'><img src='{ai_icon_b64}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
+    def _on_export_result(self, result):
+        if result and result.get("success"):
+            self.export_pd.show_finish_state(True, "Export Complete",
+                                             f"Saved to {os.path.basename(result.get('path', ''))}")
+            ToastManager().show(f"Document successfully exported.", "success")
+            self.logger.info(f"Chat history successfully exported to: {result.get('path')}")
+        else:
+            self.export_pd.show_finish_state(False, "Export Failed",
+                                             result.get("msg", "Unknown error") if result else "Unknown error")
+            self.logger.error(f"Failed to export document: {result.get('msg') if result else 'None'}")
 
-                    html += f"<div class='msg-box'>{header}<div class='content'>{rendered_html}</div></div>"
-
-                html += "</body></html>"
-                doc.setHtml(html)
-
-                writer = QPdfWriter(path)
-                writer.setPageSize(QPageSize(QPageSize.A4))
-                writer.setPageMargins(QMarginsF(15, 20, 15, 20))
-                writer.setResolution(300)
-                doc.print_(writer)
-
-
-            elif path.endswith(".txt"):
-                txt_lines = [
-                    "================ SCHOLAR NAVIS ACADEMIC REPORT ================",
-                    f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    "===============================================================\n\n"
-                ]
-                for msg in self.history:
-                    role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
-
-                    raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
-                                         flags=re.DOTALL | re.IGNORECASE)
-
-                    clean_content = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', raw_content).strip()
-
-                    txt_lines.append(f"[{role}]")
-                    txt_lines.append(clean_content)
-                    txt_lines.append(f"\n{'-' * 70}\n")
-
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write("\n".join(txt_lines))
-
-
-            elif path.endswith(".csv"):
-                with open(path, "w", encoding="utf-8-sig", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Role", "Content"])
-                    for msg in self.history:
-                        raw_content = re.sub(r'<(think|mcp_process)>.*?</\1>', '', msg['content'],
-                                             flags=re.DOTALL | re.IGNORECASE)
-                        clean_content = TextFormatter.clean_text_for_export(raw_content)
-                        writer.writerow(["User" if msg['role'] == 'user' else "AI", clean_content])
-
-            ToastManager().show(f"Document successfully exported to: {os.path.basename(path)}", "success")
-            self.logger.info(f"Chat history successfully exported to: {path}")
-
-        except Exception as e:
-            ToastManager().show(f"Failed to export document: {str(e)}", "error")
-            self.logger.error(f"Failed to export document: {str(e)}")
 
     def clear_follow_up_shelf(self):
         while self.follow_up_shelf_layout.count() > 0:
@@ -1138,28 +1079,26 @@ class ChatTool(BaseTool):
         if not kb_id:
             kb_id = "none"
 
-
-
         # 4. 获取当前附件数据
         current_html = getattr(self, 'external_context_html', "")
-        current_chunks = getattr(self, 'external_chunks', [])
+        current_files = getattr(self, 'external_files', [])
         self.external_context_html = ""
-        self.external_chunks = []
+        self.external_files = []
 
         # 5. UI 切换与历史记录管理
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
 
-        self.logger.info(f"User asked: {text[:50]}... (KB: {kb_id})")
+        self.logger.info(f"User asked: {text[:50]}... (KB: {kb_id}) | Attached Files: {len(current_files)}")
         self.input_container.clear_text()
 
         # 将上下文的 HTML 链接渲染在气泡上方
         self.add_bubble(text, is_user=True, context_html=current_html if current_html else None)
 
         llm_text = text
-        if current_chunks:
+        if current_files:
             context_block = "\n".join(
-                [f"--- {c['name']} ---\n{c['content']}" for c in current_chunks]
+                [f"--- Attached File: {c['name']} ---" for c in current_files]
             )
             llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
 
@@ -1168,11 +1107,11 @@ class ChatTool(BaseTool):
             "content": llm_text,
             "display_text": text,
             "context_html": current_html if current_html else None,
-            "external_chunks": current_chunks
+            "external_files": current_files
         })
 
         self.input_container.hide_context_preview()
-        self.external_chunks = current_chunks
+        self.external_files = current_files
         self.start_ai_response(kb_id)
 
     def _restore_last_input(self):
@@ -1185,15 +1124,15 @@ class ChatTool(BaseTool):
         if last_user_msg:
             self.input_container.set_text(last_user_msg.get('display_text', ''))
 
-            chunks = last_user_msg.get('external_chunks', [])
+            files = last_user_msg.get('external_files', [])
             html = last_user_msg.get('context_html', '')
 
-            self.external_chunks = list(chunks) if chunks else []
+            self.external_files = list(files) if files else []
             self.external_context_html = html if html else ""
 
-            if self.external_chunks:
+            if self.external_files:
                 names = []
-                for c in self.external_chunks:
+                for c in self.external_files:
                     if c['name'] not in names:
                         names.append(c['name'])
                 display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(
@@ -1257,32 +1196,6 @@ class ChatTool(BaseTool):
                     break
 
     def start_ai_response(self, kb_id, requires_translation=False):
-        if getattr(self, 'worker_thread', None) is not None:
-            try:
-                if getattr(self, 'worker', None):
-                    self.worker.cancel()
-                    try:
-                        self.worker.sig_token.disconnect()
-                        self.worker.sig_finished.disconnect()
-                        self.worker.sig_error.disconnect()
-                        self.worker.sig_translated.disconnect()
-                    except Exception:
-                        pass
-                if self.worker_thread.isRunning():
-                    if not hasattr(self, '_orphaned_threads'): self._orphaned_threads = []
-                    old_t, old_w = self.worker_thread, self.worker
-                    old_t.quit()
-                    self._orphaned_threads.append((old_t, old_w))
-                    old_t.finished.connect(
-                        lambda t=old_t, w=old_w: self._orphaned_threads.remove((t, w)) if (t, w) in getattr(self,
-                                                                                                            '_orphaned_threads',
-                                                                                                            []) else None)
-            except RuntimeError:
-                pass
-
-            self.worker_thread = None
-            self.worker = None
-
         main_config = self.model_selector.get_current_config()
         trans_config = self.trans_selector.get_current_config()
 
@@ -1344,7 +1257,7 @@ class ChatTool(BaseTool):
 
         GlobalSignals().sig_toast.connect(lambda msg, lvl: ToastManager().show(msg, lvl))
 
-        current_external_chunks = getattr(self, 'external_chunks', [])
+        current_external_files = getattr(self, 'external_files', [])
 
         QApplication.processEvents()
 
@@ -1352,13 +1265,13 @@ class ChatTool(BaseTool):
             self.chat_task_mgr.start_task(
                 ChatGenerationTask,
                 task_id="chat_generation",
-                mode=TaskMode.THREAD,
+                mode=TaskMode.PROCESS,
                 main_config=main_config,
                 trans_config=trans_config,
                 messages=list(self.history),
                 kb_id=kb_id,
                 requires_translation=requires_translation,
-                external_context=current_external_chunks,
+                external_files=current_external_files,
                 use_academic_agent=use_academic_agent,
                 academic_tags=academic_tags if use_academic_agent else [],
                 use_external_tools=use_external_tools,
@@ -1367,7 +1280,7 @@ class ChatTool(BaseTool):
 
         QTimer.singleShot(100, _launch_task)
 
-        self.external_chunks = []
+        self.external_files = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()
 
@@ -1395,7 +1308,7 @@ class ChatTool(BaseTool):
 
         old_msg = self.history[index]
         old_context_html = old_msg.get('context_html')
-        old_chunks = old_msg.get('external_chunks', [])
+        old_files = old_msg.get('external_files', [])
 
         self.history = self.history[:index]
 
@@ -1423,9 +1336,9 @@ class ChatTool(BaseTool):
         self._is_editing = False
 
         llm_text = new_text
-        if old_chunks:
+        if old_files:
             context_block = "\n".join(
-                [f"--- {c['name']} ---\n{c['content']}" for c in old_chunks]
+                [f"--- Attached File: {c['name']} ---" for c in old_files]
             )
             llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{new_text}"
         elif "Context Info:\n" in old_msg['content'] and "\n\nQuestion:\n" in old_msg['content']:
@@ -1437,10 +1350,10 @@ class ChatTool(BaseTool):
             "content": llm_text,
             "display_text": new_text,
             "context_html": old_context_html,
-            "external_chunks": old_chunks
+            "external_files": old_files
         })
 
-        self.external_chunks = old_chunks
+        self.external_files = old_files
         self.start_ai_response(kb_id)
 
     def cancel_generation(self):
@@ -1449,23 +1362,16 @@ class ChatTool(BaseTool):
 
         self.input_container.btn_stop.setEnabled(False)
         self.input_container.btn_stop.setText("Stopping...")
-        self.input_container.btn_stop.setToolTip("Waiting for background resources to safely release...")
+
+        if hasattr(self, '_render_timer'):
+            self._render_timer.stop()
+            self._is_rendering_dirty = False
 
         if getattr(self, 'chat_task_mgr', None):
             self.chat_task_mgr.cancel_task()
 
-        if hasattr(self, '_render_timer'): self._render_timer.stop()
-        self.set_controls_enabled(True)
-
-        if self.current_ai_bubble and self.current_ai_bubble.is_loading:
-            self.current_ai_bubble.set_loading(False)
-
-        tm = ThemeManager()
-        self.current_ai_text += f"\n\n<div style='color:{tm.color('warning')}; font-weight:bold;'>[Generation Cancelling... Please wait]</div>"
-
         if self.current_ai_bubble:
-            idx = getattr(self.current_ai_bubble, 'index', -1)
-            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
+            self.current_ai_bubble.set_loading(False)
 
         self.logger.info("AI generation cancellation requested by user. Task manager is gracefully terminating.")
         self.scroll_to_bottom()
@@ -1535,7 +1441,7 @@ class ChatTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to write temp external context: {e}")
 
-        self.external_chunks = [{
+        self.external_files = [{
             "path": temp_path,
             "name": "External Context.txt",
             "page": 1,
@@ -1581,32 +1487,17 @@ class ChatTool(BaseTool):
         menu.exec(QCursor.pos())
 
     def clear_attached_context(self):
-        self.external_chunks = []
+        self.external_files = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()
 
     def attach_from_kb(self):
-        kb_data = self.combo_kb.currentData()
-        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-
-        if not kb_id or kb_id == "none":
-            ToastManager().show("Please select a Knowledge Base from the top dropdown first.", "warning")
-            return
-
-        files = self.kb_manager.get_kb_files(kb_id)
-        if not files:
-            ToastManager().show("The selected Knowledge Base is empty.", "warning")
-            return
-
-        dlg = SelectKBFileDialog(self.widget, files=files)
+        from src.ui.components.dialog import SelectKBFileDialog
+        dlg = SelectKBFileDialog(self.widget)
 
         if dlg.exec():
-            paths = dlg.get_selected_paths()
-            if paths:
-                file_infos = []
-                for p in paths:
-                    real_name = next((f["name"] for f in files if f["path"] == p), os.path.basename(p))
-                    file_infos.append({"path": p, "name": real_name})
+            file_infos = dlg.get_selected_file_infos()
+            if file_infos:
                 self.process_attached_files(file_infos)
 
     def update_ai_bubble(self, token):
@@ -1660,115 +1551,17 @@ class ChatTool(BaseTool):
         self._is_rendering_dirty = True
 
     def _format_response(self, text, index):
-        if not text:
-            return ""
+        """统一代理给 TextFormatter，保持内部调用无需修改"""
+        from src.ui.components.text_formatter import TextFormatter
+        if not hasattr(self, 'mermaid_codes'):
+            self.mermaid_codes = {}
 
-        try:
-            pattern = r'```mermaid\s*\n(.*?)\n```'
-            tm = ThemeManager()
-
-            def repl_mermaid(match):
-                code = match.group(1).strip()
-                code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()
-
-                if not hasattr(self, 'mermaid_codes'):
-                    self.mermaid_codes = {}
-                self.mermaid_codes[code_hash] = code
-
-                return (
-                    f"<br><div style='padding:12px; margin: 8px 0; border:1px solid {tm.color('accent')}; border-radius:6px; background-color: transparent;'>"
-                    f"<div style='margin-bottom: 5px;'><b>Mermaid Diagram Generated</b></div>"
-                    f"<a href='mermaid://view?hash={code_hash}' style='color:{tm.color('accent')}; text-decoration:none; font-weight:bold;'>"
-                    f"Click here to view / edit interactive diagram</a></div><br>")
-
-            processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)
-
-            return TextFormatter.format_chat_text(
-                processed_text, index, getattr(self, 'expanded_thinks', set()),
-                getattr(self, 'user_toggled_thinks', set())
-            )
-        except Exception as e:
-            self.logger.error(f"Error formatting response: {e}")
-            return str(text).replace('\n', '<br>')
-
-    def on_chat_error(self, msg):
-        self.logger.error(f"Chat generation encountered an error: {msg}")
-        if hasattr(self, 'slow_conn_timer'): self.slow_conn_timer.stop()
-        self._is_waiting_llm = False
-
-        if hasattr(self, '_render_timer'): self._render_timer.stop()
-        self.set_controls_enabled(True)
-
-        self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_send.setVisible(True)
-        self._restore_last_input()
-
-
-        error_title = "Generation Terminated"
-        display_msg = str(msg).strip()
-
-        try:
-            parsed = json.loads(display_msg)
-            error_title = parsed.get("title", error_title)
-            display_msg = parsed.get("body", display_msg)
-        except json.JSONDecodeError:
-            prefix_match = re.match(r'^\s*\[(.*?)\]\s*\n*(.*)', display_msg, re.DOTALL)
-            if prefix_match:
-                raw_title = prefix_match.group(1).strip()
-                display_msg = prefix_match.group(2).strip()
-
-                if "API Request Error" in raw_title:
-                    error_title = "Provider API Error"
-                    if "404" in raw_title and "404" not in display_msg:
-                        display_msg += "\n\nSuggestion: The selected model may not exist or your API endpoint path (e.g., /v1) is incorrect."
-                    elif ("401" in raw_title or "key" in display_msg.lower()) and "verify" not in display_msg.lower():
-                        error_title = "Authentication Required"
-                        display_msg += "\n\nSuggestion: Please verify your API Key in the Global Settings."
-                elif "Context Exceeded" in raw_title:
-                    error_title = "Context Window Exceeded"
-                elif "Rate Limit" in raw_title:
-                    error_title = "Rate Limit Reached"
-                elif "Timeout" in raw_title:
-                    error_title = "Connection Timeout"
-
-        # 处理特定的顶层网络拦截
-        if "translation" in msg.lower() or "translator" in msg.lower():
-            error_title = "Translation Module Failure"
-            ToastManager().show("Translation model error. Please check your translator settings.", "error")
-        elif "time" in msg.lower() or "connect" in msg.lower():
-            ToastManager().show("Network connection failed. Please check your API configuration or proxy.", "error")
-
-        error_json_str = json.dumps({"title": error_title, "body": display_msg})
-
-        if self.current_ai_bubble:
-            idx = getattr(self.current_ai_bubble, 'index', -1)
-
-            # 如果 AI 完全没有正常输出过内容，删掉它，换上错误气泡
-            if not self.current_ai_text.strip():
-                self.chat_layout.removeWidget(self.current_ai_bubble)
-                self.current_ai_bubble.deleteLater()
-
-                error_bubble = ChatBubbleWidget(
-                    text=error_json_str,
-                    is_user=False,
-                    index=idx,
-                    msg_type=ChatBubbleWidget.MSG_ERROR
-                )
-                self.chat_layout.addWidget(error_bubble)
-            else:
-                self.current_ai_bubble.set_content(self._format_response(self.current_ai_text, idx))
-
-                idx += 1
-                error_bubble = ChatBubbleWidget(
-                    text=error_json_str,
-                    is_user=False,
-                    index=idx,
-                    msg_type=ChatBubbleWidget.MSG_ERROR
-                )
-                self.chat_layout.addWidget(error_bubble)
-
-        self.current_ai_bubble = None
-        self.scroll_to_bottom()
+        return TextFormatter.format_response(
+            text, index,
+            getattr(self, 'expanded_thinks', set()),
+            getattr(self, 'user_toggled_thinks', set()),
+            self.mermaid_codes
+        )
 
     def on_chat_finished(self, is_cancelled=False):
         if hasattr(self, '_render_timer'): self._render_timer.stop()
@@ -1785,17 +1578,18 @@ class ChatTool(BaseTool):
         self.input_container.btn_stop.setVisible(False)
         self.input_container.btn_send.setVisible(True)
 
-        # 检查是否是被主动中止的，履行“无论成功与否都要弹窗告知用户”的要求
-
         if is_cancelled:
+            if self.current_ai_bubble:
+                self.current_ai_bubble.is_interrupted = True
             StandardDialog(self.widget, "Task Cancelled", "The AI generation has been stopped by the user.",
                            show_cancel=False).exec()
             if hasattr(self, '_restore_last_input'):
                 self._restore_last_input()
-            self.history.append({"role": "assistant", "content": self.current_ai_text})
+
+            self.history.append({"role": "assistant", "content": self.current_ai_text, "status": "interrupted"})
             self.current_ai_bubble = None
             self.scroll_to_bottom()
-            return  # 提前返回，不再处理后续追问按钮逻辑
+            return
 
         try:
             self.input_container.btn_stop.clicked.disconnect()
@@ -1920,118 +1714,33 @@ class ChatTool(BaseTool):
                 pass
 
     def handle_link_click(self, url):
-        if hasattr(url, 'toString'):
-            url_str = url.toString()
-        else:
-            url_str = str(url)
+        """统一代理链接路由"""
+        from src.ui.components.text_formatter import TextFormatter
 
-        if url_str.startswith("mermaid://"):
-            parsed = urlparse(url_str)
-            params = parse_qs(parsed.query)
-            code_hash = params.get('hash', [''])[0]
+        def trigger_render(idx):
+            # 仅寻找被点击的那个气泡进行局部重绘
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget():
+                    w = item.widget()
+                    from src.ui.components.chat_bubble import ChatBubbleWidget
+                    if isinstance(w, ChatBubbleWidget) and getattr(w, 'index', -1) == idx:
+                        raw_text = self.current_ai_text if w == getattr(self, 'current_ai_bubble', None) else (
+                            self.history[idx]['content'] if idx < len(self.history) else "")
+                        if raw_text:
+                            w.set_content(self._format_response(raw_text, idx))
+                        break
 
-            # 从缓存字典中取出真实的 Mermaid 代码
-            code = getattr(self, 'mermaid_codes', {}).get(code_hash, "")
-            if code:
-                # 延迟导入避免循环依赖
-                if not hasattr(self, 'mermaid_viewer') or self.mermaid_viewer is None:
-                    self.mermaid_viewer = MermaidViewer(None)
-                self.mermaid_viewer.load_diagram(code)
-            else:
-                ToastManager().show("Diagram data lost. Please ask the AI to generate it again.", "error")
-            return
+        if not hasattr(self, 'mermaid_codes'): self.mermaid_codes = {}
+        if not hasattr(self, 'user_toggled_thinks'): self.user_toggled_thinks = set()
+        if not hasattr(self, 'expanded_thinks'): self.expanded_thinks = set()
 
-        if url_str.startswith("think://"):
-            parsed = urlparse(url_str)
-            action = parsed.netloc
-            params = parse_qs(parsed.query)
-            idx = int(params.get('index', [-1])[0])
-
-            if idx != -1:
-                if not hasattr(self, 'user_toggled_thinks'):
-                    self.user_toggled_thinks = set()
-                self.user_toggled_thinks.add(idx)
-
-                if action == 'expand':
-                    self.expanded_thinks.add(idx)
-                else:
-                    self.expanded_thinks.discard(idx)
-
-                # 寻找对应的气泡重绘
-                for i in range(self.chat_layout.count()):
-                    item = self.chat_layout.itemAt(i)
-                    if item and item.widget():
-                        w = item.widget()
-                        if isinstance(w, ChatBubbleWidget) and getattr(w, 'index', -1) == idx:
-                            raw_text = self.current_ai_text if w == getattr(self, 'current_ai_bubble', None) else (
-                                self.history[idx]['content'] if idx < len(self.history) else "")
-                            if raw_text:
-                                w.set_content(self._format_response(raw_text, idx))
-                            break
-            return
-
-        if url_str.startswith("cite://"):
-            parsed = urlparse(url_str)
-            params = parse_qs(parsed.query)
-            file_path = params.get('path', [''])[0]
-
-            if file_path.startswith(("http://", "https://")):
-                QDesktopServices.openUrl(QUrl(file_path))
-                ToastManager().show(f"Opening online source...", "success")
-                return
-
-            # page_num = int(params.get('page', ['1'])[0]) - 1
-            page_num = 0
-            text_snippet = params.get('text', [''])[0]
-            source_name = params.get('name', [''])[0]
-
-            kb_data = self.combo_kb.currentData()
-            kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-
-            real_path = ""
-            if kb_id and source_name:
-                kb_meta = self.kb_manager.get_kb_by_id(kb_id)
-                if kb_meta:
-                    file_map = kb_meta.get("file_map", {})
-                    reverse_map = {v: k for k, v in file_map.items()}
-                    obf_name = reverse_map.get(source_name)
-                    if obf_name:
-                        real_path = os.path.join(self.kb_manager.WORKSPACE_DIR, kb_id, "documents", obf_name)
-
-            target_path = real_path if real_path and os.path.exists(real_path) else file_path
-
-            if os.path.exists(target_path):
-                ext = source_name.lower().split('.')[-1] if '.' in source_name else ""
-
-                # === 路由分发 ===
-                if ext == 'pdf':
-                    if self.pdf_viewer is None: self.pdf_viewer = InternalPDFViewer(None)
-                    self.pdf_viewer.load_document(target_path, page_num, text_snippet, display_name=source_name)
-                    ToastManager().show(f"Document opened.", "success")
-
-                elif ext in ['md', 'txt', 'csv', 'json']:
-                    if not hasattr(self, 'text_viewer') or self.text_viewer is None:
-                        from src.ui.components.pdf_viewer import InternalTextViewer
-                        self.text_viewer = InternalTextViewer(None)
-                    self.text_viewer.load_document(target_path, text_snippet, display_name=source_name)
-                    ToastManager().show("Document snippet opened", "success")
-
-                else:
-                    # 对于图片或无法渲染的格式，降级交给操作系统处理
-                    temp_dir = tempfile.gettempdir()
-                    safe_name = source_name if source_name else "document.bin"
-                    temp_file_path = os.path.join(temp_dir, f"scholar_navis_view_{safe_name}")
-
-                    try:
-                        shutil.copy2(target_path, temp_file_path)
-                        QDesktopServices.openUrl(QUrl.fromLocalFile(temp_file_path))
-                        ToastManager().show(f"Opening with system default application: {safe_name}", "success")
-                    except Exception as e:
-                        ToastManager().show(f"Failed to invoke external program: {str(e)}", "error")
-            else:
-                ToastManager().show(f"File not found: {source_name or file_path}", "error")
-        else:
-            QDesktopServices.openUrl(QUrl(url_str))
+        TextFormatter.handle_link_click(
+            url=url, parent_widget=self, mermaid_cache=self.mermaid_codes,
+            user_toggled_thinks=self.user_toggled_thinks,
+            expanded_indices=self.expanded_thinks,
+            render_callback=trigger_render
+        )
 
     def refresh_kb_list(self):
         self.load_llm_configs()
@@ -2073,6 +1782,12 @@ class ChatTool(BaseTool):
                 if hasattr(self, 'db'): self.db.switch_kb(kb_id)
                 break
 
+    def _on_fade_anim_finished(self):
+        """动画结束时的统一处理逻辑，避免反复 connect/disconnect 产生警告"""
+        if self.fade_anim.endValue() == 0.0:
+            self.btn_scroll_bottom.hide()
+
+
     def _check_scroll_position(self):
         sb = self.scroll_area.verticalScrollBar()
         should_show = (sb.maximum() - sb.value() > 200)
@@ -2083,12 +1798,6 @@ class ChatTool(BaseTool):
             self.fade_anim.stop()
             self.fade_anim.setStartValue(self.opacity_effect.opacity())
             self.fade_anim.setEndValue(1.0)
-
-            try:
-                self.fade_anim.finished.disconnect()
-            except:
-                pass
-
             self.fade_anim.start()
 
         elif not should_show and self.btn_scroll_bottom.isVisible():
@@ -2096,13 +1805,6 @@ class ChatTool(BaseTool):
                 self.fade_anim.stop()
                 self.fade_anim.setStartValue(self.opacity_effect.opacity())
                 self.fade_anim.setEndValue(0.0)
-
-                try:
-                    self.fade_anim.finished.disconnect()
-                except:
-                    pass
-                self.fade_anim.finished.connect(self.btn_scroll_bottom.hide)
-
                 self.fade_anim.start()
 
     def _on_chat_progress(self, progress, msg):
@@ -2120,6 +1822,47 @@ class ChatTool(BaseTool):
     def _on_chat_result(self, payload):
         if isinstance(payload, dict) and payload.get("event") == "translated":
             self._on_query_translated(payload.get("text"))
+
+    def on_chat_error(self, msg):
+        """处理对话任务抛出的异常，恢复 UI 状态并展示错误"""
+        if hasattr(self, '_render_timer'):
+            self._render_timer.stop()
+        self.set_controls_enabled(True)
+
+        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setEnabled(True)
+        self.input_container.btn_stop.setVisible(False)
+        self.input_container.btn_send.setVisible(True)
+
+        if self.current_ai_bubble:
+            self.current_ai_bubble.set_loading(False)
+            self.current_ai_bubble.is_interrupted = True
+
+        # 格式化错误信息以在聊天气泡中醒目展示
+        error_html = f"<div style='color: #ff6b6b; margin-top: 10px;'><b>⚠️ Generation Error:</b><br>{msg}</div>"
+
+        if self.current_ai_text.strip():
+            self.current_ai_text += error_html
+        else:
+            self.current_ai_text = error_html
+
+        # 渲染到气泡
+        if self.current_ai_bubble:
+            idx = getattr(self.current_ai_bubble, 'index', -1)
+            final_html = self._format_response(self.current_ai_text, idx)
+            self.current_ai_bubble.set_content(final_html)
+
+        # 记录到历史避免上下文结构断裂
+        self.history.append({
+            "role": "assistant",
+            "content": self.current_ai_text,
+            "status": "error"
+        })
+
+        self.current_ai_bubble = None
+        self.logger.error(f"Chat task failed: {msg}")
+        ToastManager().show("Generation failed due to an error.", "error")
+        self.scroll_to_bottom()
 
 
     def _save_setting(self, key, value):

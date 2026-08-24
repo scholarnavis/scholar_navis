@@ -1,16 +1,21 @@
+import ctypes
 import locale
 import logging
 import re
+import sys
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
                                QTextBrowser, QPushButton, QLabel, QApplication,
                                QComboBox, QCheckBox, QSizeGrip)
-from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal
+from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal, QSettings
 
 from src.core.config_manager import ConfigManager
 from src.core.theme_manager import ThemeManager
+from src.ui.components.combo import BaseComboBox
+from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
 from src.core.signals import GlobalSignals
+from src.ui.components.pdf_viewer import InternalPDFViewer, InternalTextViewer
 from src.ui.components.text_formatter import TextFormatter
 from src.task.quick_translator_task import TranslatorTaskManager
 
@@ -50,8 +55,9 @@ class QuickTranslatorWindow(QWidget):
         self.cfg_mgr = ConfigManager()
         self.logger = logging.getLogger("QuickTranslator")
 
-        # 窗口置顶设置
-        self.is_pinned = self.cfg_mgr.user_settings.get("quick_trans_is_pinned", True)
+        self.settings = QSettings("ScholarNavis", "QuickTranslator")
+        pinned_val = self.settings.value("is_pinned", True)
+        self.is_pinned = pinned_val if isinstance(pinned_val, bool) else str(pinned_val).lower() == 'true'
 
         flags = Qt.Window | Qt.FramelessWindowHint
         if self.is_pinned:
@@ -75,11 +81,24 @@ class QuickTranslatorWindow(QWidget):
 
         # UI相关
         self.current_out_text = ""
+        self.expanded_indices = set()
+        self.user_toggled_thinks = set()
+        self.mermaid_codes = {}
+
+        self._is_render_dirty = False
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(50)
+        self._render_timer.timeout.connect(self._throttled_render)
 
         # 设置UI
         self._setup_ui()
         self._update_pin_ui()
-        self._center_on_screen()
+
+        # 恢复窗口大小与位置
+        if self.settings.value("geometry"):
+            self.restoreGeometry(self.settings.value("geometry"))
+        else:
+            self._center_on_screen()
 
         # 主题和配置
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -161,23 +180,20 @@ class QuickTranslatorWindow(QWidget):
         lang_bar = QHBoxLayout()
         lang_bar.addSpacing(30)
 
-        langs = ["Auto Detect", "English", "Chinese", "Japanese", "French", "German"]
+        langs = ["Auto Detect", "English", "Simplified Chinese", "Traditional Chinese", "Japanese", "French", "German",
+                 "Russian"]
         sys_lang = get_system_language()
 
         saved_src = self.cfg_mgr.user_settings.get("trans_source_lang", "Auto Detect")
         saved_tgt = self.cfg_mgr.user_settings.get("trans_target_lang", sys_lang)
 
-        self.combo_src = QComboBox()
+        self.combo_src = BaseComboBox()
         self.combo_src.addItems(langs)
         self.combo_src.setCurrentText(saved_src)
-        self.combo_src.setStyleSheet(
-            "background: #1e1e1e; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px;")
 
-        self.combo_tgt = QComboBox()
+        self.combo_tgt = BaseComboBox()
         self.combo_tgt.addItems([l for l in langs if l != "Auto Detect"] + ["Academic Polish"])
         self.combo_tgt.setCurrentText(saved_tgt)
-        self.combo_tgt.setStyleSheet(
-            "background: #1e1e1e; color: white; border: 1px solid #444; border-radius: 4px; padding: 4px;")
 
         self.combo_src.currentTextChanged.connect(lambda t: self._save_lang("trans_source_lang", t))
         self.combo_tgt.currentTextChanged.connect(lambda t: self._save_lang("trans_target_lang", t))
@@ -234,6 +250,8 @@ class QuickTranslatorWindow(QWidget):
 
         # 输出框
         self.output_box = QTextBrowser()
+        self.output_box.setOpenLinks(False)
+        self.output_box.anchorClicked.connect(self._on_link_clicked)
         self.output_box.setStyleSheet(
             "background-color: #1e1e1e; color: #fff; border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 14px;")
         frame_layout.addWidget(self.output_box)
@@ -288,29 +306,61 @@ class QuickTranslatorWindow(QWidget):
             llm_config=trans_config
         )
 
-
     def _stop_translation(self):
-        """停止翻译任务"""
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setText("Stopping...")
+
         if self.translator_manager.is_running():
             self.translator_manager.cancel_translation()
-        self.output_box.append("<br><span style='color:#e6a23c;'><b>[Stopped by User]</b></span>")
-        self._reset_buttons()
 
-
+        if hasattr(self, '_render_timer'):
+            self._render_timer.stop()
 
     def _on_token(self, token: str):
         """处理接收到的token"""
         self.current_out_text += token
-        clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
+        self._is_render_dirty = True
+
+        # 如果定时器没跑，就启动它
+        if not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def _throttled_render(self):
+        """实际执行渲染的函数，由定时器触发"""
+        if not self._is_render_dirty:
+            self._render_timer.stop()
+            return
 
         if self.chk_markdown.isChecked():
-            html = TextFormatter.markdown_to_html(clean_text)
+            # 使用带完整协议解析的渲染逻辑
+            html = self._format_response(self.current_out_text, index=0)
             self.output_box.setHtml(html)
         else:
-            self.output_box.setHtml(clean_text.replace('\n', '<br>'))
+            # 非 Markdown 模式下保持纯文本
+            clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
+            self.output_box.setPlainText(clean_text)
 
         # 自动滚动到底部
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
+
+        # 重置标记
+        self._is_render_dirty = False
+
+    def _format_response(self, text, index):
+        """统一代理给 TextFormatter"""
+        from src.ui.components.text_formatter import TextFormatter
+        if not hasattr(self, 'mermaid_codes'):
+            self.mermaid_codes = {}
+
+        return TextFormatter.format_response(
+            text, index,
+            getattr(self, 'expanded_indices', set()),
+            getattr(self, 'user_toggled_thinks', set()),
+            self.mermaid_codes
+        )
+
+
+
 
     def _on_translation_finished(self, result: dict = None):
         """翻译完成回调"""
@@ -356,29 +406,34 @@ class QuickTranslatorWindow(QWidget):
         if not self.current_out_text:
             return
 
-        clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
         if checked:
-            html_str = TextFormatter.markdown_to_html(clean_text)
+            html_str = self._format_response(self.current_out_text, index=0)
             self.output_box.setHtml(html_str)
         else:
+            clean_text = TextFormatter.hide_think_tags(self.current_out_text, for_display=True)
             self.output_box.setHtml(clean_text.replace('\n', '<br>'))
+
         self.output_box.verticalScrollBar().setValue(self.output_box.verticalScrollBar().maximum())
+
 
     def _toggle_pin(self):
         """切换窗口置顶状态"""
         self.is_pinned = not self.is_pinned
-        self.cfg_mgr.user_settings["quick_trans_is_pinned"] = self.is_pinned
-        self.cfg_mgr.save_settings()
+        self.settings.setValue("is_pinned", self.is_pinned)
 
-        flags = self.windowFlags()
-        if self.is_pinned:
-            flags |= Qt.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowStaysOnTopHint
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, self.is_pinned)
 
-        self.setWindowFlags(flags)
-        self._update_pin_ui()
         self.show()
+
+        if sys.platform == "win32":
+            hwnd = int(self.winId())
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            insert_after = HWND_TOPMOST if self.is_pinned else HWND_NOTOPMOST
+            flags = 0x0002 | 0x0001 | 0x0010  # SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            ctypes.windll.user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
+
+        self._update_pin_ui()
 
     def _save_lang(self, key, val):
         """保存语言设置"""
@@ -404,7 +459,8 @@ class QuickTranslatorWindow(QWidget):
         self.anim.start()
 
     def hide_with_fade(self):
-        """淡出隐藏"""
+        self.settings.setValue("geometry", self.saveGeometry())
+
         self.anim = QPropertyAnimation(self, b"windowOpacity")
         self.anim.setDuration(200)
         self.anim.setStartValue(self.windowOpacity())
@@ -412,10 +468,41 @@ class QuickTranslatorWindow(QWidget):
         self.anim.finished.connect(self.hide)
         self.anim.start()
 
+    def _on_link_clicked(self, url):
+        """统一代理链接路由"""
+        scheme = url.scheme()
+
+        # 拦截 Quick Translator 不支持的协议
+        if scheme in ["cite", "mermaid"]:
+            from src.ui.components.toast import ToastManager
+            ToastManager().show("This action is not supported in Quick Translator.", "warning")
+            return
+
+        from src.ui.components.text_formatter import TextFormatter
+
+        def trigger_render(idx=None):
+            self._is_render_dirty = True
+            self._throttled_render()
+
+        if not hasattr(self, 'mermaid_codes'): self.mermaid_codes = {}
+        if not hasattr(self, 'user_toggled_thinks'): self.user_toggled_thinks = set()
+        if not hasattr(self, 'expanded_indices'): self.expanded_indices = set()
+
+        TextFormatter.handle_link_click(
+            url=url, parent_widget=self, mermaid_cache=self.mermaid_codes,
+            user_toggled_thinks=self.user_toggled_thinks,
+            expanded_indices=self.expanded_indices,
+            render_callback=trigger_render
+        )
+
     def _center_on_screen(self):
         """窗口居中"""
         screen = QApplication.primaryScreen().geometry()
         self.move((screen.width() - self.width()) // 2, int((screen.height() - self.height()) // 2))
+
+    def closeEvent(self, event):
+        self.settings.setValue("geometry", self.saveGeometry())
+        super().closeEvent(event)
 
     def _clear_all(self):
         """清空所有内容"""
@@ -467,20 +554,6 @@ class QuickTranslatorWindow(QWidget):
                        f"border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 8px;")
         self.input_box.setStyleSheet(input_style)
         self.output_box.setStyleSheet(input_style + " font-size: 14px;")
-
-        combo_style = f"""
-            QComboBox {{
-                background: {tm.color('bg_input')}; 
-                color: {tm.color('text_main')}; 
-                border: 1px solid {tm.color('border')}; 
-                border-radius: 4px;
-            }}
-            QComboBox:hover {{
-                border: 1px solid {tm.color('accent')};
-            }}
-        """
-        self.combo_src.setStyleSheet(combo_style)
-        self.combo_tgt.setStyleSheet(combo_style)
 
         self.chk_markdown.setStyleSheet(f"""
             QCheckBox {{

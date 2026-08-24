@@ -127,14 +127,62 @@ class AboutTool(BaseTool):
             return
 
         latest_version = payload.get("latest_version")
-        if latest_version and latest_version != "0.0.0" and latest_version != __version__:
+        if latest_version and latest_version != "0.0.0" and self._is_newer_version(latest_version, __version__):
             os_name = platform.system().lower()
-            dl_url = f"{__dl__}?os={os_name}"
 
-            self.lbl_update.setText(
-                f'<a href="{dl_url}" style="color: inherit; text-decoration: none;">New version v{latest_version} available! Click to download.</a>')
+            self._dl_url = f"{__dl__}?os={os_name}"
+            self._latest_version = latest_version
+
+            self._update_link_ui()
             self.lbl_update.show()
-            self._apply_theme()
+
+    def _is_newer_version(self, latest: str, current: str) -> bool:
+        """
+        处理格式：a.b.c-d-e (如 2.2.4-beta-2)
+        """
+
+        def parse_v(v_str):
+            parts = v_str.strip().split('-')
+            main_v = parts[0]
+            stage = 'final'  # 默认无后缀视为最高优先级的正式版
+            stage_num = 0
+
+            if len(parts) > 1:
+                stage = parts[1].lower()
+            if len(parts) > 2:
+                try:
+                    stage_num = int(parts[2])
+                except ValueError:
+                    stage_num = 0
+
+            # 解析 a.b.c
+            try:
+                abc = [int(x) for x in main_v.split('.')]
+                while len(abc) < 3:  # 补齐到3位，兼容 "2.0" 这种格式
+                    abc.append(0)
+            except ValueError:
+                abc = [0, 0, 0]
+
+            # 定义阶段的权重：alpha < beta < rc < final(正式版)
+            stage_weights = {'alpha': 1, 'beta': 2, 'rc': 3, 'final': 4}
+            weight = stage_weights.get(stage, 0)  # 未知标签权重垫底
+
+            # 组合成元组进行比较，例如：(2, 2, 4, 2, 2)
+            return tuple(abc + [weight, stage_num])
+
+        return parse_v(latest) > parse_v(current)
+
+
+    def _update_link_ui(self):
+        if hasattr(self, '_latest_version') and hasattr(self, '_dl_url'):
+            tm = ThemeManager()
+            base_color = tm.color('success')
+            link_color = tm.color('accent')
+
+            html = (f'<span style="color: {base_color};">New version v{self._latest_version} available! </span>'
+                    f'<a href="{self._dl_url}" style="color: {link_color}; text-decoration: underline;">Click to download.</a>')
+            self.lbl_update.setText(html)
+
 
     def _show_licenses(self):
         dlg = LicenseDialog(self.widget)
@@ -154,8 +202,9 @@ class AboutTool(BaseTool):
 
         self.lbl_version.setStyleSheet(
             f"color: {tm.color('text_muted')}; font-size: 13px; font-family: 'Consolas', monospace;")
-        self.lbl_update.setStyleSheet(
-            f"{base_font} color: {tm.color('success')}; font-weight: bold; font-size: 13px; text-decoration: underline;")
+        self.lbl_update.setStyleSheet(f"{base_font} font-weight: bold; font-size: 13px;")
+        if hasattr(self, '_update_link_ui'):
+            self._update_link_ui()
         self.lbl_copy.setStyleSheet(f"{base_font} color: {tm.color('text_muted')}; font-size: 11px; margin-top: 30px;")
 
         self.btn_web.setIcon(tm.icon("link", "text_main"))

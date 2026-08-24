@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import traceback
 import uuid
@@ -10,19 +11,20 @@ import zipfile
 
 from chromadb import Settings
 
+from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.theme_manager import ThemeManager
 
 
 class KBManager:
     _instance = None
-    WORKSPACE_DIR = None  # 移除 os.getcwd()
+    WORKSPACE_DIR = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(KBManager, cls).__new__(cls)
 
-            cls.WORKSPACE_DIR = ThemeManager.get_resource_path("scholar_workspace")
+            cls.WORKSPACE_DIR = os.path.join(BASE_DIR,"scholar_workspace")
 
             if not os.path.exists(cls.WORKSPACE_DIR):
                 os.makedirs(cls.WORKSPACE_DIR)
