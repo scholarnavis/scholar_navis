@@ -110,6 +110,15 @@ class OpenAICompatibleLLM:
         # LiteLLM 对流的打断可以通过停止迭代来实现，无需手动 close client
         self._is_cancelled = True
 
+    def reset(self):
+        """清除取消标志，供实例复用（新一轮生成开始时调用）。
+
+        一旦 cancel() 将 _is_cancelled 置 True，若不复位，后续所有流式
+        stream_chat 会立即中断并输出"已停止"。每次新的 Agent 运行/任务启动
+        前都应调用 reset() 以保证状态干净。
+        """
+        self._is_cancelled = False
+
     def _parse_custom_params(self, params_list: List[Dict]) -> Dict:
         res = {}
         if not params_list: return res

@@ -184,6 +184,16 @@ class ChatInputContainer(QFrame):
         self.chk_external_tools.setToolTip("Enable external MCP servers and custom Python scripts")
         self.chk_external_tools.toggled.connect(lambda c: self._save_agent_state("chat_use_external_tools", c))
 
+        # 3. 深度研究开关：分解为并行子任务，分节汇总（默认关闭）
+        use_deep = self.config.user_settings.get("agent_deep_mode", False)
+        self.chk_deep_mode = QCheckBox("Deep Mode")
+        self.chk_deep_mode.setStyleSheet("color: #05B8CC; font-weight: bold;")
+        self.chk_deep_mode.setChecked(use_deep)
+        self.chk_deep_mode.setToolTip(
+            "Decompose the query into parallel sub-investigations, then synthesize "
+            "a section-by-section answer (higher cost, deeper coverage)")
+        self.chk_deep_mode.toggled.connect(lambda c: self._save_agent_state("agent_deep_mode", c))
+
         self.btn_mcp_tags = QToolButton()
         self.btn_mcp_tags = QPushButton("Tools Filter", self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
@@ -207,6 +217,7 @@ class ChatInputContainer(QFrame):
 
         self.mcp_toolbar.addWidget(self.chk_academic_agent)
         self.mcp_toolbar.addWidget(self.chk_external_tools)
+        self.mcp_toolbar.addWidget(self.chk_deep_mode)
         self.mcp_toolbar.addWidget(self.btn_mcp_tags)
         self.mcp_toolbar.addWidget(self.lbl_tool_hint)  # 新增：将标签加入水平布局
         self.mcp_toolbar.addStretch()
@@ -1141,6 +1152,23 @@ class ChatTool(BaseTool):
             else:
                 self.input_container.hide_context_preview()
 
+    def show_dev_note(self, text):
+        """Show a display-only note bubble (left-aligned, gray) to the user.
+
+        This bubble is NOT appended to ``self.history`` and therefore never
+        reaches the LLM — it is purely a user-visible annotation (used by the
+        developer-mode AI tests to label what is being exercised).
+        """
+        index = len(self.history)
+        bubble = ChatBubbleWidget(
+            text, is_user=False, index=index,
+            context_html=None, msg_type=ChatBubbleWidget.MSG_ERROR,
+        )
+        bubble.index = index
+        self.chat_layout.addWidget(bubble)
+        QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True))
+        return bubble
+
     def add_bubble(self, text, is_user, context_html=None):
         if is_user:
             self.remove_old_follow_ups()
@@ -1154,6 +1182,15 @@ class ChatTool(BaseTool):
         index = len(self.history)
         bubble = ChatBubbleWidget(text, is_user, index, context_html=context_html)
         bubble.index = index
+
+        # Inject the translator config so plot-plan cards can translate non-English
+        # user edits back to English before the plan is confirmed and re-sent.
+        if hasattr(self, 'trans_selector'):
+            bubble.translator_config = self.trans_selector.get_current_config()
+
+        # Plot-plan confirmation cards may appear in AI bubbles; forward the final
+        # English requirement to the chat tool so it re-sends it to the AI to render.
+        bubble.sig_plot_plan_confirm.connect(self.handle_plot_plan_confirm)
 
         if is_user:
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
@@ -1203,6 +1240,8 @@ class ChatTool(BaseTool):
                                                                                             'chk_academic_agent') else True
         use_external_tools = self.input_container.chk_external_tools.isChecked() if hasattr(self.input_container,
                                                                                             'chk_external_tools') else False
+        deep_mode = self.input_container.chk_deep_mode.isChecked() if hasattr(self.input_container,
+                                                                              'chk_deep_mode') else False
 
         selected_tags = self.input_container.get_selected_tags()
         academic_tags = [t.replace("[ACADEMIC]", "").strip() for t in selected_tags if t.startswith("[ACADEMIC]")]
@@ -1275,7 +1314,8 @@ class ChatTool(BaseTool):
                 use_academic_agent=use_academic_agent,
                 academic_tags=academic_tags if use_academic_agent else [],
                 use_external_tools=use_external_tools,
-                external_tool_names=external_names if use_external_tools else []
+                external_tool_names=external_names if use_external_tools else [],
+                deep_mode=deep_mode
             )
 
         QTimer.singleShot(100, _launch_task)
@@ -1355,6 +1395,25 @@ class ChatTool(BaseTool):
 
         self.external_files = old_files
         self.start_ai_response(kb_id)
+
+    def handle_plot_plan_confirm(self, final_requirement: str):
+        """Re-send the user-confirmed (English) plotting requirement to the AI.
+
+        Triggered when a plot-plan confirmation card's "Confirm & Draw" button is
+        clicked. The text is already English (translated by the card if needed);
+        we inject a light framing hint so the model clearly renders the chart, then
+        feed it through the normal send path.
+        """
+        if getattr(self, 'is_locked', False):
+            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            return
+        if not final_requirement or not final_requirement.strip():
+            ToastManager().show("Empty plotting requirement.", "warning")
+            return
+
+        text = final_requirement.strip()
+        self.logger.info(f"Plot plan confirmed -> sending render request: {text[:80]}")
+        self.process_send(text)
 
     def cancel_generation(self):
         if not self.input_container.btn_stop.isEnabled():

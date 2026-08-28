@@ -1,8 +1,12 @@
 import hashlib
+import logging
 import os
 import re
+import sys
 import tempfile
 import time
+
+logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, Signal, QEvent, QTimer
 from PySide6.QtGui import QGuiApplication
@@ -35,6 +39,7 @@ class ChatBubbleWidget(QWidget):
     sig_edit_confirmed = Signal(int, str)
     sig_link_clicked = Signal(str)
     sig_retry_clicked = Signal(int)
+    sig_plot_plan_confirm = Signal(str)
 
     # --- 2. 完整的 __init__ 方法 ---
     def __init__(self, text, is_user, index, context_html=None, parent=None, msg_type=None):
@@ -52,6 +57,9 @@ class ChatBubbleWidget(QWidget):
         self.is_editing = False
         self._can_edit = True
         self.is_interrupted = False
+        # Translator model config injected by the chat tool; used by plot-plan cards
+        # to translate non-English user edits back to English before confirming.
+        self.translator_config = None
 
         self.loading_timer = QTimer(self)
         self.loading_timer.timeout.connect(self._animate_loading)
@@ -402,8 +410,100 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.setText("Thinking" + "." * self.loading_dots)
 
 
+    # --- 4.5 R 绘图卡片提取（流式标记 → 固定 QWidget） ---
+    def _extract_rplot_cards(self, text: str) -> str:
+        """检测 ``<rplot_card data="...">`` 标记并转换为 RPlotCardWidget。
+
+        - 标记内为 base64 编码的 JSON（见 runtime._handle_plot_result）。
+        - ``set_content`` 会被流式调用多次，因此用 ``_rplot_rendered``
+          记录已创建卡片的 key，保证每个图只插入一次；标记本身从文本中
+          剥离，不再进入 markdown 渲染。
+        """
+        if "<rplot_card" not in text:
+            return text
+        if not hasattr(self, "_rplot_rendered"):
+            self._rplot_rendered = set()
+
+        import base64
+        import json
+
+        def _replace(match):
+            try:
+                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+            except Exception:
+                logger.warning("Malformed <rplot_card> marker dropped")
+                return ""
+            key = data.get("png_path") or data.get("svg_path") or data.get("chart_title", "")
+            if key and key not in self._rplot_rendered:
+                self._rplot_rendered.add(key)
+                try:
+                    from src.ui.components.r_plot_card import RPlotCardWidget
+
+                    card = RPlotCardWidget(data)
+                    # btn_widget 在 __init__ 末尾才创建；若尚未创建则直接追加
+                    idx = self.content_layout.indexOf(getattr(self, "btn_widget", None))
+                    if idx >= 0:
+                        self.content_layout.insertWidget(idx, card)
+                    else:
+                        self.content_layout.addWidget(card)
+                except Exception as e:
+                    logger.error(f"Failed to create R plot card: {e}")
+            return ""
+
+        text = re.sub(r'<rplot_card data="([^"]*)"></rplot_card>', _replace, text)
+        # 清理流式中可能残留的不完整标记
+        text = re.sub(r"<rplot_card[^>]*>", "", text)
+        return text
+
+    # --- 4.6 Plot 方案确认卡片提取（流式标记 → 固定 QWidget） ---
+    def _extract_plot_plan_cards(self, text: str) -> str:
+        """检测 ``<plot_plan data="...">`` 标记并转换为 PlotPlanCardWidget。
+
+        - 标记内为 base64 编码的 JSON（见 runtime._handle_propose_plot_plan）。
+        - 卡片允许用户查看 / 编辑 / 翻译 / 确认绘图方案；确认后通过
+          ``sig_plot_plan_confirm`` 将最终需求（英文）交给 ChatTool 重新发送。
+        """
+        if "<plot_plan" not in text:
+            return text
+        if not hasattr(self, "_plot_plan_rendered"):
+            self._plot_plan_rendered = set()
+
+        import base64
+        import json
+
+        def _replace(match):
+            try:
+                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+            except Exception:
+                logger.warning("Malformed <plot_plan> marker dropped")
+                return ""
+            key = data.get("plan_text") or data.get("request") or "plan"
+            if key in self._plot_plan_rendered:
+                return ""
+            self._plot_plan_rendered.add(key)
+            try:
+                from src.ui.components.plot_plan_card import PlotPlanCardWidget
+
+                card = PlotPlanCardWidget(data, translator_config=self.translator_config)
+                card.sig_confirm.connect(self.sig_plot_plan_confirm)
+                idx = self.content_layout.indexOf(getattr(self, "btn_widget", None))
+                if idx >= 0:
+                    self.content_layout.insertWidget(idx, card)
+                else:
+                    self.content_layout.addWidget(card)
+            except Exception as e:
+                logger.error(f"Failed to create plot plan card: {e}")
+            return ""
+
+        text = re.sub(r'<plot_plan data="([^"]*)"></plot_plan>', _replace, text)
+        # 清理流式中可能残留的不完整标记
+        text = re.sub(r"<plot_plan[^>]*>", "", text)
+        return text
+
     # --- 5. 完整的 set_content 方法 ---
     def set_content(self, text, msg_type=None):
+        text = self._extract_rplot_cards(text)
+        text = self._extract_plot_plan_cards(text)
         self.original_text = text
         if msg_type is not None:
             self.msg_type = msg_type
@@ -456,6 +556,44 @@ class ChatBubbleWidget(QWidget):
             html = html.replace('<th>',
                                 f'<th style="background-color: {bg_header}; font-weight: bold; text-align: left;">')
 
+            def _convert_svg_to_png(svg_path: str) -> str:
+                """Convert an SVG file to PNG (cached) for inline display.
+
+                ``QTextBrowser`` cannot natively render SVG, so we rasterize it
+                with ``QSvgRenderer`` and cache the PNG next to the source file.
+                Returns the PNG path, or the original path on failure.
+                """
+                try:
+                    from PySide6.QtSvg import QSvgRenderer
+                    from PySide6.QtGui import QPixmap, QPainter
+                    png_path = os.path.splitext(svg_path)[0] + ".png"
+                    if os.path.exists(png_path):
+                        return png_path
+                    renderer = QSvgRenderer(svg_path)
+                    if not renderer.isValid():
+                        return svg_path
+                    # Use the SVG's intrinsic size; fall back to 800x600 if unknown.
+                    size = renderer.defaultSize()
+                    w = max(1, int(size.width())) if size.isValid() and size.width() > 0 else 800
+                    h = max(1, int(size.height())) if size.isValid() and size.height() > 0 else 600
+                    pixmap = QPixmap(w, h)
+                    pixmap.fill(Qt.transparent)
+                    painter = QPainter(pixmap)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                    renderer.render(painter)
+                    painter.end()
+                    if pixmap.save(png_path, "PNG"):
+                        return png_path
+                    return svg_path
+                except Exception as e:
+                    print(f"SVG to PNG conversion failed: {e}")
+                    return svg_path
+
+            def _local_uri(path: str) -> str:
+                p = path.replace("\\", "/")
+                return f"file:///{p}" if not p.startswith("/") else f"file://{p}"
+
             def repl_img(match):
                 raw_src_url = match.group(1)
                 src_url = raw_src_url.replace("&amp;", "&")
@@ -487,6 +625,37 @@ class ChatBubbleWidget(QWidget):
                         return f'<img width="420" style="max-width: 100%;" src="{src_url}" />'
 
                 if src_url.startswith("file://"):
+                    # Resolve the local file path.
+                    try:
+                        from urllib.parse import urlparse, unquote
+                        parsed = urlparse(src_url)
+                        local_path = unquote(parsed.path)
+                        if sys.platform == "win32" and local_path.startswith("/"):
+                            local_path = local_path.lstrip("/")
+                        lower = local_path.lower()
+                    except Exception:
+                        return match.group(0)
+
+                    # PDF cannot render inline; route via cite://view to the internal viewer.
+                    if lower.endswith(".pdf"):
+                        import urllib.parse as _up
+                        file_name = os.path.basename(local_path)
+                        cite_url = (
+                            "cite://view?path=" + _up.quote(local_path)
+                            + "&name=" + _up.quote(file_name) + "&text=&page=1"
+                        )
+                        return (
+                            f'<a href="{cite_url}" style="text-decoration:none;">'
+                            f'<div style="display:inline-block; padding:14px 18px; border:2px dashed '
+                            f'#05B8CC; border-radius:8px; margin-top:5px; color:#05B8CC; '
+                            f'font-weight:bold;">📄 View PDF (open in internal viewer)</div></a>'
+                        )
+
+                    # Convert SVG to PNG before inline display.
+                    if lower.endswith(".svg"):
+                        local_path = _convert_svg_to_png(local_path)
+                        src_url = _local_uri(local_path)
+
                     new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{src_url}" title="Click to view full image" />'
                     return f'<a href="{src_url}">{new_img_tag}</a>'
 

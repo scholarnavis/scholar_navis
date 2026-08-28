@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QFrame, QFormLayout,
                                QLineEdit, QTextEdit, QComboBox, QProgressBar,
                                QSizePolicy, QHeaderView, QAbstractItemView, QTableWidget,
-                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea, QPlainTextEdit)
+                               QCheckBox, QTableWidgetItem, QListWidget, QListWidgetItem, QScrollArea)
 
 from src.core.core_task import TaskManager, TaskMode
 from src.core.models_registry import EMBEDDING_MODELS
@@ -19,6 +19,7 @@ from src.core.theme_manager import ThemeManager
 from src.task.settings_tasks import TestMcpConnectionTask
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.param_editor import ParamEditorWidget
+from src.ui.components.source_code_viewer import SourceCodeViewer
 from src.ui.components.toast import ToastManager
 
 
@@ -650,6 +651,8 @@ class McpConfigDialog(BaseDialog):
         title = "Edit MCP Server" if server_config else "Add MCP Server"
         super().__init__(parent, title=title, width=660)
 
+        self.task_mgr = None
+
         self.form_widget = QWidget()
         self.form_layout = QFormLayout(self.form_widget)
         self.form_layout.setSpacing(15)
@@ -769,13 +772,6 @@ class McpConfigDialog(BaseDialog):
         self._apply_theme()
         self.adjustSize()
 
-    def _setup_task_signals(self):
-        self.task_manager.connect_signals(
-            finished_callback=self._on_test_finished,
-            error_callback=self._on_test_error,
-            progress_callback=self._on_test_progress
-        )
-
     def _on_test_clicked(self):
         """测试连接（使用标准 TaskManager 管理）"""
         name, cfg = self.get_config()
@@ -784,7 +780,7 @@ class McpConfigDialog(BaseDialog):
             return
 
         # 1. 取消现有任务
-        if self.task_mgr and hasattr(self.task_mgr, 'is_running') and self.task_mgr.is_running():
+        if self.task_mgr is not None:
             self.task_mgr.cancel_task()
 
         self.btn_test.setEnabled(False)
@@ -1680,17 +1676,14 @@ class SkillPreviewDialog(BaseDialog):
             lbl_warnings.setStyleSheet(f"color: {self.tm.color('warning')}; font-size: 12px;")
             self.content_layout.addWidget(lbl_warnings)
 
-        # 3. 渲染代码高亮编辑器
-        self.editor = QPlainTextEdit()
-        self.editor.setPlainText(code_content)
-        font = QFont("Consolas", 10)
-        self.editor.setFont(font)
-        self.editor.setStyleSheet(
-            f"background-color: {self.tm.color('bg_input')}; "
-            f"color: {self.tm.color('text_main')}; "
-            f"border: 1px solid {self.tm.color('border')}; "
-            f"border-radius: 4px;"
+        # 3. 渲染代码高亮编辑器（专属源码控件：边框底纹、独立滚动条、复制/折叠、深色模式）
+        self.editor = SourceCodeViewer(
+            title="Skill Source Code (.py)",
+            editable=True,
+            collapsed=False,
+            max_height=600,
         )
+        self.editor.set_code(code_content)
         self.highlighter = PythonHighlighter(self.editor.document(), self.tm)
 
         self.content_layout.addWidget(self.editor, stretch=1)
@@ -1702,7 +1695,7 @@ class SkillPreviewDialog(BaseDialog):
         self._apply_theme()
 
     def get_edited_code(self):
-        return self.editor.toPlainText()
+        return self.editor.code()
 
 
 

@@ -20,7 +20,17 @@ class RerankEngine:
             cls._instance.config = ConfigManager()
             cls._instance.dev_mgr = DeviceManager()
             cls._instance._inference_lock = threading.Lock()
+            cls._instance._model_lock = threading.Lock()
+            cls._instance._last_error = None
         return cls._instance
+
+    def preload(self):
+        """后台线程预加载重排模型，避免首次查询阻塞 UI。加载失败留待惰性重试。"""
+        try:
+            self.load_model()
+        except Exception as e:
+            self.logger.warning(f"Preload reranker failed (will retry lazily): {e}")
+        return self.model is not None
 
     def load_model(self):
         from optimum.onnxruntime import ORTModelForSequenceClassification
@@ -29,6 +39,13 @@ class RerankEngine:
         if self.model is not None:
             return
 
+        # 防止预加载线程与首次查询并发触发重复加载
+        with self._model_lock:
+            if self.model is not None:
+                return
+            self._load_model_locked()
+
+    def _load_model_locked(self):
         try:
             import onnxruntime as ort
             user_pref = self.config.user_settings.get("inference_device", "Auto")
@@ -96,13 +113,19 @@ class RerankEngine:
             else:
                 self.logger.info(f"ONNX Reranker loaded successfully on {provider}.")
 
+            self._last_error = None
+
         except Exception as e:
             self.logger.error(f"Failed to load ONNX Reranker: {e}")
+            self._last_error = str(e)
             self.model = None
 
     def rerank(self, query, documents, domain="General", top_k=8):
         self.load_model()
-        if not self.model or not documents: return documents[:top_k]
+        if not documents:
+            return []
+        if not self.model:
+            return documents[:top_k]
 
         augmented_query = f"[{domain} Context] {query}" if domain and domain != "General" else query
         pairs = [[augmented_query, doc.get('content', '')] for doc in documents]
@@ -112,8 +135,9 @@ class RerankEngine:
             with self._inference_lock:
                 logits = self.model(**inputs).logits
 
+            # (N,1) 二分类交叉编码器得分；.squeeze(-1) 比 .view(-1) 对 batch 语义更明确
             if logits.shape[1] == 1:
-                scores = logits.view(-1).detach().numpy()
+                scores = logits.squeeze(-1).detach().numpy()
             else:
                 import torch.nn.functional as F
                 scores = F.softmax(logits, dim=1)[:, 1].detach().numpy()

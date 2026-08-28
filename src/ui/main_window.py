@@ -419,6 +419,30 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def route_dev_test(self, prompt_text, note_text=""):
+        """Developer-mode AI test: switch to Chat, show a user-visible note
+        (NOT sent to the LLM), then send the real prompt to the LLM."""
+        chat_index = 1
+        self.sidebar.setCurrentRow(chat_index)
+
+        def _send():
+            chat_tool = self.tools[chat_index]
+            if not chat_tool:
+                return
+            # 1) 展示测试说明（仅给用户看，不进 LLM 历史）
+            if note_text and hasattr(chat_tool, 'show_dev_note'):
+                chat_tool.show_dev_note(note_text)
+            # 2) 发送真实提示词给 LLM
+            if hasattr(chat_tool, 'process_send'):
+                chat_tool.process_send(prompt_text)
+
+        # 延迟一帧，确保 ChatTool 完成实例化（绕过 check_unsaved_changes 的异步时序）
+        QTimer.singleShot(50, _send)
+
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
     def route_to_chat_with_mcp(self, context_text, prompt_text, target_tag):
         chat_index = 1
         self.sidebar.setCurrentRow(chat_index)

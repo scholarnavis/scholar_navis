@@ -43,6 +43,11 @@ class AboutTool(BaseTool):
 
         self.lbl_version = QLabel(f"Current Release: v{__version__}")
         self.lbl_version.setAlignment(Qt.AlignCenter)
+        self.lbl_version.setCursor(Qt.PointingHandCursor)
+        # Hidden entry: click the version label 5 times to open developer mode.
+        self.lbl_version.mousePressEvent = self._on_version_clicked
+        self._version_click_count = 0
+        self._dev_dialog = None
 
         self.lbl_update = QLabel()
         self.lbl_update.setAlignment(Qt.AlignCenter)
@@ -121,6 +126,28 @@ class AboutTool(BaseTool):
         self.task_manager.start_task(VersionCheckTask, task_id="check_update", mode=TaskMode.THREAD)
 
         return self.widget
+
+    def _on_version_clicked(self, event):
+        """Version-click counter: 5 consecutive clicks open the hidden developer mode."""
+        self._version_click_count += 1
+        remaining = 5 - self._version_click_count
+        if remaining > 0:
+            self.lbl_version.setToolTip(f"Click {remaining} more time(s) to open developer mode")
+        else:
+            self._version_click_count = 0
+            self.lbl_version.setToolTip("")
+            self._open_developer_mode()
+        event.accept()
+
+    def _open_developer_mode(self):
+        """Open the developer-mode dialog (lazily created singleton)."""
+        from src.ui.components.developer_dialog import DeveloperDialog
+        if self._dev_dialog is None:
+            main_win = self.widget.window() if self.widget else None
+            self._dev_dialog = DeveloperDialog(main_win)
+        self._dev_dialog.show()
+        self._dev_dialog.raise_()
+        self._dev_dialog.activateWindow()
 
     def _on_version_checked(self, payload):
         if not payload:

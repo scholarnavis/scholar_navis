@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 import uuid
@@ -15,6 +16,9 @@ class ChatGenerationTask(BackgroundTask):
     Background task for executing local/remote LLM interactions, Vector Retrieval,
     and Multi-Agent tool processing within the Core Task Framework.
     """
+
+    # 首次重排失败弹一次警告，之后静默降级，避免每次问答刷屏
+    _rerank_warned = False
 
     def cancel(self):
         super().cancel()
@@ -189,16 +193,48 @@ class ChatGenerationTask(BackgroundTask):
         self.external_tool_names = self.kwargs.get('external_tool_names',
                                                    [])
 
+        # 深度研究开关：由 UI 传入（kwargs 优先），否则回退到全局配置
+        self.deep_mode = self.kwargs.get('deep_mode', None)
+        if self.deep_mode is None:
+            self.deep_mode = bool(self.config.user_settings.get("agent_deep_mode", False))
+
         self.db = DatabaseManager()
         self.kb_manager = KBManager()
         self.config = ConfigManager()
         self.full_response_cache = ""
+
+        # New conversation: clear the previous round's Provenance evidence chain
+        # to avoid unbounded cross-session accumulation (the collector is a
+        # process-level singleton).
+        try:
+            from src.core.provenance import get_collector
+            get_collector().clear()
+        except Exception as e:
+            self.logger.warning(f"Failed to clear provenance collector: {e}")
+
+        # 后台预加载 Reranker，避免首次问答时主线程阻塞（失败会惰性重试）
+        if self.config.user_settings.get("rerank_auto_load", True):
+            try:
+                import threading as _t
+                _t.Thread(target=self._preload_reranker, daemon=True).start()
+            except Exception as e:
+                self.logger.warning(f"Failed to spawn reranker preload thread: {e}")
 
         self.main_llm = None
         self.trans_llm = None
         self.vision_llm = None
 
         self._init_llms()
+        # 新一轮生成开始：复位各 LLM 实例的取消标志（若实例复用）。
+        # 放在任务入口而非 AgentRuntime.run 内，避免 deep 模式多子 Agent 共享
+        # 同一 LLM 时，并发 reset 与用户取消产生竞态。
+        for llm in (self.main_llm, self.trans_llm, self.vision_llm):
+            if llm is not None and hasattr(llm, "reset"):
+                try:
+                    llm.reset()
+                except Exception as e:
+                    self.logger.warning(f"Failed to reset LLM cancel state: {e}")
+
         original_user_query = self.messages[-1].get('display_text', self.messages[-1].get('content', ''))
         search_query = original_user_query
         domain = "General Academic"
@@ -287,7 +323,7 @@ class ChatGenerationTask(BackgroundTask):
 
                 if candidate_docs:
                     candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
-                    final_docs = self._process_rerank(search_query, candidate_docs, domain, 10)
+                    final_docs = self._process_rerank(search_query, candidate_docs, domain)
                     if final_docs is None:
                         final_docs = candidate_docs[:10]
 
@@ -325,10 +361,10 @@ class ChatGenerationTask(BackgroundTask):
                           "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
 
             if len(cand_docs) > 5:
-                reranked_docs = self._process_rerank(search_query, cand_docs, "General", 8)
+                reranked_docs = self._process_rerank(search_query, cand_docs, "General")
                 if reranked_docs is not None:
                     self.send_log("INFO",
-                                  f"Reranker finished: Reduced {len(cand_docs)} chunks to top 8 most relevant segments.")
+                                  f"Reranker finished: Reduced {len(cand_docs)} chunks to top {len(reranked_docs)} most relevant segments.")
                     cand_docs = reranked_docs
                 else:
                     self.send_log("WARNING", "Reranker failed for files, falling back to top-k selection.")
@@ -423,26 +459,28 @@ class ChatGenerationTask(BackgroundTask):
         llm_content.append({"type": "text", "text": f"User Query:\n{search_query}"})
         self._emit_token("[CLEAR_SEARCH]")
 
-        # Phase 5: Agentic Generation
+        # Phase 5: Agentic Generation (Modern Agent Runtime)
         self._emit_token("[START_LLM_NETWORK]")
 
         mcp_mgr = MCPManager.get_instance()
         from src.core.skill_manager import SkillManager
+        from src.core.agent.skill_registry import SkillRegistry
+        from src.core.agent.planner import IntentPlanner
+        from src.core.agent.runtime import AgentRuntime
+
         skill_mgr = SkillManager.get_instance()
+        registry = SkillRegistry(skill_mgr).build()
+        planner = IntentPlanner(registry)
 
-        combined_tools = []
         raw_tools = []
-        dynamic_tool_prompt = ""
-
-        # 1. 内部学术 Agent
+        # 1. 内部学术 Agent (enabled Skills by user tags)
         if self.use_academic_agent:
             raw_academic = skill_mgr.get_academic_schemas(self.academic_tags)
             if raw_academic:
                 raw_tools.extend(raw_academic)
 
-        # 2. 外部工具组合
+        # 2. 外部工具组合 (external Skills + remote MCP by user names)
         if self.use_external_tools:
-            # 2.1 提取外部 SKILL
             ext_skills = skill_mgr.get_external_schemas(self.external_tool_names)
             if ext_skills:
                 raw_tools.extend(ext_skills)
@@ -450,50 +488,99 @@ class ChatGenerationTask(BackgroundTask):
             for schema in mcp_mgr.tool_schemas.values():
                 server_name = schema.get("server", "Unknown Server")
                 if not self.external_tool_names or server_name in self.external_tool_names:
-                    clean_schema = {
+                    raw_tools.append({
                         "type": schema.get("type", "function"),
                         "function": schema.get("function", {})
-                    }
-                    raw_tools.append(clean_schema)
+                    })
 
+        # --- Modern AGENT tool exposure (LLM decides via native function calling) ---
+        # The Planner NEVER strips tools with keyword matching. All user-enabled
+        # tools are exposed so the main LLM keeps full agency; an optional
+        # semantic-focus hint is injected only as guidance.
+        focus_reminder = ""
         if raw_tools:
-            self.send_log("INFO",
-                          f"Enabled tool pool contains {len(raw_tools)} candidate tools (MCP + Skills). Starting intent-based filtering...")
+            self.send_log(
+                "INFO",
+                f"Enabled tool pool: {len(raw_tools)} tools (Skills + MCP). "
+                "Exposing all of them for native LLM function calling...",
+            )
             self._emit_token(
-                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Filtering optimal tools based on query intent...</div>\n\n")
+                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>"
+                "Analyzing query intent to guide tool selection...</div>\n\n"
+            )
             time.sleep(0.05)
-            combined_tools = self.filter_tools_by_rag(search_query, raw_tools, top_k=8)
+
+            # Full tool set -> full agency for the LLM.
+            combined_tools = list(raw_tools)
+
+            # Optional semantic focus hint (suggestion only, never a filter).
+            use_semantic_focus = self.config.user_settings.get("agent_semantic_focus", True)
+            if use_semantic_focus:
+                try:
+                    plan = planner.semantic_focus(search_query, self.main_llm)
+                    focus_reminder = planner.build_focus_reminder(plan)
+                    if focus_reminder:
+                        self.send_log(
+                            "INFO",
+                            f"Semantic focus hint: {', '.join(plan.focus_hint)} "
+                            f"(intent='{plan.intent}').",
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Semantic focus failed, continuing with full tool set: {e}")
+
             self._emit_token("[CLEAR_SEARCH]")
-
             final_tool_names = [t.get("function", {}).get("name", "Unknown") for t in combined_tools]
-            self.send_log("INFO", f"Final selected tools for LLM generation: {', '.join(final_tool_names)}")
+            self.send_log(
+                "INFO",
+                f"Exposing {len(final_tool_names)} tools for LLM selection: {', '.join(final_tool_names)}",
+            )
+        else:
+            combined_tools = []
 
-        combined_tools.append({
-            "type": "function",
-            "function": {
-                "name": "generate_image",
-                "description": "Generates an image based on a text prompt. Use this tool ONLY when the user explicitly asks to draw, create, or generate a picture/image.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "A highly detailed English prompt describing the image to be generated."
-                        }
-                    },
-                    "required": ["prompt"]
-                }
-            }
-        })
+        # Always expose the image generator and chart modifier so drawing requests
+        # are never blocked and previously drawn charts can be re-rendered.
+        from src.core.agent.runtime import _ALWAYS_TOOLS
+        combined_tools.append(dict(_ALWAYS_TOOLS)["generate_image"])
+        combined_tools.append(dict(_ALWAYS_TOOLS)["modify_chart"])
+        combined_tools.append(dict(_ALWAYS_TOOLS)["propose_plot_plan"])
 
         if combined_tools:
-            self._emit_token("<mcp_process>⚙️ Analyzing query intent and filtering optimal MCP tools...</mcp_process>")
+            self._emit_token("<mcp_process>⚙️ Query intent analyzed — the model selects tools natively...</mcp_process>")
             tool_names = [t.get("function", {}).get("name", "Unknown") for t in combined_tools]
+            # 当绘图工具可用时，追加一条强约束，避免 reasoning 模型把 chart 参数
+            # 以纯文本形式“泄漏”到最终答案里，而不是真正调用 plot_chart。
+            plot_guard = ""
+            if any(name == "plot_chart" for name in tool_names):
+                plot_guard = (
+                    "\n### DATA VISUALIZATION RULE (plot_chart / propose_plot_plan):\n"
+                    "When the user requests any chart or plot (bubble, bar, scatter, volcano, heatmap, "
+                    "GO enrichment, volcano plot, etc.), you MUST call the plot_chart tool to render the "
+                    "figure. NEVER reply with chart parameters, the data table, or a chart specification "
+                    "as plain text.\n"
+                    "IMPORTANT: If the user asks to visualize/plot data but has NOT clearly specified the "
+                    "chart type, the x/y columns, the title, or styling, call the propose_plot_plan tool "
+                    "FIRST to show a confirmation card. Only call plot_chart after the user confirms the plan.\n"
+                    "ENRICHMENT DOTPLOT REFERENCE LAYOUT (KEGG / GO / GSEA / Reactome bubble plots): "
+                    "chart_type='bubble', x=Gene Ratio plotted HORIZONTALLY at the bottom, y=Pathway/Term "
+                    "name on the left ordered by Gene Ratio DESCENDING (largest ratio on TOP), size=Gene "
+                    "Count, color=FDR (BH-corrected p-value) with a blue-to-red continuous gradient; the "
+                    "right-side legend has a vertical color bar labeled 'FDR' plus a 'Count' size legend "
+                    "with discrete reference dots. Do NOT coord_flip; do NOT use -log10(FDR) for the "
+                    "color mapping (use the raw FDR column directly so the gradient matches the reference).\n"
+                    "If native function calling is unavailable, output exactly this JSON block and nothing else:\n"
+                    "```json {\"name\": \"plot_chart\", \"arguments\": {\"chart_type\": \"bubble\", \"data\": \"[...]\", \"x\": \"...\", \"y\": \"...\"}} ```\n"
+                )
             dynamic_tool_prompt = (
                 f"### CRITICAL TOOL UTILIZATION RULE:\n"
-                f"The Reranker engine has exclusively selected the following tools for this specific query: {', '.join(tool_names)}.\n"
-                f"You MUST read the user's prompt carefully. If the user asks for multi-dimensional data (e.g., metadata AND protein interactions), you MUST use multiple tools to fulfill ALL parts of the request. DO NOT skip required tools. DO NOT answer partially.\n\n"
+                f"You have the following tools available for this query: {', '.join(tool_names)}.\n"
+                f"Read the user's prompt carefully and USE the native function-calling API to invoke the "
+                f"tool(s) you need. If the user asks for multi-dimensional data (e.g., metadata AND protein "
+                f"interactions), you MUST use multiple tools to fulfill ALL parts of the request. DO NOT skip "
+                f"required tools. DO NOT answer partially.\n\n"
+                f"{focus_reminder}{plot_guard}"
             )
+        else:
+            dynamic_tool_prompt = ""
 
         system_prompt = (
             f"You are a Senior Research Scientist specializing in {domain}. "
@@ -503,9 +590,9 @@ class ChatGenerationTask(BackgroundTask):
             "1. CRITICAL FOR CITATIONS: If the user's prompt asks for literature, references, citations, or a review, you MUST explicitly invoke academic search tools (like search_academic_literature) BEFORE generating your response. NEVER rely on your internal training data to generate citations, DOIs, or author lists.\n"
             "2. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
             "3. SILENT EXECUTION: Never output your reasoning process for choosing a tool. YOU MUST USE THE NATIVE TOOL CALLING API FORMAT.\n"
-            "4. FALLBACK TOOL CALLING (CRITICAL FOR REASONING MODELS): If your native function calling API is disabled (e.g., DeepSeek-R1), you MUST invoke tools manually by outputting exactly this XML block in your response text: <｜DSML｜invoke name=\"tool_name\"><｜DSML｜parameter name=\"arg_name\">value</｜DSML｜parameter></｜DSML｜invoke>\n"
+            "4. FALLBACK TOOL CALLING (CRITICAL FOR REASONING MODELS): If your native function calling API is disabled (e.g., DeepSeek-R1), you MUST invoke tools manually by outputting exactly this JSON block in your response text: ```json {\"name\": \"tool_name\", \"arguments\": {\"arg\": \"value\"}} ```\n"
             "5. CROSS-DOMAIN FLEXIBILITY (CRITICAL): If the user's request matches the capability of ANY available tool (e.g., checking train tickets, weather, web search), you MUST use that tool to assist them, EVEN IF the request is not related to academic research.\n"
-            "6. If graphics need to be created, use mermaid uniformly.\n\n"
+            "6. DIAGRAMS: use mermaid code blocks ONLY for non-data diagrams (flowcharts, architecture, relationships). Data-driven charts/plots (bubble, bar, scatter, volcano, heatmap, enrichment) must ALWAYS be rendered via the dedicated charting tool (plot_chart), never as plain text or a mermaid diagram.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
             "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. This automatically generates a UI 'Cited Sources' block. NEVER claim facts without these bracketed numbers.\n"
             "2. FORMAL BIBLIOGRAPHY (For the User): If the user explicitly requests 'references', 'citations', or a 'review', you MUST ALSO generate a standalone 'References' section at the very end of your main text (but BEFORE the [FOLLOW_UPS] section). \n"
@@ -536,270 +623,70 @@ class ChatGenerationTask(BackgroundTask):
         rag_messages = [{"role": "system", "content": system_prompt}] + clean_history
         rag_messages.append({"role": "user", "content": llm_content})
 
-        tool_executed = False
-        final_response_obtained = False
+        # ---- Run the modern Agent loop (plan -> execute -> observe) ----
 
-        if combined_tools:
-            try:
-                MAX_ITERATIONS = 12
-                for iteration in range(MAX_ITERATIONS):
-                    if self.is_cancelled():
-                        self._emit_token("\n\n[⛔ Generation halted by user.]")
-                        break
+        def _cite_collector(source_meta: dict):
+            """Register an online MCP source for the 'Cited Sources' UI block."""
+            ref_id = len(sources_map) + 101
+            sources_map[ref_id] = source_meta
+            return ref_id
 
-                    response_msg = self.main_llm.chat(
-                        messages=rag_messages,
-                        tools=combined_tools,
-                        tool_choice="auto"
-                    )
-
-                    tool_calls = response_msg.get('tool_calls') if isinstance(response_msg, dict) else None
-                    content = response_msg.get("content", "") if isinstance(response_msg, dict) else ""
-                    reasoning = response_msg.get("reasoning_content", "") if isinstance(response_msg, dict) else ""
-
-                    if not tool_calls and "<｜DSML｜function_calls>" in content:
-                        dsml_matches = re.findall(r'<｜DSML｜invoke name=["\'](.*?)["\'](?:>(.*?)</｜DSML｜invoke>| />)',
-                                                  content, re.DOTALL)
-                        if dsml_matches:
-                            tool_calls = []
-                            for m_name, m_args_raw in dsml_matches:
-                                arg_dict = {}
-                                if m_args_raw:
-                                    p_matches = re.findall(
-                                        r'<｜DSML｜parameter name=["\'](.*?)["\'][^>]*>(.*?)</｜DSML｜parameter>',
-                                        m_args_raw, re.DOTALL)
-                                    for p_name, p_val in p_matches:
-                                        p_val = p_val.strip()
-                                        if p_val.lower() == "true":
-                                            p_val = True
-                                        elif p_val.lower() == "false":
-                                            p_val = False
-                                        arg_dict[p_name] = p_val
-
-                                tool_calls.append({
-                                    "id": f"call_{uuid.uuid4().hex[:12]}",
-                                    "type": "function",
-                                    "function": {"name": m_name, "arguments": json.dumps(arg_dict, ensure_ascii=False)}
-                                })
-                            content = re.sub(r'<｜DSML｜function_calls>.*?(?:</｜DSML｜function_calls>|$)', '', content,
-                                             flags=re.DOTALL).strip()
-
-                    if reasoning:
-                        self._emit_token(f"<think>\n{reasoning}\n</think>\n\n")
-
-                    if not tool_calls and "<｜DSML｜invoke" in content:
-                        dsml_matches = re.findall(r'<｜DSML｜invoke name=["\'](.*?)["\'](?:>(.*?)</｜DSML｜invoke>| />)',
-                                                  content, re.DOTALL)
-                        if dsml_matches:
-                            tool_calls = []
-                            for m_name, m_args_raw in dsml_matches:
-                                arg_dict = {}
-                                if m_args_raw:
-                                    p_matches = re.findall(
-                                        r'<｜DSML｜parameter name=["\'](.*?)["\'][^>]*>(.*?)</｜DSML｜parameter>',
-                                        m_args_raw, re.DOTALL)
-                                    for p_name, p_val in p_matches:
-                                        p_val = p_val.strip()
-                                        if p_val.lower() == "true":
-                                            p_val = True
-                                        elif p_val.lower() == "false":
-                                            p_val = False
-                                        arg_dict[p_name] = p_val
-
-                                tool_calls.append({
-                                    "id": f"call_{uuid.uuid4().hex[:12]}",
-                                    "type": "function",
-                                    "function": {"name": m_name, "arguments": json.dumps(arg_dict, ensure_ascii=False)}
-                                })
-                            content = re.sub(r'<｜DSML｜invoke.*?(?:</｜DSML｜invoke>|$)', '', content,
-                                             flags=re.DOTALL).strip()
-
-                    if not tool_calls and "```json" in content:
-                        json_blocks = re.findall(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
-                        for jb in json_blocks:
-                            try:
-                                j_data = json.loads(jb)
-                                if isinstance(j_data, dict) and "name" in j_data and "arguments" in j_data:
-                                    tool_calls = [{
-                                        "id": f"call_{uuid.uuid4().hex[:12]}",
-                                        "type": "function",
-                                        "function": {
-                                            "name": j_data["name"],
-                                            "arguments": json.dumps(j_data["arguments"],
-                                                                    ensure_ascii=False) if isinstance(
-                                                j_data["arguments"], dict) else j_data["arguments"]
-                                        }
-                                    }]
-                                    content = content.replace(f"```json\n{jb}\n```", "").strip()
-                                    break
-                            except:
-                                pass
-
-                    if not tool_calls:
-                        if content:
-                            self._emit_token("[CLEAR_SEARCH]")
-                            chunk_size = 5
-                            for i in range(0, len(content), chunk_size):
-                                if self.is_cancelled(): break
-                                chunk = content[i:i + chunk_size]
-                                self.full_response_cache += chunk
-                                self._emit_token(chunk)
-                                time.sleep(0.015)
-                            final_response_obtained = True
-                        break
-
-                    tool_executed = True
-                    norm_tool_calls = []
-                    for tc in tool_calls:
-                        if hasattr(tc, 'model_dump'):
-                            norm_tool_calls.append(tc.model_dump())
-                        elif not isinstance(tc, dict):
-                            norm_tool_calls.append({
-                                "id": getattr(tc, "id", f"call_{uuid.uuid4().hex[:8]}"),
-                                "type": getattr(tc, "type", "function"),
-                                "function": {
-                                    "name": getattr(getattr(tc, "function", None), "name", "unknown"),
-                                    "arguments": getattr(getattr(tc, "function", None), "arguments", "{}")
-                                }
-                            })
-                        else:
-                            norm_tool_calls.append(tc)
-
-                    assistant_msg = {"role": "assistant", "content": content or "", "tool_calls": norm_tool_calls}
-                    if reasoning: assistant_msg["reasoning_content"] = reasoning
-                    rag_messages.append(assistant_msg)
-
-                    for tool_call in norm_tool_calls:
-                        if self.is_cancelled(): break
-
-                        t_id = tool_call.get('id', f"call_{uuid.uuid4().hex[:8]}")
-                        t_func = tool_call.get('function', {})
-                        tool_name = t_func.get('name', 'unknown')
-
-                        tool_result = f"[System Error] Tool '{tool_name}' not found or disabled."
-
-                        try:
-                            raw_args = t_func.get('arguments', '{}')
-                            tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-
-                            if tool_name == "generate_image":
-                                prompt_text = tool_args.get("prompt", "")
-                                self._emit_token(
-                                    f"<mcp_process>🎨 Generating image (Prompt: {prompt_text[:30]}...)</mcp_process>\n")
-                                try:
-                                    img_url = self.main_llm.generate_image(prompt=prompt_text)
-                                    self._emit_token(
-                                        f"<br><img src='{img_url}' style='max-width: 100%; border-radius: 8px; border: 1px solid #444;' alt='Generated Image'/><br>\n\n")
-                                    tool_result = f"Image generated successfully. URL: {img_url}"
-                                except Exception as img_e:
-                                    self.logger.error(f"Internal Image Tool failed: {img_e}")
-                                    tool_result = f"Image generation failed: {str(img_e)}"
-
-                            elif skill_mgr.is_skill_available(tool_name):
-                                tool_args_str = json.dumps(tool_args, ensure_ascii=False)
-                                short_args = tool_args_str if len(tool_args_str) < 120 else tool_args_str[:120] + "..."
-
-                                if hasattr(skill_mgr, 'academic_skills') and tool_name in skill_mgr.academic_skills:
-                                    prefix = "[ACADEMIC]"
-                                    self.send_log("INFO", f"{prefix} Executing internal skill: {tool_name}")
-                                else:
-                                    prefix = "[SKILL]"
-                                    self.send_log("INFO", f"{prefix} Executing external skill script: {tool_name}")
-                                self._emit_token(
-                                    f"<mcp_process><b>{prefix} {tool_name}</b><br>"
-                                    f"<span style='font-size:12px; color:#888;'>[Status: Executing] Args: {short_args}</span></mcp_process>\n"
-                                )
-
-                                tool_result = skill_mgr.call_skill(tool_name, tool_args)
-
-                            elif self.use_external_tools and mcp_mgr.is_tool_available(tool_name):
-                                tool_args_str = json.dumps(tool_args, ensure_ascii=False)
-                                short_args = tool_args_str if len(tool_args_str) < 120 else tool_args_str[:120] + "..."
-                                prefix = "[MCP]"
-                                self.send_log("INFO", f"{prefix} Requesting external MCP service: {tool_name}")
-                                self._emit_token(
-                                    f"<mcp_process><b>{prefix} {tool_name}</b><br>"
-                                    f"<span style='font-size:12px; color:#888;'>[Status: Executing] Args: {short_args}</span></mcp_process>\n"
-                                )
-
-                                tool_result = mcp_mgr.call_tool_sync(tool_name, tool_args)
-                                try:
-                                    res_data = json.loads(tool_result)
-                                    if isinstance(res_data, dict) and "results" in res_data:
-                                        for item in res_data["results"]:
-                                            source_url = item.get("url") or item.get("pdf_url") or item.get(
-                                                "landing_page_url")
-                                            source_title = item.get("title") or item.get("name") or item.get(
-                                                "pref_name") or item.get("display_name") or item.get(
-                                                "scientific_name") or f"Result from {tool_name}"
-                                            if source_url:
-                                                mcp_ref_id = len(sources_map) + 101
-                                                sources_map[mcp_ref_id] = {
-                                                    "path": source_url, "page": 1, "name": f"[Online] {source_title}",
-                                                    "search_text": item.get("abstract", "")[:100]
-                                                }
-                                                item["_mcp_cite_id"] = mcp_ref_id
-                                        tool_result = json.dumps(res_data, ensure_ascii=False)
-                                except:
-                                    pass
-                            else:
-                                self.logger.warning(
-                                    f"Model hallucinated or attempted to call disabled tool: {tool_name}")
-                                tool_result = f"[TOOL ERROR] The tool '{tool_name}' does not exist or is disabled. Please answer the user using only your current knowledge or valid tools."
-
-                        except Exception as e:
-                            self.logger.error(f"MCP tool {tool_name} failed: {e}")
-                            tool_result = f"Tool execution failed: {str(e)}"
-
-                        if not isinstance(tool_result, str):
-                            tool_result = json.dumps(tool_result, ensure_ascii=False)
-
-                        if "API Key" in tool_result or "error" in tool_result.lower() or "missing" in tool_result.lower():
-                            tool_result = (
-                                f"[TOOL EXECUTION FAILED] The tool '{tool_name}' returned an error:\n\"{tool_result}\"\n\n"
-                                f"INSTRUCTION TO AI:\n1. Explain to the user EXACTLY why the access failed."
-                            )
-
-                        rag_messages.append({"role": "tool", "tool_call_id": t_id, "name": tool_name,
-                                             "content": tool_result})
-            except Exception as e:
-                self.logger.warning(f"Tool calling loop failed: {e}")
-
-        if not final_response_obtained:
-            if tool_executed:
-                silence_prompt = "\n\n[System Notification: Tool execution limit reached. Please analyze the tool results above and answer the user's original query.\nFINAL OUTPUT RULE: YOU MUST NOT INVOKE ANY MORE TOOLS. Output your final response directly in plain Markdown.]"
-                if rag_messages and rag_messages[-1]["role"] == "tool":
-                    rag_messages[-1]["content"] += silence_prompt
-                else:
-                    rag_messages.append({"role": "user", "content": silence_prompt})
-
+        try:
+            # 会话级 plot registry 缓存：AgentRuntime 每轮重建，但已画过的图
+            # 注册在磁盘（plot_registry.json），这里传入内存缓存并回写，减少
+            # 磁盘恢复开销；即使缓存丢失，modify_chart 也会自动从磁盘恢复。
+            agent = AgentRuntime(
+                self.main_llm, skill_mgr, mcp_mgr, planner=planner,
+                cite_collector=_cite_collector,
+                log_fn=self.send_log,
+                plot_registry=getattr(self, "_plot_registry_cache", None),
+                plot_seq=getattr(self, "_plot_seq_cache", 0),
+            )
+            if self.deep_mode:
+                # 深度研究：分解为并行子任务 -> 独立 Agent 执行 -> 分节汇总
+                self.full_response_cache = self._run_deep_agent(
+                    agent=agent,
+                    search_query=search_query,
+                    rag_messages=rag_messages,
+                    system_prompt=system_prompt,
+                    candidate_tools=combined_tools,
+                    llm_content=llm_content,
+                    skill_mgr=skill_mgr,
+                    mcp_mgr=mcp_mgr,
+                    planner=planner,
+                    sources_map=sources_map,
+                )
+            else:
+                self.full_response_cache = agent.run(
+                    query=search_query,
+                    rag_messages=rag_messages,
+                    system_prompt=system_prompt,
+                    candidate_tools=combined_tools,
+                    emit_token=self._emit_token,
+                    is_cancelled=self.is_cancelled,
+                )
+            # 回写 registry，供同一 task 实例的下一轮直接复用。
+            if getattr(agent, "_plot_registry", None):
+                self._plot_registry_cache = agent._plot_registry
+                self._plot_seq_cache = agent._plot_seq
+        except Exception as e:
+            self.logger.warning(f"Agent runtime loop failed: {e}")
+            # Graceful degradation: plain streaming without tools.
             self._emit_token("[CLEAR_SEARCH]")
             self._emit_token("[START_LLM_NETWORK]")
-
-            stream_kwargs = {}
-            if combined_tools:
-                stream_kwargs["tools"] = combined_tools
-
-            # --- 新增：截获底层流式错误的逻辑 ---
             error_buffer = ""
-            for token in self.main_llm.stream_chat(rag_messages, **stream_kwargs):
+            for token in self.main_llm.stream_chat(rag_messages):
                 if self.is_cancelled():
                     break
-
-                # 检查是否是底层异常前缀
-                if error_buffer or "[API Request Error" in token or "[System Error" in token or "[Context Exceeded Error]" in token or "[Rate Limit Error]" in token or "[Timeout Error]" in token:
+                if "[API Request Error" in token or "[System Error" in token or "[Context Exceeded Error]" in token or "[Rate Limit Error]" in token or "[Timeout Error]" in token:
                     error_buffer += token
                     continue
-
                 self.full_response_cache += token
                 self._emit_token(token)
-
             if error_buffer:
-                prefix_match = re.match(r'^\s*\[(.*?)\]\s*\n*(.*)', error_buffer, re.DOTALL)
-                if prefix_match:
-                    title = prefix_match.group(1).strip()
-                    body = prefix_match.group(2).strip()
-                    self._emit_error(json.dumps({"title": title, "body": body}))
+                m = re.match(r'^\s*\[(.*?)\]\s*\n*(.*)', error_buffer, re.DOTALL)
+                if m:
+                    self._emit_error(json.dumps({"title": m.group(1).strip(), "body": m.group(2).strip()}))
                 else:
                     self._emit_error(json.dumps({"title": "Provider Error", "body": error_buffer.strip()}))
                 return
@@ -821,75 +708,273 @@ class ChatGenerationTask(BackgroundTask):
             if displayed > 0:
                 self._emit_token(ref_html)
 
+        # Phase 7: Persist Provenance evidence chain + show summary to user
+        self._emit_provenance()
+
         return self.full_response_cache
 
-    def filter_tools_by_rag(self, user_query, candidate_tools, top_k=8):
-        if not candidate_tools or len(candidate_tools) <= top_k:
-            self.send_log("INFO", f"Skipping Reranker: {len(candidate_tools)} candidate tools is <= top_k ({top_k}).")
-            return candidate_tools
+    def _emit_provenance(self):
+        """Persist the current conversation's evidence chain as JSONL and show
+        a summary to the user.
 
+        This is the Provenance "consumption" step: every tool call in this
+        conversation (tool -> params -> status -> source -> timestamp) is
+        written to ``scholar_workspace/provenance/`` and surfaced as an
+        auditable summary + download link. Failures must never break the main
+        flow, so everything degrades silently.
+        """
         try:
-            candidate_docs = []
-            for tool in candidate_tools:
-                func = tool.get("function", {})
-                content = f"Tool Name: {func.get('name', '')}. Description: {func.get('description', '')}"
-                candidate_docs.append({"content": content, "metadata": {"tool_schema": tool}})
+            from src.core.provenance import get_collector
+            collector = get_collector()
+            records = collector.snapshot()
+            if not records:
+                return
 
-            history_context = f" Previous Context: {self.messages[-2].get('content', '')[:200]}" if len(
-                self.messages) >= 2 else ""
-            rerank_query = f"User Intent: {user_query}.{history_context} Find the most appropriate API tools to fulfill this request."
+            # Output directory: scholar_workspace/provenance/
+            from src.core import BASE_DIR
+            prov_dir = os.path.join(BASE_DIR, "scholar_workspace", "provenance")
+            path = collector.export_to_dir(prov_dir, conversation_id=getattr(self, "task_id", ""))
 
-            self.send_log("DEBUG", f"Reranker Query constructed: {rerank_query}")
-            self.send_log("DEBUG", f"Sending {len(candidate_tools)} tools to Reranker engine for scoring...")
+            # Aggregate by tool for the summary.
+            from collections import Counter
+            counter = Counter(r["tool"] for r in records)
+            ok_count = sum(1 for r in records if r["status"] == "success")
+            fail_count = len(records) - ok_count
 
-            ranked_docs = self._process_rerank(rerank_query, candidate_docs, domain="Tool Selection", top_k=len(candidate_docs), emit_warning=False)
+            import html as _html_mod
+            rows = []
+            for tool, cnt in counter.most_common():
+                rows.append(
+                    f"<div style='margin-bottom:3px;'>▪ <b>{_html_mod.escape(tool)}</b> "
+                    f"<span style='color:#888;'>({cnt} call(s))</span></div>"
+                )
 
-            if ranked_docs is None:
-                self.send_log("WARNING", "Reranker returned None. Bypassing tool filtering.")
-                return candidate_tools
+            ref_html = (
+                "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
+                "<b>📊 Provenance (trace log):</b><br>"
+                f"<div style='margin-top:6px; font-size:13px;'>"
+                f"{len(records)} tool call(s) this round, "
+                f"{ok_count} succeeded, {fail_count} failed:<br>"
+                + "".join(rows)
+            )
 
-            log_lines = ["\n[--- Reranker Tool Scoring Report ---]"]
-            for idx, doc in enumerate(ranked_docs):
-                tool_name = doc["metadata"]["tool_schema"]["function"]["name"]
-                score = doc.get("score", 0.0)
-                status = "✅ [SELECTED]" if idx < top_k else "❌ [REJECTED]"
-                log_lines.append(f"{idx+1:02d}. {status} Score: {score:.4f} | Tool: {tool_name}")
-
-
-            log_lines.append("[------------------------------------]\n")
-            self.send_log("INFO", "\n".join(log_lines))
-
-            top_ranked_docs = ranked_docs[:top_k]
-            selected_names = [doc["metadata"]["tool_schema"]["function"]["name"] for doc in top_ranked_docs]
-
-            self.send_log("INFO", f"Reranker scoring complete. Final Top {len(selected_names)} tools: {', '.join(selected_names)}")
-
-            return [doc["metadata"]["tool_schema"] for doc in top_ranked_docs]
-
+            if path:
+                fpath = path.replace("\\", "/")
+                uri = f"file:///{fpath}" if not fpath.startswith("/") else f"file://{fpath}"
+                ref_html += (
+                    f"<div style='margin-top:8px; font-size:12px;'>"
+                    f"Full evidence chain (JSONL): "
+                    f"<a href='{uri}' style='color:#05B8CC; text-decoration:none;'>"
+                    f"{_html_mod.escape(os.path.basename(path))}</a></div>"
+                )
+            ref_html += "</div>"
+            self._emit_token(ref_html)
         except Exception as e:
-            self.send_log("ERROR", f"Exception during tool reranking: {str(e)}")
-            return candidate_tools
+            self.logger.warning(f"Provenance emission skipped: {e}")
 
-    def _process_rerank(self, query, docs, domain, top_k, emit_warning=True):
-        if not docs: return []
-        import time
-        time.sleep(0.05)
+    def _run_deep_agent(self, agent, search_query, rag_messages, system_prompt,
+                        candidate_tools, llm_content, skill_mgr, mcp_mgr,
+                        planner, sources_map):
+        """深度研究：分解 -> 并行子 Agent -> 分节汇总。
+
+        - 分解失败或不可分解时，回退单 Agent 路径。
+        - 每个子任务共享本地 KB 上下文（Phase 2 已构建），独立收集在线引用。
+        - 子任务引用 id（>=101）在合并时重映射为全局 id，避免冲突。
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from src.core.agent.decomposer import TaskDecomposer
+        from src.core.agent.synthesizer import Synthesizer
+        from src.core.agent.runtime import AgentRuntime
+
+        self._emit_token("[CLEAR_SEARCH]")
+        self._emit_token(
+            "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>"
+            "Analyzing query for multi-path decomposition...</div>\n\n"
+        )
+
+        decomp = TaskDecomposer(self.main_llm).decompose(search_query)
+        if not decomp.decomposable:
+            self.send_log("INFO", "Query not decomposable; using single-agent path.")
+            return agent.run(
+                query=search_query,
+                rag_messages=rag_messages,
+                system_prompt=system_prompt,
+                candidate_tools=candidate_tools,
+                emit_token=self._emit_token,
+                is_cancelled=self.is_cancelled,
+            )
+
+        sub_tasks = decomp.sub_tasks
+        self.send_log("INFO", f"Deep mode: decomposed into {len(sub_tasks)} parallel sub-tasks.")
+        self._emit_token(
+            f"<mcp_process>⚙️ Deep research: {len(sub_tasks)} parallel sub-investigations launched...</mcp_process>\n"
+        )
+
+        # ---- 并行执行各子任务 ----
+        results = [None] * len(sub_tasks)
+
+        def _run_sub(idx, st):
+            local_sources = {}
+
+            def _local_cite(meta):
+                rid = len(local_sources) + 101
+                local_sources[rid] = meta
+                return rid
+
+            sub_llm_content = list(llm_content[:-1]) + [
+                {"type": "text", "text": f"User Query:\n{st.query}"}
+            ]
+            sub_rag = [dict(m) for m in rag_messages]
+            sub_rag[-1] = dict(sub_rag[-1])
+            sub_rag[-1]["content"] = sub_llm_content
+
+            sub_agent = AgentRuntime(
+                self.main_llm, skill_mgr, mcp_mgr, planner=planner,
+                cite_collector=_local_cite, log_fn=self.send_log,
+            )
+            buffer = []
+            try:
+                text = sub_agent.run(
+                    query=st.query,
+                    rag_messages=sub_rag,
+                    system_prompt=system_prompt,
+                    candidate_tools=candidate_tools,
+                    emit_token=buffer.append,
+                    is_cancelled=self.is_cancelled,
+                )
+            except Exception as e:
+                self.logger.warning(f"Sub-task '{st.query[:40]}' failed: {e}")
+                text = f"[Sub-investigation unavailable: {e}]"
+            return idx, text, local_sources
+
+        with ThreadPoolExecutor(max_workers=len(sub_tasks)) as pool:
+            futures = [pool.submit(_run_sub, i, st) for i, st in enumerate(sub_tasks)]
+            for fut in as_completed(futures):
+                try:
+                    idx, text, local_sources = fut.result()
+                    results[idx] = (text, local_sources)
+                except Exception as e:
+                    self.logger.warning(f"Sub-task future failed: {e}")
+
+        # ---- 合并引用并重映射 ----
+        next_id = max((k for k in sources_map if isinstance(k, int)), default=0) + 1
+        merged = []
+        plot_markers = []  # 收集子任务产生的 <rplot_card> 标记，避免 base64 污染合成器
+
+        def _pull_plot_markers(m):
+            plot_markers.append(m.group(0))
+            return ""
+
+        for i, (st, res) in enumerate(zip(sub_tasks, results)):
+            if res is None:
+                text, local_sources = "", {}
+            else:
+                text, local_sources = res
+            remap = {}
+            for local_id, meta in local_sources.items():
+                remap[local_id] = next_id
+                sources_map[next_id] = meta
+                next_id += 1
+            text = self._clean_sub_result(text)
+            text = self._remap_citations(text, remap)
+            text = re.sub(r'<rplot_card data="([^"]*)"></rplot_card>', _pull_plot_markers, text)
+            merged.append({
+                "heading": st.query,
+                "query": st.query,
+                "text": text,
+            })
+
+        # ---- 分节汇总 ----
+        self._emit_token(
+            "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>"
+            "Synthesizing structured synthesis across sub-investigations...</div>\n\n"
+        )
+        synthesizer = Synthesizer(self.main_llm)
+        final_text = synthesizer.synthesize(search_query, merged)
+
+        # 合成后把 R 绘图卡片标记追加回最终文本，保证 UI 端仍能渲染固定卡片
+        if plot_markers:
+            final_text = final_text.rstrip() + "\n\n" + "\n".join(plot_markers)
+
+        self._emit_token("[CLEAR_SEARCH]")
+        self._emit_token("[START_LLM_NETWORK]")
+        self._emit_token(final_text)
+        return final_text
+
+    @staticmethod
+    def _remap_citations(text, remap):
+        """将文本中 `[id]` 按 remap 映射替换为新的全局 id（仅替换映射内 id）。"""
+        if not text or not remap:
+            return text or ""
+        def _repl(m):
+            cid = int(m.group(1))
+            return f"[{remap[cid]}]" if cid in remap else m.group(0)
+        return re.sub(r"\[(\d+)\]", _repl, text)
+
+    @staticmethod
+    def _clean_sub_result(text):
+        """清理子任务返回文本中的运行时控制标记，避免污染合成器。
+
+        Agent.run 的返回值混杂了 UI 控制 token（[CLEAR_SEARCH]、
+        [START_LLM_NETWORK]）与思考块（<think>...</think>），合成前必须剥离。
+        """
+        if not text:
+            return ""
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        for token in ("[CLEAR_SEARCH]", "[START_LLM_NETWORK]", "[FOLLOW_UPS]"):
+            text = text.replace(token, "")
+        return text.strip()
+
+    def _preload_reranker(self):
+        """后台线程预加载交叉编码器重排模型。"""
+        try:
+            from src.core.rerank_engine import RerankEngine
+            RerankEngine().preload()
+        except Exception as e:
+            self.logger.warning(f"Reranker preload failed: {e}")
+
+    def _process_rerank(self, query, docs, domain, top_k=None, emit_warning=True):
+        """两阶段精排：交叉编码器重排 + 分数阈值过滤。
+
+        - top_k: 返回文档数上限；None 时取配置 rerank_top_k（默认 5）。
+        - 低于 rerank_min_score 的文档会被丢弃（全低于阈值时保底保留前 3 个，
+          避免上下文为空）。
+        - 首次失败弹一次警告，之后静默降级为原始顺序。
+        """
+        if not docs:
+            return []
+
+        cfg = self.config.user_settings
+        if top_k is None:
+            top_k = int(cfg.get("rerank_top_k", 5))
+        min_score = float(cfg.get("rerank_min_score", 0.0))
 
         try:
             from src.core.rerank_engine import RerankEngine
             engine = RerankEngine()
 
             ranked_docs = engine.rerank(query, docs, domain=domain, top_k=top_k)
-
-            if ranked_docs:
-                return ranked_docs
-            else:
+            if not ranked_docs:
                 return docs[:top_k]
+
+            # 分数阈值过滤：cross-encoder 概率分数，bge-reranker 类模型通常在 0.1~0.99
+            if min_score > 0:
+                kept = [d for d in ranked_docs if d.get("score", 1.0) >= min_score]
+                if not kept:
+                    kept = ranked_docs[:3]
+                elif len(kept) < len(ranked_docs):
+                    self.send_log("INFO",
+                                  f"Rerank threshold ({min_score}) dropped "
+                                  f"{len(ranked_docs) - len(kept)} low-relevance chunks.")
+                return kept
+
+            return ranked_docs
 
         except Exception as e:
             self.logger.error(f"Direct Rerank Engine execution failed: {e}")
 
-            if emit_warning:
+            if emit_warning and not self._rerank_warned:
+                self._rerank_warned = True
                 warning_html = (
                     f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
                     f"⚠️ <b>Reranker Processing Failed</b><br><br>"
@@ -899,6 +984,8 @@ class ChatGenerationTask(BackgroundTask):
                     f"</div><br>"
                 )
                 self._emit_token(warning_html)
+            else:
+                self.send_log("WARNING", "Reranker unavailable, using default document ordering.")
 
             # 降级方案：返回未重新排序的前 top_k 个文档
             return docs[:top_k]

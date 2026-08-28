@@ -100,6 +100,7 @@ class SettingsTool(BaseTool):
         self.layout.setContentsMargins(15, 0, 15, 40)
 
         self.init_hardware_section()
+        self.init_r_environment_section()
         self.init_system_section()
         self.init_network_section()
         self.init_llm_section()
@@ -574,6 +575,95 @@ class SettingsTool(BaseTool):
         layout.addWidget(self.lbl_hw_info)
 
         self.layout.addWidget(self.group_hw)
+
+    def init_r_environment_section(self):
+        """Detect and configure the R runtime (used by the visualization engine)."""
+        from src.core.r_engine import get_r_engine, R_DOWNLOAD_URL
+
+        self.group_r = QGroupBox("R Environment (Visualization)")
+        self.group_r.setObjectName("group_r")
+        layout = QVBoxLayout(self.group_r)
+
+        # Status label
+        self.lbl_r_status = QLabel("Detecting R environment...")
+        self.lbl_r_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_r_status.setTextFormat(Qt.RichText)
+        layout.addWidget(self.lbl_r_status)
+
+        # Path selection row
+        path_layout = QHBoxLayout()
+        self.edit_r_path = QLineEdit()
+        self.edit_r_path.setPlaceholderText("Rscript path, e.g. C:\\Program Files\\R\\R-4.3.1\\bin\\Rscript.exe")
+        self.edit_r_path.textChanged.connect(self._on_r_path_edited)
+        path_layout.addWidget(self.edit_r_path, stretch=1)
+
+        self.btn_r_browse = QPushButton("Browse...")
+        self.btn_r_browse.clicked.connect(self._on_browse_r_path)
+        path_layout.addWidget(self.btn_r_browse)
+        layout.addLayout(path_layout)
+
+        self.layout.addWidget(self.group_r)
+        self._refresh_r_status()
+
+    def _refresh_r_status(self):
+        """Re-detect R and refresh the status display."""
+        if not hasattr(self, 'lbl_r_status'):
+            return
+        from src.core.r_engine import get_r_engine, R_DOWNLOAD_URL
+
+        tm = ThemeManager()
+        engine = get_r_engine()
+        # Prefer the user-typed path; otherwise fall back to the configured path.
+        custom = ""
+        if hasattr(self, 'edit_r_path'):
+            custom = self.edit_r_path.text().strip()
+        if not custom:
+            custom = self.config.get_r_path()
+            if custom and hasattr(self, 'edit_r_path'):
+                self.edit_r_path.setText(custom)
+        engine.set_custom_path(custom or None)
+
+        info = engine.detect()
+        if info.get("available"):
+            status_color = tm.color("success")
+            status_text = "R detected"
+            detail = (
+                f"<b>Rscript:</b> {info.get('executable', '')}<br>"
+                f"<b>Version:</b> R {info.get('version', 'Unknown')}"
+            )
+        else:
+            status_color = tm.color("warning")
+            status_text = "R not detected"
+            detail = (
+                "Visualization requires R.<br>"
+                f"Download and install it from <a href='{R_DOWNLOAD_URL}'>{R_DOWNLOAD_URL}</a>, "
+                "then specify the Rscript path above or add it to PATH."
+            )
+
+        html = (
+            f"<div style='font-size:13px; line-height:1.6;'>"
+            f"<b>Status:</b> <span style='color:{status_color};'>{status_text}</span><br>"
+            f"{detail}</div>"
+        )
+        self.lbl_r_status.setText(html)
+        # Fill the placeholder with the detected path (only if not user-set).
+        if info.get("available") and not self.edit_r_path.text().strip():
+            self.edit_r_path.setPlaceholderText(info.get("executable", ""))
+
+    def _on_r_path_edited(self, _text):
+        from src.core.r_engine import get_r_engine
+        get_r_engine().set_custom_path(_text.strip() or None)
+        self.config.set_r_path(_text.strip() or "")
+        self._refresh_r_status()
+
+    def _on_browse_r_path(self):
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self.widget, "Select Rscript executable", "",
+            "Rscript (*.exe);;Rscript (Rscript);;All Files (*)"
+        )
+        if path:
+            self.edit_r_path.setText(path)
 
     def _get_btn_style(self, btn_type="default"):
         tm = ThemeManager()

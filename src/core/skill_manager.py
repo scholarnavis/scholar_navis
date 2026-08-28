@@ -104,7 +104,8 @@ class SkillManager:
                 query_kegg_database, fetch_go_annotations, search_chembl_target,
                 uniprot_id_mapping, query_uniprot_database, fetch_alphafold_structure,
                 query_pdb_structure, query_metabolite_database, analyze_systems_network,
-                query_plant_multiomics, search_jaspar_motifs, query_ensembl_database
+                query_plant_multiomics, search_jaspar_motifs, query_ensembl_database,
+                plot_chart
             )
 
             # Map functions with their exact descriptions from the original MCP decorators
@@ -121,7 +122,7 @@ class SkillManager:
                 search_web: "[Tags: Web] Search the web for general information, news, or current events. Supported engines: 'duckduckgo' (default, most stable), 'google', 'bing', 'baidu'. CRITICAL INSTRUCTION: You MUST use the provided '_mcp_cite_id' (e.g., [101], [102]) inline to cite your claims. You MUST also append a 'References' list at the very end of your response containing the exact URLs.",
                 search_preprints: "[Tags: Literature] Search bioRxiv and medRxiv for latest life science and medical preprints.",
                 fetch_wikipedia_summary: "[Tags: Web] Fetch exact introductory summary of a concept from Wikipedia. Fast and token-efficient.",
-                search_github_repos: "[Tags: Code] Search GitHub for open-source repositories, pipelines, or code.",
+                search_github_repos: "[Tags: Code, Tools] Search GitHub for reproducible bioinformatics tools, analysis pipelines, or open-source code. Use this when the user wants to find software, a computational pipeline, or an algorithm implementation for analyzing omics data. Results include license and maintenance metrics to judge reproducibility and citability.",
                 query_kegg_database: "[Tags: Function, Systems Biology] A unified tool to search and fetch records from the KEGG database. The 'action' parameter strictly defines the tool's behavior:\n - 'search_pathway': Searches for pathway maps using a keyword (e.g., 'glycolysis'). You MUST provide an exact 3-4 letter 'organism_code' (e.g., 'ath' for Arabidopsis, 'hsa' for Human).\n - 'get_record': Fetches detailed structural metadata for a specific KEGG identifier (e.g., a KO number like 'K01803' or a pathway map like 'map00010').\nCRITICAL: The 'query' parameter acts as the keyword for 'search_pathway', but acts as the precise KEGG ID for 'get_record'.",
                 fetch_go_annotations: "[Tags: Function, Systems Biology] Fetch Gene Ontology (GO) annotations (Molecular Function, Biological Process, Cellular Component) for a given UniProt ID using the EBI QuickGO API. CRITICAL: 'uniprot_id' MUST be a valid UniProt Accession (e.g., 'P04637').",
                 search_chembl_target: "[Tags: Phytochemistry, Metabolomics] Search the ChEMBL database for pharmacological protein targets. Use this to find Target ChEMBL IDs and preferred names associated with specific biological targets, enzymes, or pathways (e.g., 'Tubulin', 'EGFR', 'Kinase'). Do NOT use this to search for chemical compounds directly; it is strictly for finding biological TARGETS.",
@@ -133,7 +134,8 @@ class SkillManager:
                 analyze_systems_network: "[Tags: Interaction, Systems Biology, Enrichment] A unified tool to analyze protein-protein interactions (PPI) or perform advanced functional enrichment. Use action='interactions' (via STRING DB) to find interacting partners. Use action='enrichment' (via g:Profiler) for robust GO/KEGG/Reactome pathway enrichment, highly optimized for plants and non-mammalian models. CRITICAL: 'identifiers' must be a comma-separated list of gene symbols or IDs. For 'interactions', 'species_id' is the NCBI TaxID (e.g., 3702 for Arabidopsis, 9606 for Human). For 'enrichment', 'organism' MUST be a valid g:Profiler code (e.g., 'athaliana', 'osativa', 'zmaize', 'hsapiens').",
                 query_plant_multiomics: "[Tags: Transcriptomics, Genomics] Fetch deep plant-specific gene annotations and baseline expression datasets. Action 'annotation' uses MyGene.info to aggregate deep TAIR/Phytozome/Ensembl metadata for plant genes. Action 'expression' searches the EBI Expression Atlas for transcriptomic datasets related to the gene. CRITICAL: 'gene_id' MUST be a canonical Gene ID or Symbol (e.g., 'AT1G01010', 'FLC', 'Os01g0101000').",
                 search_jaspar_motifs: "[Tags: Regulatory Genomics] Search JASPAR database for Transcription Factor binding motifs (DNA profiles). Use this to find motif IDs (e.g., 'MA0001.1') and sequence logos for promoter analysis. CRITICAL: The 'tax_group' MUST strictly be one of the provided literal values. Do not hallucinate taxonomic groups like 'mammals' or 'dicots'.",
-                query_ensembl_database: "[Tags: Genomics, Systems Biology] A unified tool to query the Ensembl REST API. Action 'lookup' fetches gene location, biotype, and description. Action 'homology' fetches homologous genes (orthologs) across different species. CRITICAL: The default species is 'arabidopsis_thaliana'. If querying other species, you MUST explicitly provide the correct lowercase_underscore species name (e.g., 'homo_sapiens', 'oryza_sativa'). The 'symbol' MUST be a canonical gene symbol (e.g., 'FT', 'BRCA1')."
+                query_ensembl_database: "[Tags: Genomics, Systems Biology] A unified tool to query the Ensembl REST API. Action 'lookup' fetches gene location, biotype, and description. Action 'homology' fetches homologous genes (orthologs) across different species. CRITICAL: The default species is 'arabidopsis_thaliana'. If querying other species, you MUST explicitly provide the correct lowercase_underscore species name (e.g., 'homo_sapiens', 'oryza_sativa'). The 'symbol' MUST be a canonical gene symbol (e.g., 'FT', 'BRCA1').",
+                plot_chart: "[Tags: Visualization] Render a publication-quality chart via R using a DECLARATIVE spec (you do NOT write R code). Use this AFTER a successful tabular tool (enrichment results, expression datasets, homologs, interactions, etc.). The system first ANALYZES the data (column names + value ranges) to decide the best academic presentation: whether to sort the categorical column by significance (most significant on top), whether to add a continuous color gradient (e.g. -log10(pvalue) or FDR), and whether to draw significance stars (* / ** / ***). It then applies international journal conventions (clean theme, bold typography, journal palettes). COLOR DECISION: choose the academic palette yourself based on (1) the chart type, (2) the data structure (categorical vs continuous, number of groups), and (3) the user's needs. Guidelines: volcano -> 'set1' (red/blue up/down regulation); heatmap/corrplot/density/ridge -> 'viridis' (perceptually uniform sequential); pie/donut/alluvial/network -> 'set1' (high-contrast for many categories); line/area -> 'nature' (colorblind-safe trends); boxplot/violin/dotplot -> 'set2' (soft categorical); scatter/bubble/bar/histogram -> 'set2' (categorical) or 'viridis' when a continuous color column is mapped. Always prefer a COLORED palette so the figure is never black-and-white unless the user explicitly asks for grayscale. Supported chart_type values: 'scatter','bubble','line','area','volcano','bar','boxplot','violin','histogram','density','dotplot','heatmap','corrplot','pie','donut','ridge','alluvial','network'. ENRICHMENT DOTPLOT CANONICAL LAYOUT (for KEGG/GO/Reactome/GSEA bubble plots): chart_type='bubble', x=Gene Ratio (numeric, e.g. gene_ratio / rich_factor) plotted HORIZONTALLY, y=Term / Pathway name (categorical) ordered in DESCENDING order of Gene Ratio so the largest ratio sits at the TOP of the figure, size=Gene Count column, color=FDR (continuous) mapped via a blue-white-red gradient (matches clusterProfiler::dotplot / enrichplot). The right-side legend shows a vertical color bar labeled 'FDR' and a separate 'Count' size legend with discrete reference dots. Do NOT flip the axes (no coord_flip): X=Gene Ratio is bottom; Y=Pathway names are on the left. Parameters: chart_type (one of the supported types), data (the previous tool's result list as a JSON string, unchanged), x (column for X axis), y (column for Y axis), size (optional column for point size, bubble/dotplot), label (optional column for point labels / group), title (optional). OPTIONAL style overrides to honor the user's special requirements: style (journal preset: 'publication','nature','cell','minimal','custom'), palette (color: 'set1','set2','nature','cell','viridis','magma'), theme (base theme: 'bw','classic','minimal','pubr'). If the user requests a chart type NOT in the supported list, do NOT guess — ask the user for more detail (data structure, exact chart type, styling) so the system can draw it well. CRITICAL: pass the exact column names that exist in the data, and forward the data unchanged. Example: chart_type='bubble', data='{\"results\":[{\"term\":\"x\",\"p_value\":1e-5,\"gene_count\":32}]}', x='gene_count', y='p_value', size='gene_count', label='term'."
             }
 
             for func_ptr, desc in core_tools.items():
@@ -281,8 +283,28 @@ class SkillManager:
         return filtered
 
     def get_academic_schemas(self, tags: list = None) -> list:
-        """获取并过滤内部学术 Agent 的工具（严格基于 Tags）"""
-        return self._filter_schemas_by_tags(self.academic_schemas, tags)
+        """Get and filter internal academic-agent tools (by Tags + user disable toggle)."""
+        filtered = self._filter_schemas_by_tags(self.academic_schemas, tags)
+        deselected = self._get_deselected_academic_skills()
+        if not deselected:
+            return filtered
+
+        result = []
+        for schema in filtered:
+            func_name = schema.get("function", {}).get("name", "")
+            if func_name in deselected:
+                continue
+            result.append(schema)
+        return result
+
+    def _get_deselected_academic_skills(self) -> set:
+        """Read the set of disabled internal academic tool names from config."""
+        try:
+            from src.core.config_manager import ConfigManager
+            return ConfigManager().get_deselected_academic_skills()
+        except Exception as e:
+            logger.warning(f"Failed to read deselected academic skills: {e}")
+            return set()
 
     def get_external_schemas(self, names: list = None) -> list:
         """修改：获取并过滤外部导入的 Skills（严格基于 Name 而非 Tags）"""
@@ -298,6 +320,58 @@ class SkillManager:
     def is_skill_available(self, name: str) -> bool:
         return name in self.academic_skills or name in self.external_skills
 
+    @staticmethod
+    def _drop_unknown_arguments(func: Callable, arguments: dict) -> dict:
+        """Drop arguments the target callable does not declare.
+
+        Reasoning models frequently append cosmetic extras (e.g. ``x_label`` /
+        ``y_label``) to a declarative skill such as ``plot_chart``. Instead of
+        raising ``TypeError``, silently discard anything the function cannot
+        accept while preserving every declared parameter.
+        """
+        if not isinstance(arguments, dict):
+            return arguments
+        try:
+            sig = inspect.signature(func)
+        except (ValueError, TypeError):
+            return arguments
+        accepted = {p for p in sig.parameters if p not in ("self", "cls")}
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return arguments
+        return {k: v for k, v in arguments.items() if k in accepted}
+
+    @staticmethod
+    def _normalize_arguments(name: str, arguments: dict) -> dict:
+        """Normalize LLM-provided arguments to match a skill's signature.
+
+        LLMs sometimes use near-miss or alias parameter names (e.g. ``type``
+        instead of ``chart_type``). This maps known aliases so the call does
+        not fail with ``TypeError``. Returns a new dict; the input is unchanged.
+        """
+        if not isinstance(arguments, dict):
+            return arguments
+
+        alias_map = {
+            "plot_chart": {
+                "type": "chart_type",
+                "chart": "chart_type",
+                "data_records": "data",
+                "values": "data",
+                "title_text": "title",
+            },
+        }
+
+        aliases = alias_map.get(name)
+        if not aliases:
+            return arguments
+
+        normalized = dict(arguments)
+        for alias, canonical in aliases.items():
+            if alias in normalized and canonical not in normalized:
+                normalized[canonical] = normalized.pop(alias)
+
+        return normalized
+
     def call_skill(self, name: str, arguments: dict) -> str:
         """统一的执行入口，自动寻找对应的池子"""
         if name in self.academic_skills:
@@ -311,6 +385,12 @@ class SkillManager:
 
         try:
             logger.info(f"Executing {pool_name} Skill: [{name}]")
+            # 参数归一化：LLM 可能用别名/近似参数名（如 plot_chart 用 "type"
+            # 而非 "chart_type"），此处做兜底映射，避免 Argument mismatch。
+            arguments = self._normalize_arguments(name, arguments)
+            # 丢弃函数未声明的额外参数（如 plot_chart 收到 x_label/y_label），
+            # 避免 TypeError，同时保留所有已声明参数。
+            arguments = self._drop_unknown_arguments(func, arguments)
             result = func(**arguments)
             if isinstance(result, (dict, list)):
                 return json.dumps(result, ensure_ascii=False)

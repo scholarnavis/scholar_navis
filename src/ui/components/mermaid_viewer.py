@@ -4,11 +4,12 @@ import os
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar,
-                               QFileDialog, QComboBox, QSplitter, QTextEdit)
+                               QFileDialog, QComboBox, QSplitter)
 
 from src.core.theme_manager import ThemeManager
 # 🌟 引入你的自定义 Dialog
 from src.ui.components.dialog import StandardDialog
+from src.ui.components.source_code_viewer import SourceCodeViewer
 
 
 class MermaidViewer(QMainWindow):
@@ -22,11 +23,14 @@ class MermaidViewer(QMainWindow):
         self.splitter = QSplitter(Qt.Horizontal)
         self.setCentralWidget(self.splitter)
 
-        # 左侧：源码编辑器 (默认隐藏)
-        self.source_editor = QTextEdit()
-        self.source_editor.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; font-family: Consolas, monospace;")
+        # 左侧：源码编辑器（默认折叠，可通过工具栏 "Toggle Source" 展开）
+        self.source_editor = SourceCodeViewer(
+            title="Mermaid Source Code",
+            editable=True,
+            collapsed=True,
+            max_height=600,
+        )
         self.source_editor.textChanged.connect(self._live_update)
-        self.source_editor.setVisible(False)
         self.splitter.addWidget(self.source_editor)
 
         # 右侧：Web 引擎渲染器
@@ -44,13 +48,7 @@ class MermaidViewer(QMainWindow):
     def _apply_theme(self):
         tm = ThemeManager()
 
-        # 1. 更新源码编辑器
-        self.source_editor.setStyleSheet(f"""
-            background-color: {tm.color('bg_input')}; 
-            color: {tm.color('text_main')}; 
-            font-family: {tm.font_family()}; /* Changed to unified font */
-            border: 1px solid {tm.color('border')};
-        """)
+        # 1. 源码编辑器主题由 SourceCodeViewer 内部自适应，无需在此处理
 
         # 2. 更新工具栏
         tb_style = f"""
@@ -146,9 +144,7 @@ class MermaidViewer(QMainWindow):
 
         self.mermaid_code = cleaned_code.strip()
 
-        self.source_editor.blockSignals(True)
-        self.source_editor.setPlainText(self.mermaid_code)
-        self.source_editor.blockSignals(False)
+        self.source_editor.set_code(self.mermaid_code)
 
         self.render_diagram()
         self.showNormal()
@@ -157,10 +153,10 @@ class MermaidViewer(QMainWindow):
 
 
     def _toggle_source(self):
-        self.source_editor.setVisible(not self.source_editor.isVisible())
+        self.source_editor.toggle_collapsed()
 
     def _live_update(self):
-        self.mermaid_code = self.source_editor.toPlainText()
+        self.mermaid_code = self.source_editor.code()
         self.render_diagram()
 
     def render_diagram(self, theme=None):
