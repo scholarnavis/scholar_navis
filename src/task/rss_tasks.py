@@ -16,7 +16,7 @@ def _setup_worker_env():
     try:
         from src.core.network_worker import setup_global_network_env
         setup_global_network_env()
-    except Exception:
+    except (ImportError, OSError, AttributeError, ValueError, RuntimeError):
         pass
 
 

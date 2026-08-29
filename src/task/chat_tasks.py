@@ -114,7 +114,7 @@ class ChatGenerationTask(BackgroundTask):
                                 cached_data = json.load(cf)
                             self.external_context.extend(cached_data)
                             continue
-                        except:
+                        except (OSError, ValueError):
                             pass
 
                     try:

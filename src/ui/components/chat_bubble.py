@@ -41,6 +41,30 @@ class ChatBubbleWidget(QWidget):
     sig_retry_clicked = Signal(int)
     sig_plot_plan_confirm = Signal(str)
 
+    # 由 init_ui/add_translation_widget 创建，仅作静态检查声明
+    main_layout: QHBoxLayout
+    spacer: QWidget
+    content_container: QWidget
+    content_layout: QVBoxLayout
+    ctx_frame: QFrame
+    ctx_header: QLabel
+    ctx_content: QLabel
+    lbl_text: QTextBrowser
+    edit_input: QTextEdit
+    btn_widget: QWidget
+    btn_layout: QHBoxLayout
+    btn_copy: QPushButton
+    btn_copy_md: QPushButton
+    btn_bubble_retry: QPushButton
+    btn_edit: QPushButton
+    edit_btn_widget: QWidget
+    edit_btn_layout: QHBoxLayout
+    btn_cancel: QPushButton
+    btn_confirm: QPushButton
+    trans_container: QWidget
+    btn_toggle_trans: QPushButton
+    lbl_trans: QLabel
+
     # --- 2. 完整的 __init__ 方法 ---
     def __init__(self, text, is_user, index, context_html=None, parent=None, msg_type=None):
         super().__init__(parent)
@@ -430,7 +454,7 @@ class ChatBubbleWidget(QWidget):
         def _replace(match):
             try:
                 data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
-            except Exception:
+            except ValueError:
                 logger.warning("Malformed <rplot_card> marker dropped")
                 return ""
             key = data.get("png_path") or data.get("svg_path") or data.get("chart_title", "")
@@ -474,7 +498,7 @@ class ChatBubbleWidget(QWidget):
         def _replace(match):
             try:
                 data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
-            except Exception:
+            except ValueError:
                 logger.warning("Malformed <plot_plan> marker dropped")
                 return ""
             key = data.get("plan_text") or data.get("request") or "plan"
@@ -604,7 +628,6 @@ class ChatBubbleWidget(QWidget):
                         ext = header.split(";")[0].split("/")[1] if "/" in header else "png"
                         import base64
                         import hashlib
-                        import os
                         import tempfile
 
                         img_data = base64.b64decode(encoded)
@@ -620,8 +643,8 @@ class ChatBubbleWidget(QWidget):
                         local_uri = f"file:///{local_path.replace(os.sep, '/')}"
                         new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{local_uri}" title="Click to view full image" />'
                         return f'<a href="{local_uri}">{new_img_tag}</a>'
-                    except Exception as e:
-                        print(f"Base64 image decode failed: {e}")
+                    except (ValueError, OSError) as e:
+                        logger.warning(f"Base64 image decode failed: {e}")
                         return f'<img width="420" style="max-width: 100%;" src="{src_url}" />'
 
                 if src_url.startswith("file://"):
@@ -633,7 +656,7 @@ class ChatBubbleWidget(QWidget):
                         if sys.platform == "win32" and local_path.startswith("/"):
                             local_path = local_path.lstrip("/")
                         lower = local_path.lower()
-                    except Exception:
+                    except (ValueError, ImportError):
                         return match.group(0)
 
                     # PDF cannot render inline; route via cite://view to the internal viewer.
@@ -698,6 +721,7 @@ class ChatBubbleWidget(QWidget):
             self.updateGeometry()
 
         except Exception as e:
+            logger.warning(f"Failed to render bubble content: {e}")
             self.lbl_text.setText(text)
             self.lbl_text.adjustSize()
             self.content_container.adjustSize()
@@ -709,7 +733,7 @@ class ChatBubbleWidget(QWidget):
             try:
                 if os.path.exists(path):
                     os.remove(path)
-            except Exception:
+            except OSError:
                 pass
         self.downloaded_images.clear()
 

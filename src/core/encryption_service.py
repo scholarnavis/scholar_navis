@@ -4,7 +4,9 @@ import platform
 import logging
 import base64
 import keyring
+from keyring.errors import KeyringError
 import hashlib
+import subprocess
 from typing import Optional, Tuple
 
 from cryptography.fernet import Fernet
@@ -45,7 +47,7 @@ class SystemEncryptionService:
                 cmd = "ioreg -rd1 -c IOPlatformExpertDevice | grep -E '(UUID)'"
                 uuid = subprocess.check_output(cmd, shell=True).decode().split('"')[-2]
                 return uuid
-        except Exception:
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             return platform.node()
         return "fallback-id"
 
@@ -89,7 +91,7 @@ class SystemEncryptionService:
                     # 可选：尝试清除物理存储中的损坏数据
                     try:
                         keyring.delete_password(self.service_name, self.account_name)
-                    except:
+                    except (KeyringError, OSError):
                         pass
 
             # Generate new key if missing or corrupted

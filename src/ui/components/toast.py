@@ -8,6 +8,9 @@ logger = logging.getLogger("UI.Toast")
 class ToastManager:
     """全局单例，用于管理 Toast 显示（支持多消息向上堆叠排队）"""
     _instance = None
+    # 由 __new__ 初始化，仅作静态检查声明
+    parent_widget = None
+    active_toasts: list
 
     def __new__(cls):
         if cls._instance is None:

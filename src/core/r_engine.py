@@ -45,12 +45,16 @@ class REngine:
     _instance: Optional["REngine"] = None
     _lock = threading.Lock()
 
+    # 由 __new__ 初始化为实例属性；类体声明提供类型与缺省值，满足静态检查
+    _custom_path: Optional[str] = None
+    _cached: Optional[dict] = None
+
     def __new__(cls) -> "REngine":
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
-                cls._instance._custom_path: Optional[str] = None
-                cls._instance._cached: Optional[dict] = None
+                cls._instance._custom_path = None
+                cls._instance._cached = None
                 cls._instance._cache_lock = threading.RLock()
         return cls._instance
 

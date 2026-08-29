@@ -14,6 +14,14 @@ from src.core.version import __version__, __app_name__, __description__, __websi
 
 
 class AboutTool(BaseTool):
+    # 由 get_ui_widget/_on_version_clicked 创建，仅作静态检查声明
+    logo: QSvgWidget
+    lbl_title: QLabel
+    lbl_desc: QLabel
+    lbl_version: QLabel
+    _version_click_count: int
+    _dev_dialog: QWidget
+
     def __init__(self):
         super().__init__("About")
         self.widget = None

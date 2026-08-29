@@ -75,7 +75,7 @@ class McpTestTask(BackgroundTask):
             from src.core.mcp_manager import MCPManager
             mgr = MCPManager.get_instance()
             mgr.disconnect_server(test_name)
-        except Exception:
+        except (ImportError, RuntimeError, OSError):
             pass
         self.send_log("INFO", "MCP test task cancelled")
 

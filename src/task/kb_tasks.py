@@ -238,7 +238,7 @@ class ImportFilesTask(BackgroundTask):
                         embedding_function=embed_fn,
                         metadata={"kb_name": kb_info['name']}
                     )
-                except Exception:
+                except (ValueError, RuntimeError, OSError):
                     pass
 
                 all_docs = kb_mgr.get_kb_files(kb_id)
@@ -373,7 +373,7 @@ class ImportFilesTask(BackgroundTask):
             if getattr(db_mgr, 'client', None):
                 try:
                     db_mgr.client._system.stop()
-                except Exception:
+                except (RuntimeError, AttributeError, OSError):
                     pass
 
             if 'embed_fn' in locals() and embed_fn:
@@ -389,7 +389,7 @@ class ImportFilesTask(BackgroundTask):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     self.send_log("INFO", "CUDA cache cleared.")
-            except Exception:
+            except (ImportError, OSError, RuntimeError, AttributeError):
                 pass
 
 
@@ -429,7 +429,7 @@ class DeleteFilesTask(BackgroundTask):
                 if getattr(db_mgr, 'client', None):
                     try:
                         db_mgr.client._system.stop()
-                    except Exception:
+                    except (RuntimeError, AttributeError, OSError):
                         pass
 
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
@@ -474,7 +474,7 @@ class RenameFilesTask(BackgroundTask):
                 if getattr(db_mgr, 'client', None):
                     try:
                         db_mgr.client._system.stop()
-                    except Exception:
+                    except (RuntimeError, AttributeError, OSError):
                         pass
 
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))

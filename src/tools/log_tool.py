@@ -27,6 +27,21 @@ class LogReceiver(QObject):
 class LogTool(BaseTool):
     MAX_LOGS = 1000
 
+    # 由 UI 构建流程创建的控件与快捷键，仅作静态检查声明
+    lbl_title: QLabel
+    btn_toggle_search: QPushButton
+    search_widget: QWidget
+    search_input: QLineEdit
+    lbl_search_count: QLabel
+    btn_find_prev: QPushButton
+    btn_find_next: QPushButton
+    btn_close_search: QPushButton
+    btn_clear: QPushButton
+    shortcut_find: QShortcut
+    shortcut_find_prev: QShortcut
+    shortcut_find_prev_alt: QShortcut
+    _search_timer: QTimer
+
     def __init__(self):
         super().__init__("System Logs")
         self.widget = None

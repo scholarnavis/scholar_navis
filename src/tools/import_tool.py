@@ -23,6 +23,19 @@ from src.ui.components.dialog import ProjectEditorDialog, ProgressDialog, Standa
 
 
 class ImportTool(BaseTool):
+    # 由 get_ui_widget 创建，仅作静态检查声明
+    combo_kb: BaseComboBox
+    btn_new: QPushButton
+    btn_snp: QPushButton
+    btn_edit: QPushButton
+    btn_del_kb: QPushButton
+    lbl_kb_info: QLabel
+    btn_add_files: QPushButton
+    btn_export: QPushButton
+    file_table: QTableWidget
+    lbl_staged_status: QLabel
+    btn_save: QPushButton
+
     def __init__(self):
         super().__init__("Library Manager")
         self.widget = None
@@ -629,7 +642,7 @@ class ImportTool(BaseTool):
         if self.pd:
             self.pd.close_safe()
             try: self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-            except Exception: pass
+            except (TypeError, RuntimeError): pass
 
         self.staged_add, self.staged_del, self.staged_rename = [], [], {}
         self.staged_meta, self.rebuild_required = None, False
@@ -652,7 +665,7 @@ class ImportTool(BaseTool):
     def _on_rename_done(self, state, msg):
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_rename_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
 
         if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
@@ -668,7 +681,7 @@ class ImportTool(BaseTool):
     def _on_del_done(self, state, msg):
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_del_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
 
         if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
@@ -689,11 +702,11 @@ class ImportTool(BaseTool):
         # 1. Disconnect immediately to prevent duplicate triggers or warnings
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception:
+        except (AttributeError, TypeError, RuntimeError):
             pass
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_final_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
 
         if state == TaskState.SUCCESS.value:
@@ -791,7 +804,7 @@ class ImportTool(BaseTool):
                 while chunk := f.read(1024 * 1024):  # 每次读 1MB，防内存溢出
                     hasher.update(chunk)
             return hasher.hexdigest()
-        except:
+        except OSError:
             return None
 
     def select_files(self):
@@ -986,11 +999,11 @@ class ImportTool(BaseTool):
 
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_export_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception:
+        except (AttributeError, TypeError, RuntimeError):
             pass
 
 
@@ -1028,11 +1041,11 @@ class ImportTool(BaseTool):
 
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_import_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception:
+        except (AttributeError, TypeError, RuntimeError):
             pass
         GlobalSignals().kb_list_changed.emit()
 
@@ -1049,7 +1062,7 @@ class ImportTool(BaseTool):
         def on_download_state_changed(state, msg):
             try:
                 self.task_mgr.sig_state_changed.disconnect(on_download_state_changed)
-            except Exception:
+            except (TypeError, RuntimeError):
                 pass
 
             if state == TaskState.SUCCESS.value:

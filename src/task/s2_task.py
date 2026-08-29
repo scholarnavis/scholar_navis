@@ -11,6 +11,8 @@ logger = logging.getLogger("S2Task")
 class S2TaskManager:
     _instance = None
     _lock = threading.Lock()
+    # 限流时间戳：延迟创建，reload_config 中可被删除，故仅作类型声明
+    _last_request_time: float
 
     def __new__(cls):
         with cls._lock:

@@ -1,6 +1,7 @@
 # ====== 文件：pdf_viewer.py ======
 
 import html
+import logging
 import os
 import re
 import shutil
@@ -38,8 +39,9 @@ def _apply_windows_dark_titlebar(window, tm):
             attr = 20 if build >= 22000 else 19
             val = ctypes.c_int(1 if is_dark else 0)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
-        except Exception:
-            pass
+        except Exception as e:
+            # DWM 属外观增强，失败仅记录，不影响窗口功能
+            logging.getLogger("UI.PDFViewer").debug(f"DWM dark titlebar failed: {e}")
 
 
 class InternalPDFViewer(QMainWindow):

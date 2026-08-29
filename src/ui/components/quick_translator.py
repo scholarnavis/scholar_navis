@@ -49,6 +49,9 @@ class TranslatorInputEdit(QTextEdit):
 class QuickTranslatorWindow(QWidget):
     """快捷翻译窗口"""
 
+    # 淡入/淡出动画引用，防止被 GC 回收，仅作静态检查声明
+    anim: QPropertyAnimation
+
     def __init__(self, parent=None):
         super().__init__(None)
 

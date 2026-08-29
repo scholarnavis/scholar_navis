@@ -97,7 +97,7 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 try:
                     os.remove(lock_file)
                     self.send_log("WARNING", f"Removed leftover lock file to prevent deadlock: {lock_file}")
-                except Exception as e:
+                except OSError:
                     pass
         hf_logger = hf_logging.get_logger()
         hf_logging.set_verbosity_info()

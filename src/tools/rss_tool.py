@@ -6,8 +6,8 @@ import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QUrl, QEvent, QMarginsF, QTimer, QRectF, QByteArray, QBuffer, QIODevice
-from PySide6.QtGui import QDesktopServices, QTextDocument, QPageLayout, QAbstractTextDocumentLayout, QPainter, QFont, \
-    QColor
+from PySide6.QtGui import QAction, QDesktopServices, QTextDocument, QPageLayout, QAbstractTextDocumentLayout, \
+    QPainter, QFont, QColor
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QListWidget, QSplitter, QListWidgetItem, QLineEdit, QCheckBox, QScrollArea,
@@ -376,6 +376,41 @@ class ArticleWidget(QFrame):
 
 
 class RSSTool(BaseTool):
+    # 由 get_ui_widget 与刷新流程创建，仅作静态检查声明
+    search_task_mgr: TaskManager
+    widget: QWidget
+    btn_manage: QPushButton
+    btn_more_actions: QPushButton
+    more_menu: QMenu
+    action_add: QAction
+    action_edit: QAction
+    action_unsub: QAction
+    action_import: QAction
+    action_export: QAction
+    lbl_time: QLabel
+    btn_refresh: QPushButton
+    inp_search_feed: QLineEdit
+    btn_feed_sel_all: QPushButton
+    btn_feed_sel_inv: QPushButton
+    feed_list: QListWidget
+    btn_sel_all: QPushButton
+    btn_sel_inv: QPushButton
+    btn_batch_chat: QPushButton
+    btn_export_pdf: QPushButton
+    scroll_area: QScrollArea
+    loading_container: QWidget
+    loading_layout: QHBoxLayout
+    spinner: ModernSpinner
+    lbl_loading_text: QLabel
+    article_container: QWidget
+    article_layout: QVBoxLayout
+    render_timer: QTimer
+    render_queue: list
+    current_render_url: str
+    _is_cancelling: bool
+    pd: ProgressDialog
+    _cancel_export: bool
+
     def __init__(self):
         super().__init__("Literature Tracker")
 
@@ -506,7 +541,7 @@ class RSSTool(BaseTool):
         try:
             self.search_task_mgr.sig_result.disconnect()
             self.search_task_mgr.sig_state_changed.disconnect()
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
 
         self.search_task_mgr.sig_result.connect(self._on_search_result)
@@ -823,7 +858,7 @@ class RSSTool(BaseTool):
     def _on_export_done(self, result):
         try:
             self.task_mgr.sig_result.disconnect(self._on_export_done)
-        except:
+        except (TypeError, RuntimeError):
             pass
 
         if result and result.get("success"):
@@ -841,7 +876,7 @@ class RSSTool(BaseTool):
     def _on_import_done(self, result):
         try:
             self.task_mgr.sig_result.disconnect(self._on_import_done)
-        except:
+        except (TypeError, RuntimeError):
             pass
 
         if result and result.get("success"):
@@ -980,11 +1015,11 @@ class RSSTool(BaseTool):
     def _on_fetch_done(self, state, msg):
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_fetch_done)
-        except:
+        except (TypeError, RuntimeError):
             pass
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except:
+        except (TypeError, RuntimeError):
             pass
 
         # 统一替换为 show_finish_state 闭环强反馈

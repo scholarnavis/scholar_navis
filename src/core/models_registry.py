@@ -91,7 +91,8 @@ def get_optimal_chunk_settings(embedding_model_id: str, reranker_model_id: str):
         from src.core.config_manager import ConfigManager
         from src.core.device_manager import DeviceManager
         dev = DeviceManager().parse_device_string(ConfigManager().user_settings.get("inference_device", "Auto"))
-    except:
+    except Exception as e:
+        logger.debug(f"Device probe failed, fallback to cpu: {e}")
         dev = "cpu"
 
     # 解析 AUTO 宏
@@ -221,7 +222,7 @@ def _is_file_valid(path):
     if not os.path.exists(path): return False
     try:
         if os.path.getsize(path) == 0: return False
-    except: return False
+    except OSError: return False
     return True
 
 def _official_check(repo_id):
@@ -230,7 +231,7 @@ def _official_check(repo_id):
         info = scan_cache_dir(_get_hf_home())
         for repo in info.repos:
             if repo.repo_id == repo_id and repo.revisions: return True
-    except: pass
+    except (ImportError, OSError, ValueError, RuntimeError): pass
     return False
 
 def _manual_check(repo_id):
@@ -254,7 +255,7 @@ def _repair_model_links(repo_id):
             if os.path.exists(p): shutil.rmtree(p, ignore_errors=True)
         snapshot_download(repo_id, resume_download=True)
         return True
-    except: return False
+    except (ImportError, OSError, ValueError, RuntimeError): return False
 
 
 class ModelManager:

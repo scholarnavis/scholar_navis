@@ -17,6 +17,9 @@ CONFIG_VERSION = "1.0"
 class ConfigManager:
     _instance = None
     _lock = threading.RLock()
+    # 由 load_settings/load_mcp_servers 填充，此处仅作类型声明
+    user_settings: dict
+    mcp_servers: dict
 
     def __new__(cls):
         with cls._lock:
@@ -146,7 +149,7 @@ class ConfigManager:
                                 plain_data = json.load(f)
                             self.save_json(path, plain_data, encrypt=True)
                             return plain_data
-                        except Exception:
+                        except (OSError, ValueError, InvalidToken, RuntimeError):
                             return None
                 else:
                     try:
@@ -162,7 +165,7 @@ class ConfigManager:
                             plain_data = json.loads(decrypted_text)
                             self.save_json(path, plain_data, encrypt=False)
                             return plain_data
-                        except Exception:
+                        except (OSError, ValueError, InvalidToken, RuntimeError):
                             return None
             except Exception as e:
                 self.logger.error(f"Critical error reading {path}: {e}")

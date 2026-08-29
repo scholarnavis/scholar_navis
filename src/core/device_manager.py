@@ -60,7 +60,7 @@ class DeviceManager:
                         for nv_name, real_vram in nvidia_vrams.items():
                             if nv_name.lower() in gpu["name"].lower() or gpu["name"].lower() in nv_name.lower():
                                 gpu["vram"] = real_vram
-                except Exception:
+                except (OSError, ValueError, subprocess.SubprocessError):
                     pass
 
             elif system == "Darwin":
@@ -78,7 +78,7 @@ class DeviceManager:
                         if len(parts) == 2:
                             mb_val = float(parts[1].replace("MiB", "").strip())
                             gpus.append({"name": parts[0].strip(), "vram": f"{mb_val / 1024:.1f} GB"})
-                except:
+                except (OSError, ValueError, subprocess.SubprocessError):
                     output = subprocess.check_output(["lspci"], text=True)
                     names = [line.split(': ')[1].strip() for line in output.split('\n') if
                              "VGA" in line or "3D" in line]
@@ -185,14 +185,14 @@ class DeviceManager:
 
         try:
             info['cpu_cores'] = f"{psutil.cpu_count(logical=False)}C / {psutil.cpu_count(logical=True)}T"
-        except:
+        except (psutil.Error, OSError):
             info['cpu_cores'] = "Unknown Cores"
 
         try:
             mem = psutil.virtual_memory()
             info['ram_total'] = f"{mem.total / (1024 ** 3):.1f} GB"
             info['ram_available'] = f"{mem.available / (1024 ** 3):.1f} GB"
-        except:
+        except (psutil.Error, OSError):
             info['ram_total'] = "Unknown"
             info['ram_available'] = "Unknown"
 
@@ -207,7 +207,7 @@ class DeviceManager:
         try:
             import onnxruntime as ort
             info['ort_version'] = ort.__version__
-        except:
+        except (ImportError, OSError, AttributeError):
             info['ort_version'] = "N/A"
 
         return info

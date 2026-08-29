@@ -106,5 +106,5 @@ class PDFEngine:
             return total_chunks
 
         except Exception as e:
-            self.logger.error(f"Fatal exception occurred:\n{traceback.format_exc()}")
+            self.logger.error(f"Fatal exception occurred ({e}):\n{traceback.format_exc()}")
             return 0

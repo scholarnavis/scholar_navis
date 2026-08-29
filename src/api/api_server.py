@@ -692,7 +692,7 @@ async def chat_completions(
             # 如果解析结果包含 OpenAI 标准错误体，则抛出 500 状态码
             status_code = 500 if "error" in parsed_response else 200
             return JSONResponse(content=parsed_response, status_code=status_code)
-        except Exception:
+        except (ValueError, TypeError):
             return JSONResponse(
                 content={
                     "error": {

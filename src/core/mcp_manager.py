@@ -41,7 +41,7 @@ class MCPLogReceiverProtocol(asyncio.DatagramProtocol):
                 main_logger.error(log_str)
             elif level == "CRITICAL":
                 main_logger.critical(log_str)
-        except Exception:
+        except (ValueError, AttributeError):
             pass
 
 
@@ -155,6 +155,8 @@ class MCPManager:
             self.server_stops[server_name] = asyncio.Event()
 
         try:
+            # PyCharm 已知误报：contextlib.AsyncExitStack 并非抽象类
+            # noinspection PyAbstractClass
             async with AsyncExitStack() as stack:
 
                 if connection_config['type'] == 'stdio':

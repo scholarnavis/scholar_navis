@@ -1,4 +1,5 @@
 import ctypes
+import logging
 import os
 import sys
 
@@ -50,8 +51,9 @@ def force_windows_taskbar_icon(hwnd, icon_path):
         if hIcon_big:
             ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 1, hIcon_big)
 
-    except Exception:
-        pass
+    except Exception as e:
+        # 任务栏图标强制刷新属外观增强，失败仅记录
+        logging.getLogger("UI.MainWindow").debug(f"Taskbar icon patch failed: {e}")
 
 
 def set_window_titlebar_theme(hwnd, is_dark: bool):
@@ -69,8 +71,9 @@ def set_window_titlebar_theme(hwnd, is_dark: bool):
             ctypes.windll.user32.SendMessageW(hwnd_int, 0x0086, 1, 0)
 
             ctypes.windll.user32.RedrawWindow(hwnd_int, None, None, 0x0400 | 0x0100 | 0x0001)
-        except Exception:
-            pass
+        except Exception as e:
+            # 深色标题栏适配属外观增强，失败仅记录
+            logging.getLogger("UI.MainWindow").debug(f"Titlebar theme patch failed: {e}")
 
 
 class MainWindow(QMainWindow):
@@ -336,7 +339,7 @@ class MainWindow(QMainWindow):
                 for old_log in logs[:-30]:
                     try:
                         os.remove(old_log)
-                    except Exception:
+                    except OSError:
                         pass
 
     def perform_startup_checks(self):

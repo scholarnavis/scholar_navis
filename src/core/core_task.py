@@ -30,6 +30,9 @@ class IPCLogHandler(logging.Handler):
         self.task_queue = task_queue
 
     def emit(self, record):
+        # 子进程日志管道不允许向调用方抛出异常（与 stdlib logging.Handler.emit 行为一致）；
+        # format() 失败域不可穷举，此处豁免静态检查。
+        # noinspection PyBroadException
         try:
             msg = self.format(record)
             self.task_queue.put({
@@ -358,5 +361,5 @@ class TaskManager(QObject):
                     parent.kill()
                 except psutil.NoSuchProcess:
                     pass
-        except Exception:
+        except (OSError, subprocess.SubprocessError, psutil.Error):
             pass

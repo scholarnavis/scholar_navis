@@ -36,8 +36,9 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     if 'global_logger' in globals():
         try:
             global_logger.error(f"Uncaught Exception:\n{tb_str}")
-        except Exception:
-            pass
+        except Exception as e:
+            # 崩溃处理器内日志失败时降级输出到 stderr
+            print(f"CRITICAL: Failed to log uncaught exception: {e}", file=sys.stderr)
 
     try:
         # 检查是否为 API 模式（非 GUI），如果是则只打印终端
@@ -67,7 +68,9 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
 
         msg.setDetailedText(tb_str)
         msg.exec()
-    except Exception:
+    except Exception as e:
+        # 崩溃弹窗失败时记录原因并回退到系统默认处理器
+        print(f"CRITICAL: Crash dialog failed: {e}", file=sys.stderr)
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
     sys.exit(1)
@@ -298,7 +301,7 @@ if __name__ == "__main__":
             is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
         else:
             is_admin = os.geteuid() == 0
-    except Exception:
+    except (ImportError, OSError, AttributeError):
         pass
 
     if is_admin:
@@ -378,7 +381,7 @@ if __name__ == "__main__":
             try:
                 myappid = ctypes.c_wchar_p("scholar.navis.app")
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            except Exception:
+            except (OSError, AttributeError):
                 pass
 
         global_logger = setup_logger()

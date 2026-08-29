@@ -13,6 +13,7 @@ from src.core.config_manager import ConfigManager
 class ThemeManager(QObject):
     theme_changed = Signal()
     _instance = None
+    current_theme: str
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
