@@ -40,6 +40,12 @@ logger = logging.getLogger("UI.DeveloperDialog")
 
 # AI tests: each entry pairs a display-only note (shown to the user, NOT sent
 # to the LLM) with the actual prompt (sent to the LLM to drive real tool use).
+#
+# IMPORTANT: the prompt should read like a REAL user typing in the chat box —
+# natural, conversational, with a concrete research goal — NOT a developer
+# instruction that names tools or parameters. Let the agent pick the right tool
+# itself, exactly as it would for a human user. The ``note`` is where the
+# developer intent (which skill / parameter path is being exercised) lives.
 AI_TESTS = {
     "plot_bubble": {
         "note": (
@@ -48,8 +54,9 @@ AI_TESTS = {
             "-> SVG/PNG/PDF rendering."
         ),
         "prompt": (
-            "I have GO/KEGG enrichment results and want an enrichment "
-            "bubble plot (Dotplot). Data: {\"results\": ["
+            "I just ran a GO enrichment analysis on my RNA-seq dataset and got "
+            "these terms back. Could you visualize them as an enrichment dotplot "
+            "(bubble plot) for me? Here is the data: {\"results\": ["
             '{"term": "response to far red light", "category": "BP", "p_value": 2.1e-12, "gene_count": 18, "gene_ratio": 0.18}, '
             '{"term": "photoperiodism, flowering", "category": "BP", "p_value": 8.4e-11, "gene_count": 15, "gene_ratio": 0.15}, '
             '{"term": "circadian rhythm", "category": "BP", "p_value": 3.2e-9, "gene_count": 22, "gene_ratio": 0.22}, '
@@ -60,8 +67,9 @@ AI_TESTS = {
             '{"term": "seed germination", "category": "BP", "p_value": 1.2e-3, "gene_count": 8, "gene_ratio": 0.08}, '
             '{"term": "response to cold", "category": "BP", "p_value": 6.7e-3, "gene_count": 14, "gene_ratio": 0.14}, '
             '{"term": "response to gibberellin", "category": "BP", "p_value": 2.4e-2, "gene_count": 19, "gene_ratio": 0.19}'
-            "]}\n"
-            "Please draw the enrichment bubble plot with the plot_chart tool."
+            "]} \n"
+            "A classic GO dotplot would be great, the kind you'd put in a paper. "
+            "Could you also tell me what the size and color of the bubbles represent?"
         ),
     },
     "provenance_chain": {
@@ -71,10 +79,28 @@ AI_TESTS = {
             "then a Provenance summary block at the end of the reply."
         ),
         "prompt": (
-            "Use search_academic_literature to find recent papers on "
-            "'CRISPR plant genome editing', then summarize the core finding of "
-            "one of them. After your answer, I expect to see the Provenance "
-            "summary at the end of the conversation."
+            "I'm writing the introduction to my plant biology paper and need "
+            "recent, citable papers on CRISPR-based genome editing in plants. "
+            "Could you find me a few good recent reviews and summarize what the "
+            "key finding of one of them is? Please make sure to cite everything "
+            "properly with full references."
+        ),
+    },
+    "literature_breadth": {
+        "note": (
+            "Developer test: exercising the enhanced <b>literature search</b> "
+            "(breadth / depth / trust). Expected: a single search_academic_literature "
+            "call with source='auto' returning an 'aggregated' payload, per-record "
+            "source_dbs + confidence fields, and a 'source_stats' block. "
+            "Use min_year to constrain recency."
+        ),
+        "prompt": (
+            "I'm starting a new project on single-cell RNA sequencing analysis "
+            "and want to get a broad picture of the field before I dive in. "
+            "Could you look for review-level papers from the last decade, point "
+            "out which are the most influential / highly cited ones, and give me "
+            "a sense of which journals they tend to appear in? Summarize the main "
+            "takeaways and cite every claim with the references."
         ),
     },
 }
@@ -110,8 +136,10 @@ class DeveloperDialog(BaseDialog):
         ai_row.setSpacing(8)
         self.btn_ai_plot = self._make_btn("AI: Plot (bubble)", lambda: self._ai_test("plot_bubble"))
         self.btn_ai_prov = self._make_btn("AI: Provenance", lambda: self._ai_test("provenance_chain"))
+        self.btn_ai_lit = self._make_btn("AI: Literature (Breadth)", lambda: self._ai_test("literature_breadth"))
         ai_row.addWidget(self.btn_ai_plot)
         ai_row.addWidget(self.btn_ai_prov)
+        ai_row.addWidget(self.btn_ai_lit)
         ai_row.addStretch()
         self.content_layout.addLayout(ai_row)
 
@@ -124,7 +152,8 @@ class DeveloperDialog(BaseDialog):
         self.btn_prov = self._make_btn("Provenance (module)", self._test_provenance)
         self.btn_skill = self._make_btn("Skill Gate", self._test_skill_gate)
         self.btn_syntax = self._make_btn("Syntax/Import", self._test_syntax)
-        for b in (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill, self.btn_syntax):
+        self.btn_lit = self._make_btn("Literature Merge", self._test_literature_merge)
+        for b in (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill, self.btn_syntax, self.btn_lit):
             func_row.addWidget(b)
         func_row.addStretch()
         self.content_layout.addLayout(func_row)
@@ -205,6 +234,7 @@ class DeveloperDialog(BaseDialog):
         self._test_skill_gate(clear=False)
         self._test_r_engine(clear=False)
         self._test_provenance(clear=False)
+        self._test_literature_merge(clear=False)
         self._log("=== All functional tests finished ===", "INFO")
 
     def _test_r_engine(self, clear: bool = True):
@@ -253,6 +283,134 @@ class DeveloperDialog(BaseDialog):
             self._log("Sensitive-key redaction verified.", "OK")
         except Exception as e:
             self._log(f"Provenance test failed: {e}", "FAIL")
+
+    def _test_literature_merge(self, clear: bool = True):
+        """Functional test for the enhanced literature search aggregation.
+
+        Validates the breadth/depth/trust upgrades of
+        ``search_academic_literature`` (multi-source aggregation) without any
+        network call: it feeds synthetic records into the real ``_merge_records``
+        pipeline and asserts:
+          * breadth  - cross-source dedup merges duplicate DOIs into one record
+          * depth    - journal name and a richer record are preserved/merged
+          * trust    - ``confidence`` scoring ranks higher-quality papers first
+        """
+        if clear:
+            self._clear()
+        self._log("--- Literature Merge (breadth/depth/trust) ---", "INFO")
+
+        # Synthetic fixtures mimicking raw per-source results. No network involved.
+        fixtures = [
+            # Same DOI, different sources -> must be merged (breadth + depth)
+            {"title": "A study on single-cell RNA-seq", "doi": "10.1000/abc123",
+             "citation_count": 5, "abstract": "real abstract from OpenAlex",
+             "source_db": "OpenAlex", "journal": "Nature Methods", "year": 2019},
+            {"title": "A study on single-cell RNA-seq", "doi": "https://doi.org/10.1000/abc123",
+             "citation_count": 9, "abstract": "No abstract",
+             "source_db": "Crossref", "journal": "", "year": 2019},
+            # No DOI -> dedup by normalized title (breadth)
+            {"title": "Single-cell analysis: methods and pitfalls", "doi": "",
+             "citation_count": 2, "abstract": "No abstract",
+             "source_db": "PubMed", "journal": "Genome Biology", "year": 2020},
+            # Distinct paper, low citations (trust: should rank lower)
+            {"title": "Another unrelated preprint", "doi": "",
+             "citation_count": 0, "abstract": "No abstract",
+             "source_db": "Semantic Scholar", "journal": "", "year": 2021},
+        ]
+
+        try:
+            from src.core.academic.literature import _merge_records, _normalize_doi
+            merged = _merge_records(list(fixtures))
+            origin = "literature._merge_records"
+        except Exception as e:
+            self._log(f"Import literature failed ({e}); falling back to inline logic.", "WARN")
+            # Inline replica so the developer panel still self-checks on machines
+            # without the biopython runtime (e.g. CI). Explicitly labelled.
+            import re as _re
+
+            def _norm_title(t):
+                return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9 ]", " ", str(t).lower())).strip()
+
+            def _normalize_doi(d):
+                if not d:
+                    return ""
+                return _re.sub(r"^(https?://(dx\.)?doi\.org/|http://)", "", str(d).strip(), flags=_re.IGNORECASE)
+
+            def _merge_records(records):
+                merged, order = {}, []
+                for rec in records:
+                    if not isinstance(rec, dict) or not rec.get("title"):
+                        continue
+                    doi = _normalize_doi(rec.get("doi"))
+                    key = f"doi:{doi}" if doi else f"title:{_norm_title(rec.get('title'))}"
+                    if key in merged:
+                        ex = merged[key]
+                        srcs = ex.get("source_dbs") or []
+                        for s in rec.get("source_db") and [rec["source_db"]] or []:
+                            if s and s not in srcs:
+                                srcs.append(s)
+                        ex["source_dbs"] = srcs
+                        ex["citation_count"] = max(ex.get("citation_count", 0) or 0,
+                                                   rec.get("citation_count", 0) or 0)
+                        if ex.get("abstract") in (None, "", "No abstract") and rec.get("abstract") not in (
+                                None, "", "No abstract"):
+                            ex["abstract"] = rec["abstract"]
+                        if not ex.get("journal") and rec.get("journal"):
+                            ex["journal"] = rec["journal"]
+                    else:
+                        rec.setdefault("source_dbs", [rec["source_db"]] if rec.get("source_db") else [])
+                        rec.setdefault("journal", "")
+                        rec.setdefault("pmid", "")
+                        merged[key] = rec
+                        order.append(key)
+                ranked = []
+                for key in order:
+                    rec = merged[key]
+                    score = 0.0
+                    n = len(rec.get("source_dbs") or [])
+                    score += 1.0 * min(n, 3)
+                    score += 1.0 if rec.get("doi") else 0.0
+                    score += 1.0 if rec.get("abstract") not in (None, "", "No abstract") else 0.0
+                    score += 0.5 if rec.get("journal") else 0.0
+                    score += 0.2 * min(float(rec.get("citation_count", 0) or 0) / 100.0, 2.0)
+                    rec["confidence"] = round(score, 2)
+                    ranked.append(rec)
+                ranked.sort(key=lambda r: (r.get("citation_count", 0) or 0, r.get("confidence", 0)), reverse=True)
+                return ranked
+
+            merged = _merge_records(list(fixtures))
+            origin = "inline replica (marked)"
+
+        # --- Assertions ---
+        fails = []
+        if len(merged) != 3:
+            fails.append(f"expected 3 merged records, got {len(merged)}")
+        if not any(r.get("doi") == "10.1000/abc123" and len(r.get("source_dbs", [])) == 2 for r in merged):
+            fails.append("DOI duplicate was not cross-source merged (breadth)")
+        if not any(r.get("journal") == "Nature Methods" for r in merged):
+            fails.append("journal name not preserved (depth)")
+        if not any(r.get("citation_count") == 9 for r in merged):
+            fails.append("citation_count should take the max across sources (trust)")
+        if not any(r.get("abstract") == "real abstract from OpenAlex" for r in merged):
+            fails.append("richer abstract not preferred (depth)")
+        ranked_first = merged[0] if merged else {}
+        if merged and ranked_first.get("title", "").startswith("A study on single-cell"):
+            self._log("Highest-cited merged paper ranked first (trust).", "OK")
+        else:
+            fails.append("ranking should place the highest-cited paper first (trust)")
+
+        for r in merged:
+            self._log(
+                f"  [{r.get('title', '')[:40]}] src={r.get('source_dbs')} "
+                f"cites={r.get('citation_count')} conf={r.get('confidence')}",
+                "INFO")
+
+        if fails:
+            for msg in fails:
+                self._log(msg, "FAIL")
+            self._log(f"Literature merge test FAILED (via {origin}).", "FAIL")
+        else:
+            self._log(f"Literature merge test passed (via {origin}).", "OK")
 
     def _test_skill_gate(self, clear: bool = True):
         if clear:

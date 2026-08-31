@@ -33,11 +33,28 @@ _MAX_BLOCK_NOISE = 250
 # 追问数量上限（提示词要求 6 条，留冗余）
 _MAX_QUESTIONS = 8
 
-# ---- 引用块（Cited Sources HTML）剥离：与 UI 生成格式保持一致 ----
+# ---- UI 页脚块（Cited Sources / Provenance）剥离 ----
+#    这些块由 chat_tasks 的 Phase 6/7 以 <br><hr ...> 起始追加到回复末尾，
+#    与模型生成的正文/追问建议不同源，须整体剥离并原样拼回。
+_UI_FOOTER_START = "<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
+
+# 兼容旧式 Only-Cited 匹配（保留引用链接文本）
 _CITES_RE = re.compile(
     r"<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
     r"<b>.*?Cited Sources:</b><br>"
 )
+
+
+def _split_ui_footer(text: str) -> tuple[str, str]:
+    """把末尾由 <br><hr ...> 起始的 UI 页脚（Cited Sources / Provenance）与正文分离。
+
+    返回 (body, footer_html)。UI 块永远位于回复末尾（Phase 6/7 追加），
+    故取第一个 <br><hr ...> 出现位置作为 footer 起点即可。
+    """
+    idx = text.find(_UI_FOOTER_START)
+    if idx == -1:
+        return text, ""
+    return text[:idx], text[idx:]
 
 # ---- 一级：强标记（提示词要求独占一行的字面 token，兼容大小写/分隔符变体）----
 _TOKEN_RE = re.compile(r"\[\s*FOLLOW[_\-\s]*UPS?\s*\]", re.IGNORECASE)
@@ -168,8 +185,13 @@ def _norm_tag(tag: str) -> str:
 def _extract_questions(block: str):
     """从候选块中解析列表项。
 
-    返回 (questions, noise_chars)：noise_chars 是块内"既非列表行、
+    返回 (questions, noise_chars)：noise_chars 是块内"既非合法追问行、
     又非标题行"的字符量，用于判断该候选是否为误报。
+
+    过滤口径：
+        - 追问项要求最终文本以 "?" / "." / 中文全角问号结尾；
+          例如 "search_preprints (1 call(s))" 末尾是 ")"，不应误吞。
+        - bullet 行不以问号结尾一律视为噪声（防止误识别列表/工具调用等）。
     """
     questions: List[dict] = []
     noise = 0
@@ -179,23 +201,38 @@ def _extract_questions(block: str):
             continue
         m = _ITEM_LINE_RE.match(line)
         if m:
-            q = _parse_question(m.group(1))
+            raw = m.group(1)
+            # 仅当 bullet 行末尾像问句才视为追问；否则按噪声计入
+            if not _looks_like_question(raw):
+                noise += len(stripped)
+                continue
+            q = _parse_question(raw)
             if q:
                 questions.append(q)
             else:
                 noise += len(stripped)
-        elif _BOLD_ITEM_RE.match(stripped) and stripped.endswith("?"):
-            # 无 bullet 的粗体 tag 行（**Tag**: question?）也视为追问行
+        elif _BOLD_ITEM_RE.match(stripped) and _looks_like_question(stripped):
             q = _parse_question(stripped)
             if q:
                 questions.append(q)
             else:
                 noise += len(stripped)
         elif _HEADER_LINE_RE.match(stripped):
-            continue  # 标题行（如 💡 Suggested Follow-ups:）不算噪声
+            continue  # 标题行不算噪声
         else:
             noise += len(stripped)
     return questions, noise
+
+
+def _looks_like_question(text: str) -> bool:
+    """粗判"这是一条追问"：剥除装饰后以 ?、.、! 或中英文全角问号结尾。
+
+    末尾判断同时要求文本长度足够（避免噪声冒名）。
+    """
+    t = _strip_inline(text or "")
+    if len(t) < _MIN_QUESTION_LEN:
+        return False
+    return t.rstrip().endswith(("?", "!", "？", "！", "."))
 
 
 def _dedupe(questions: List[dict]) -> List[dict]:
@@ -214,66 +251,66 @@ def _dedupe(questions: List[dict]) -> List[dict]:
 def split_follow_ups(text: str) -> FollowUpSplit:
     """把模型输出拆分为 (正文, 追问列表, 引用块 HTML)。
 
+    处理顺序：
+        0) 剥离末尾 UI 页脚（Cited Sources / Provenance，以 <br><hr ...> 起始），
+           避免其吞掉/干扰位于其前的 follow-ups 识别，并原样保留 footer。
+        1~3) 在"正文 + 追问建议"上做三级 follow-ups 识别。
+        4) 残余的引用块剥离归入 footer。
+
     任何一级识别失败都会安全回退：追问块保持原文渲染（与旧行为一致），
     仅额外清理残留的 [FOLLOW_UPS] 标记 token。
     """
     if not text or not text.strip():
         return FollowUpSplit(text or "", [], "")
 
-    # 0) 剥离 UI 生成的 Cited Sources 块（渲染时原样拼回）
-    cites_html = ""
-    cites_match = _CITES_RE.search(text)
-    if cites_match:
-        cites_html = text[cites_match.start():]
-        text = text[:cites_match.start()]
+    # 0) 先剥离末尾的 UI 页脚块（Cited Sources / Provenance）
+    body, footer_html = _split_ui_footer(text)
 
-    # 统一换行便于逐行处理；TextFormatter 渲染时本就会把 <br> 转为 \n
-    norm = text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
-    lines = norm.split("\n")
+    # 在剩余"正文 + 追问"上识别 follow-ups
+    norm_full = body.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    lines_full = norm_full.split("\n")
+    offsets_full: List[int] = []
+    _pos = 0
+    for _line in lines_full:
+        offsets_full.append(_pos)
+        _pos += len(_line) + 1
 
-    # 每行起始字符偏移，用于在原文上精确切分
-    offsets = []
-    pos = 0
-    for line in lines:
-        offsets.append(pos)
-        pos += len(line) + 1
-
-    split_at: Optional[int] = None
+    split_at_full: Optional[int] = None
     questions: List[dict] = []
     strategy = "none"
 
-    # ---- 1) 强标记分支：提示词要求输出在末尾，故取最后一个标记 ----
-    token_matches = list(_TOKEN_RE.finditer(norm))
+    # ---- 1) 强标记分支 ----
+    token_matches = list(_TOKEN_RE.finditer(norm_full))
     for m in reversed(token_matches):
-        line_start = norm.rfind("\n", 0, m.start()) + 1
-        qs, noise = _extract_questions(norm[m.end():])
+        line_start = norm_full.rfind("\n", 0, m.start()) + 1
+        qs, noise = _extract_questions(norm_full[m.end():])
         if len(qs) >= 2 and noise <= _MAX_BLOCK_NOISE:
-            split_at, questions, strategy = line_start, qs, "token"
+            split_at_full, questions, strategy = line_start, qs, "token"
             break
 
-    # ---- 2) 标题分支：从最后一个标题往前找第一个通过校验的 ----
-    if split_at is None:
-        for i in range(len(lines) - 1, -1, -1):
-            if not lines[i].strip():
+    # ---- 2) 标题分支 ----
+    if split_at_full is None:
+        for i in range(len(lines_full) - 1, -1, -1):
+            if not lines_full[i].strip():
                 continue
-            if not _HEADER_LINE_RE.match(lines[i].strip()):
+            if not _HEADER_LINE_RE.match(lines_full[i].strip()):
                 continue
-            qs, noise = _extract_questions("\n".join(lines[i + 1:]))
+            qs, noise = _extract_questions("\n".join(lines_full[i + 1:]))
             if len(qs) >= 2 and noise <= _MAX_BLOCK_NOISE:
-                split_at, questions, strategy = offsets[i], qs, "header"
+                split_at_full, questions, strategy = offsets_full[i], qs, "header"
                 break
 
-    # ---- 3) 兜底启发式：末尾连续的、全部以问号结尾的列表项 ----
-    if split_at is None:
+    # ---- 3) 兜底启发式 ----
+    if split_at_full is None:
         start_line = None
         collected: List[str] = []
-        for i in range(len(lines) - 1, -1, -1):
-            stripped = lines[i].strip()
+        for i in range(len(lines_full) - 1, -1, -1):
+            stripped = lines_full[i].strip()
             if not stripped:
                 if collected:
                     break
                 continue
-            m = _ITEM_LINE_RE.match(lines[i])
+            m = _ITEM_LINE_RE.match(lines_full[i])
             if not m and _BOLD_ITEM_RE.match(stripped):
                 raw_item = stripped
                 content = _strip_inline(_BOLD_ITEM_RE.match(stripped).group(2))
@@ -284,32 +321,31 @@ def split_follow_ups(text: str) -> FollowUpSplit:
                 break
             if not content.endswith("?"):
                 break
-            # 保留原始文本，交给 _parse_question 识别 [Tag] / **Tag**: 形式
             collected.append(raw_item)
             start_line = i
         if len(collected) >= 2 and start_line and start_line > 0:
-            collected.reverse()  # 倒序收集，恢复为阅读顺序
+            collected.reverse()
             questions = [q for q in (_parse_question(c) for c in collected) if q]
             if len(questions) >= 2:
-                split_at, strategy = offsets[start_line], "tail-heuristic"
+                split_at_full, strategy = offsets_full[start_line], "tail-heuristic"
 
     # ---- 校验失败：整体回退，正文保留（仅清理残留标记 token）----
-    if split_at is None:
-        fallback = _strip_tokens(norm).strip()
-        if fallback != norm.strip():
+    if split_at_full is None:
+        fallback = _strip_tokens(norm_full).strip()
+        if fallback != norm_full.strip():
             logger.debug("Follow-up split: no block found; stripped stray tokens.")
-        return FollowUpSplit(fallback, [], cites_html)
+        return FollowUpSplit(fallback, [], footer_html)
 
     # 切分点之前的正文若仍残留标记 token（如标记误写在中间），一并清理
-    main_text = _strip_tokens(norm[:split_at]).rstrip()
+    main_text = _strip_tokens(norm_full[:split_at_full]).rstrip()
     if not main_text.strip():
         # 整篇都是列表（如用户直接索要问题清单）：不当追问，保持原文
         logger.debug("Follow-up split: candidate would empty the body; ignored.")
-        return FollowUpSplit(_strip_tokens(norm).strip(), [], cites_html)
+        return FollowUpSplit(_strip_tokens(norm_full).strip(), [], footer_html)
 
     questions = _dedupe(questions)
     logger.info(
-        "Follow-up split via '%s': %d questions, main=%d chars.",
-        strategy, len(questions), len(main_text),
+        "Follow-up split via '%s': %d questions, main=%d chars, footer=%d chars.",
+        strategy, len(questions), len(main_text), len(footer_html),
     )
-    return FollowUpSplit(main_text, questions, cites_html)
+    return FollowUpSplit(main_text, questions, footer_html)
