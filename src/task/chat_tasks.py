@@ -599,7 +599,7 @@ class ChatGenerationTask(BackgroundTask):
             "3. STRICT FORMATTING: The standalone 'References' section must strictly follow academic formatting (e.g., APA/Nature style: Authors. (Year). Title. Journal. DOI). DO NOT include conversational fluff like 'Cited for the role of...' in this formal list. List purely the bibliographic data.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
             "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
-            "At the very end of your response, you MUST output the exact string [FOLLOW_UPS] followed by exactly 6 follow-up questions using this EXACT format:\n"
+            "At the very end of your response — after ALL other content — you MUST output the literal string [FOLLOW_UPS] on its own dedicated line, immediately followed by exactly 6 follow-up questions in this EXACT format:\n"
             "[FOLLOW_UPS]\n"
             "💡 Suggested Follow-ups:\n"
             "   - [Deep Dive] <Question about specific details or mechanisms>\n"
@@ -607,7 +607,8 @@ class ChatGenerationTask(BackgroundTask):
             "   - [Broader] <Question about implications or future trends>\n"
             "   - [Brainstorm] <A creative brainstorming question or hypothetical \"What if\" scenario>\n"
             "   - [Similar] <Question connecting to a similar or parallel topic/concept>\n"
-            "   - [Application] <Question about real-world applications or cross-disciplinary use>\n\n"
+            "   - [Application] <Question about real-world applications or cross-disciplinary use>\n"
+            "COMPLIANCE RULES (CRITICAL): (a) The string [FOLLOW_UPS] must appear EXACTLY once, alone on its own line — never inside a paragraph, heading, list item, or code block. (b) NEVER omit the follow-up section: even for short or negative answers, output at least 3 follow-ups. (c) The question list is the ABSOLUTE END of your response — output NOTHING after it. (d) Do NOT wrap this section in quotes or code fences.\n\n"
             f"### CONTEXT:\n{context_str}"
         )
 

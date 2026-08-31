@@ -48,41 +48,8 @@ AI_TESTS = {
             "-> SVG/PNG/PDF rendering."
         ),
         "prompt": (
-            "The user wants a GO/KEGG enrichment bubble plot (Dotplot). This is "
-            "the canonical way such a figure is drawn (memorize it for any "
-            "enrichment bubble request — it matches the clusterProfiler / "
-            "enrichplot reference style used in thousands of publications):\n"
-            "  - It conveys FOUR dimensions at once through a 2D plane plus "
-            "visual encodings:\n"
-            "    (1) Y axis = GO term / KEGG pathway names. The term with the "
-            "LARGEST Gene Ratio is plotted at the TOP; the rest are sorted in "
-            "DESCENDING order of Gene Ratio, so the figure forms a smooth "
-            "diagonal from upper-right to lower-left (matches the reference).\n"
-            "    (2) X axis = enrichment ratio (Gene Ratio / Rich Factor), "
-            "plotted HORIZONTALLY at the BOTTOM (do NOT flip the axes).\n"
-            "    (3) bubble size = gene count (Gene Count, bigger bubble = more "
-            "genes). The right-side size legend shows continuous reference dots "
-            "covering the observed count range.\n"
-            "    (4) bubble color = statistical significance (FDR / p.adjust). "
-            "Use a BLUE-to-WHITE-to-RED continuous gradient (similar to the "
-            "RdBu reversed / viridis::plasma ramp): smaller FDR -> more red, "
-            "larger FDR -> more blue. A vertical color bar on the right side "
-            "labels this gradient with the heading 'FDR'.\n"
-            "  - Render it as a bubble chart: x = gene_ratio, y = term "
-            "(ordered by gene_ratio descending), size = gene_count, "
-            "color = fdr (with the gradient above); compute FDR from the "
-            "p_value column with Benjamini-Hochberg BEFORE the ggplot call.\n\n"
-            "Workflow rule: if the user's plotting request is NOT clear on chart "
-            "type, the x/y/size/color columns, the title, or the styling, you MUST "
-            "first call the propose_plot_plan tool to show the user a concrete, "
-            "editable proposal (chart type, x, y, title, style/palette/theme, and "
-            "a short rationale) and wait for their confirmation or edits. Only "
-            "after the user confirms or adjusts the plan may you call plot_chart "
-            "to render. Never call plot_chart directly when the requirement is "
-            "ambiguous.\n\n"
-            "For this specific test, the requirements below are fully specified, "
-            "so you may proceed directly:\n"
-            'Data: {"results": ['
+            "I have GO/KEGG enrichment results and want an enrichment "
+            "bubble plot (Dotplot). Data: {\"results\": ["
             '{"term": "response to far red light", "category": "BP", "p_value": 2.1e-12, "gene_count": 18, "gene_ratio": 0.18}, '
             '{"term": "photoperiodism, flowering", "category": "BP", "p_value": 8.4e-11, "gene_count": 15, "gene_ratio": 0.15}, '
             '{"term": "circadian rhythm", "category": "BP", "p_value": 3.2e-9, "gene_count": 22, "gene_ratio": 0.22}, '
@@ -94,11 +61,7 @@ AI_TESTS = {
             '{"term": "response to cold", "category": "BP", "p_value": 6.7e-3, "gene_count": 14, "gene_ratio": 0.14}, '
             '{"term": "response to gibberellin", "category": "BP", "p_value": 2.4e-2, "gene_count": 19, "gene_ratio": 0.19}'
             "]}\n"
-            "Draw this as a bubble chart (x = gene_ratio horizontal axis, "
-            "y = term ordered by gene_ratio descending so the largest ratio "
-            "is at the top, size = gene_count, color = fdr via BH correction of "
-            "p_value, using the blue-white-red gradient). Call the plot_chart "
-            "tool to produce the figure."
+            "Please draw the enrichment bubble plot with the plot_chart tool."
         ),
     },
     "provenance_chain": {

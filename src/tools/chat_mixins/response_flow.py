@@ -9,6 +9,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from src.core.core_task import TaskState
+from src.core.follow_ups import split_follow_ups
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.toast import ToastManager
 
@@ -48,7 +49,12 @@ class ChatResponseFlowMixin:
         if getattr(self, '_is_rendering_dirty', False) and self.current_ai_bubble:
             self._is_rendering_dirty = False
             idx = getattr(self.current_ai_bubble, 'index', -1)
-            self.current_ai_bubble.set_content(self._format_response(self.current_ai_text.lstrip(), idx))
+            # 渲染前先分离追问块：流式期间 suggestions 也不进入正文，避免闪烁
+            split = split_follow_ups(self.current_ai_text.lstrip())
+            self._pending_follow_ups = split.questions
+            self.current_ai_bubble.set_content(
+                self._format_response(split.main_text + split.cites_html, idx)
+            )
 
             sb = self.scroll_area.verticalScrollBar()
             if (sb.maximum() - sb.value()) <= 50:
@@ -172,60 +178,25 @@ class ChatResponseFlowMixin:
             self.current_ai_bubble.set_loading(False)
 
         full_text = self.current_ai_text
-        cites_html = ""
 
-        cite_match = re.search(
-            r'<br><hr style=\'border:0; height:1px; background:#444; margin:15px 0;\'><b>.*?Cited Sources:</b><br>',
-            full_text)
-        if cite_match:
-            cites_html = full_text[cite_match.start():]
-            full_text = full_text[:cite_match.start()]
+        # 统一分离：正文 / 追问块 / 引用块（与流式渲染共用同一逻辑）
+        split = split_follow_ups(full_text)
+        self.current_ai_text = split.main_text + split.cites_html
+        self.logger.debug(
+            "Follow-up split finished: main=%d chars, questions=%d, cites=%d chars.",
+            len(split.main_text), len(split.questions), len(split.cites_html),
+        )
 
-        pattern = r'(?:\[\s*FOLLOW[_-]?\s*UPS?\s*\]|(?:^|\n|<br>|<br/>)\s*\*?\*?(?:💡\s*)?Suggested\s*Follow[- ]?ups?(?:\s*questions?)?:?\*?\*?)\s*'
-        matches = list(re.finditer(pattern, full_text, flags=re.IGNORECASE))
-        questions = []
+        idx = getattr(self.current_ai_bubble, 'index', -1)
+        final_html = (
+            self._format_response(self.current_ai_text, idx)
+            if self.current_ai_text else "No response."
+        )
+        self.current_ai_bubble.set_content(final_html)
 
-        if matches:
-            last_match = matches[-1]
-            follow_up_block = full_text[last_match.end():].replace('<br>', '\n').replace('<br/>', '\n')
-
-            if len(follow_up_block) < 1500:
-                clean_text = full_text[:last_match.start()].strip()
-                self.current_ai_text = clean_text + cites_html
-
-                for line in follow_up_block.split('\n'):
-                    line = line.strip()
-                    line = re.sub(r'^>\s*', '', line)
-                    if re.match(r'^([-*]|\d+\.)', line):
-                        q = re.sub(r'^([-*\s]+|\d+\.\s*)', '', line).strip()
-                        q = q.replace('**', '').strip()
-                        if q and len(q) > 4:  # 防止空行或者过短的字符
-                            tag_match = re.match(r'^\[(.*?)\]\s*(.*)', q)
-                            if tag_match:
-                                tag, text = tag_match.groups()
-                                questions.append({"tag": tag.strip(), "text": text.strip()})
-                            else:
-                                questions.append({"tag": "General", "text": q})
-
-                # 更新气泡内容
-                idx = getattr(self.current_ai_bubble, 'index', -1)
-                final_html = self._format_response(self.current_ai_text, idx)
-                self.current_ai_bubble.set_content(final_html)
-
-                # 渲染追问按钮
-                if questions:
-                    self.render_follow_up_buttons(questions)
-            else:
-                self.current_ai_text = full_text + cites_html
-                idx = getattr(self.current_ai_bubble, 'index', -1)
-                final_html = self._format_response(self.current_ai_text,
-                                                   idx) if self.current_ai_text else "No response."
-                self.current_ai_bubble.set_content(final_html)
-        else:
-            self.current_ai_text = full_text + cites_html
-            idx = getattr(self.current_ai_bubble, 'index', -1)
-            final_html = self._format_response(self.current_ai_text, idx) if self.current_ai_text else "No response."
-            self.current_ai_bubble.set_content(final_html)
+        # 渲染追问按钮（识别失败时 questions 为空，正文保持原样）
+        if split.questions:
+            self.render_follow_up_buttons(split.questions)
 
         self.history.append({"role": "assistant", "content": self.current_ai_text})
         self.current_ai_bubble = None
