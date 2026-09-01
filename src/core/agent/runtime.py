@@ -687,10 +687,24 @@ class AgentRuntime:
 
     @staticmethod
     def _format_error(error_buffer: str) -> str:
+        """把底层流式错误统一为 ``<error_panel>`` 标记。
+
+        UI 侧（chat_bubble._extract_error_panels）将标记渲染为统一
+        错误面板：title/body 面向用户，details（原始错误全文）进入
+        折叠栏；真实错误同时写入日志。
+        """
+        from src.core.llm_errors import friendly_payload, error_marker
+
         m = re.match(r"^\s*\[(.*?)\]\s*\n*(.*)", error_buffer, re.DOTALL)
         if m:
-            return f"[{m.group(1)}]\n{m.group(2)}"
-        return error_buffer.strip()
+            payload = friendly_payload(m.group(1).strip(), m.group(2).strip(),
+                                       details=error_buffer.strip())
+        else:
+            payload = friendly_payload("Provider Error", error_buffer.strip()[:400],
+                                       details=error_buffer.strip())
+        logger.error(f"LLM stream error captured.\n{payload['details']}")
+        # 前置空行确保标记独占块级位置，Markdown 原样透传给 UI 提取
+        return "\n\n" + error_marker(payload)
 
     # ------------------------------------------------------------------ #
     #  Provenance tracking

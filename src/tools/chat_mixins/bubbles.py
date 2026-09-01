@@ -27,7 +27,7 @@ class ChatBubblesMixin:
             logger.warning("Chat UI not built yet; building lazily before bubble ops.")
             self.get_ui_widget()
 
-    def add_bubble(self, text, is_user, context_html=None):
+    def add_bubble(self, text, is_user, context_html=None, image_files=None):
         self._ensure_chat_ui()
         if is_user:
             self.remove_old_follow_ups()
@@ -41,6 +41,10 @@ class ChatBubblesMixin:
         index = len(self.history)
         bubble = ChatBubbleWidget(text, is_user, index, context_html=context_html)
         bubble.index = index
+
+        # 用户消息携带的图片附件：在气泡内渲染可点击的缩略图条
+        if image_files:
+            bubble.set_image_files(image_files)
 
         # Inject the translator config so plot-plan cards can translate non-English
         # user edits back to English before the plan is confirmed and re-sent.

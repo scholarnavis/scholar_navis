@@ -6,7 +6,9 @@ import uuid
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask, TaskState
 from src.core.device_manager import DeviceManager
+from src.core.image_utils import IMAGE_EXTENSIONS, encode_data_url
 from src.core.kb_manager import KBManager, DatabaseManager
+from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
 
@@ -102,6 +104,26 @@ class ChatGenerationTask(BackgroundTask):
                         {"path": path, "name": f_name, "page": info.get('page', 1), "content": content})
                     continue
 
+                # 图片附件：编码为 data URL 交给视觉管线。
+                # SVG 在 UI 附加时已栅格化为 PNG，image_path 指向该 PNG，
+                # 因此这里无需任何 Qt/图像库，读取字节即可（子进程安全）。
+                if info.get('type') == 'image' or ext.endswith(IMAGE_EXTENSIONS):
+                    if ext.endswith('.svg') and not info.get('image_path'):
+                        self.send_log("WARNING",
+                                      f"SVG '{f_name}' lacks a rasterized PNG payload; skipped for model input.")
+                        continue
+                    img_src = info.get('image_path') or path
+                    try:
+                        data_url = encode_data_url(img_src)
+                        self.external_context.append({
+                            "type": "image", "path": path, "name": f_name, "base64_url": data_url,
+                            "image_path": img_src
+                        })
+                        self.send_log("INFO", f"Image attachment ready for model input: {f_name}")
+                    except (OSError, ValueError) as e:
+                        self.send_log("ERROR", f"Failed to encode image '{f_name}': {e}")
+                    continue
+
                 if os.path.exists(path):
                     file_stat = os.stat(path)
                     hash_key = hashlib.md5(f"{path}_{file_stat.st_mtime}_{file_stat.st_size}".encode()).hexdigest()
@@ -137,8 +159,6 @@ class ChatGenerationTask(BackgroundTask):
                                 chunks.append({"path": path, "name": f_name, "page": 1, "content": text})
                         elif ext.endswith('.doc'):
                             self.send_log("WARNING", f"Legacy .doc format skipped: {f_name}")
-                        elif ext.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
-                            self.send_log("INFO", f"Image upload is currently paused. Skipping image: {f_name}")
                         else:
                             import chardet
                             with open(path, 'rb') as f:
@@ -242,6 +262,9 @@ class ChatGenerationTask(BackgroundTask):
         sources_map = {}
 
         # Phase 1: Query Extraction & Translation (Cache Accelerated)
+        # 注意：翻译仅作用于 display_text（用户键入的问题文本）。
+        # 附件（文档/图片）保存在 external_files 中，从不进入翻译模型——
+        # 图片内容无法被翻译模型处理，文档正文也保持原文供视觉/正文模型消费。
         if self.requires_translation:
             self.send_log("INFO", f"Translating query: {original_user_query[:20]}...")
             self._emit_token(
@@ -347,7 +370,7 @@ class ChatGenerationTask(BackgroundTask):
 
         external_chunks = self.external_context or []
         images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
-            ('.png', '.jpg', '.jpeg', '.webp'))]
+            IMAGE_EXTENSIONS)]
         docs = [c for c in external_chunks if c not in images]
 
         llm_content = []
@@ -382,24 +405,26 @@ class ChatGenerationTask(BackgroundTask):
                 )
 
         if images:
-            vision_model_name = self.main_config.get("vision_model_name", "auto")
-            main_model_name = self.main_config.get("model_name", "").lower()
-
-            vision_keywords = ['image', 'vl', 'vision', 'llava', 'pixtral', 'gpt-4o', 'gpt-4-turbo', 'gemini-1.5',
-                               'gemini-2.0', 'claude-3', 'qwen-vl']
-            main_supports_vision = any(kw in main_model_name for kw in vision_keywords)
-            if "deepseek" in main_model_name:
-                main_supports_vision = False
+            vision_model_name = str(self.main_config.get("vision_model_name", "") or "").strip()
+            main_model_name = self.main_config.get("model_name", "")
 
             need_pre_caption = False
             active_vision_model = None
 
-            if vision_model_name != "auto":
+            if vision_model_name and vision_model_name.lower() != "auto":
+                # 用户显式配置了 Vision 模型：先用它做图生文，保证任何主模型
+                # （含纯文本模型）都能理解图片内容。
                 need_pre_caption = True
                 active_vision_model = vision_model_name
-            elif not main_supports_vision:
-                need_pre_caption = True
-                active_vision_model = main_model_name
+            else:
+                # 一律原生挂载，能力校验交给 provider：OpenAI 兼容 API 没有
+                # 能力查询接口，本地按模型名预判会误拦本可识图的模型
+                # （Web 端 / CodeBuddy 等产品从不做此类预判）。若模型不支持
+                # 图片或图片格式，API 返回 400，由统一错误面板反馈
+                # （见 llm_errors 映射），provider 原始响应完整写入日志。
+                self.logger.info(
+                    f"Mounting {len(images)} image(s) natively for model [{main_model_name}]; "
+                    "capability will be validated by the provider (no local pre-filtering).")
 
             if need_pre_caption:
                 self._emit_token(
@@ -419,14 +444,20 @@ class ChatGenerationTask(BackgroundTask):
                             ext = str(img.get("path", ".jpeg")).split('.')[-1]
                             img_data = f"data:image/{ext};base64,{img_data}"
 
-                        vision_prompt = [{"role": "user", "content": [
-                            {"type": "text",
-                             "text": "Please deeply analyze this image, extract all text (OCR), describe the charts/data, and detail its core contents. Output in pure text."},
-                            {"type": "image_url", "image_url": {"url": img_data}}
-                        ]}]
+                        # 图生文结果磁盘缓存：同一图片在后续轮次重复出现时
+                        # （历史附件每轮都会重载）直接命中缓存，避免重复
+                        # 调用视觉模型产生不必要开销。
+                        desc_content = self._load_caption_cache(img)
+                        if desc_content is None:
+                            vision_prompt = [{"role": "user", "content": [
+                                {"type": "text",
+                                 "text": "Please deeply analyze this image, extract all text (OCR), describe the charts/data, and detail its core contents. Output in pure text."},
+                                {"type": "image_url", "image_url": {"url": img_data}}
+                            ]}]
 
-                        desc_res = self.vision_llm.chat(vision_prompt)
-                        desc_content = desc_res.get('content', '') if isinstance(desc_res, dict) else str(desc_res)
+                            desc_res = self.vision_llm.chat(vision_prompt)
+                            desc_content = desc_res.get('content', '') if isinstance(desc_res, dict) else str(desc_res)
+                            self._save_caption_cache(img, desc_content)
 
                         image_descriptions.append(
                             f"[Image: {img.get('name', 'Unknown')}] Description:\n{desc_content}")
@@ -436,15 +467,28 @@ class ChatGenerationTask(BackgroundTask):
                                             "text": "The user uploaded images. Here are their detailed textual descriptions analyzed by the vision model:\n" + "\n".join(
                                                 image_descriptions)})
                 except Exception as e:
-                    self.logger.warning(f"Vision pre-captioning failed: {e}")
-                    self._emit_token(
-                        "<div style='color:#e6a23c;'>⚠️ Image parsing failed. The current model configuration might not support vision. Images will be ignored.</div><br>")
-                    llm_content.append({"type": "text",
-                                        "text": f"[System Warning: User uploaded an image, but the vision parser failed to read it.]"})
+                    # 视觉模型解析失败（如所选模型同样不支持图片/Key 无效）：
+                    # 友好终止本轮对话，而不是静默丢弃图片导致答案与图片无关。
+                    import traceback
+                    self.logger.error(
+                        f"Vision pre-captioning failed.\n{type(e).__name__}: {e}\n{traceback.format_exc()}")
+                    self._emit_error(json.dumps(friendly_payload(
+                        "Image Parsing Failed",
+                        (
+                            "The vision model failed to read the attached image(s), so this round "
+                            "was safely terminated to avoid an answer that ignores your images.\n\n"
+                            "How to fix:\n"
+                            "1. Verify the configured Vision model supports image input;\n"
+                            "2. Or switch the Main Model to a multimodal model and set Vision to "
+                            "'Auto (Use Main Model)';\n"
+                            "3. Or remove the image attachments and retry with plain text."
+                        ),
+                        details=f"{type(e).__name__}: {e}",
+                    ), ensure_ascii=False))
+                    return
                 finally:
                     self.vision_llm = None
             else:
-                self.logger.info(f"Mounting images natively for vision-capable main model: [{main_model_name}]")
                 for img in images:
                     img_data = img.get("base64_url") or img.get("content")
                     if img_data:
@@ -615,7 +659,11 @@ class ChatGenerationTask(BackgroundTask):
         clean_history = []
         for m in self.messages[:-1]:
             if "role" in m and "content" in m:
-                msg = {"role": m["role"], "content": m["content"]}
+                content = m["content"]
+                if isinstance(content, str):
+                    # 历史中的错误面板标记不含语义信息，剥离后避免污染 LLM 上下文
+                    content = strip_markers(content)
+                msg = {"role": m["role"], "content": content}
                 if m.get("tool_calls"): msg["tool_calls"] = m["tool_calls"]
                 if m.get("tool_call_id"): msg["tool_call_id"] = m["tool_call_id"]
                 if m.get("name"): msg["name"] = m["name"]
@@ -671,7 +719,7 @@ class ChatGenerationTask(BackgroundTask):
                 self._plot_registry_cache = agent._plot_registry
                 self._plot_seq_cache = agent._plot_seq
         except Exception as e:
-            self.logger.warning(f"Agent runtime loop failed: {e}")
+            self.logger.error(f"Agent runtime loop failed: {e}", exc_info=True)
             # Graceful degradation: plain streaming without tools.
             self._emit_token("[CLEAR_SEARCH]")
             self._emit_token("[START_LLM_NETWORK]")
@@ -687,9 +735,14 @@ class ChatGenerationTask(BackgroundTask):
             if error_buffer:
                 m = re.match(r'^\s*\[(.*?)\]\s*\n*(.*)', error_buffer, re.DOTALL)
                 if m:
-                    self._emit_error(json.dumps({"title": m.group(1).strip(), "body": m.group(2).strip()}))
+                    payload = friendly_payload(m.group(1).strip(), m.group(2).strip(),
+                                               details=error_buffer.strip())
                 else:
-                    self._emit_error(json.dumps({"title": "Provider Error", "body": error_buffer.strip()}))
+                    payload = friendly_payload("Provider Error", error_buffer.strip()[:400],
+                                               details=error_buffer.strip())
+                # 真实错误信息入日志，UI 折叠栏展示同一份 details
+                self.logger.error(f"LLM stream error captured.\n{payload['details']}")
+                self._emit_error(json.dumps(payload, ensure_ascii=False))
                 return
 
         # Phase 6: Dynamic Citation Mounting
@@ -713,6 +766,87 @@ class ChatGenerationTask(BackgroundTask):
         self._emit_provenance()
 
         return self.full_response_cache
+
+    def _caption_cache_path(self, img_info: dict) -> str:
+        """根据图片源路径与修改时间生成图生文缓存的 JSON 路径。"""
+        import hashlib
+        import tempfile
+        cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        src = img_info.get("image_path") or img_info.get("path", "")
+        try:
+            stat = os.stat(src)
+            key = f"{src}_{stat.st_mtime_ns}_{stat.st_size}"
+        except OSError:
+            key = src
+        return os.path.join(cache_dir, f"imgcap_{hashlib.md5(key.encode()).hexdigest()}.json")
+
+    def _load_caption_cache(self, img_info: dict):
+        """命中返回缓存描述文本，未命中返回 None。"""
+        try:
+            cache_file = self._caption_cache_path(img_info)
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r', encoding='utf-8') as cf:
+                    data = json.load(cf)
+                if data.get("desc"):
+                    self.send_log("INFO", f"Caption cache hit for image: {img_info.get('name', '')}")
+                    return data["desc"]
+        except (OSError, ValueError) as e:
+            self.logger.warning(f"Caption cache read failed: {e}")
+        return None
+
+    def _save_caption_cache(self, img_info: dict, desc: str):
+        """持久化图生文结果。失败静默降级（不影响主流程）。"""
+        if not desc:
+            return
+        try:
+            with open(self._caption_cache_path(img_info), 'w', encoding='utf-8') as cf:
+                json.dump({"name": img_info.get("name", ""), "desc": desc}, cf, ensure_ascii=False)
+        except OSError as e:
+            self.logger.warning(f"Caption cache write failed: {e}")
+
+    @staticmethod
+    def _looks_vision_capable(model_name: str) -> bool:
+        """根据模型名称启发式判断是否具备视觉（多模态）能力。
+
+        关键词覆盖主流多模态模型系列；已知纯文本家族（DeepSeek 等）
+        显式排除。
+
+        注意：图片现已一律原生挂载、由 provider 裁决（见 _execute 的
+        images 分支），本方法不再用于发送前拦截，仅保留给
+        developer_dialog 的能力矩阵自检与诊断用途。
+        """
+        name = (model_name or "").lower()
+        if not name:
+            return False
+
+        vision_keywords = [
+            'image', 'vision', '-vl', 'vl-', 'llava', 'pixtral', 'internvl',
+            'minicpm-v', 'molmo', 'qvq',
+            'gpt-4o', 'gpt-4-turbo', 'gpt-4.1', 'gpt-5', 'o1', 'o3', 'o4-mini',
+            'gemini-1.5', 'gemini-2.0', 'gemini-2.5', 'gemma-3',
+            'claude-3', 'claude-4', 'claude-sonnet', 'claude-opus', 'claude-haiku',
+            'qwen-vl', 'glm-4v', 'glm-4.5v', 'glm-4.6', 'doubao', 'hunyuan-vision',
+            'step-1v', 'yi-vision', 'grok-vision', 'grok-4',
+            'llama-3.2', 'llama-4', 'phi-3-vision', 'phi-4-multimodal',
+        ]
+        if any(kw in name for kw in vision_keywords):
+            # 已知不支持图片的家族显式排除
+            if 'deepseek' in name or 'ernie' in name:
+                return False
+            return True
+        return False
+
+    @staticmethod
+    def _friendly_error_payload(title: str, body: str, details: str = "") -> str:
+        """兼容入口：错误归一化 -> 统一 JSON payload 字符串（含 details）。
+
+        映射逻辑集中在 ``src/core/llm_errors.py``，任务端与 Agent 运行时
+        共用同一套规则，保证 LLM 侧报错文案与 UI 样式全局一致：
+        ``title``/``body`` 面向用户，``details`` 为程序真实错误信息，
+        由错误面板折叠栏展示并写入日志。
+        """
+        return json.dumps(friendly_payload(title, body, details), ensure_ascii=False)
 
     def _emit_provenance(self):
         """Persist the current conversation's evidence chain as JSONL and show

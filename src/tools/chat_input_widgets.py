@@ -5,20 +5,105 @@
 """
 
 import logging
+import os
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QSize
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel, QFrame,
                                QMenu, QCheckBox, QToolButton, QWidgetAction,
                                QSizePolicy, QApplication)
 
 from src.core.config_manager import ConfigManager
+from src.core.image_utils import IMAGE_EXTENSIONS
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager
 from src.ui.components.chat_bubble import hex_to_rgba
 from src.ui.components.toast import ToastManager
+
+
+class _ImageChip(QWidget):
+    """输入区附件预览条中的图片缩略图芯片。
+
+    单击打开查看器预览；右上角内嵌 "x" 按钮移除该附件。
+    """
+    sig_remove = Signal(object)
+    sig_open = Signal(str)
+
+    THUMB_HEIGHT = 56
+
+    def __init__(self, info, parent=None):
+        super().__init__(parent)
+        self.info = info
+        self.image_path = info.get("path", "")
+
+        pix = self._load_pixmap()
+        if pix is None or pix.isNull():
+            self.setFixedSize(90, self.THUMB_HEIGHT)
+            placeholder = QLabel("IMG", self)
+            placeholder.setAlignment(Qt.AlignCenter)
+            placeholder.resize(self.size())
+        else:
+            # 约束到芯片包围盒内（等比缩放），避免宽图溢出裁剪
+            scaled = pix.scaled(110, self.THUMB_HEIGHT, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            chip_w = max(60, scaled.width())
+            self.setFixedSize(chip_w, self.THUMB_HEIGHT + 2)
+            lbl = QLabel(self)
+            lbl.setPixmap(scaled)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.resize(self.size())
+            lbl.setCursor(Qt.PointingHandCursor)
+            lbl.mousePressEvent = self._on_click
+
+        # 右上角移除按钮
+        self.btn_remove = QLabel("x", self)
+        self.btn_remove.setFixedSize(16, 16)
+        self.btn_remove.setAlignment(Qt.AlignCenter)
+        self.btn_remove.setStyleSheet(
+            "QLabel { background-color: rgba(0, 0, 0, 0.55); color: white; "
+            "border-radius: 8px; font-size: 10px; font-weight: bold; }")
+        self.btn_remove.setCursor(Qt.PointingHandCursor)
+        self.btn_remove.setToolTip("Remove this image")
+        self.btn_remove.mousePressEvent = self._on_remove
+        self.btn_remove.move(self.width() - 10, -2)
+        self.btn_remove.raise_()
+
+    def _load_pixmap(self):
+        path = self.image_path
+        if not path or not os.path.exists(path):
+            return None
+        if path.lower().endswith('.svg'):
+            try:
+                from PySide6.QtSvg import QSvgRenderer
+                from PySide6.QtGui import QPainter, QImage
+                renderer = QSvgRenderer(path)
+                if not renderer.isValid():
+                    return None
+                size = renderer.defaultSize()
+                if not size.isValid() or size.isEmpty():
+                    size = QSize(200, 200)
+                img = QImage(size.width(), size.height(), QImage.Format_ARGB32)
+                img.fill(Qt.transparent)
+                painter = QPainter(img)
+                renderer.render(painter)
+                painter.end()
+                return QPixmap.fromImage(img)
+            except Exception:
+                return None
+        return QPixmap(path)
+
+    def _on_click(self, event):
+        if event.button() == Qt.LeftButton and os.path.exists(self.image_path):
+            self.sig_open.emit(self.image_path)
+
+    def _on_remove(self, event):
+        if event.button() == Qt.LeftButton:
+            self.sig_remove.emit(self.info)
+
+    def mousePressEvent(self, event):
+        event.ignore()
 
 
 class ChatDropTargetWidget(QWidget):
@@ -63,8 +148,8 @@ class ChatDropTargetWidget(QWidget):
     def dropEvent(self, event):
         self.overlay.hide()
 
-        #supported_exts = ('.pdf', '.md', '.txt', '.csv', '.docx', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
-        supported_exts = ('.pdf', '.md', '.txt', '.docx')
+        # 文档 + 图片附件（图片同样进入多模态对话链路）
+        supported_exts = ('.pdf', '.md', '.txt', '.docx') + IMAGE_EXTENSIONS
         paths = [
             url.toLocalFile() for url in event.mimeData().urls()
             if url.isLocalFile() and url.toLocalFile().lower().endswith(supported_exts)
@@ -112,6 +197,8 @@ class ChatInputContainer(QFrame):
     sig_clear_clicked = Signal()
     sig_attach_clicked = Signal()
     sig_clear_context_clicked = Signal()
+    sig_remove_image = Signal(object)
+    sig_open_image = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -137,8 +224,8 @@ class ChatInputContainer(QFrame):
         self.context_banner.setVisible(False)
         self.context_banner.setStyleSheet(
             "background-color: rgba(5, 184, 204, 0.1); border: 1px solid #05B8CC; border-radius: 4px;")
-        banner_layout = QHBoxLayout(self.context_banner)
-        banner_layout.setContentsMargins(8, 4, 8, 4)
+        self.banner_layout = QHBoxLayout(self.context_banner)
+        self.banner_layout.setContentsMargins(8, 4, 8, 4)
 
         self.lbl_context_icon = QLabel()
         self.lbl_context_info = QLabel("Context Attached")
@@ -149,10 +236,10 @@ class ChatInputContainer(QFrame):
         self.btn_clear_context.setCursor(Qt.PointingHandCursor)
         self.btn_clear_context.clicked.connect(self.sig_clear_context_clicked.emit)
 
-        banner_layout.addWidget(self.lbl_context_icon)
-        banner_layout.addWidget(self.lbl_context_info)
-        banner_layout.addStretch()
-        banner_layout.addWidget(self.btn_clear_context)
+        self.banner_layout.addWidget(self.lbl_context_icon)
+        self.banner_layout.addWidget(self.lbl_context_info)
+        self.banner_layout.addStretch()
+        self.banner_layout.addWidget(self.btn_clear_context)
         main_layout.addWidget(self.context_banner)
 
         self.mcp_toolbar = QHBoxLayout()
@@ -543,7 +630,9 @@ class ChatInputContainer(QFrame):
         if not self.btn_send.isEnabled():
             return
         text = self.text_edit.toPlainText().strip()
-        if text: self.sig_send_clicked.emit(text)
+        # 允许"仅附件"发送（如只拖入图片并按回车），默认提示语由发送链路补全
+        if text or getattr(self, '_has_attachments', False):
+            self.sig_send_clicked.emit(text)
 
     def clear_text(self):
         self.text_edit.clear()
@@ -569,8 +658,38 @@ class ChatInputContainer(QFrame):
         """显示输入框上方的附件预览条"""
         self.lbl_context_info.setText(f"📎 Attached: {text_info}")
         self.context_banner.setVisible(True)
+        self._has_attachments = True
 
     def hide_context_preview(self):
         """隐藏输入框上方的附件预览条"""
         self.context_banner.setVisible(False)
         self.lbl_context_info.setText("📎 Context Attached")
+        self._has_attachments = False
+
+    def set_image_thumbs(self, image_infos):
+        """同步输入区预览条中的图片缩略图芯片。
+
+        :param image_infos: 当前待发送的图片附件 dict 列表。
+        """
+        # 清理旧芯片
+        for chip in getattr(self, '_image_chips', []):
+            try:
+                chip.setParent(None)
+                chip.deleteLater()
+            except RuntimeError:
+                pass
+        self._image_chips = []
+
+        if not image_infos:
+            return
+
+        self.context_banner.setVisible(True)
+        # 插入到 stretch 与清除按钮之前，保证布局顺序稳定
+        insert_pos = max(0, self.banner_layout.count() - 2)
+        for info in image_infos:
+            chip = _ImageChip(info)
+            chip.sig_remove.connect(self.sig_remove_image.emit)
+            chip.sig_open.connect(self.sig_open_image.emit)
+            self.banner_layout.insertWidget(insert_pos, chip)
+            self._image_chips.append(chip)
+            insert_pos += 1

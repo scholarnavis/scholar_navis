@@ -1,6 +1,8 @@
 import re
+import logging
 import markdown
 import os
+import sys
 import tempfile
 import shutil
 import hashlib
@@ -9,6 +11,8 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from src.core.theme_manager import ThemeManager
 from src.ui.components.toast import ToastManager
+
+logger = logging.getLogger(__name__)
 
 class TextFormatter:
 
@@ -412,6 +416,11 @@ class TextFormatter:
         from PySide6.QtGui import QDesktopServices
         import os, tempfile, shutil
 
+        # 入参兼容：AI 气泡的 anchorClicked 传入 QUrl，而用户气泡的
+        # sig_link_clicked 传 str（linkActivated 亦为 str），统一归一化。
+        if isinstance(url, str):
+            url = QUrl(url)
+
         qt_parent = parent_widget if isinstance(parent_widget, QWidget) else None
 
         scheme = url.scheme()
@@ -486,6 +495,26 @@ class TextFormatter:
             else:
                 ToastManager().show(f"File not found: {source_name or file_path}", "error")
             return
+
+        # 3.5 本地文件链接：图片走内部查看器（支持双击打开/保存），其余交由系统默认程序
+        if scheme == "file":
+            try:
+                file_path = url.toLocalFile()
+                if not file_path:
+                    from urllib.parse import unquote, urlparse
+                    file_path = unquote(urlparse(url.toString()).path)
+                    if sys.platform == "win32" and file_path.startswith("/"):
+                        file_path = file_path.lstrip("/")
+
+                from src.core.image_utils import is_image_file
+                from src.ui.components.image_viewer import open_image_viewer
+
+                if file_path and os.path.exists(file_path) and is_image_file(file_path):
+                    open_image_viewer(file_path, parent=qt_parent)
+                    return
+                # 非图片本地文件保留原有行为（交由系统默认程序打开）
+            except Exception as e:
+                logger.warning(f"Failed to open local file link: {e}")
 
         # 4. 普通网络链接交由系统默认浏览器
         url_str = url.toString() if hasattr(url, 'toString') else str(url)

@@ -422,9 +422,10 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def route_dev_test(self, prompt_text, note_text=""):
+    def route_dev_test(self, prompt_text, note_text="", image_paths=None):
         """Developer-mode AI test: switch to Chat, show a user-visible note
-        (NOT sent to the LLM), then send the real prompt to the LLM."""
+        (NOT sent to the LLM), optionally mount image attachments, then send
+        the real prompt to the LLM."""
         chat_index = 1
         self.sidebar.setCurrentRow(chat_index)
 
@@ -432,10 +433,17 @@ class MainWindow(QMainWindow):
             chat_tool = self.tools[chat_index]
             if not chat_tool:
                 return
+            # 0) 确保 Chat UI 已构建（懒加载，等价于 handle_external_send 的前置调用）
+            if hasattr(chat_tool, 'get_ui_widget'):
+                chat_tool.get_ui_widget()
             # 1) 展示测试说明（仅给用户看，不进 LLM 历史）
             if note_text and hasattr(chat_tool, 'show_dev_note'):
                 chat_tool.show_dev_note(note_text)
-            # 2) 发送真实提示词给 LLM
+            # 2) 挂载图片附件（走标准 attachments 管线：校验 + SVG 栅格化 + 预览条）
+            for p in (image_paths or []):
+                if p and os.path.exists(p) and hasattr(chat_tool, 'process_attached_files'):
+                    chat_tool.process_attached_files([p])
+            # 3) 发送真实提示词给 LLM
             if hasattr(chat_tool, 'process_send'):
                 chat_tool.process_send(prompt_text)
 

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from src.core.core_task import TaskState
 from src.core.follow_ups import split_follow_ups
+from src.core.theme_manager import ThemeManager
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.toast import ToastManager
 
@@ -50,7 +51,10 @@ class ChatResponseFlowMixin:
             self._is_rendering_dirty = False
             idx = getattr(self.current_ai_bubble, 'index', -1)
             # 渲染前先分离追问块：流式期间 suggestions 也不进入正文，避免闪烁
-            split = split_follow_ups(self.current_ai_text.lstrip())
+            # log_success=False：流式期间同一文本会被反复拆分，成功日志仅由最终渲染打印
+            split = split_follow_ups(
+                self.current_ai_text.lstrip(), log_success=False
+            )
             self._pending_follow_ups = split.questions
             self.current_ai_bubble.set_content(
                 self._format_response(split.main_text + split.cites_html, idx)
@@ -202,6 +206,42 @@ class ChatResponseFlowMixin:
         self.current_ai_bubble = None
         self.logger.info("AI response generation finished and UI updated.")
 
+    @staticmethod
+    def _build_error_marker(msg):
+        """把任务端传回的错误转换为统一错误面板标记。
+
+        - 任务端结构化 JSON（{"title","body","details"}）原样转为面板
+          payload（details 缺省时回退为 title+body）；
+        - 非结构化文本（程序自身异常）包装为通用 payload：首行摘要进入
+          正文，完整原文进入折叠详情。
+
+        所有报错最终都渲染为同一样式的 ErrorPanelWidget（含可折叠的
+        Technical Details 技术详情栏），保证美术样式全局一致。
+
+        :return: ``<error_panel data="...">`` 标记字符串。
+        """
+        import json as _json
+
+        from src.core.llm_errors import error_marker, friendly_payload
+
+        data = None
+        if isinstance(msg, str) and msg.strip().startswith("{"):
+            try:
+                parsed = _json.loads(msg)
+                if isinstance(parsed, dict) and "body" in parsed:
+                    data = {
+                        "title": str(parsed.get("title", "Generation Error")),
+                        "body": str(parsed.get("body", "")),
+                        "details": str(parsed.get("details", "") or
+                                       f"{parsed.get('title', '')}\n{parsed.get('body', '')}"),
+                    }
+            except ValueError:
+                data = None
+        if data is None:
+            raw = str(msg or "").strip()
+            data = friendly_payload("Generation Error", raw.split("\n", 1)[0][:300], details=raw)
+        return error_marker(data)
+
     def on_chat_error(self, msg):
         """处理对话任务抛出的异常，恢复 UI 状态并展示错误"""
         if hasattr(self, '_render_timer'):
@@ -217,13 +257,14 @@ class ChatResponseFlowMixin:
             self.current_ai_bubble.set_loading(False)
             self.current_ai_bubble.is_interrupted = True
 
-        # 格式化错误信息以在聊天气泡中醒目展示
-        error_html = f"<div style='color: #ff6b6b; margin-top: 10px;'><b>⚠️ Generation Error:</b><br>{msg}</div>"
+        # 统一错误面板：任务端结构化 JSON 与程序自身异常都转换为
+        # <error_panel> 标记，由气泡渲染为同一样式的错误组件（含折叠详情）。
+        error_marker = self._build_error_marker(msg)
 
         if self.current_ai_text.strip():
-            self.current_ai_text += error_html
+            self.current_ai_text += "\n\n" + error_marker
         else:
-            self.current_ai_text = error_html
+            self.current_ai_text = error_marker
 
         # 渲染到气泡
         if self.current_ai_bubble:
@@ -239,6 +280,7 @@ class ChatResponseFlowMixin:
         })
 
         self.current_ai_bubble = None
-        self.logger.error(f"Chat task failed: {msg}")
+        # 完整原始错误（含 JSON payload 中的 details）写入日志
+        self.logger.error("Chat task failed.\n%s", msg)
         ToastManager().show("Generation failed due to an error.", "error")
         self.scroll_to_bottom()

@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import threading
 from typing import Generator, List, Dict, Optional
 
@@ -54,6 +55,36 @@ def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs)
         _TRANSLATION_CACHE[cache_key] = res_text
 
     return res_text
+
+
+def _raw_error_text(e: Exception) -> str:
+    """提取异常的原始底层信息（provider 响应体、状态码、请求 URL）。
+
+    litellm 异常的 ``message`` 常为摘要；``body`` / ``response`` 才包含
+    provider 返回的原始 JSON。统一结构化输出供日志完整追溯；UI 错误
+    面板的 details 与日志同源（协议见 src/core/llm_errors.py）。
+    """
+    parts = [f"{type(e).__name__}: {e}"]
+    status = getattr(e, 'status_code', None)
+    if status:
+        parts.append(f"status_code: {status}")
+    body = getattr(e, 'body', None)
+    if body:
+        try:
+            parts.append(f"body: {json.dumps(body, ensure_ascii=False)}")
+        except (TypeError, ValueError):
+            parts.append(f"body: {body!r}")
+    response = getattr(e, 'response', None)
+    if response is not None and not body:
+        text = getattr(response, 'text', None)
+        if text:
+            parts.append(f"response: {str(text)[:2000]}")
+    request = getattr(e, 'request', None)
+    if request is not None:
+        url = getattr(request, 'url', '')
+        if url:
+            parts.append(f"url: {url}")
+    return "\n".join(parts)
 
 
 litellm.drop_params = True
@@ -273,8 +304,8 @@ class OpenAICompatibleLLM:
                 "role": "assistant"
             }
         except Exception as e:
-            self.logger.error(f"Chat completion error: {str(e)}")
-            raise e
+            self.logger.error(f"Chat completion error.\n{_raw_error_text(e)}", exc_info=True)
+            raise
 
     def stream_chat(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[str, None, None]:
         if getattr(self, '_missing_api_key', False):
@@ -354,57 +385,58 @@ class OpenAICompatibleLLM:
 
 
         except ContextWindowExceededError as e:
-
-            self.logger.error(f"Context window exceeded: {e}")
-
+            self.logger.error(f"Context window exceeded.\n{_raw_error_text(e)}")
             yield f"\n\n[Context Exceeded Error]\nThe input text or document is too long for this model. Please clear history or use a model with a larger context window.\n"
 
-
         except RateLimitError as e:
-
-            self.logger.error(f"Rate limit hit: {e}")
-
+            self.logger.error(f"Rate limit hit.\n{_raw_error_text(e)}")
             yield f"\n\n[Rate Limit Error]\nToo many requests or insufficient quota. Please try again later.\n"
 
-
         except Timeout as e:
-            self.logger.error(f"Request timeout: {e}")
+            self.logger.error(f"Request timeout.\n{_raw_error_text(e)}")
             yield f"\n\n[Timeout Error]\nThe model took too long to respond. Please check your network or try a different provider.\n"
         except AuthenticationError as e:
-            self.logger.error(f"Authentication Error: {e}")
+            self.logger.error(f"Authentication Error.\n{_raw_error_text(e)}")
             err_msg = getattr(e, 'message', str(e))
             yield f"\n\n[API Request Error: HTTP 401]\n{err_msg}\n"
         except NotFoundError as e:
-            self.logger.error(f"Not Found Error: {e}")
+            self.logger.error(f"Not Found Error.\n{_raw_error_text(e)}")
             err_msg = getattr(e, 'message', str(e))
             yield f"\n\n[API Request Error: HTTP 404]\n{err_msg}\n"
         except BadRequestError as e:
-            self.logger.error(f"Bad Request Error: {e}")
+            # provider 原始响应体（含"不支持图片/不支持格式"等具体原因）完整入日志
+            self.logger.error(f"Bad Request Error.\n{_raw_error_text(e)}")
             err_msg = getattr(e, 'message', str(e))
-            yield f"\n\n[API Request Error: HTTP 400]\n{err_msg}\n💡 Tip: This might happen if you sent an image to a text-only model or provided invalid parameters.\n"
+            yield f"\n\n[API Request Error: HTTP 400]\n{err_msg}\n💡 Tip: This might happen if you sent an image to a text-only model, used an unsupported image format, or provided invalid parameters.\n"
         except ServiceUnavailableError as e:
-            self.logger.error(f"Service Unavailable Error: {e}")
+            self.logger.error(f"Service Unavailable Error.\n{_raw_error_text(e)}")
             err_msg = getattr(e, 'message', str(e))
             yield f"\n\n[API Request Error: HTTP 503]\nThe API service is currently overloaded or down. Please try again later.\nDetails: {err_msg}\n"
         except APIConnectionError as e:
-            self.logger.error(f"API Connection Error: {e}")
+            self.logger.error(f"API Connection Error.\n{_raw_error_text(e)}")
             err_msg = getattr(e, 'message', str(e))
             yield f"\n\n[System Error: Connection Failed]\nFailed to connect to the API endpoint. Please check your proxy settings or local network.\nDetails: {err_msg}\n"
         except APIError as e:
-            self.logger.error(f"API Error ({e.status_code}): {e.message}")
+            self.logger.error(f"API Error ({e.status_code}).\n{_raw_error_text(e)}")
             yield f"\n\n[API Request Error: HTTP {e.status_code}]\n{e.message}\n"
         except Exception as e:
             if self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
                 yield "\n\n[⛔ Generation halted by user.]"
             else:
-                self.logger.error(f"Unexpected system error: {e}")
-                yield f"\n\n[System Error: {str(e)}]\n"
+                # 未知错误：完整 traceback + 原始信息入日志，摘要反馈给用户
+                self.logger.error(f"Unexpected system error.\n{_raw_error_text(e)}", exc_info=True)
+                yield f"\n\n[System Error: {type(e).__name__}: {e}]\n"
 
 
     def generate_image(self, prompt: str, **kwargs) -> str:
         """
         补全的多模态：统一的图像生成接口。
         支持 DALL-E, Midjourney (需要对应的代理 API), 或兼容的模型。
+
+        返回值统一为可直接嵌入 <img src=...> 的地址：
+        - 提供方返回 URL 时原样返回；
+        - 仅返回 b64_json 时落盘为本地临时文件并返回 file:// URI
+          （部分图像生成专用模型不返回 URL，只返回 base64）。
         """
         if getattr(self, '_missing_api_key', False):
             raise ValueError("API Key is missing. Please configure your API key.")
@@ -420,8 +452,28 @@ class OpenAICompatibleLLM:
                 api_base=self.base_url,
                 **kwargs
             )
-            # 提取生成的图像 URL
-            return res.data[0].url
+
+            data = res.data[0] if res and getattr(res, "data", None) else None
+            url = str(getattr(data, "url", None) or "").strip()
+            if url:
+                return url
+
+            # 兜底：仅返回 base64 时写入本地缓存，返回 file:// URI
+            b64 = str(getattr(data, "b64_json", None) or "").strip()
+            if b64:
+                import base64
+                import hashlib
+                import tempfile
+                img_bytes = base64.b64decode(b64)
+                file_name = f"scholar_navis_gen_{hashlib.md5(img_bytes).hexdigest()[:12]}.png"
+                local_path = os.path.join(tempfile.gettempdir(), file_name)
+                if not os.path.exists(local_path):
+                    with open(local_path, "wb") as f:
+                        f.write(img_bytes)
+                local_uri = local_path.replace("\\", "/")
+                return f"file:///{local_uri}" if not local_uri.startswith("/") else f"file://{local_uri}"
+
+            raise ValueError("Image generation returned no image data (neither url nor b64_json).")
         except Exception as e:
-            self.logger.error(f"Image generation failed: {str(e)}")
-            raise e
+            self.logger.error(f"Image generation failed.\n{_raw_error_text(e)}", exc_info=True)
+            raise

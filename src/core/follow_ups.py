@@ -248,7 +248,7 @@ def _dedupe(questions: List[dict]) -> List[dict]:
     return unique[:_MAX_QUESTIONS]
 
 
-def split_follow_ups(text: str) -> FollowUpSplit:
+def split_follow_ups(text: str, log_success: bool = True) -> FollowUpSplit:
     """把模型输出拆分为 (正文, 追问列表, 引用块 HTML)。
 
     处理顺序：
@@ -259,6 +259,10 @@ def split_follow_ups(text: str) -> FollowUpSplit:
 
     任何一级识别失败都会安全回退：追问块保持原文渲染（与旧行为一致），
     仅额外清理残留的 [FOLLOW_UPS] 标记 token。
+
+    log_success：识别成功时是否打印 INFO 日志。流式渲染会对同一文本
+    反复调用本函数，该路径应传 False 以免日志刷屏；最终渲染（默认）
+    保持 True，仅打一条成功日志。
     """
     if not text or not text.strip():
         return FollowUpSplit(text or "", [], "")
@@ -344,8 +348,9 @@ def split_follow_ups(text: str) -> FollowUpSplit:
         return FollowUpSplit(_strip_tokens(norm_full).strip(), [], footer_html)
 
     questions = _dedupe(questions)
-    logger.info(
-        "Follow-up split via '%s': %d questions, main=%d chars, footer=%d chars.",
-        strategy, len(questions), len(main_text), len(footer_html),
-    )
+    if log_success:
+        logger.info(
+            "Follow-up split via '%s': %d questions, main=%d chars, footer=%d chars.",
+            strategy, len(questions), len(main_text), len(footer_html),
+        )
     return FollowUpSplit(main_text, questions, footer_html)

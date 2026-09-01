@@ -24,6 +24,12 @@ class ChatSendFlowMixin:
     """发送链路：process_send -> start_ai_response -> (task events handled elsewhere)。"""
 
     def process_send(self, text):
+        # 0. 取消待刷新的附件预览定时器：同步链路（如开发者测试）在同一调用栈内
+        #    attach -> send，若不取消，延迟回调会在发送完成后残留输入区预览。
+        timer = getattr(self, '_attach_preview_timer', None)
+        if timer is not None:
+            timer.stop()
+
         # 1. 获取并格式化 KB ID
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
@@ -36,6 +42,17 @@ class ChatSendFlowMixin:
         self.external_context_html = ""
         self.external_files = []
 
+        image_files = [c for c in current_files if c.get("type") == "image"]
+
+        # 仅附件（如只拖入图片）发送时补全默认提示语
+        if not text.strip() and current_files:
+            text = ("Please analyze the attached image(s): describe their content, "
+                    "extract key information, and answer any implied questions.") \
+                if image_files else "Please analyze the attached file(s)."
+
+        if not text.strip():
+            return
+
         # 5. UI 切换与历史记录管理
         self.input_container.btn_send.setVisible(False)
         self.input_container.btn_stop.setVisible(True)
@@ -43,13 +60,15 @@ class ChatSendFlowMixin:
         self.logger.info(f"User asked: {text[:50]}... (KB: {kb_id}) | Attached Files: {len(current_files)}")
         self.input_container.clear_text()
 
-        # 将上下文的 HTML 链接渲染在气泡上方
-        self.add_bubble(text, is_user=True, context_html=current_html if current_html else None)
+        # 将上下文的 HTML 链接渲染在气泡上方；图片以缩略图形式展示
+        self.add_bubble(text, is_user=True, context_html=current_html if current_html else None,
+                        image_files=image_files)
 
         llm_text = text
         if current_files:
             context_block = "\n".join(
-                [f"--- Attached File: {c['name']} ---" for c in current_files]
+                [f"--- Attached {'Image' if c.get('type') == 'image' else 'File'}: {c['name']} ---"
+                 for c in current_files]
             )
             llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{text}"
 
@@ -89,8 +108,16 @@ class ChatSendFlowMixin:
                 display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(
                     names)
                 self.input_container.show_context_preview(display_text)
+                self._sync_image_thumbs()
             else:
                 self.input_container.hide_context_preview()
+                self._sync_image_thumbs()
+
+    def _sync_image_thumbs(self):
+        """将当前待发送附件中的图片同步到输入区预览条。"""
+        image_files = [c for c in getattr(self, 'external_files', []) if c.get("type") == "image"]
+        if hasattr(self.input_container, 'set_image_thumbs'):
+            self.input_container.set_image_thumbs(image_files)
 
     def _on_query_translated(self, translated_text):
         for i in range(self.chat_layout.count() - 1, -1, -1):
@@ -195,6 +222,8 @@ class ChatSendFlowMixin:
         self.external_files = []
         self.external_context_html = ""
         self.input_container.hide_context_preview()
+        if hasattr(self.input_container, 'set_image_thumbs'):
+            self.input_container.set_image_thumbs([])
 
     def handle_edit_resend(self, index, new_text):
         if getattr(self, 'is_locked', False):
@@ -235,13 +264,16 @@ class ChatSendFlowMixin:
         for msg in temp_history:
             display_text = msg.get('display_text', msg['content'])
             ctx_html = msg.get('context_html')
-            self.add_bubble(display_text, is_user=(msg['role'] == 'user'), context_html=ctx_html)
+            msg_images = [c for c in msg.get('external_files', []) if c.get("type") == "image"]
+            self.add_bubble(display_text, is_user=(msg['role'] == 'user'), context_html=ctx_html,
+                            image_files=msg_images)
             self.history.append(msg)
 
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
 
-        self.add_bubble(new_text, is_user=True, context_html=old_context_html)
+        old_images = [c for c in old_files if c.get("type") == "image"]
+        self.add_bubble(new_text, is_user=True, context_html=old_context_html, image_files=old_images)
 
         QApplication.processEvents()
         v_bar.setValue(current_scroll)
@@ -250,7 +282,8 @@ class ChatSendFlowMixin:
         llm_text = new_text
         if old_files:
             context_block = "\n".join(
-                [f"--- Attached File: {c['name']} ---" for c in old_files]
+                [f"--- Attached {'Image' if c.get('type') == 'image' else 'File'}: {c['name']} ---"
+                 for c in old_files]
             )
             llm_text = f"Context Info:\n{context_block}\n\nQuestion:\n{new_text}"
         elif "Context Info:\n" in old_msg['content'] and "\n\nQuestion:\n" in old_msg['content']:
@@ -266,6 +299,16 @@ class ChatSendFlowMixin:
         })
 
         self.external_files = old_files
+        # 附件保持挂载（供后续追问继续引用）：同步输入区预览条与图片芯片
+        if old_files:
+            names = []
+            for c in old_files:
+                if c.get('type') != 'image' and c['name'] not in names:
+                    names.append(c['name'])
+            display_text = (f"{names[0]}, {names[1]} and {len(names) - 2} more"
+                            if len(names) > 2 else (", ".join(names) if names else f"{len(old_files)} attachment(s)"))
+            self.input_container.show_context_preview(display_text)
+        self._sync_image_thumbs()
         self.start_ai_response(kb_id)
 
     def handle_plot_plan_confirm(self, final_requirement: str):

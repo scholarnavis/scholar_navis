@@ -107,8 +107,10 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         top_bar.setContentsMargins(0, 0, 0, 10)
 
         row1_layout = QHBoxLayout()
+        # enable_vision=True：允许为聊天单独配置 Vision 模型，当主模型不支持
+        # 图片时，可由该模型把附件图片转成文字描述（Auto 表示跟随主模型）。
         self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
-                                                  model_key="chat_model_name", enable_vision=False)
+                                                  model_key="chat_model_name", enable_vision=True)
 
         self.collapsed_placeholder = QLabel(" ")
         self.collapsed_placeholder.setVisible(False)
@@ -265,6 +267,11 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         self.input_container.sig_clear_clicked.connect(self.clear_chat_history)
         self.input_container.sig_attach_clicked.connect(self.show_attachment_menu)
         self.input_container.sig_clear_context_clicked.connect(self.clear_attached_context)
+        # 图片附件：输入区缩略图芯片的移除 / 预览动作
+        if hasattr(self.input_container, 'sig_remove_image'):
+            self.input_container.sig_remove_image.connect(self.remove_attached_image)
+        if hasattr(self.input_container, 'sig_open_image'):
+            self.input_container.sig_open_image.connect(self.open_attachment_image)
 
         main_layout.addWidget(self.input_container)
 

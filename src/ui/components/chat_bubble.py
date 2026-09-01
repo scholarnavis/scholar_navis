@@ -8,8 +8,8 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from PySide6.QtCore import Qt, Signal, QEvent, QTimer
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize
+from PySide6.QtGui import QGuiApplication, QPixmap
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
@@ -18,6 +18,7 @@ from src.core.theme_manager import ThemeManager
 from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
+from src.ui.components.image_viewer import open_image_viewer
 
 
 def hex_to_rgba(hex_color, alpha):
@@ -28,6 +29,170 @@ def hex_to_rgba(hex_color, alpha):
     g = int(hex_color[2:4], 16)
     b = int(hex_color[4:6], 16)
     return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+class ImageAwareTextBrowser(QTextBrowser):
+    """支持双击激活内联图片的 QTextBrowser。
+
+    QTextBrowser 默认把图片当作不可交互的富文本元素；本子类在双击
+    时探测光标下是否为图片，并发出 ``sig_image_activated``（携带本地
+    路径），供外层打开内部查看器。
+    """
+    sig_image_activated = Signal(str)
+
+    def mouseDoubleClickEvent(self, event):
+        cursor = self.cursorForPosition(event.pos())
+        fmt = cursor.charFormat()
+        if fmt.isImageFormat():
+            img_fmt = fmt.toImageFormat()
+            src = img_fmt.name() or ""
+            local_path = self._resolve_local_path(src)
+            if local_path and os.path.exists(local_path):
+                self.sig_image_activated.emit(local_path)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    @staticmethod
+    def _resolve_local_path(src: str) -> str:
+        """把文档内图片的 src（file:// URI 或绝对路径）解析为本地路径。"""
+        if not src:
+            return ""
+        if src.startswith("file://"):
+            from urllib.parse import urlparse, unquote
+            try:
+                path = unquote(urlparse(src).path)
+            except ValueError:
+                return ""
+            if sys.platform == "win32" and path.startswith("/"):
+                path = path.lstrip("/")
+            return path
+        if src.startswith("data:image"):
+            # data URL 在渲染阶段已被替换为本地临时文件路径，这里兜底还原
+            try:
+                import base64
+                import hashlib
+                import tempfile
+                header, encoded = src.split(",", 1)
+                ext = header.split(";")[0].split("/")[1] if "/" in header else "png"
+                img_data = base64.b64decode(encoded)
+                local_path = os.path.join(
+                    tempfile.gettempdir(), f"navis_base64_{hashlib.md5(img_data).hexdigest()[:12]}.{ext}")
+                if not os.path.exists(local_path):
+                    with open(local_path, "wb") as f:
+                        f.write(img_data)
+                return local_path
+            except (ValueError, OSError):
+                return ""
+        return src if os.path.isabs(src) else ""
+
+
+class _ImageThumb(QLabel):
+    """用户消息中的图片缩略图（点击/双击打开查看器，右键菜单支持保存）。"""
+    sig_activated = Signal(str)
+
+    def __init__(self, info, parent=None):
+        super().__init__(parent)
+        self.info = info
+        self.image_path = info.get("path", "")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Click or double-click to view the image\nRight-click: Save / Copy")
+        self._load_pixmap()
+        self._style()
+
+    def _load_pixmap(self):
+        path = self.image_path
+        pix = None
+        if path and path.lower().endswith('.svg'):
+            try:
+                from PySide6.QtSvg import QSvgRenderer
+                from PySide6.QtGui import QPainter, QImage
+                renderer = QSvgRenderer(path)
+                if renderer.isValid():
+                    size = renderer.defaultSize()
+                    if not size.isValid() or size.isEmpty():
+                        size = QSize(400, 300)
+                    img = QImage(size.width(), size.height(), QImage.Format_ARGB32)
+                    img.fill(Qt.transparent)
+                    painter = QPainter(img)
+                    renderer.render(painter)
+                    painter.end()
+                    pix = QPixmap.fromImage(img)
+            except Exception as e:
+                logger.warning(f"SVG thumbnail rendering failed: {e}")
+        if pix is None and path and os.path.exists(path):
+            pix = QPixmap(path)
+
+        if pix is None or pix.isNull():
+            self.setText("Image unavailable")
+            self.setFixedSize(120, 90)
+            self.setAlignment(Qt.AlignCenter)
+            return
+
+        scaled = pix.scaledToHeight(96, Qt.SmoothTransformation)
+        self.setPixmap(scaled)
+        self.setFixedSize(scaled.size() + QSize(2, 2))
+
+    def _style(self):
+        self.setStyleSheet(
+            "QLabel { border: 1px solid rgba(128, 128, 128, 0.4); border-radius: 6px; background: rgba(128, 128, 128, 0.08); }")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and os.path.exists(self.image_path):
+            self.sig_activated.emit(self.image_path)
+        elif event.button() == Qt.LeftButton:
+            ToastManager().show(f"Image file not found: {os.path.basename(self.image_path)}", "error")
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # 双击同样打开查看器（单击已触发，双击时保持一致行为）
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        tm = ThemeManager()
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {tm.color('bg_card')}; color: {tm.color('text_main')};
+                     border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 4px; }}
+            QMenu::item {{ padding: 6px 18px; border-radius: 4px; }}
+            QMenu::item:selected {{ background-color: {tm.color('btn_hover')}; }}
+        """)
+        act_open = menu.addAction(tm.icon("open", "text_main"), "Open Viewer")
+        act_save = menu.addAction(tm.icon("download", "text_main"), "Save As...")
+        act_copy = menu.addAction(tm.icon("copy", "text_main"), "Copy Image")
+
+        chosen = menu.exec(event.globalPos())
+        if chosen == act_open:
+            if os.path.exists(self.image_path):
+                self.sig_activated.emit(self.image_path)
+        elif chosen == act_save:
+            self._save_image()
+        elif chosen == act_copy:
+            self._copy_image()
+
+    def _save_image(self):
+        if not os.path.exists(self.image_path):
+            ToastManager().show(f"Image file not found: {os.path.basename(self.image_path)}", "error")
+            return
+        from PySide6.QtWidgets import QFileDialog
+        target, _ = QFileDialog.getSaveFileName(
+            self, "Save Image As", os.path.basename(self.image_path),
+            "Image (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg)")
+        if not target:
+            return
+        try:
+            import shutil
+            shutil.copy2(self.image_path, target)
+            ToastManager().show(f"Image saved: {os.path.basename(target)}", "success")
+        except OSError as e:
+            logger.error(f"Failed to save image: {e}")
+            ToastManager().show(f"Failed to save image: {e}", "error")
+
+    def _copy_image(self):
+        pix = self.pixmap()
+        if pix:
+            QGuiApplication.clipboard().setPixmap(pix)
+            ToastManager().show("Image copied to clipboard.", "success")
 
 
 class ChatBubbleWidget(QWidget):
@@ -151,7 +316,7 @@ class ChatBubbleWidget(QWidget):
             ctx_layout.addWidget(self.ctx_content)
             self.content_layout.addWidget(self.ctx_frame)
 
-        self.lbl_text = QTextBrowser()
+        self.lbl_text = ImageAwareTextBrowser()
         self.lbl_text.setOpenExternalLinks(False)
         self.lbl_text.setOpenLinks(False)
         self.lbl_text.setFrameShape(QFrame.NoFrame)
@@ -161,6 +326,8 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
         self.lbl_text.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
+        # 双击内联图片（AI 生成 / 工具产图）时打开内部查看器
+        self.lbl_text.sig_image_activated.connect(self.open_image_viewer)
 
         self.lbl_text.document().documentLayout().documentSizeChanged.connect(self._adjust_browser_height)
 
@@ -254,6 +421,41 @@ class ChatBubbleWidget(QWidget):
             self.edit_btn_widget.setVisible(False)
             self.content_layout.addWidget(self.edit_btn_widget)
 
+    # --- 3.1 用户消息图片缩略图条 ---
+    def set_image_files(self, image_infos):
+        """在气泡中渲染上传图片的缩略图条（用户消息）。
+
+        :param image_infos: 附件信息 dict 列表（``type == "image"``），
+                            需含 ``path`` 字段。
+        """
+        if not image_infos:
+            return
+        if getattr(self, '_image_strip', None) is not None:
+            return  # 幂等：重建气泡时不会重复插入
+
+        strip = QWidget()
+        strip_layout = QHBoxLayout(strip)
+        strip_layout.setContentsMargins(0, 2, 0, 2)
+        strip_layout.setSpacing(8)
+        strip_layout.setAlignment(Qt.AlignLeft)
+
+        for info in image_infos:
+            thumb = _ImageThumb(info)
+            thumb.sig_activated.connect(self.open_image_viewer)
+            strip_layout.addWidget(thumb)
+
+        self._image_strip = strip
+        # 插到文本上方：有附件上下文框时紧跟其后，否则置顶
+        insert_idx = 1 if getattr(self, 'ctx_frame', None) is not None else 0
+        self.content_layout.insertWidget(min(insert_idx, self.content_layout.count()), strip)
+
+    def open_image_viewer(self, image_path):
+        """用内部查看器打开本地图片（含 SVG）。"""
+        if image_path and os.path.exists(image_path):
+            open_image_viewer(image_path, parent=self)
+        else:
+            ToastManager().show(f"Image file not found: {os.path.basename(str(image_path))}", "error")
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         parent = self.parentWidget()
@@ -334,21 +536,10 @@ class ChatBubbleWidget(QWidget):
         tm = ThemeManager()
         font_family = tm.font_family()
 
-        if self.msg_type == self.MSG_ERROR:
-            # 【关键修复】让外层的 QWidget 来承担背景色和红色左边框，这样就不会出现文字底纹了
-            danger_color = tm.color('danger')
-            is_dark = tm.current_theme == 'dark'
-            bg_color = hex_to_rgba(danger_color, 0.1) if is_dark else hex_to_rgba(danger_color, 0.05)
-
-            self.content_container.setStyleSheet(f"""
-                QWidget#BubbleWrapper {{
-                    background-color: {bg_color};
-                    border: 1px solid {tm.color('border')};
-                    border-left: 4px solid {danger_color};
-                    border-radius: 4px; 
-                }}
-            """)
-        elif self.is_user:
+        # MSG_ERROR 气泡：错误框线（danger 左侧竖条 + 浅色底）由
+        # ErrorPanelWidget 统一承载，容器使用与 AI 气泡一致的卡片样式，
+        # 避免双重描边，保证全应用报错美术样式一致。
+        if self.is_user:
             bg_color = hex_to_rgba(tm.color('success'), 0.15) if tm.current_theme == 'dark' else hex_to_rgba(
                 tm.color('success'), 0.1)
             border_color = tm.color('success')
@@ -524,8 +715,81 @@ class ChatBubbleWidget(QWidget):
         text = re.sub(r"<plot_plan[^>]*>", "", text)
         return text
 
+    # --- 4.7 统一错误面板提取（流式标记 → 固定 QWidget） ---
+    def _extract_error_panels(self, text: str) -> str:
+        """检测 ``<error_panel data="...">`` 标记并转换为 ErrorPanelWidget。
+
+        与 ``<rplot_card>`` / ``<plot_plan>`` 相同的协议：core/task 层产出
+        base64 标记（见 src/core/llm_errors.py），UI 层解码渲染为统一
+        错误面板（含可折叠的 Technical Details 技术详情栏）。
+        """
+        if "<error_panel" not in text:
+            return text
+        if not hasattr(self, "_error_panel_rendered"):
+            self._error_panel_rendered = set()
+
+        import base64
+        import json
+
+        def _replace(match):
+            try:
+                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                logger.warning("Malformed <error_panel> marker dropped")
+                return ""
+            key = f"{data.get('title', '')}|{str(data.get('details', ''))[:128]}"
+            if key not in self._error_panel_rendered:
+                self._error_panel_rendered.add(key)
+                try:
+                    from src.ui.components.error_panel import ErrorPanelWidget
+
+                    panel = ErrorPanelWidget(data)
+                    anchor = getattr(self, "btn_widget", None)
+                    idx = self.content_layout.indexOf(anchor) if anchor is not None else -1
+                    if idx >= 0:
+                        self.content_layout.insertWidget(idx, panel)
+                    else:
+                        self.content_layout.addWidget(panel)
+                except Exception as e:
+                    logger.error(f"Failed to create error panel: {e}")
+            return ""
+
+        text = re.sub(r'<error_panel data="([^"]*)"\s*>\s*</error_panel>', _replace, text)
+        # 清理流式中可能残留的不完整标记
+        text = re.sub(r"<error_panel[^>]*/?>", "", text)
+        return text
+
+    # --- 4.8 MSG_ERROR 气泡统一渲染 ---
+    def _render_error_payload(self, text: str):
+        """MSG_ERROR 气泡统一渲染：解析 JSON payload -> ErrorPanelWidget。
+
+        兼容非 JSON 纯文本（如开发提示），回退为 "Generation Terminated"
+        通用标题；多次调用（如 set_loading 复原）时幂等更新同一面板。
+        """
+        import json
+        try:
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError("payload is not a dict")
+        except ValueError:
+            data = {"title": "Generation Terminated", "body": text, "details": ""}
+
+        if getattr(self, '_error_panel', None) is None:
+            from src.ui.components.error_panel import ErrorPanelWidget
+            self._error_panel = ErrorPanelWidget(data)
+            idx = self.content_layout.indexOf(self.lbl_text)
+            if idx >= 0:
+                self.content_layout.insertWidget(idx, self._error_panel)
+            else:
+                self.content_layout.addWidget(self._error_panel)
+        else:
+            self._error_panel.update_payload(data)
+
+        self.lbl_text.setVisible(False)
+
     # --- 5. 完整的 set_content 方法 ---
     def set_content(self, text, msg_type=None):
+        text = self._extract_error_panels(text)
         text = self._extract_rplot_cards(text)
         text = self._extract_plot_plan_cards(text)
         self.original_text = text
@@ -533,28 +797,7 @@ class ChatBubbleWidget(QWidget):
             self.msg_type = msg_type
 
         if self.msg_type == self.MSG_ERROR:
-            import json
-            tm = ThemeManager()
-            try:
-                error_data = json.loads(text)
-                title = error_data.get('title', 'Error')
-                body = error_data.get('body', text)
-            except json.JSONDecodeError:
-                title = "Generation Terminated"
-                body = text
-
-            danger_color = tm.color('danger')
-
-            html = (
-                f"<div style='margin: 0px; padding: 4px 6px;'>"
-                f"<div style='color: {danger_color}; font-weight: bold; font-size: 14px; margin-bottom: 8px;'>"
-                f"⚠️ {title}</div>"
-                f"<div style='font-size: 13px; font-family: {tm.font_family()}; line-height: 1.5;'>"
-                f"{body.replace(chr(10), '<br>')}</div>"
-                f"</div>"
-            )
-            self.lbl_text.setText(html)
-            self._adjust_browser_height()
+            self._render_error_payload(text)
             return
 
         if self.is_loading:
@@ -889,6 +1132,22 @@ class ChatBubbleWidget(QWidget):
     def _extract_content_for_copy(self, is_markdown=False):
         """核心提取逻辑：全局跨组件打捞 Mermaid 源码，精准清洗 Cite 链接"""
         text = self.original_text
+
+        # 0. 错误内容：错误气泡导出为可读文本（标题/建议/真实详情），
+        #    AI 气泡剥离错误面板标记，避免 base64 噪声进入剪贴板。
+        if self.msg_type == self.MSG_ERROR:
+            try:
+                import json as _json
+                data = _json.loads(text)
+                if isinstance(data, dict):
+                    parts = [str(data.get(k, "") or "").strip()
+                             for k in ("title", "body", "details")]
+                    return "\n".join(p for p in parts if p)
+            except ValueError:
+                pass
+        else:
+            from src.core.llm_errors import strip_markers
+            text = strip_markers(text)
 
         # 1. 预处理：移除后台思考过程和系统标识
         text = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)

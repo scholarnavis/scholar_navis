@@ -26,6 +26,8 @@ Design principles:
 from __future__ import annotations
 
 import ast
+import base64
+import json
 import logging
 import os
 import tempfile
@@ -103,6 +105,21 @@ AI_TESTS = {
             "takeaways and cite every claim with the references."
         ),
     },
+    "image_upload_vision": {
+        "note": (
+            "Developer test: exercising the <b>image attachment + vision</b> path. "
+            "A synthetic PNG is attached and sent with the prompt. Expected: the "
+            "image is mounted natively (vision-capable model) or routed through the "
+            "vision model (image-to-text), then a text answer describing the image. "
+            "If the backend rejects image input, a friendly error panel should appear."
+        ),
+        "prompt": (
+            "Please analyze the attached image and describe its key contents, "
+            "including any text, colors, and shapes you can see."
+        ),
+        #: 测试用合成图片（1x1 红色 PNG），由 _ai_test 动态生成并附加
+        "image": "synthetic",
+    },
 }
 
 
@@ -137,9 +154,11 @@ class DeveloperDialog(BaseDialog):
         self.btn_ai_plot = self._make_btn("AI: Plot (bubble)", lambda: self._ai_test("plot_bubble"))
         self.btn_ai_prov = self._make_btn("AI: Provenance", lambda: self._ai_test("provenance_chain"))
         self.btn_ai_lit = self._make_btn("AI: Literature (Breadth)", lambda: self._ai_test("literature_breadth"))
+        self.btn_ai_img = self._make_btn("AI: Image Vision", lambda: self._ai_test("image_upload_vision"))
         ai_row.addWidget(self.btn_ai_plot)
         ai_row.addWidget(self.btn_ai_prov)
         ai_row.addWidget(self.btn_ai_lit)
+        ai_row.addWidget(self.btn_ai_img)
         ai_row.addStretch()
         self.content_layout.addLayout(ai_row)
 
@@ -153,7 +172,9 @@ class DeveloperDialog(BaseDialog):
         self.btn_skill = self._make_btn("Skill Gate", self._test_skill_gate)
         self.btn_syntax = self._make_btn("Syntax/Import", self._test_syntax)
         self.btn_lit = self._make_btn("Literature Merge", self._test_literature_merge)
-        for b in (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill, self.btn_syntax, self.btn_lit):
+        self.btn_img = self._make_btn("Image Pipeline", self._test_image_pipeline)
+        for b in (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill,
+                  self.btn_syntax, self.btn_lit, self.btn_img):
             func_row.addWidget(b)
         func_row.addStretch()
         self.content_layout.addLayout(func_row)
@@ -209,20 +230,79 @@ class DeveloperDialog(BaseDialog):
             self._log("Cannot route to Chat panel (MainWindow route method missing).", "FAIL")
             return
 
+        # 测试用合成图片附件：按需生成（纯标准库构造 PNG，无 Qt / 第三方依赖）
+        image_paths = []
+        if entry.get("image"):
+            path = self._make_synthetic_png()
+            if path:
+                image_paths = [path]
+                self._log(f"Synthetic test image: {path}", "INFO")
+            else:
+                self._log("Failed to create synthetic test image; sending text only.", "WARN")
+
         self._log(f"Dispatching AI test '{key}' to Chat panel...", "INFO")
         self._log(f"Prompt: {entry['prompt'][:80]}...", "INFO")
         try:
-            route(entry["prompt"], note_text=entry["note"])
+            if image_paths:
+                route(entry["prompt"], note_text=entry["note"], image_paths=image_paths)
+            else:
+                route(entry["prompt"], note_text=entry["note"])
             self._log("Sent to Chat panel. Check the Chat Assistant for results.", "OK")
         except TypeError:
-            # Fallback: older route method without note_text.
+            # Fallback: older route method without note_text / image_paths.
             try:
                 route(entry["prompt"])
-                self._log("Sent to Chat panel (no note support).", "OK")
+                self._log("Sent to Chat panel (no note/image support).", "OK")
             except Exception as e2:
                 self._log(f"Failed to dispatch AI test: {e2}", "FAIL")
         except Exception as e:
             self._log(f"Failed to dispatch AI test: {e}", "FAIL")
+
+    @staticmethod
+    def _make_synthetic_png() -> str:
+        """生成测试用合成 PNG（32x32 四色块）到临时目录，返回路径。
+
+        标准库构造（zlib + struct 手写 PNG chunk），无 Qt / 第三方依赖，
+        保证开发者面板在任何环境下都能生成该测试附件。
+        """
+        import struct
+        import zlib
+
+        def _chunk(tag: bytes, data: bytes) -> bytes:
+            return (struct.pack(">I", len(data)) + tag + data
+                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+        try:
+            # 32x32：四象限红/绿/蓝/白，便于视觉模型给出可验证的结构化描述
+            rows = []
+            for y in range(32):
+                row = b"\x00"  # filter type 0
+                for x in range(32):
+                    if x < 16 and y < 16:
+                        row += b"\xe5\x3a\x3a"      # red
+                    elif x >= 16 and y < 16:
+                        row += b"\x3a\x9a\x5a"      # green
+                    elif x < 16 and y >= 16:
+                        row += b"\x3a\x6a\xcf"      # blue
+                    else:
+                        row += b"\xf2\xf2\xf2"      # white
+                rows.append(row)
+
+            ihdr = struct.pack(">IIBBBBB", 32, 32, 8, 2, 0, 0, 0)  # 8-bit RGB
+            png = (b"\x89PNG\r\n\x1a\n"
+                   + _chunk(b"IHDR", ihdr)
+                   + _chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
+                   + _chunk(b"IEND", b""))
+
+            cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            path = os.path.join(cache_dir, "devtest_synthetic.png")
+            with open(path, "wb") as f:
+                f.write(png)
+            return path
+        except OSError as e:
+            logger.warning(f"Synthetic PNG generation failed: {e}")
+            return ""
 
     # ------------------------------------------------------------------ #
     #  Functional tests
@@ -235,6 +315,7 @@ class DeveloperDialog(BaseDialog):
         self._test_r_engine(clear=False)
         self._test_provenance(clear=False)
         self._test_literature_merge(clear=False)
+        self._test_image_pipeline(clear=False)
         self._log("=== All functional tests finished ===", "INFO")
 
     def _test_r_engine(self, clear: bool = True):
@@ -412,6 +493,162 @@ class DeveloperDialog(BaseDialog):
         else:
             self._log(f"Literature merge test passed (via {origin}).", "OK")
 
+    def _test_image_pipeline(self, clear: bool = True):
+        """Functional test for the image-attachment pipeline (no AI, no network).
+
+        Validates, in order:
+          * classification  - is_image_file / is_svg_file / guess_mime matrix
+          * encode          - encode_data_url round-trip (bytes & MIME intact)
+          * guards          - missing file / oversize image rejected properly
+          * capability      - ChatGenerationTask._looks_vision_capable matrix
+          * friendly error  - image-rejection 400 -> "Model Cannot Read Images"
+          * caption cache   - image-to-text disk cache round-trip
+          * svg rasterize   - SVG -> PNG conversion (UI-process stage)
+        """
+        if clear:
+            self._clear()
+        self._log("--- Image Pipeline ---", "INFO")
+        fails = []
+
+        # 1) 分类与 MIME 推断
+        try:
+            from src.core.image_utils import (guess_mime, is_image_file, is_svg_file,
+                                              IMAGE_EXTENSIONS, MAX_IMAGE_BYTES)
+            cases = [("a.png", "image/png", True, False),
+                     ("b.JPG", "image/jpeg", True, False),
+                     ("c.svg", "image/svg+xml", True, True),
+                     ("d.pdf", "image/png", False, False),
+                     ("", "image/png", False, False)]
+            for name, mime, is_img, is_svg in cases:
+                if guess_mime(name) != mime:
+                    fails.append(f"guess_mime({name!r}) != {mime}")
+                if is_image_file(name) != is_img:
+                    fails.append(f"is_image_file({name!r}) != {is_img}")
+                if is_svg_file(name) != is_svg:
+                    fails.append(f"is_svg_file({name!r}) != {is_svg}")
+            self._log(f"Classification: {len(cases)} cases checked, "
+                      f"{len(IMAGE_EXTENSIONS)} supported extensions.", "INFO")
+        except Exception as e:
+            fails.append(f"classification module: {e}")
+
+        # 2) data URL 编码往返（字节与 MIME 保持一致）
+        png_path = self._make_synthetic_png()
+        if not png_path or not os.path.exists(png_path):
+            fails.append("synthetic PNG generation failed")
+        else:
+            try:
+                with open(png_path, "rb") as f:
+                    raw = f.read()
+                data_url = encode_data_url(png_path)
+                if not data_url.startswith("data:image/png;base64,"):
+                    fails.append(f"unexpected data URL header: {data_url[:40]}...")
+                elif base64.b64decode(data_url.partition(",")[2]) != raw:
+                    fails.append("encode_data_url round-trip mismatch")
+                else:
+                    self._log(f"encode_data_url round-trip OK "
+                              f"({len(raw)} B -> {len(data_url) // 1024} KB b64).", "OK")
+            except Exception as e:
+                fails.append(f"encode round-trip: {e}")
+
+        # 3) 防御路径：文件缺失 / 超限
+        try:
+            from src.core.image_utils import encode_data_url, MAX_IMAGE_BYTES
+            try:
+                encode_data_url(os.path.join(tempfile.gettempdir(), "scholar_navis_missing_.png"))
+                fails.append("missing image was not rejected")
+            except FileNotFoundError:
+                self._log("Missing file correctly rejected (FileNotFoundError).", "OK")
+
+            big = os.path.join(tempfile.gettempdir(), "scholar_navis_devtest_oversize.png")
+            with open(big, "wb") as f:
+                f.truncate(MAX_IMAGE_BYTES + 1)  # 稀疏写入，磁盘占用极小
+            try:
+                encode_data_url(big)
+                fails.append("oversize image was not rejected")
+            except ValueError:
+                self._log(f"Oversize image correctly rejected (> {MAX_IMAGE_BYTES // (1024 * 1024)} MB).", "OK")
+            finally:
+                os.remove(big)
+        except OSError as e:
+            fails.append(f"guard fixtures: {e}")
+
+        # 4) 视觉能力判定矩阵 + 5) 友好错误映射
+        try:
+            from src.task.chat_tasks import ChatGenerationTask
+            matrix = [("gpt-4o", True), ("gpt-4.1-mini", True),
+                      ("claude-3-5-sonnet-20241022", True), ("gemini-2.5-flash", True),
+                      ("qwen-vl-max", True), ("glm-4v-flash", True), ("o3-mini", True),
+                      ("deepseek-chat", False), ("deepseek-vl2", False),  # 显式排除优先
+                      ("ernie-4.5", False), ("llama-3.3-70b", False), ("", False)]
+            bad = [m for m, want in matrix if ChatGenerationTask._looks_vision_capable(m) != want]
+            if bad:
+                fails.append(f"vision capability matrix mismatch: {bad}")
+            else:
+                self._log(f"Vision capability matrix OK ({len(matrix)} models).", "OK")
+
+            data = json.loads(ChatGenerationTask._friendly_error_payload(
+                "400 Bad Request", "Invalid content: image_url not supported by this model"))
+            if data.get("title") != "Model Cannot Read Images":
+                fails.append("image-rejection error not mapped to friendly payload")
+            else:
+                self._log("Friendly error maps image-rejection 400 correctly.", "OK")
+            fmt = json.loads(ChatGenerationTask._friendly_error_payload(
+                "400 Bad Request", "The image format webp is not supported by this model"))
+            if fmt.get("title") != "Image Format Not Accepted":
+                fails.append("image-format error not mapped to friendly payload")
+            else:
+                self._log("Friendly error maps image-format 400 correctly.", "OK")
+            plain = json.loads(ChatGenerationTask._friendly_error_payload("Timeout", "upstream timeout"))
+            if plain.get("title") != "Timeout":
+                fails.append("friendly error passthrough broken")
+        except Exception as e:
+            fails.append(f"chat_tasks checks: {e}")
+
+        # 6) 图生文磁盘缓存往返（stub 实例，不启动真实生成任务）
+        if png_path and os.path.exists(png_path):
+            try:
+                from src.task.chat_tasks import ChatGenerationTask
+
+                class _Stub:
+                    logger = logging.getLogger("devtest.caption")
+
+                stub = _Stub()
+                info = {"name": "devtest.png", "image_path": png_path}
+                desc = "red/green/blue/white quadrant test image"
+                ChatGenerationTask._save_caption_cache(stub, info, desc)
+                if ChatGenerationTask._load_caption_cache(stub, info) != desc:
+                    fails.append("caption cache round-trip mismatch")
+                elif ChatGenerationTask._load_caption_cache(stub, {"image_path": "no_such.png"}) is not None:
+                    fails.append("caption cache miss should return None")
+                else:
+                    self._log("Caption cache round-trip OK.", "OK")
+                os.remove(ChatGenerationTask._caption_cache_path(stub, info))
+            except Exception as e:
+                fails.append(f"caption cache: {e}")
+
+        # 7) SVG 栅格化（UI 进程阶段，QSvgRenderer）
+        try:
+            from src.tools.chat_mixins.attachments import ChatAttachmentsMixin
+            svg_path = os.path.join(tempfile.gettempdir(), "scholar_navis_devtest.svg")
+            with open(svg_path, "w", encoding="utf-8") as f:
+                f.write('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">'
+                        '<rect width="64" height="64" fill="#05b8cc"/></svg>')
+            png_out = ChatAttachmentsMixin._rasterize_svg(svg_path)
+            if png_out and os.path.exists(png_out) and os.path.getsize(png_out) > 0:
+                self._log(f"SVG rasterized -> {os.path.basename(png_out)}.", "OK")
+                os.remove(svg_path)
+            else:
+                fails.append("SVG rasterization returned no PNG")
+        except Exception as e:
+            fails.append(f"svg rasterize: {e}")
+
+        if fails:
+            for msg in fails:
+                self._log(msg, "FAIL")
+            self._log("Image pipeline test FAILED.", "FAIL")
+        else:
+            self._log("Image pipeline test passed.", "OK")
+
     def _test_skill_gate(self, clear: bool = True):
         if clear:
             self._clear()
@@ -457,9 +694,11 @@ class DeveloperDialog(BaseDialog):
             "src/core/agent/decomposer.py",
             "src/core/agent/synthesizer.py",
             "src/task/chat_tasks.py",
+            "src/core/image_utils.py",
             "src/ui/components/chat_bubble.py",
             "src/ui/components/dialog.py",
             "src/ui/components/developer_dialog.py",
+            "src/ui/components/image_viewer.py",
         ]
         ok = 0
         for rel in files:
