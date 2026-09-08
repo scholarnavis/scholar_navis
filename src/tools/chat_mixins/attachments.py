@@ -1,6 +1,6 @@
-"""Attachment mixin: file attach, KB file pick, chat history export.
+"""Attachment mixin: file attach, KB file pick, chat history export & import.
 
-拆分自 src/tools/chat_tool.py：负责外部附件管理与聊天记录导出任务。
+拆分自 src/tools/chat_tool.py：负责外部附件管理与聊天记录导入 / 导出任务。
 """
 import base64
 import logging
@@ -309,6 +309,9 @@ class ChatAttachmentsMixin:
         act_pdf = menu.addAction(tm.icon("article", "text_main"), "Export as PDF")
         act_md = menu.addAction(tm.icon("markdown", "text_main"), "Export as MD")
         act_txt = menu.addAction(tm.icon("file-text", "text_main"), "Export as TXT")
+        menu.addSeparator()
+        act_json = menu.addAction(tm.icon("archive", "text_main"),
+                                  "Export as JSON (Lossless, for re-import)")
 
         # 在鼠标位置弹出菜单
         action = menu.exec(QCursor.pos())
@@ -319,6 +322,8 @@ class ChatAttachmentsMixin:
             filter_str, default_ext = "PDF Document (*.pdf)", ".pdf"
         elif action == act_md:
             filter_str, default_ext = "Markdown File (*.md)", ".md"
+        elif action == act_json:
+            filter_str, default_ext = "Scholar Navis History (*.schat *.json)", ".schat"
         else:
             filter_str, default_ext = "Text File (*.txt)", ".txt"
 
@@ -393,3 +398,109 @@ class ChatAttachmentsMixin:
             self.export_pd.show_finish_state(False, "Export Failed",
                                              result.get("msg", "Unknown error") if result else "Unknown error")
             self.logger.error(f"Failed to export document: {result.get('msg') if result else 'None'}")
+
+    # ---------- Import ----------
+    def import_chat_history(self):
+        """选择并导入一份聊天记录（.schat/.json 无损 或 .md/.txt 尽力还原）。"""
+        from src.task.chat_tasks import ImportChatHistoryTask
+        from src.ui.components.dialog import ProgressDialog
+
+        # 空历史也允许导入（直接填充），因此不做前置判空
+        path, _ = QFileDialog.getOpenFileName(
+            self.widget, "Import Chat History", "",
+            "Chat History (*.schat *.json *.md *.txt *.csv);;"
+            "Scholar Navis Lossless (*.schat *.json);;"
+            "Markdown (*.md);;Text (*.txt);;CSV (*.csv)"
+        )
+        if not path:
+            return
+
+        pd = ProgressDialog(self.widget, "Importing Chat", "Reading and parsing chat history...")
+        pd.show()
+
+        self.import_task_mgr = TaskManager()
+        self.import_task_mgr.sig_result.connect(
+            lambda res: self._on_import_history_result(res, path, pd))
+        self.import_task_mgr.start_task(
+            ImportChatHistoryTask,
+            task_id="import_chat_history",
+            mode=TaskMode.THREAD,
+            path=path,
+        )
+
+    def _on_import_history_result(self, result, path, pd):
+        if not result or not result.get("success"):
+            msg = result.get("msg", "Unknown error") if result else "Unknown error"
+            pd.show_finish_state(False, "Import Failed", msg)
+            self.logger.error("Chat history import failed: %s", msg)
+            return
+
+        messages = result.get("messages", [])
+        lossless = result.get("lossless", False)
+        if not messages:
+            pd.show_finish_state(False, "Import Failed", "No chat messages were found in the file.")
+            return
+
+        # 确认是否用导入内容替换当前对话上下文
+        from src.ui.components.dialog import StandardDialog
+        fmt_note = "Lossless (full fidelity)." if lossless else \
+            "Best-effort text import (rich content such as citations/images may be reduced to plain text)."
+        dlg = StandardDialog(
+            self.widget,
+            "Import Chat History",
+            f"Found {len(messages)} message(s).\n{fmt_note}\n\n"
+            "This will replace the current conversation. Continue?",
+            show_cancel=True,
+        )
+        if not dlg.exec():
+            pd.close_safe()
+            return
+
+        try:
+            self._apply_imported_history(messages)
+            pd.show_finish_state(True, "Import Complete",
+                                 f"Imported {len(messages)} message(s) from:\n{os.path.basename(path)}")
+            self.logger.info("Imported %d chat message(s) from %s (lossless=%s)",
+                             len(messages), path, lossless)
+        except Exception as e:
+            self.logger.exception("Failed to render imported history.")
+            pd.show_finish_state(False, "Import Error", f"Failed to render chat history:\n{e}")
+
+    def _apply_imported_history(self, messages):
+        """将导入的消息替换进对话：重建气泡并写回 self.history。
+
+        复用编辑重发（edit-resend）同款重放逻辑，保证渲染行为与现有对话一致，
+        导入后的记录可继续作为上下文追问。
+        """
+        self._ensure_chat_ui()
+
+        # 终止可能在进行的生成，清空旧会话
+        if hasattr(self, 'cancel_generation'):
+            self.cancel_generation()
+        self.current_ai_bubble = None
+        self.is_locked = False
+        self.clear_layout(self.chat_layout)
+        self.remove_old_follow_ups()
+
+        # 逐条重放并同时写入 self.history：add_bubble 依赖 len(history) 生成自增
+        # 气泡索引，故必须与历史写入交替进行（与 edit-resend 重放逻辑一致）。
+        self.history = []
+        for msg in messages:
+            role = msg.get("role", "assistant")
+            is_user = role == "user"
+            content = msg.get("content", "") or ""
+            display_text = msg.get("display_text", content) if is_user else content
+            ctx_html = msg.get("context_html")
+            msg_images = [c for c in msg.get("external_files", []) if c.get("type") == "image"] \
+                if msg.get("external_files") else []
+            self.add_bubble(display_text, is_user=is_user, context_html=ctx_html,
+                            image_files=msg_images)
+            self.history.append(msg)
+
+        # 恢复输入控件状态
+        if hasattr(self, 'input_container'):
+            self.input_container.unlock_input()
+            self.input_container.clear_text()
+        self.clear_attached_context()
+        self.scroll_to_bottom(smooth=True)
+        ToastManager().show(f"Imported {len(messages)} message(s).", "success")

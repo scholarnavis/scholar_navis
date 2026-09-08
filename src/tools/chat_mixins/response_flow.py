@@ -45,6 +45,10 @@ class ChatResponseFlowMixin:
                 self.input_container.btn_clear.setEnabled(enabled)
             if hasattr(self.input_container, 'btn_attach'):
                 self.input_container.btn_attach.setEnabled(enabled)
+            if hasattr(self.input_container, 'btn_export'):
+                self.input_container.btn_export.setEnabled(enabled)
+            if hasattr(self.input_container, 'btn_import'):
+                self.input_container.btn_import.setEnabled(enabled)
 
     def _throttled_render(self):
         if getattr(self, '_is_rendering_dirty', False) and self.current_ai_bubble:

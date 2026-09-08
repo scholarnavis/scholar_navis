@@ -194,6 +194,7 @@ class AutoResizingTextEdit(QPlainTextEdit):
 class ChatInputContainer(QFrame):
     sig_send_clicked = Signal(str)
     sig_export_clicked = Signal()
+    sig_import_clicked = Signal()
     sig_clear_clicked = Signal()
     sig_attach_clicked = Signal()
     sig_clear_context_clicked = Signal()
@@ -315,6 +316,14 @@ class ChatInputContainer(QFrame):
         self.btn_export.setStyleSheet(tool_btn_style)
         self.btn_export.clicked.connect(self.sig_export_clicked.emit)
 
+        self.btn_import = QPushButton("Import")
+        self.btn_import.setCursor(Qt.PointingHandCursor)
+        self.btn_import.setStyleSheet(tool_btn_style)
+        self.btn_import.setToolTip(
+            "Load a previously exported chat history (.schat / .json lossless, "
+            "or best-effort .md / .txt / .csv)")
+        self.btn_import.clicked.connect(self.sig_import_clicked.emit)
+
         self.btn_clear = QPushButton("Clear")
         self.btn_clear.setCursor(Qt.PointingHandCursor)
         self.btn_clear.setStyleSheet(tool_btn_style)
@@ -327,6 +336,7 @@ class ChatInputContainer(QFrame):
         self.bottom_bar.insertWidget(0, self.btn_attach)
 
         self.bottom_bar.addWidget(self.btn_export)
+        self.bottom_bar.addWidget(self.btn_import)
         self.bottom_bar.addWidget(self.btn_clear)
         self.bottom_bar.addStretch()
 
@@ -406,6 +416,10 @@ class ChatInputContainer(QFrame):
         self.btn_export.setText("Export")
         self.btn_export.setIcon(tm.icon("download", "text_muted"))
         self.btn_export.setStyleSheet(tool_btn_style)
+
+        self.btn_import.setText("Import")
+        self.btn_import.setIcon(tm.icon("upload", "text_muted"))
+        self.btn_import.setStyleSheet(tool_btn_style)
 
         self.btn_clear.setText("Clear")
         self.btn_clear.setIcon(tm.icon("delete", "text_muted"))

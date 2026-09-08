@@ -43,7 +43,13 @@ _SYNTH_PROMPT = (
     "do not renumber or drop them.\n"
     "4. Write in high-density academic prose, concise but complete. Do not add a new "
     "References section; citations are handled by the system.\n"
-    "5. Output pure Markdown (sections as '## Heading')."
+    "5. Output pure Markdown (sections as '## Heading').\n"
+    "6. PUNCTUATION LOCALIZATION: The input question may already be translated to English, so "
+    "do NOT infer the reply language from it. Match punctuation to the language you actually "
+    "write each passage in: when writing Chinese, use full-width punctuation（，。；：？！）、"
+    "full-width parentheses（）and Chinese quotes（“”）; in English/other languages use their "
+    "standard punctuation. Keep ASCII citation markers [1]/[101], section headings, code "
+    "fences and identifiers unchanged."
 )
 
 
@@ -53,8 +59,13 @@ class Synthesizer:
     def __init__(self, main_llm):
         self.main_llm = main_llm
 
-    def synthesize(self, query: str, sub_results: List[Dict]) -> str:
-        """sub_results: list of {'heading': str, 'query': str, 'text': str}."""
+    def synthesize(self, query: str, sub_results: List[Dict], output_lang: str = "") -> str:
+        """sub_results: list of {'heading': str, 'query': str, 'text': str}.
+
+        ``output_lang``: 用户原始语言（如 "Chinese"）。不为空时，强制最终综合
+        正文使用该语言；因为 query 可能已被翻译为英文，若不声明，模型会默认用
+        英文作答。
+        """
         if not sub_results:
             return ""
 
@@ -74,10 +85,18 @@ class Synthesizer:
             )
 
         headings = " | ".join((r.get("heading") or f"Part {i+1}") for i, r in enumerate(sub_results))
+        lang_note = ""
+        if output_lang and output_lang not in ("English", "unknown"):
+            lang_note = (
+                f"\n\nThe overarching question was translated to English for retrieval, but the "
+                f"user originally wrote in {output_lang}. Compose the FINAL synthesis in "
+                f"{output_lang} (not English), using that language's native punctuation. "
+                f"Keep citation markers [1]/[101], headings and code fences as ASCII.\n"
+            )
         user_prompt = (
             f"Overarching Question:\n{query}\n\n"
             f"Use these section headings in order: {headings}\n\n"
-            f"Sub-investigation results:\n\n" + "\n".join(sections)
+            f"Sub-investigation results:\n\n" + "\n".join(sections) + lang_note
         )
 
         try:

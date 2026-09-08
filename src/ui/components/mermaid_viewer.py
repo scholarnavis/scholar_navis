@@ -1,15 +1,171 @@
+import base64
 import json
 import os
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import (QMainWindow, QToolBar,
+from PySide6.QtWidgets import (QMainWindow, QToolBar, QCheckBox,
                                QFileDialog, QComboBox, QSplitter)
 
 from src.core.theme_manager import ThemeManager
 # 🌟 引入你的自定义 Dialog
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.source_code_viewer import SourceCodeViewer
+
+
+#: 导出用全局导出函数，注入页面 <script> 后供 Qt 端 runJavaScript 调用。
+#: - ``__navisExportSVG()``: 返回 #graphDiv 内 <svg> 的 outerHTML（矢量）。
+#: - ``__navisExportRaster(mime, quality, scale, crop)``: 按 SVG 真实尺寸光栅化，
+#:   返回 ``data:`` URL。crop=True 时按非背景像素自动裁剪四周空白。
+#:   此方案不依赖视口/滚动条/grab，可保证高清不裁切。
+_NAVIS_EXPORT_JS = r"""
+function __navisSvgNode() {
+    return document.querySelector('#graphDiv svg');
+}
+
+function __navisSvgLogicalSize(svg) {
+    var w = 0, h = 0;
+    try {
+        var vb = svg.viewBox;
+        if (vb && vb.baseVal) { w = vb.baseVal.width; h = vb.baseVal.height; }
+    } catch (e) { /* ignore */ }
+    if (!w || !h) {
+        try { var b = svg.getBBox(); if (b && (b.width || b.height)) { w = b.width; h = b.height; } } catch (e) {}
+    }
+    if (!w || !h) {
+        try {
+            var wa = svg.width && svg.width.baseVal ? svg.width.baseVal.value : 0;
+            var ha = svg.height && svg.height.baseVal ? svg.height.baseVal.value : 0;
+            if (wa && ha) { w = wa; h = ha; }
+        } catch (e) {}
+    }
+    return { w: w || 1200, h: h || 800 };
+}
+
+function __navisExportSVG() {
+    var svg = __navisSvgNode();
+    if (!svg) return null;
+    return new XMLSerializer().serializeToString(svg);
+}
+
+// 画到底层 canvas，并把绘制区域的 canvas 一并返回，供裁剪用。
+function __navisDrawToCanvas(scale) {
+    var svg = __navisSvgNode();
+    if (!svg) return null;
+    var size = __navisSvgLogicalSize(svg);
+    // 四周留白，避免个别标签/描边画到边界外被裁掉。
+    var pad = 24;
+    var W = Math.max(1, Math.round((size.w + pad * 2) * scale));
+    var H = Math.max(1, Math.round((size.h + pad * 2) * scale));
+    var canvas = document.createElement('canvas');
+    canvas.width = W;
+    canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    var filledBg = null;
+    try {
+        var bg = getComputedStyle(document.body).backgroundColor;
+        if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') {
+            ctx.fillStyle = bg;
+            ctx.fillRect(0, 0, W, H);
+            filledBg = bg;
+        }
+    } catch (e) { filledBg = null; }
+
+    var c = svg.cloneNode(true);
+    var hasViewBox = false;
+    try { hasViewBox = !!(c.viewBox && c.viewBox.baseVal && c.viewBox.baseVal.width); } catch (e) {}
+    if (!hasViewBox) { c.setAttribute('viewBox', '0 0 ' + size.w + ' ' + size.h); }
+    c.setAttribute('width', String(size.w));
+    c.setAttribute('height', String(size.h));
+
+    return {
+        svgNode: c, size: size, pad: pad, scale: scale,
+        canvas: canvas, ctx: ctx, filledBg: filledBg
+    };
+}
+
+// 根据 body 背景判断某像素是否属于"内容"（裁剪时空白的依据）。
+// 有背景填充则比较颜色，无背景则看 alpha。
+function __navisIsContentPixel(data, i, filledBg) {
+    var a = data[i + 3];
+    if (!filledBg) {
+        return a > 40;
+    }
+    if (a < 240) return false;
+    return Math.abs(data[i] - filledBg[0]) + Math.abs(data[i + 1] - filledBg[1]) +
+           Math.abs(data[i + 2] - filledBg[2]) > 30;
+}
+
+function __navisComputeCropBox(ctx, W, H, filledBg) {
+    var imgData;
+    try { imgData = ctx.getImageData(0, 0, W, H); } catch (e) { return null; }
+    var d = imgData.data;
+    var minX = W, minY = H, maxX = -1, maxY = -1;
+    var ref = null;
+    if (filledBg) {
+        var rgb = filledBg.match(/rgba?\(([^)]+)\)/);
+        if (!rgb) {
+            var hex = filledBg.replace('#', '');
+            if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+            ref = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+        } else {
+            var parts = rgb[1].split(',');
+            ref = [parseInt(parts[0], 10), parseInt(parts[1], 10), parseInt(parts[2], 10)];
+        }
+    }
+    var step = 2; // 采样步长，提速且不影响边缘结果太多
+    for (var y = 0; y < H; y += step) {
+        var row = y * W * 4;
+        for (var x = 0; x < W; x += step) {
+            var i = row + x * 4;
+            if (__navisIsContentPixel(d, i, ref)) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    if (maxX < 0) return null;
+    return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+}
+
+function __navisExportRaster(mime, quality, scale, crop) {
+    return new Promise(function (resolve, reject) {
+        var canvas = __navisDrawToCanvas(scale);
+        if (!canvas) { resolve(null); return; }
+        var size = canvas.size, pad = canvas.pad, W = canvas.canvas.width, H = canvas.canvas.height;
+        var ctx = canvas.ctx;
+        var img = new Image();
+        var url = URL.createObjectURL(new Blob(
+            [new XMLSerializer().serializeToString(canvas.svgNode)],
+            { type: 'image/svg+xml;charset=utf-8' }
+        ));
+        img.onload = function () {
+            try {
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+                var dw = size.w * scale, dh = size.h * scale;
+                ctx.drawImage(img, pad * scale, pad * scale, dw, dh);
+                var outCanvas = canvas.canvas;
+                if (crop) {
+                    var box = __navisComputeCropBox(ctx, W, H, canvas.filledBg);
+                    if (box) {
+                        outCanvas = document.createElement('canvas');
+                        outCanvas.width = box.w;
+                        outCanvas.height = box.h;
+                        outCanvas.getContext('2d').drawImage(canvas.canvas, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+                    }
+                }
+                resolve(outCanvas.toDataURL(mime, quality));
+            } catch (e) { reject(e); }
+            finally { URL.revokeObjectURL(url); }
+        };
+        img.onerror = function (e) { URL.revokeObjectURL(url); reject(e); };
+        img.src = url;
+    });
+}
+"""
 
 
 class MermaidViewer(QMainWindow):
@@ -92,31 +248,92 @@ class MermaidViewer(QMainWindow):
 
         tb.addSeparator()
 
+        # 导出设置：倍率（清晰度）与自动裁剪空白
+        self.scale_combo = QComboBox()
+        self.scale_combo.addItems(["1x", "2x", "3x", "4x"])
+        self.scale_combo.setToolTip("Raster export scale (SVG export is always lossless)")
+        self.scale_combo.setStyleSheet("QComboBox { color: #ccc; background: #333; border: 1px solid #555; border-radius: 3px; padding: 2px 6px; } "
+                                       "QComboBox QAbstractItemView { color: #ccc; background: #222; selection-background-color: #05B8CC; selection-color: #fff; }")
+        tb.addWidget(self.scale_combo)
+
+        self.chk_crop = QCheckBox("Crop Whitespace")
+        self.chk_crop.setToolTip("Automatically trim blank margins around the diagram")
+        self.chk_crop.setChecked(True)
+        self.chk_crop.setStyleSheet("QCheckBox { color: #ccc; padding-left: 4px; }")
+        tb.addWidget(self.chk_crop)
+
+        tb.addSeparator()
+
 
     def _export_image(self):
-        filters = "PNG Images (*.png);;JPEG Images (*.jpg);;WebP Images (*.webp);;SVG Vector Graphics (*.svg)"
-        path, selected_filter = QFileDialog.getSaveFileName(
+        filters = ("PNG Images (*.png);;JPEG Images (*.jpg);;WebP Images (*.webp);;"
+                   "SVG Vector Graphics (*.svg)")
+        path, _ = QFileDialog.getSaveFileName(
             self, "Export Diagram", "academic_diagram.png", filters
         )
 
         if not path:
             return
 
-        if path.lower().endswith('.svg'):
+        lower = path.lower()
+        if lower.endswith('.svg'):
             self.web_view.page().runJavaScript(
-                "document.getElementById('graphDiv').innerHTML;",
-                lambda html: self._save_svg_content(html, path)
+                "__navisExportSVG();",
+                lambda res: self._save_svg_content(res, path)
             )
+            return
+
+        # 位图：基于矢量 SVG 按真实尺寸 × 缩放系数光栅化，分辨率不依赖窗口/缩放，
+        # 且不受滚动条与可视区裁切影响，保证导出高清。
+        if lower.endswith('.png'):
+            mime, quality = 'image/png', 1.0
+        elif lower.endswith(('.jpg', '.jpeg')):
+            mime, quality = 'image/jpeg', 0.95
+        elif lower.endswith('.webp'):
+            mime, quality = 'image/webp', 0.95
         else:
-            # 位图导出逻辑
-            success = self.web_view.grab().save(path)
-            if success:
-                StandardDialog(self, "Success", f"Diagram exported successfully to:\n{path}").exec()
+            StandardDialog(self, "Export Failed",
+                           "Unsupported image extension. Please use PNG, JPG, WebP or SVG.").exec()
+            return
+
+        # 导出倍率：优先取工具栏选择（1x-4x）；未初始化时按 DPI 给至少 2x 保底。
+        if getattr(self, 'scale_combo', None) is not None:
+            text = self.scale_combo.currentText().lower().replace('x', '')
+            try:
+                scale = float(text)
+            except (TypeError, ValueError):
+                scale = 2.0
+        else:
+            dpr = max(1.0, float(self.web_view.devicePixelRatioF()))
+            scale = min(4.0, max(2.0, dpr))
+
+        crop = bool(getattr(self, 'chk_crop', None) is not None and self.chk_crop.isChecked())
+
+        script = (
+            "__navisExportRaster("
+            f"'{mime}', {json.dumps(quality)}, {json.dumps(scale)}, {json.dumps(crop)}"
+            ").then(function(d){ return d; }, function(e){ return null; });"
+        )
+        self.web_view.page().runJavaScript(script, lambda res: self._save_raster(res, path, lower))
+
+    def _save_raster(self, data_url, path, lower):
+        if not data_url:
+            StandardDialog(self, "Export Failed",
+                           "Could not export diagram. It might not be rendered yet.").exec()
+            return
+
+        try:
+            if "," in data_url:
+                _, b64 = data_url.split(",", 1)
             else:
-                msg = ("Failed to save image.\n\n"
-                       "Your Python Qt environment might be missing the codec for this format. "
-                       "Please try exporting as PNG, JPG, WebP, or SVG instead.")
-                StandardDialog(self, "Export Failed", msg).exec()
+                b64 = data_url
+            raw = base64.b64decode(b64)
+            with open(path, "wb") as f:
+                f.write(raw)
+            StandardDialog(self, "Success",
+                           f"High-resolution diagram exported successfully to:\n{path}").exec()
+        except Exception as e:
+            StandardDialog(self, "Export Failed", f"Failed to save image:\n{str(e)}").exec()
 
     def _save_svg_content(self, html_content, path):
         if not html_content:
@@ -173,18 +390,29 @@ class MermaidViewer(QMainWindow):
         js_path = tm.get_resource_path("assets", "js", "mermaid.min.js")
         js_uri = QUrl.fromLocalFile(js_path).toString()
 
+        # SVG 只用于页内预览（等比缩入容器，避免超宽图产生横向滚动条）；
+        # 导出始终走矢量/真实尺寸光栅化，不受此处 max-width 影响。
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="utf-8">
             <style>
-                body {{ 
-                    background-color: {tm.color('bg_main')}; 
-                    display: flex; justify-content: center; align-items: center; 
-                    height: 100vh; margin: 0; overflow: auto; 
+                html, body {{
+                    margin: 0; padding: 0;
+                    background-color: {tm.color('bg_main')};
                 }}
-                .mermaid {{ transform-origin: top left; }}
+                body {{ overflow: auto; }}
+                .mermaid {{
+                    display: inline-block;
+                    padding: 12px;
+                    transform-origin: top left;
+                }}
+                #graphDiv svg {{
+                    max-width: 100%;
+                    height: auto;
+                    display: block;
+                }}
             </style>
             <script src="{js_uri}"></script>
         </head>
@@ -203,6 +431,9 @@ class MermaidViewer(QMainWindow):
                     }}
                 }}
                 draw();
+            </script>
+            <script>
+                {_NAVIS_EXPORT_JS}
             </script>
         </body>
         </html>

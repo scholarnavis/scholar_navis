@@ -264,6 +264,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         self.input_container = ChatInputContainer()
         self.input_container.sig_send_clicked.connect(self.process_send)
         self.input_container.sig_export_clicked.connect(self.export_chat_history)
+        self.input_container.sig_import_clicked.connect(self.import_chat_history)
         self.input_container.sig_clear_clicked.connect(self.clear_chat_history)
         self.input_container.sig_attach_clicked.connect(self.show_attachment_menu)
         self.input_container.sig_clear_context_clicked.connect(self.clear_attached_context)

@@ -9,7 +9,8 @@ import time
 logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize
-from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtGui import (QGuiApplication, QPixmap, QTextBlockFormat,
+                           QTextCursor, QFont, QFontDatabase)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
@@ -19,6 +20,51 @@ from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import TextFormatter
 from src.ui.components.toast import ToastManager
 from src.ui.components.image_viewer import open_image_viewer
+
+
+#: CSS 通用关键字（Qt 无法当作真实族名解析，需过滤）。
+_FONT_KEYWORDS = {"system-ui", "-apple-system", "blinkmacsystemfont",
+                  "sans-serif", "serif", "monospace", "cursive", "fantasy"}
+
+#: 行距（按字体高度的百分比，100 为单倍行高）。
+_LINE_HEIGHT_PERCENT = 150
+#: 段落间距（设备逻辑像素，用于拉开段落/列表项间距）。
+_BLOCK_BOTTOM_MARGIN = 8.0
+_BLOCK_TOP_MARGIN = 4.0
+
+
+_QT_FAMILIES_CACHE = None
+
+
+def resolve_qt_font_families() -> list:
+    """把 ``ThemeManager.font_family()`` 的 CSS 字体栈解析为 Qt 可用族名列表。
+
+    Qt 的 ``QFont.setFamilies`` 不接受 ``system-ui`` / ``sans-serif`` 等通用关键字，
+    这里过滤掉它们，仅保留真实族名（如 Segoe UI / Microsoft YaHei 等），
+    供 QTextBrowser 的富文本文档使用，保证气泡正文与全局无衬线字体一致。
+    结果缓存，避免流式渲染频繁重复解析。
+    """
+    global _QT_FAMILIES_CACHE
+    if _QT_FAMILIES_CACHE is not None:
+        return _QT_FAMILIES_CACHE
+
+    tm = ThemeManager()
+    stack = tm.font_family()
+    families = []
+    for raw in stack.split(','):
+        name = raw.strip().strip("'\"")
+        if not name:
+            continue
+        if name.lower() in _FONT_KEYWORDS:
+            continue
+        families.append(name)
+    # 保底：至少给一个可用族，避免空列表导致 Qt 回退默认衬线。
+    if not families:
+        db = QFontDatabase()
+        preferred = ["Segoe UI", "Microsoft YaHei", "PingFang SC", "Roboto", "Arial"]
+        families = [f for f in preferred if f in db.families()] or ["Arial"]
+    _QT_FAMILIES_CACHE = list(families)
+    return _QT_FAMILIES_CACHE
 
 
 def hex_to_rgba(hex_color, alpha):
@@ -787,6 +833,51 @@ class ChatBubbleWidget(QWidget):
 
         self.lbl_text.setVisible(False)
 
+    # --- 4.8 排版优化：富文本文档字体 / 行距 / 段距 ---
+    def _apply_typography(self):
+        """让气泡正文与全局无衬线字体一致，并拉大行距与段落间距。
+
+        QTextBrowser 通过 ``setText`` 渲染富文本时，其内容字体不由控件
+        QSS 的 ``font-family`` 决定，而回退到 QTextDocument 的默认字体
+        （常为系统衬线/紧凑行距）。这里显式设置文档默认字体族，并逐块
+        提高行高与块间距，改善长时间阅读的舒适度。
+        """
+        try:
+            doc = self.lbl_text.document()
+            if doc is None:
+                return
+
+            # 1) 文档默认字体：沿用控件字号，仅把字体族换成全局无衬线栈。
+            f = QFont(self.lbl_text.font())
+            families = resolve_qt_font_families()
+            if families:
+                if hasattr(f, "setFamilies"):
+                    try:
+                        f.setFamilies(families)
+                    except TypeError:  # 老版本无 setFamilies，退化为单族
+                        f.setFamily(families[0])
+                else:
+                    f.setFamily(families[0])
+            doc.setDefaultFont(f)
+
+            # 2) 逐块拉大行距与段落/列表项间距。
+            block = doc.begin()
+            while block.isValid():
+                fmt = block.blockFormat()
+                fmt.setLineHeight(_LINE_HEIGHT_PERCENT, QTextBlockFormat.ProportionalHeight)
+                if fmt.topMargin() < _BLOCK_TOP_MARGIN:
+                    fmt.setTopMargin(_BLOCK_TOP_MARGIN)
+                if fmt.bottomMargin() < _BLOCK_BOTTOM_MARGIN:
+                    fmt.setBottomMargin(_BLOCK_BOTTOM_MARGIN)
+                cur = QTextCursor(block)
+                cur.setBlockFormat(fmt)
+                block = block.next()
+
+            # QTextBrowser 会根据视口宽度自动决定换行，无需手动 setTextWidth，
+            # 避免固定过宽导致横向溢出。
+        except Exception as e:
+            logger.debug(f"Failed to apply bubble typography: {e}")
+
     # --- 5. 完整的 set_content 方法 ---
     def set_content(self, text, msg_type=None):
         text = self._extract_error_panels(text)
@@ -958,6 +1049,7 @@ class ChatBubbleWidget(QWidget):
             html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
 
             self.lbl_text.setText(html)
+            self._apply_typography()
             self.lbl_text.adjustSize()
             self.content_container.adjustSize()
             self.adjustSize()
@@ -966,6 +1058,7 @@ class ChatBubbleWidget(QWidget):
         except Exception as e:
             logger.warning(f"Failed to render bubble content: {e}")
             self.lbl_text.setText(text)
+            self._apply_typography()
             self.lbl_text.adjustSize()
             self.content_container.adjustSize()
             self.adjustSize()

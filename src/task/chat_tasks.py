@@ -13,6 +13,19 @@ from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
 
 
+#: detect_primary_language 返回的语言码 -> prompt 中可读的语言名。
+#: 用于告诉主模型"用户原始语言是 X，请用 X 回复"（翻译仅用于英文检索）。
+_LANG_EN_NAMES = {
+    "zh": "Chinese", "zh-cn": "Chinese", "zh-tw": "Chinese",
+    "ja": "Japanese", "ko": "Korean", "fr": "French", "de": "German",
+    "es": "Spanish", "ru": "Russian", "it": "Italian", "pt": "Portuguese",
+    "ar": "Arabic", "hi": "Hindi", "th": "Thai", "vi": "Vietnamese",
+    "tr": "Turkish", "nl": "Dutch", "pl": "Polish", "uk": "Ukrainian",
+    "id": "Indonesian", "ms": "Malay", "he": "Hebrew", "sv": "Swedish",
+    "unknown": "unknown",
+}
+
+
 class ChatGenerationTask(BackgroundTask):
     """
     Background task for executing local/remote LLM interactions, Vector Retrieval,
@@ -21,6 +34,29 @@ class ChatGenerationTask(BackgroundTask):
 
     # 首次重排失败弹一次警告，之后静默降级，避免每次问答刷屏
     _rerank_warned = False
+
+    def _reply_lang_instruction(self) -> str:
+        """返回告知主模型"用用户原始语言作答"的指令段。
+
+        用户的 query 可能已被翻译为英文用于检索/工具（``requires_translation``），
+        因此模型看到的始终是英文问题；若不额外声明，它会默认用英文作答。
+        这里显式要求最终回复语言 = 用户原始语言，使"用户用什么语言，AI 就用
+        什么语言回答"成立。英文用户（无需翻译）返回空串，保持英文默认且不
+        浪费 token。
+        """
+        if not getattr(self, "requires_translation", False):
+            return ""
+        reply_lang = getattr(self, "reply_lang", "English")
+        if not reply_lang or reply_lang in ("English", "unknown"):
+            return ""
+        return (
+            f"### OUTPUT LANGUAGE (MANDATORY):\n"
+            f"The user's query was automatically translated to English for tool "
+            f"retrieval, but the user originally wrote in {reply_lang}. You MUST compose "
+            f"your final answer in {reply_lang} (do NOT reply in English), and use that "
+            f"language's native punctuation. Structural protocol tokens, in-text citation "
+            f"markers ([1]/[101]) and code blocks remain ASCII and unchanged.\n"
+        )
 
     def cancel(self):
         super().cancel()
@@ -192,7 +228,15 @@ class ChatGenerationTask(BackgroundTask):
 
         try:
             from src.core.lang_detect import detect_primary_language
-            is_english = detect_primary_language(original_user_query) == 'en'
+            primary_lang = detect_primary_language(original_user_query)
+            is_english = primary_lang == 'en'
+            # 记录用户原始语言：翻译只把 query 转成英文用于检索/工具，
+            # 但最终回复必须用用户原始语言（见 system_prompt 的语言指令与
+            # deep 综合的 output_lang）。
+            self.primary_lang = primary_lang
+            self.reply_lang = _LANG_EN_NAMES.get(primary_lang) or _LANG_EN_NAMES.get(
+                primary_lang.split('_')[0] if primary_lang else '', '') or 'English'
+            self.reply_lang = "the user's original language" if self.reply_lang == 'unknown' else self.reply_lang
 
             if not is_english and self.trans_config is None:
                 self.send_log("WARNING",
@@ -204,6 +248,8 @@ class ChatGenerationTask(BackgroundTask):
         except Exception as e:
             self.logger.warning(f"Language detection failed in background: {e}")
             self.requires_translation = False
+            self.primary_lang = 'unknown'
+            self.reply_lang = 'English'
 
         self.use_academic_agent = self.kwargs.get('use_academic_agent', True)
         self.academic_tags = self.kwargs.get('academic_tags', [])
@@ -629,6 +675,7 @@ class ChatGenerationTask(BackgroundTask):
         system_prompt = (
             f"You are a Senior Research Scientist specializing in {domain}. "
             "Your goal is to provide high-density, evidence-based academic responses.\n\n"
+            f"{self._reply_lang_instruction()}\n"
             f"{dynamic_tool_prompt}\n\n"
             "### TOOL USE PROTOCOL (STRICT):\n"
             "1. CRITICAL FOR CITATIONS: If the user's prompt asks for literature, references, citations, or a review, you MUST explicitly invoke academic search tools (like search_academic_literature) BEFORE generating your response. NEVER rely on your internal training data to generate citations, DOIs, or author lists.\n"
@@ -642,6 +689,13 @@ class ChatGenerationTask(BackgroundTask):
             "2. FORMAL BIBLIOGRAPHY (For the User): If the user explicitly requests 'references', 'citations', or a 'review', you MUST ALSO generate a standalone 'References' section at the very end of your main text (but BEFORE the [FOLLOW_UPS] section). \n"
             "3. STRICT FORMATTING: The standalone 'References' section must strictly follow academic formatting (e.g., APA/Nature style: Authors. (Year). Title. Journal. DOI). DO NOT include conversational fluff like 'Cited for the role of...' in this formal list. List purely the bibliographic data.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
+            "### PUNCTUATION LOCALIZATION (STRICT):\n"
+            "The user's input may already have been translated to English for retrieval, so do NOT infer "
+            "the reply language from the query. Instead, match punctuation to the language you are "
+            "ACTUALLY writing each passage in:\n"
+            "   - When writing in Chinese: use FULL-WIDTH punctuation — Chinese commas（，）, periods（。）, semicolons（；）, colons（：）, question/exclamation marks（？！）, Chinese ellipsis（……）, and Chinese parentheses（）for parenthetical remarks. Use Chinese curly quotes（“” and ‘’）for quotations instead of straight or half-width quotes.\n"
+            "   - When writing in English or other languages: follow that language's standard punctuation conventions (half-width punctuation and straight quotes for English).\n"
+            "2. CRITICAL EXCEPTION — do NOT modify these machine-parsed ASCII tokens under any circumstance: in-text citation markers written as [1]/[101], the literal [FOLLOW_UPS] header, JSON blocks, code fences (```...```), mermaid code blocks, tool names, identifiers, and URLs. Keep those exactly half-width ASCII.\n\n"
             "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
             "At the very end of your response — after ALL other content — you MUST output the literal string [FOLLOW_UPS] on its own dedicated line, immediately followed by exactly 6 follow-up questions in this EXACT format:\n"
             "[FOLLOW_UPS]\n"
@@ -1025,7 +1079,10 @@ class ChatGenerationTask(BackgroundTask):
             "Synthesizing structured synthesis across sub-investigations...</div>\n\n"
         )
         synthesizer = Synthesizer(self.main_llm)
-        final_text = synthesizer.synthesize(search_query, merged)
+        final_text = synthesizer.synthesize(
+            search_query, merged,
+            output_lang=getattr(self, "reply_lang", "English"),
+        )
 
         # 合成后把 R 绘图卡片标记追加回最终文本，保证 UI 端仍能渲染固定卡片
         if plot_markers:
@@ -1231,18 +1288,219 @@ class ExportChatTask(BackgroundTask):
                 with open(path, "w", encoding="utf-8") as f:
                     f.write("\n".join(txt_lines))
 
-            elif export_fmt == ".csv":
-                with open(path, "w", encoding="utf-8-sig", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Role", "Content"])
-                    for msg in clean_history:
-                        content = TextFormatter.clean_text_for_export(msg['content'])
-                        writer.writerow(["User" if msg['role'] == 'user' else "AI", content])
+            elif export_fmt in (".json", ".schat"):
+                # 无损导出：完整序列化历史记录（含富字段、引文、附件引用等）。
+                # 供 "Import" 还原为可继续对话的上下文。非 JSON 可序列化内容降级为 str。
+                import json as _json
+
+                def _sanitize(value):
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        return value
+                    if isinstance(value, list):
+                        return [_sanitize(v) for v in value]
+                    if isinstance(value, dict):
+                        return {k: _sanitize(v) for k, v in value.items()}
+                    try:
+                        return str(value)
+                    except Exception:
+                        return None
+
+                lossless_payload = {
+                    "format": "scholar_navis_chat_history",
+                    "version": 1,
+                    "generated": datetime.datetime.now().isoformat(timespec="seconds"),
+                    "messages": [_sanitize(m) for m in history],
+                }
+                with open(path, "w", encoding="utf-8") as f:
+                    _json.dump(lossless_payload, f, ensure_ascii=False, indent=2)
 
             return {"success": True, "path": path}
         except Exception as e:
             self.send_log("ERROR", f"Export task failed: {str(e)}")
             return {"success": False, "msg": str(e)}
+
+
+class ImportChatHistoryTask(BackgroundTask):
+    """
+    后台任务：解析并导入聊天记录。
+
+    支持的输入：
+    - ``.schat`` / ``.json``：Scholar Navis 无损格式（含富字段 / 引文 / 附件引用）。
+    - ``.md`` / ``.txt``：旧格式导出，尽力还原为纯文本气泡（有损）。
+
+    返回 ``{"success": True, "messages": [...], "lossless": bool}``，
+    消息结构已规范化为可写入 ``self.history`` 的条目。
+    """
+    _TXT_USER = "[USER INQUIRY]"
+    _TXT_AI = "[AI ANALYSIS]"
+
+    def _execute(self):
+        path = self.kwargs.get("path")
+        if not path or not os.path.exists(path):
+            return {"success": False, "msg": f"File not found: {path}"}
+
+        lower = path.lower()
+        try:
+            if lower.endswith((".schat", ".json")):
+                messages, lossless = self._parse_lossless(path)
+            elif lower.endswith(".md"):
+                messages, lossless = self._parse_markdown(path), False
+            elif lower.endswith((".txt", ".csv")):
+                messages, lossless = self._parse_text(path), False
+            else:
+                return {"success": False,
+                        "msg": "Unsupported format. Please import a .schat/.json/.md/.txt file."}
+
+            if not messages:
+                return {"success": False,
+                        "msg": "No chat messages could be parsed from this file."}
+
+            return {"success": True, "messages": messages, "lossless": lossless}
+        except Exception as e:
+            self.send_log("ERROR", f"Import task failed: {str(e)}")
+            return {"success": False, "msg": str(e)}
+
+    @staticmethod
+    def _normalize_msg(raw):
+        """把原始记录条目规范化为可写回 self.history 的 user/assistant 条目。"""
+        role = raw.get("role", "")
+        content = raw.get("content")
+        if role not in ("user", "assistant"):
+            role = "assistant"
+        msg = {"role": role}
+        if isinstance(content, str):
+            msg["content"] = content
+        elif isinstance(content, dict):
+            msg["content"] = content.get("text") or content.get("content") or ""
+        elif content is None:
+            msg["content"] = ""
+        else:
+            msg["content"] = str(content)
+        # 保留供气泡渲染的富字段
+        for key in ("display_text", "context_html", "external_files", "status"):
+            if key in raw:
+                msg[key] = raw[key]
+        return msg
+
+    def _parse_lossless(self, path):
+        import json as _json
+        with open(path, "r", encoding="utf-8") as f:
+            payload = _json.load(f)
+        if isinstance(payload, dict) and payload.get("format") == "scholar_navis_chat_history":
+            messages = [self._normalize_msg(m) for m in payload.get("messages", [])]
+            return messages, True
+        # 退路：形如 {"role": ..., "content": ...} 的单条，或 {"history"/"messages": [...]} 的包装
+        if isinstance(payload, list):
+            return [self._normalize_msg(m) for m in payload if isinstance(m, dict)], True
+        if isinstance(payload, dict):
+            for key in ("messages", "history", "conversation"):
+                val = payload.get(key)
+                if isinstance(val, list):
+                    return [self._normalize_msg(m) for m in val if isinstance(m, dict)], True
+            if "role" in payload and "content" in payload:
+                return [self._normalize_msg(payload)], True
+        return [], True
+
+    def _parse_markdown(self, path):
+        # 按历史消息的 `### ... User Inquiry / AI Analysis` 标题切分。
+        # 标题可能带角色 emoji（如 🧑💻 / 🤖），因此仅在标题行内检索角色关键字。
+        import re as _re
+        _user_kw = _re.compile(r"User Inquiry", _re.IGNORECASE)
+        _ai_kw = _re.compile(r"AI Analysis", _re.IGNORECASE)
+        _header_re = _re.compile(r"^\s*#{1,6}\s+.*$")
+        seps = _re.compile(r"^\s*---\s*$")
+
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        lines = text.splitlines()
+        markers = []  # (line_index, role)
+        for i, line in enumerate(lines):
+            if _header_re.match(line):
+                if _user_kw.search(line):
+                    markers.append((i, "user"))
+                elif _ai_kw.search(line):
+                    markers.append((i, "assistant"))
+
+        if not markers:
+            body = self._strip_report_header(text)
+            return [{"role": "assistant", "content": body.strip()}] if body.strip() else []
+
+        messages = []
+        for idx, (start_i, role) in enumerate(markers):
+            end_i = markers[idx + 1][0] if idx + 1 < len(markers) else len(lines)
+            body_lines = lines[start_i + 1:end_i]
+            # 去除段落末尾的空行与水平分隔线
+            while body_lines and (not body_lines[0].strip() or seps.match(body_lines[0])):
+                body_lines.pop(0)
+            while body_lines and (not body_lines[-1].strip() or seps.match(body_lines[-1])):
+                body_lines.pop()
+            content = "\n".join(body_lines).strip()
+            if content:
+                messages.append({"role": role, "content": content})
+        return messages
+
+    def _strip_report_header(self, text):
+        # 去除导出文件顶部的报告头（标题 + Generated 元信息）
+        lines = text.splitlines()
+        out = []
+        for line in lines:
+            if line.strip().startswith("# Scholar Navis") or line.strip().startswith("> **Generated:**"):
+                continue
+            out.append(line)
+        return "\n".join(out)
+
+    def _parse_text(self, path):
+        with open(path, "r", encoding="utf-8-sig") as f:
+            text = f.read()
+
+        user_re = None
+        ai_re = None
+        lower = path.lower()
+        if lower.endswith(".csv"):
+            import csv as _csv
+            import io as _io
+            messages = []
+            reader = _csv.DictReader(_io.StringIO(text))
+            for row in reader:
+                role = row.get("Role", "").strip().lower()
+                content = row.get("Content", "")
+                if role.startswith("user"):
+                    messages.append({"role": "user", "content": content})
+                elif role.startswith("ai") or role.startswith("assistant"):
+                    messages.append({"role": "assistant", "content": content})
+            return messages
+
+        # TXT 格式：行式 `[USER INQUIRY]` / `[AI ANALYSIS]`
+        lines = text.splitlines()
+        messages = []
+        cur_role = None
+        buf = []
+        sep = "-" * 70
+
+        def flush():
+            nonlocal cur_role, buf
+            body = "\n".join(buf).strip()
+            # 剥离行内环绕分隔线
+            body = "\n".join(l for l in body.splitlines() if l.strip() != sep)
+            if cur_role and body:
+                messages.append({"role": cur_role, "content": body})
+            cur_role = None
+            buf = []
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.upper().startswith(self._TXT_USER) or stripped == "USER INQUIRY":
+                flush()
+                cur_role = "user"
+            elif stripped.upper().startswith(self._TXT_AI) or stripped == "AI ANALYSIS":
+                flush()
+                cur_role = "assistant"
+            elif cur_role is not None:
+                buf.append(line)
+            # 报告头/分隔线忽略（无 cur_role 时）
+        flush()
+        return messages
 
 
 class DownloadImageTask(BackgroundTask):
