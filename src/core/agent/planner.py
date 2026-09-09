@@ -103,6 +103,40 @@ class IntentPlanner:
         logger.info(plan.rationale)
         return plan
 
+    # ------------------------------------------------------------------ #
+    #  低信息量 / 无明确领域意图的查询不再支付一次全往返的语义聚焦 LLM 调用。
+    #  聚焦仅是“提示”，从未裁剪工具；即使跳过，主 LLM 仍持有全部工具自行决策，
+    #  因此跳过对正确性零影响，却能省掉一次串行延迟（简单问题往往省 ~10-16s）。
+    # ------------------------------------------------------------------ #
+    _CHIT_CHAT_HINTS = {
+        "hi", "hello", "hey", "hola", "yo", "hiya", "thanks", "thank", "ok", "okay",
+        "好的", "谢谢", "你好", "哈喽", "嗨", "测试", "试试", "test", "hi there",
+        "what can you do", "who are you", "help", "你是谁", "你能做什么",
+    }
+
+    @classmethod
+    def _looks_low_information(cls, query: str, intent: str) -> bool:
+        """判断查询是否低信息量到不值得做语义聚焦往返。
+
+        仅当同时满足下面两点才返回 True（保守，避免误伤真实研究问题）：
+        1) 意图未被识别为任何明确研究领域（intent == General）；
+        2) 文本很短，或主要是数字/单字母，或是寒暄/闲聊。
+        """
+        q = (query or "").strip().lower()
+        if not q:
+            return True
+        if intent != "General":
+            return False
+        # 纯数字 / 无意义的极短输入：如 "123"、"5"、"ab"
+        if re.fullmatch(r"[0-9a-z\s\-_]+", q) and len(q) <= 8:
+            return True
+        # 寒暄/闲聊
+        if q in cls._CHIT_CHAT_HINTS:
+            return True
+        if len(q) < 8:
+            return True
+        return False
+
     def semantic_focus(self, query: str, main_llm, pool: Optional[str] = None) -> AgentPlan:
         """
         Produce an AgentPlan with an optional semantic focus hint.
@@ -119,6 +153,14 @@ class IntentPlanner:
 
         if len(base.tool_names) <= _SEMANTIC_FOCUS_THRESHOLD:
             base.rationale += " (tool set small; no semantic focus needed.)"
+            logger.info(base.rationale)
+            return base
+
+        # 低信息量 / 无领域意图：跳过语义聚焦往返，主回答可立即开始。
+        if self._looks_low_information(query, base.intent):
+            base.rationale += (
+                " (low-information query; skipped semantic-focus round-trip to avoid latency.)"
+            )
             logger.info(base.rationale)
             return base
 

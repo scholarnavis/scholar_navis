@@ -14,6 +14,31 @@ from src.core.kb_manager import KBManager
 
 logger = logging.getLogger("ModelRegistry")
 
+
+class ModelMissingError(RuntimeError):
+    """本地模型缺失但禁止自动下载时抛出。
+
+    携带可读的展示名与仓库名，便于上层任务用一句话提示用户去
+    "设置 → AI Models" 手动下载，而不是悄悄联网拉取。
+    """
+
+    def __init__(self, repo_id, ui_name, model_type="model"):
+        self.repo_id = repo_id
+        self.ui_name = ui_name
+        self.model_type = model_type
+        super().__init__(
+            f"{ui_name} ({model_type}) is not downloaded yet. "
+            f"Please download it manually from Settings → AI Models."
+        )
+
+
+def _display_name_for(repo_id):
+    for m in EMBEDDING_MODELS + RERANKER_MODELS:
+        if m.get('hf_repo_id') == repo_id:
+            return m.get('ui_name', m.get('id', repo_id))
+    return repo_id
+
+
 EMBEDDING_MODELS = [
     {
         "id": "embed_nano_fast",
@@ -309,7 +334,7 @@ def get_model_type_by_repo(repo_id):
     return "embedding"
 
 
-def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False):
+def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False, allow_download=True):
     hf_home = _get_hf_home()
     onnx_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
     logger.info(f"Requesting model: {repo_id} | Target ONNX cache dir: {onnx_dir}")
@@ -319,6 +344,10 @@ def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False):
             if any(f.endswith('.onnx') for f in files):
                 logger.info("Local ONNX cache hit, skipping download and conversion.")
                 return onnx_dir
+    # 禁止自动下载（如仅在使用/加载时调用）：模型缺失直接抛清晰提示，
+    # 引导用户去设置里手动下载，避免后台悄悄联网拉取大模型。
+    if not allow_download:
+        raise ModelMissingError(repo_id, _display_name_for(repo_id), model_type or "model")
     logger.info("Local ONNX cache miss, preparing for download and conversion...")
     logger.info("Loading heavy AI frameworks (Transformers/Optimum) into memory...")
     from huggingface_hub import snapshot_download

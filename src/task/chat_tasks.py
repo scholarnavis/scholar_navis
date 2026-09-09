@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import threading
 import time
 import uuid
 from src.core.config_manager import ConfigManager
@@ -20,6 +19,128 @@ from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
 # 窗口动态推导（derive_context_budgets，litellm 模型元数据优先），使不同
 # 模型各按自身容量注入。被省略的文档仍写入 sources_map，引用可点开原文。
 _KB_CHUNK_MAX_CHARS = 1600
+
+
+def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context=""):
+    """本地 KB 检索唯一权威实现：embedding 加载 -> 三变体向量检索 -> 交叉编码器
+    重排 -> 按主模型上下文预算裁剪 -> 生成 context_str 与 sources_map(整型 id)。
+
+    可在 GUI 进程内联执行，也可被 _kb_retrieval_worker 在独立子进程中调用（隔离
+    本地 ONNX 推理）。返回 (context_str, sources_map, domain)。KB 为空或检索为空
+    时 context_str/sources_map 均为空，由调用方决定默认文案。
+    """
+    from src.task.kb_tasks import _worker_load_model
+    from src.core.kb_manager import KBManager, DatabaseManager
+    from src.core.config_manager import ConfigManager
+    from src.core.token_estimator import estimate_tokens, resolve_context_window, derive_context_budgets
+    from src.core.rerank_engine import RerankEngine
+
+    cfg = ConfigManager()
+    kb_mgr = KBManager()
+    db = DatabaseManager()
+
+    kb_info = kb_mgr.get_kb_by_id(kb_id)
+    if not kb_info or kb_info.get('doc_count', 0) == 0:
+        return "", {}, "General Academic"
+
+    domain = kb_info.get('domain', 'General Academic')
+    embed_fn = _worker_load_model(kb_id, cfg)
+    if not db.switch_kb(kb_id, embedding_function=embed_fn):
+        raise RuntimeError(f"Failed to switch to Knowledge Base: {kb_id}")
+
+    # 三变体查询（严格零召回损失）：变体 3（domain 前缀）不可省略——单次查询无论
+    # 召回量多大都无法覆盖不同查询文本的召回集；DatabaseManager.query 内部
+    # _db_lock 串行化（含嵌入计算），并行查询无收益，故维持顺序执行。
+    expanded_queries = [
+        search_query,
+        f"{search_query}{history_context}",
+        f"{domain} context: {search_query} research details"
+    ]
+
+    candidate_docs = []
+    seen_contents = set()
+    for eq in expanded_queries:
+        raw_results = db.query(eq, n_results=20)
+        if raw_results and raw_results.get('documents') and raw_results['documents'][0]:
+            docs = raw_results['documents'][0]
+            metas = raw_results['metadatas'][0]
+            distances = raw_results.get('distances', [[0] * len(docs)])[0]
+            for i, doc_text in enumerate(docs):
+                clean_text = doc_text.strip()
+                if clean_text not in seen_contents and len(clean_text) > 20:
+                    seen_contents.add(clean_text)
+                    candidate_docs.append({
+                        "content": clean_text, "metadata": metas[i], "v_dist": distances[i]})
+    if not candidate_docs:
+        return "", {}, domain
+
+    candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
+    try:
+        engine = RerankEngine()
+        ranked = engine.rerank(search_query, candidate_docs, domain=domain, top_k=len(candidate_docs))
+        final_docs = ranked or candidate_docs[:10]
+    except Exception:
+        final_docs = candidate_docs[:10]
+
+    _kb_budget = derive_context_budgets(
+        resolve_context_window(main_model_name))["kb_token_budget"]
+    context_str = ""
+    sources_map = {}
+    current_ref_id = 1
+    kb_tokens = 0
+    for doc in final_docs:
+        sources_map[current_ref_id] = {
+            "path": doc['metadata'].get('file_path', ''),
+            "page": doc['metadata'].get('page', 1),
+            "name": doc['metadata'].get('source', 'Local DB'),
+            "search_text": doc['content'][:100],
+        }
+        chunk = doc['content']
+        if len(chunk) > _KB_CHUNK_MAX_CHARS:
+            chunk = chunk[:_KB_CHUNK_MAX_CHARS] + "...[chunk truncated]"
+        chunk_tokens = estimate_tokens(chunk)
+        if kb_tokens + chunk_tokens > _kb_budget:
+            context_str += (
+                f"--- [Document {current_ref_id}] ---\n"
+                f"Source: {doc['metadata'].get('source', 'Local')}\n"
+                f"Content: [Omitted: KB context token budget exceeded; "
+                f"the citation entry still links to the source.]\n\n"
+            )
+        else:
+            kb_tokens += chunk_tokens
+            context_str += (
+                f"--- [Document {current_ref_id}] ---\n"
+                f"Source: {doc['metadata'].get('source', 'Local')}\n"
+                f"Content: {chunk}\n\n"
+            )
+        current_ref_id += 1
+    return context_str, sources_map, domain
+
+
+def _kb_retrieval_worker(kb_id, search_query, main_model_name, out_path, history_context=""):
+    """独立子进程入口：隔离本地 ONNX 推理。执行权威检索逻辑并把结果写 out_path。
+    JSON 的 key 只能是字符串，写入前把整型 sources_map 键转字符串，父进程读回时复原。
+    """
+    import json
+    import logging
+    _log = logging.getLogger("KB.SubProc")
+    try:
+        from src.task.kb_tasks import _setup_worker_env
+        _setup_worker_env()
+        context_str, sources_map, _domain = _kb_retrieval_core(
+            kb_id, search_query, main_model_name, history_context)
+        payload = {
+            "context_str": context_str,
+            "sources_map": {str(k): v for k, v in sources_map.items()},
+        }
+    except Exception as e:
+        _log.error(f"KB subprocess retrieval failed: {e}", exc_info=True)
+        payload = {"context_str": "", "sources_map": {}, "error": str(e)}
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 #: detect_primary_language 返回的语言码 -> prompt 中可读的语言名。
@@ -43,27 +164,6 @@ class ChatGenerationTask(BackgroundTask):
 
     # 首次重排失败弹一次警告，之后静默降级，避免每次问答刷屏
     _rerank_warned = False
-
-    def _warm_semantic_focus(self, planner, search_query: str):
-        """后台线程：生成语义聚焦提示（纯提示词，不参与工具过滤）。
-
-        与 Phase 2 KB 检索并行执行；无论成功失败最终都会 set _focus_done，
-        主线程等待处不会死等。异常时置空 focus_reminder，走完整工具集。
-        """
-        try:
-            plan = planner.semantic_focus(search_query, self.main_llm)
-            self._focus_reminder = planner.build_focus_reminder(plan)
-            if self._focus_reminder:
-                self.send_log(
-                    "INFO",
-                    f"Semantic focus hint: {', '.join(plan.focus_hint)} "
-                    f"(intent='{plan.intent}').",
-                )
-        except Exception as e:
-            self.logger.warning(f"Semantic focus failed, continuing with full tool set: {e}")
-            self._focus_reminder = ""
-        finally:
-            self._focus_done.set()
 
     def _reply_lang_instruction(self) -> str:
         """返回告知主模型"用用户原始语言作答"的指令段。
@@ -310,8 +410,10 @@ class ChatGenerationTask(BackgroundTask):
         except Exception as e:
             self.logger.warning(f"Failed to clear provenance collector: {e}")
 
-        # 后台预加载 Reranker，避免首次问答时主线程阻塞（失败会惰性重试）
-        if self.config.user_settings.get("rerank_auto_load", True):
+        # Reranker 仅在真正需要时才后台预加载：跨编码器加载要导入庞大的
+        # transformers/optimum 栈，纯 LLM 对话（无 KB、无附件文档）根本用不到它，
+        # 盲目预载会让每次对话前白等数十秒。需要时 _process_rerank 仍会按需惰性加载。
+        if self.config.user_settings.get("rerank_auto_load", True) and self._rerank_needed_this_turn():
             try:
                 import threading as _t
                 _t.Thread(target=self._preload_reranker, daemon=True).start()
@@ -357,12 +459,9 @@ class ChatGenerationTask(BackgroundTask):
             except Exception as e:
                 self._emit_error(f"Translation model request failed. Details: {e}")
 
-        # Phase 1.5: 工具池构建 + 语义聚焦预热（与 Phase 2 KB 检索并行）。
-        # semantic_focus 是一次主模型完整往返且只产出一段提示词，原先
-        # 串行排在 KB 检索之后白白拉长关键路径；search_query 就绪后立即
-        # 后台发起，与本地向量检索/重排同时进行，总等待取两者较大值。
-        self._focus_reminder = ""
-        self._focus_done = threading.Event()
+        # Phase 1.5: 工具池构建。Planner 只负责"暴露全部工具"，工具的取舍完全
+        # 交给主模型第一轮 native function calling 自行决策——不再跑额外的
+        # "语义聚焦" LLM 预判往返，避免为每轮对话增加一次串行延迟。
         mcp_mgr = MCPManager.get_instance()
         from src.core.skill_manager import SkillManager
         from src.core.agent.skill_registry import SkillRegistry
@@ -387,16 +486,10 @@ class ChatGenerationTask(BackgroundTask):
                         "function": schema.get("function", {})
                     })
 
-        use_semantic_focus = self.config.user_settings.get("agent_semantic_focus", True)
-        if raw_tools and use_semantic_focus:
-            self.send_log("INFO", "Semantic focus preheating in background (parallel with KB retrieval).")
-            self._focus_thread = threading.Thread(
-                target=self._warm_semantic_focus, args=(planner, search_query), daemon=True)
-            self._focus_thread.start()
-        else:
-            self._focus_done.set()
-
         # Phase 2: Vector Retrieval & Reranking (Local KB)
+        # 本地 embedding/rerank 属重量级且易崩溃的 ONNX/torch 推理。聊天任务现运行
+        # 在 GUI 进程内（THREAD 模式），为避免把这类推理压在 GUI 进程里，统一交给
+        # _run_kb_retrieval：优先独立短命子进程隔离执行并回传结果，失败则回退内联。
         if self.kb_id:
             self.send_log("INFO", "Initiating local Vector RAG retrieval...")
             self._emit_token("[CLEAR_SEARCH]")
@@ -408,109 +501,10 @@ class ChatGenerationTask(BackgroundTask):
             if kb_info and kb_info.get('doc_count', 0) == 0:
                 self.logger.warning(f"Knowledge Base '{kb_info.get('name')}' is empty. Skipping vector retrieval.")
             elif kb_info:
+                domain = kb_info.get('domain', 'General Academic')
                 self._emit_token(
                     "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Loading local vector model and retrieving literature...</div>\n\n")
-                domain = kb_info.get('domain', 'General Academic')
-                model_id = kb_info.get('model_id', 'embed_auto')
-
-                user_pref = self.config.user_settings.get("inference_device", "Auto")
-                target_device = DeviceManager().parse_device_string(user_pref)
-
-                conf = get_model_conf(model_id, "embedding")
-                if not conf or conf.get('is_auto'):
-                    from src.task.kb_tasks import _worker_load_model
-                    real_id = resolve_auto_model("embedding", target_device)
-                    conf = get_model_conf(real_id, "embedding")
-
-                try:
-                    from src.task.kb_tasks import _worker_load_model
-                    embed_fn = _worker_load_model(self.kb_id, self.config)
-                    if not self.db.switch_kb(self.kb_id, embedding_function=embed_fn):
-                        self._emit_error(f"Failed to switch to Knowledge Base: {self.kb_id}")
-                except Exception as e:
-                    self._emit_error(f"Critical Model Error: {str(e)}")
-
-                history_context = ""
-                if len(self.messages) >= 3:
-                    prev_assistant = self.messages[-2]['content'][:100]
-                    history_context = f" (Context: {prev_assistant})"
-
-                # 三变体查询原样保留（严格零召回损失）：变体 3（domain 前缀）
-                # 的召回路径不可省略——单次查询无论召回量多大都无法覆盖不同
-                # 查询文本的召回集；DatabaseManager.query 内部有 _db_lock 串行
-                # 化（含嵌入计算），并行查询无收益，故维持顺序执行。
-                expanded_queries = [
-                    search_query,
-                    f"{search_query}{history_context}",
-                    f"{domain} context: {search_query} research details"
-                ]
-
-                candidate_docs = []
-                seen_contents = set()
-
-                for eq in expanded_queries:
-                    raw_results = self.db.query(eq, n_results=20)
-                    if raw_results and raw_results.get('documents') and raw_results['documents'][0]:
-                        docs = raw_results['documents'][0]
-                        metas = raw_results['metadatas'][0]
-                        distances = raw_results.get('distances', [[0] * len(docs)])[0]
-
-                        for i, doc_text in enumerate(docs):
-                            clean_text = doc_text.strip()
-                            if clean_text not in seen_contents and len(clean_text) > 20:
-                                seen_contents.add(clean_text)
-                                candidate_docs.append({
-                                    "content": clean_text,
-                                    "metadata": metas[i],
-                                    "v_dist": distances[i]
-                                })
-
-                if candidate_docs:
-                    # 重排候选上限恢复 40（严格零召回损失）：交叉编码器可从
-                    # 粗排 21-40 名翻盘，截断到 20 存在理论召回损失
-                    candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
-                    final_docs = self._process_rerank(search_query, candidate_docs, domain)
-                    if final_docs is None:
-                        final_docs = candidate_docs[:10]
-
-                    # KB 注入总预算按主模型上下文窗口动态推导（litellm
-                    # 模型元数据优先，内置家族表兜底）。
-                    _kb_budget = derive_context_budgets(resolve_context_window(
-                        (self.main_config or {}).get("model_name", "")))["kb_token_budget"]
-                    current_ref_id = 1
-                    kb_tokens = 0
-                    for doc in final_docs:
-                        sources_map[current_ref_id] = {
-                            "path": doc['metadata'].get('file_path', ''),
-                            "page": doc['metadata'].get('page', 1),
-                            "name": doc['metadata'].get('source', 'Local DB'),
-                            "search_text": doc['content'][:100]
-                        }
-                        # 单 chunk 截断：保留头部（检索命中窗口通常在前段）。
-                        chunk = doc['content']
-                        if len(chunk) > _KB_CHUNK_MAX_CHARS:
-                            chunk = chunk[:_KB_CHUNK_MAX_CHARS] + "...[chunk truncated]"
-                        chunk_tokens = estimate_tokens(chunk)
-                        if kb_tokens + chunk_tokens > _kb_budget:
-                            # 超出总预算：正文省略，仅保留元数据行。引用 [n]
-                            # 仍指向 sources_map（含路径/页码），点击可看原文。
-                            self.logger.info(
-                                "KB context token budget reached (%d), document %d omitted.",
-                                _kb_budget, current_ref_id)
-                            context_str += (
-                                f"--- [Document {current_ref_id}] ---\n"
-                                f"Source: {doc['metadata'].get('source', 'Local')}\n"
-                                f"Content: [Omitted: KB context token budget exceeded; "
-                                f"the citation entry still links to the source.]\n\n"
-                            )
-                        else:
-                            kb_tokens += chunk_tokens
-                            context_str += (
-                                f"--- [Document {current_ref_id}] ---\n"
-                                f"Source: {doc['metadata'].get('source', 'Local')}\n"
-                                f"Content: {chunk}\n\n"
-                            )
-                        current_ref_id += 1
+                context_str, sources_map, domain = self._run_kb_retrieval(search_query, domain)
 
         if not context_str.strip():
             context_str = "No local database documents provided."
@@ -655,10 +649,10 @@ class ChatGenerationTask(BackgroundTask):
 
         from src.core.agent.runtime import AgentRuntime
 
-        # --- Modern AGENT tool exposure (LLM decides via native function calling) ---
-        # The Planner NEVER strips tools with keyword matching. All user-enabled
-        # tools are exposed so the main LLM keeps full agency; an optional
-        # semantic-focus hint is injected only as guidance.
+        # --- Modern AGENT tool exposure (main model decides via native function calling) ---
+        # The Planner NEVER strips tools with keyword matching. All user-enabled tools are
+        # exposed and the FIRST agent call lets the main model pick natively. No separate
+        # "semantic-focus" LLM pre-pass is run (removed for latency); no guidance reminder.
         combined_tools = list(raw_tools)
         focus_reminder = ""
         if raw_tools:
@@ -667,18 +661,6 @@ class ChatGenerationTask(BackgroundTask):
                 f"Enabled tool pool: {len(raw_tools)} tools (Skills + MCP). "
                 "Exposing all of them for native LLM function calling...",
             )
-            self._emit_token(
-                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>"
-                "Analyzing query intent to guide tool selection...</div>\n\n"
-            )
-
-            # 语义聚焦已在 Phase 1.5 随 KB 检索并行执行，此处仅收割结果；
-            # 等待窗口轮询取消标志，保证长等待仍可中断
-            while not self._focus_done.wait(0.2):
-                if self.is_cancelled():
-                    break
-            focus_reminder = self._focus_reminder
-
             self._emit_token("[CLEAR_SEARCH]")
             final_tool_names = [t.get("function", {}).get("name", "Unknown") for t in combined_tools]
             self.send_log(
@@ -1195,6 +1177,32 @@ class ChatGenerationTask(BackgroundTask):
             text = text.replace(token, "")
         return text.strip()
 
+    def _rerank_needed_this_turn(self):
+        """判断本轮是否需要交叉编码器重排。
+
+        重排只在两种情形被调用（见主流程 Phase 2/Phase 3）：
+        - 命中了非空知识库的候选文档；
+        - 用户附带 >5 个文本块需要打分。
+        其余纯 LLM 对话（例如只跑学术 Agent、无 KB 无附件）不需要重排，
+        提前预载只会白付 transformers/optimum 的庞大导入开销。
+        """
+        try:
+            if self.kb_id:
+                kb = self.kb_manager.get_kb_by_id(self.kb_id)
+                # 与 Phase 2 空库跳过逻辑保持一致；取不到元信息时保守按需预载
+                if kb and kb.get('doc_count', 0) > 0:
+                    return True
+            text_docs = [
+                c for c in getattr(self, 'external_context', [])
+                if c.get("type") != "image" and (c.get("content") or "").strip()
+            ]
+            if len(text_docs) > 5:
+                return True
+        except Exception as e:
+            self.logger.debug(f"Reranker need-check failed, defaulting to eager preload: {e}")
+            return True
+        return False
+
     def _preload_reranker(self):
         """后台线程预加载交叉编码器重排模型。"""
         try:
@@ -1202,6 +1210,63 @@ class ChatGenerationTask(BackgroundTask):
             RerankEngine().preload()
         except Exception as e:
             self.logger.warning(f"Reranker preload failed: {e}")
+
+    def _run_kb_retrieval(self, search_query, domain):
+        """在 GUI 进程内执行 Phase 2 的本地 KB 检索与重排。
+
+        聊天任务现运行在 GUI 进程的 QThread 中，本地 embedding/rerank 属于
+        ONNX/torch 重量级且易崩溃（GPU OOM / 驱动问题）的推理。为保留崩溃隔离
+        与资源释放，优先把它们放进一个独立短命子进程（_kb_retrieval_worker）
+        执行并回传结果；子进程不可用或超时则回退为进程内联执行（_kb_retrieval_core），
+        保证 KB 检索永不因隔离失败而中断。
+
+        返回 (context_str, sources_map, effective_domain)。调用方负责在 context_str
+        为空时写默认文案。
+        """
+        model_name = (self.main_config or {}).get("model_name", "")
+        history_context = ""
+        if len(self.messages) >= 3:
+            prev_assistant = self.messages[-2].get('content', '')[:100]
+            if isinstance(prev_assistant, str):
+                history_context = f" (Context: {prev_assistant})"
+
+        # 优先走独立子进程隔离本地推理
+        try:
+            import multiprocessing as mp
+            import tempfile
+
+            fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="kb_ret_")
+            os.close(fd)
+
+            proc = mp.Process(
+                target=_kb_retrieval_worker,
+                args=(self.kb_id, search_query, model_name, tmp_path, history_context),
+                daemon=True,
+            )
+            proc.start()
+            deadline = time.time() + 120.0  # 硬上限兜底，避免无限等待
+            while proc.is_alive():
+                if self.is_cancelled():
+                    proc.terminate()
+                    break
+                if time.time() > deadline:
+                    self.logger.warning("KB retrieval subprocess timed out; killing it.")
+                    proc.terminate()
+                    break
+                time.sleep(0.1)
+            proc.join(timeout=2.0)
+
+            if os.path.exists(tmp_path):
+                with open(tmp_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # JSON key 只能是字符串，这里把引用 id 还原为整型（下游 UI 匹配用）
+                sources_map = {int(k): v for k, v in (data.get("sources_map") or {}).items()}
+                return data.get("context_str", ""), sources_map, domain
+        except Exception as e:
+            self.logger.warning(f"KB retrieval subprocess unavailable, falling back inline: {e}")
+
+        # 兜底：进程内联执行（共享同一权威实现，保证行为一致）
+        return _kb_retrieval_core(self.kb_id, search_query, model_name, history_context)[:2] + (domain,)
 
     def _process_rerank(self, query, docs, domain, top_k=None, emit_warning=True):
         """两阶段精排：交叉编码器重排 + 分数阈值过滤。

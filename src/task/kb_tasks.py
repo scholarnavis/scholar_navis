@@ -9,7 +9,7 @@ from chromadb import Documents, Embeddings, EmbeddingFunction
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
-from src.core.models_registry import get_model_conf, ensure_onnx_model
+from src.core.models_registry import get_model_conf, ensure_onnx_model, ModelMissingError
 from src.core.rerank_engine import RerankEngine
 
 logger = logging.getLogger("Task.kb")
@@ -57,11 +57,16 @@ def _worker_load_model(kb_id, config):
     conf = get_model_conf(model_id, "embedding")
     repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
     try:
-        onnx_dir = ensure_onnx_model(repo_id, "embedding")
+        # allow_download=False：模型缺失不再自动联网拉取，而是抛 ModelMissingError，
+        # 由上层向用户提示去 "设置 → AI Models" 手动下载。
+        onnx_dir = ensure_onnx_model(repo_id, "embedding", allow_download=False)
 
         logger.info(f"Loading Embedding Model: {repo_id} on {device_str}")
 
         return ONNXEmbeddingFunction(onnx_dir, device=device_str)
+    except ModelMissingError as e:
+        # 模型未下载：原样上抛清晰提示，引导用户去设置手动下载，不自动联网拉取
+        raise e
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         raise RuntimeError(f"Model Load Failed: {str(e)}")

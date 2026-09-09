@@ -203,7 +203,10 @@ class ChatSendFlowMixin:
             self.chat_task_mgr.start_task(
                 ChatGenerationTask,
                 task_id="chat_generation",
-                mode=TaskMode.PROCESS,
+                # 长驻 GUI 进程内的 QThread：避免每轮对话在 Windows 上 spawn 新进程
+                # 冷启动 + 全量 reimport（约 7s 固定开销）。ChatGenerationTask 以网络
+                # IO 为主，与 api_server 同进程跑同一任务的方式一致，改动风险小。
+                mode=TaskMode.THREAD,
                 main_config=main_config,
                 trans_config=trans_config,
                 messages=list(self.history),
