@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from src.core.config_manager import ConfigManager
@@ -11,6 +12,14 @@ from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
+from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
+                                      resolve_context_window, derive_context_budgets)
+
+
+# KB 检索注入治理：单 chunk 字符上限固定；总 token 预算按主模型上下文
+# 窗口动态推导（derive_context_budgets，litellm 模型元数据优先），使不同
+# 模型各按自身容量注入。被省略的文档仍写入 sources_map，引用可点开原文。
+_KB_CHUNK_MAX_CHARS = 1600
 
 
 #: detect_primary_language 返回的语言码 -> prompt 中可读的语言名。
@@ -34,6 +43,27 @@ class ChatGenerationTask(BackgroundTask):
 
     # 首次重排失败弹一次警告，之后静默降级，避免每次问答刷屏
     _rerank_warned = False
+
+    def _warm_semantic_focus(self, planner, search_query: str):
+        """后台线程：生成语义聚焦提示（纯提示词，不参与工具过滤）。
+
+        与 Phase 2 KB 检索并行执行；无论成功失败最终都会 set _focus_done，
+        主线程等待处不会死等。异常时置空 focus_reminder，走完整工具集。
+        """
+        try:
+            plan = planner.semantic_focus(search_query, self.main_llm)
+            self._focus_reminder = planner.build_focus_reminder(plan)
+            if self._focus_reminder:
+                self.send_log(
+                    "INFO",
+                    f"Semantic focus hint: {', '.join(plan.focus_hint)} "
+                    f"(intent='{plan.intent}').",
+                )
+        except Exception as e:
+            self.logger.warning(f"Semantic focus failed, continuing with full tool set: {e}")
+            self._focus_reminder = ""
+        finally:
+            self._focus_done.set()
 
     def _reply_lang_instruction(self) -> str:
         """返回告知主模型"用用户原始语言作答"的指令段。
@@ -81,7 +111,9 @@ class ChatGenerationTask(BackgroundTask):
             self.trans_llm = OpenAICompatibleLLM(self.trans_config)
 
     def _emit_token(self, token: str):
-        self.update_progress(-1, token)
+        # 走基类攒批通道：普通文本聚合入队，控制标记（[CLEAR_SEARCH] 等）
+        # 穿透缓冲立即送达，保证 UI 端整 token 精确匹配路由
+        self.stream_token(token)
 
     def _emit_error(self, msg: str):
         raise RuntimeError(msg)
@@ -325,6 +357,45 @@ class ChatGenerationTask(BackgroundTask):
             except Exception as e:
                 self._emit_error(f"Translation model request failed. Details: {e}")
 
+        # Phase 1.5: 工具池构建 + 语义聚焦预热（与 Phase 2 KB 检索并行）。
+        # semantic_focus 是一次主模型完整往返且只产出一段提示词，原先
+        # 串行排在 KB 检索之后白白拉长关键路径；search_query 就绪后立即
+        # 后台发起，与本地向量检索/重排同时进行，总等待取两者较大值。
+        self._focus_reminder = ""
+        self._focus_done = threading.Event()
+        mcp_mgr = MCPManager.get_instance()
+        from src.core.skill_manager import SkillManager
+        from src.core.agent.skill_registry import SkillRegistry
+        from src.core.agent.planner import IntentPlanner
+        skill_mgr = SkillManager.get_instance()
+        planner = IntentPlanner(SkillRegistry(skill_mgr).build())
+
+        raw_tools = []
+        if self.use_academic_agent:
+            raw_academic = skill_mgr.get_academic_schemas(self.academic_tags)
+            if raw_academic:
+                raw_tools.extend(raw_academic)
+        if self.use_external_tools:
+            ext_skills = skill_mgr.get_external_schemas(self.external_tool_names)
+            if ext_skills:
+                raw_tools.extend(ext_skills)
+            for schema in mcp_mgr.tool_schemas.values():
+                server_name = schema.get("server", "Unknown Server")
+                if not self.external_tool_names or server_name in self.external_tool_names:
+                    raw_tools.append({
+                        "type": schema.get("type", "function"),
+                        "function": schema.get("function", {})
+                    })
+
+        use_semantic_focus = self.config.user_settings.get("agent_semantic_focus", True)
+        if raw_tools and use_semantic_focus:
+            self.send_log("INFO", "Semantic focus preheating in background (parallel with KB retrieval).")
+            self._focus_thread = threading.Thread(
+                target=self._warm_semantic_focus, args=(planner, search_query), daemon=True)
+            self._focus_thread.start()
+        else:
+            self._focus_done.set()
+
         # Phase 2: Vector Retrieval & Reranking (Local KB)
         if self.kb_id:
             self.send_log("INFO", "Initiating local Vector RAG retrieval...")
@@ -364,6 +435,10 @@ class ChatGenerationTask(BackgroundTask):
                     prev_assistant = self.messages[-2]['content'][:100]
                     history_context = f" (Context: {prev_assistant})"
 
+                # 三变体查询原样保留（严格零召回损失）：变体 3（domain 前缀）
+                # 的召回路径不可省略——单次查询无论召回量多大都无法覆盖不同
+                # 查询文本的召回集；DatabaseManager.query 内部有 _db_lock 串行
+                # 化（含嵌入计算），并行查询无收益，故维持顺序执行。
                 expanded_queries = [
                     search_query,
                     f"{search_query}{history_context}",
@@ -391,12 +466,19 @@ class ChatGenerationTask(BackgroundTask):
                                 })
 
                 if candidate_docs:
+                    # 重排候选上限恢复 40（严格零召回损失）：交叉编码器可从
+                    # 粗排 21-40 名翻盘，截断到 20 存在理论召回损失
                     candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
                     final_docs = self._process_rerank(search_query, candidate_docs, domain)
                     if final_docs is None:
                         final_docs = candidate_docs[:10]
 
+                    # KB 注入总预算按主模型上下文窗口动态推导（litellm
+                    # 模型元数据优先，内置家族表兜底）。
+                    _kb_budget = derive_context_budgets(resolve_context_window(
+                        (self.main_config or {}).get("model_name", "")))["kb_token_budget"]
                     current_ref_id = 1
+                    kb_tokens = 0
                     for doc in final_docs:
                         sources_map[current_ref_id] = {
                             "path": doc['metadata'].get('file_path', ''),
@@ -404,11 +486,30 @@ class ChatGenerationTask(BackgroundTask):
                             "name": doc['metadata'].get('source', 'Local DB'),
                             "search_text": doc['content'][:100]
                         }
-                        context_str += (
-                            f"--- [Document {current_ref_id}] ---\n"
-                            f"Source: {doc['metadata'].get('source', 'Local')}\n"
-                            f"Content: {doc['content']}\n\n"
-                        )
+                        # 单 chunk 截断：保留头部（检索命中窗口通常在前段）。
+                        chunk = doc['content']
+                        if len(chunk) > _KB_CHUNK_MAX_CHARS:
+                            chunk = chunk[:_KB_CHUNK_MAX_CHARS] + "...[chunk truncated]"
+                        chunk_tokens = estimate_tokens(chunk)
+                        if kb_tokens + chunk_tokens > _kb_budget:
+                            # 超出总预算：正文省略，仅保留元数据行。引用 [n]
+                            # 仍指向 sources_map（含路径/页码），点击可看原文。
+                            self.logger.info(
+                                "KB context token budget reached (%d), document %d omitted.",
+                                _kb_budget, current_ref_id)
+                            context_str += (
+                                f"--- [Document {current_ref_id}] ---\n"
+                                f"Source: {doc['metadata'].get('source', 'Local')}\n"
+                                f"Content: [Omitted: KB context token budget exceeded; "
+                                f"the citation entry still links to the source.]\n\n"
+                            )
+                        else:
+                            kb_tokens += chunk_tokens
+                            context_str += (
+                                f"--- [Document {current_ref_id}] ---\n"
+                                f"Source: {doc['metadata'].get('source', 'Local')}\n"
+                                f"Content: {chunk}\n\n"
+                            )
                         current_ref_id += 1
 
         if not context_str.strip():
@@ -552,41 +653,13 @@ class ChatGenerationTask(BackgroundTask):
         # Phase 5: Agentic Generation (Modern Agent Runtime)
         self._emit_token("[START_LLM_NETWORK]")
 
-        mcp_mgr = MCPManager.get_instance()
-        from src.core.skill_manager import SkillManager
-        from src.core.agent.skill_registry import SkillRegistry
-        from src.core.agent.planner import IntentPlanner
         from src.core.agent.runtime import AgentRuntime
-
-        skill_mgr = SkillManager.get_instance()
-        registry = SkillRegistry(skill_mgr).build()
-        planner = IntentPlanner(registry)
-
-        raw_tools = []
-        # 1. 内部学术 Agent (enabled Skills by user tags)
-        if self.use_academic_agent:
-            raw_academic = skill_mgr.get_academic_schemas(self.academic_tags)
-            if raw_academic:
-                raw_tools.extend(raw_academic)
-
-        # 2. 外部工具组合 (external Skills + remote MCP by user names)
-        if self.use_external_tools:
-            ext_skills = skill_mgr.get_external_schemas(self.external_tool_names)
-            if ext_skills:
-                raw_tools.extend(ext_skills)
-
-            for schema in mcp_mgr.tool_schemas.values():
-                server_name = schema.get("server", "Unknown Server")
-                if not self.external_tool_names or server_name in self.external_tool_names:
-                    raw_tools.append({
-                        "type": schema.get("type", "function"),
-                        "function": schema.get("function", {})
-                    })
 
         # --- Modern AGENT tool exposure (LLM decides via native function calling) ---
         # The Planner NEVER strips tools with keyword matching. All user-enabled
         # tools are exposed so the main LLM keeps full agency; an optional
         # semantic-focus hint is injected only as guidance.
+        combined_tools = list(raw_tools)
         focus_reminder = ""
         if raw_tools:
             self.send_log(
@@ -598,25 +671,13 @@ class ChatGenerationTask(BackgroundTask):
                 "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>"
                 "Analyzing query intent to guide tool selection...</div>\n\n"
             )
-            time.sleep(0.05)
 
-            # Full tool set -> full agency for the LLM.
-            combined_tools = list(raw_tools)
-
-            # Optional semantic focus hint (suggestion only, never a filter).
-            use_semantic_focus = self.config.user_settings.get("agent_semantic_focus", True)
-            if use_semantic_focus:
-                try:
-                    plan = planner.semantic_focus(search_query, self.main_llm)
-                    focus_reminder = planner.build_focus_reminder(plan)
-                    if focus_reminder:
-                        self.send_log(
-                            "INFO",
-                            f"Semantic focus hint: {', '.join(plan.focus_hint)} "
-                            f"(intent='{plan.intent}').",
-                        )
-                except Exception as e:
-                    self.logger.warning(f"Semantic focus failed, continuing with full tool set: {e}")
+            # 语义聚焦已在 Phase 1.5 随 KB 检索并行执行，此处仅收割结果；
+            # 等待窗口轮询取消标志，保证长等待仍可中断
+            while not self._focus_done.wait(0.2):
+                if self.is_cancelled():
+                    break
+            focus_reminder = self._focus_reminder
 
             self._emit_token("[CLEAR_SEARCH]")
             final_tool_names = [t.get("function", {}).get("name", "Unknown") for t in combined_tools]
@@ -772,6 +833,15 @@ class ChatGenerationTask(BackgroundTask):
             if getattr(agent, "_plot_registry", None):
                 self._plot_registry_cache = agent._plot_registry
                 self._plot_seq_cache = agent._plot_seq
+            # 上报本次生成任务的 token 用量（真实 provider usage 优先，
+            # 估算兜底；UI 在 AI 气泡下方展示）。
+            usage = getattr(agent, "last_usage", None) or {}
+            self._emit_state(TaskState.PROCESSING, -1, "", payload={
+                "event": "usage",
+                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                "estimated": bool(usage.get("estimated", False)),
+            })
         except Exception as e:
             self.logger.error(f"Agent runtime loop failed: {e}", exc_info=True)
             # Graceful degradation: plain streaming without tools.
@@ -798,6 +868,14 @@ class ChatGenerationTask(BackgroundTask):
                 self.logger.error(f"LLM stream error captured.\n{payload['details']}")
                 self._emit_error(json.dumps(payload, ensure_ascii=False))
                 return
+
+            # 降级流式路径同样上报 token 用量（流式无真实 usage，纯估算）。
+            self._emit_state(TaskState.PROCESSING, -1, "", payload={
+                "event": "usage",
+                "prompt_tokens": estimate_message_tokens(rag_messages),
+                "completion_tokens": estimate_tokens(self.full_response_cache),
+                "estimated": True,
+            })
 
         # Phase 6: Dynamic Citation Mounting
         has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
@@ -1201,12 +1279,20 @@ class ExportChatTask(BackgroundTask):
         import csv
         from src.ui.components.text_formatter import TextFormatter
 
-        # 过滤掉被标记为 interrupted 或 error 的历史消息
-        clean_history = [m for m in history if m.get("status") not in ["interrupted", "error"]]
+        # 说明：不再静默过滤 interrupted/error 消息 —— 它们往往含部分已生成内容，
+        # 直接丢弃会导致导出对话"不全/断档"。改为在各格式正文前标注其未完成状态。
+        if not history:
+            return {"success": False, "msg": "No valid chat records to export."}
 
-        if not clean_history:
-            return {"success": False, "msg": "No valid chat records to export after filtering interrupted/error messages."}
+        def _status_note(msg):
+            st = msg.get("status")
+            if st == "interrupted":
+                return "⚠ This response was interrupted and may be incomplete."
+            if st == "error":
+                return "⚠ This response ended in an error and may be incomplete."
+            return ""
 
+        clean_history = history
         try:
             if export_fmt == ".pdf":
                 from PySide6.QtGui import QPdfWriter, QTextDocument, QPageSize
@@ -1246,7 +1332,9 @@ class ExportChatTask(BackgroundTask):
                     else:
                         header = f"<div class='header-ai'><img src='{ai_icon}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
 
-                    html += f"<div class='msg-box'>{header}<div class='content'>{rendered_html}</div></div>"
+                    note = _status_note(msg)
+                    note_html = f"<div style='color:#b8860b; font-style:italic; margin-bottom:4px;'>{note}</div>" if note else ""
+                    html += f"<div class='msg-box'>{header}{note_html}<div class='content'>{rendered_html}</div></div>"
 
                 html += "</body></html>"
                 doc.setHtml(html)
@@ -1266,7 +1354,9 @@ class ExportChatTask(BackgroundTask):
                 for msg in clean_history:
                     role = "🧑‍💻 User Inquiry" if msg['role'] == "user" else "🤖 AI Analysis"
                     content = TextFormatter.clean_text_for_export(msg['content'])
-                    md_lines.append(f"### {role}\n\n{content}\n\n---\n\n")
+                    note = _status_note(msg)
+                    note_text = f"> {note}\n\n" if note else ""
+                    md_lines.append(f"### {role}\n\n{note_text}{content}\n\n---\n\n")
 
                 with open(path, "w", encoding="utf-8") as f:
                     f.write("".join(md_lines))
@@ -1281,7 +1371,10 @@ class ExportChatTask(BackgroundTask):
                     role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
                     content = TextFormatter.clean_text_for_export(msg['content'])
                     content = TextFormatter.markdown_to_plain_text(content)
+                    note = _status_note(msg)
                     txt_lines.append(f"[{role}]")
+                    if note:
+                        txt_lines.append(f"[NOTE] {note}")
                     txt_lines.append(content)
                     txt_lines.append(f"\n{'-' * 70}\n")
 

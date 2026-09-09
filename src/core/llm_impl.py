@@ -2,7 +2,8 @@ import json
 import logging
 import os
 import threading
-from typing import Generator, List, Dict, Optional
+import uuid
+from typing import Generator, List, Dict, Optional, Tuple
 
 import litellm
 from litellm import completion, image_generation
@@ -268,6 +269,25 @@ class OpenAICompatibleLLM:
 
         return kwargs
 
+    def _attach_usage(self, response, result: Dict) -> None:
+        """把 provider 返回的真实 usage 以 ``_usage`` 键附加到结果 dict。
+
+        供 AgentRuntime._accumulate_usage 消费（真实 usage 优先、估算兜底）。
+        部分 provider 或异常路径下 usage 缺失，此时不写入任何键，让调用方
+        自然走 token 估算兜底；提取失败仅告警，不影响正常返回结果。
+        """
+        try:
+            usage = getattr(response, "usage", None)
+            if not usage:
+                return
+            result["_usage"] = {
+                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+            }
+        except (TypeError, ValueError) as e:
+            self.logger.warning(f"Attach usage failed (skip real usage): {e}")
+
     def chat(self, messages: List[Dict], is_translation=False, **kwargs):
         if getattr(self, '_missing_api_key', False):
             raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
@@ -296,13 +316,16 @@ class OpenAICompatibleLLM:
                 msg_dump["reasoning_content"] = reasoning or ""
                 if not msg_dump.get("content"):
                     msg_dump["content"] = ""
+                self._attach_usage(response, msg_dump)
                 return msg_dump
 
-            return {
+            result = {
                 "content": choice.message.content or "",
                 "reasoning_content": reasoning or "",
                 "role": "assistant"
             }
+            self._attach_usage(response, result)
+            return result
         except Exception as e:
             self.logger.error(f"Chat completion error.\n{_raw_error_text(e)}", exc_info=True)
             raise
@@ -384,48 +407,166 @@ class OpenAICompatibleLLM:
                 yield "\n</think>\n"
 
 
-        except ContextWindowExceededError as e:
-            self.logger.error(f"Context window exceeded.\n{_raw_error_text(e)}")
-            yield f"\n\n[Context Exceeded Error]\nThe input text or document is too long for this model. Please clear history or use a model with a larger context window.\n"
-
-        except RateLimitError as e:
-            self.logger.error(f"Rate limit hit.\n{_raw_error_text(e)}")
-            yield f"\n\n[Rate Limit Error]\nToo many requests or insufficient quota. Please try again later.\n"
-
-        except Timeout as e:
-            self.logger.error(f"Request timeout.\n{_raw_error_text(e)}")
-            yield f"\n\n[Timeout Error]\nThe model took too long to respond. Please check your network or try a different provider.\n"
-        except AuthenticationError as e:
-            self.logger.error(f"Authentication Error.\n{_raw_error_text(e)}")
-            err_msg = getattr(e, 'message', str(e))
-            yield f"\n\n[API Request Error: HTTP 401]\n{err_msg}\n"
-        except NotFoundError as e:
-            self.logger.error(f"Not Found Error.\n{_raw_error_text(e)}")
-            err_msg = getattr(e, 'message', str(e))
-            yield f"\n\n[API Request Error: HTTP 404]\n{err_msg}\n"
-        except BadRequestError as e:
-            # provider 原始响应体（含"不支持图片/不支持格式"等具体原因）完整入日志
-            self.logger.error(f"Bad Request Error.\n{_raw_error_text(e)}")
-            err_msg = getattr(e, 'message', str(e))
-            yield f"\n\n[API Request Error: HTTP 400]\n{err_msg}\n💡 Tip: This might happen if you sent an image to a text-only model, used an unsupported image format, or provided invalid parameters.\n"
-        except ServiceUnavailableError as e:
-            self.logger.error(f"Service Unavailable Error.\n{_raw_error_text(e)}")
-            err_msg = getattr(e, 'message', str(e))
-            yield f"\n\n[API Request Error: HTTP 503]\nThe API service is currently overloaded or down. Please try again later.\nDetails: {err_msg}\n"
-        except APIConnectionError as e:
-            self.logger.error(f"API Connection Error.\n{_raw_error_text(e)}")
-            err_msg = getattr(e, 'message', str(e))
-            yield f"\n\n[System Error: Connection Failed]\nFailed to connect to the API endpoint. Please check your proxy settings or local network.\nDetails: {err_msg}\n"
-        except APIError as e:
-            self.logger.error(f"API Error ({e.status_code}).\n{_raw_error_text(e)}")
-            yield f"\n\n[API Request Error: HTTP {e.status_code}]\n{e.message}\n"
         except Exception as e:
-            if self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
+            text, label = self._stream_error_map(e)
+            if text is not None:
+                # provider 原始响应体（含"不支持图片/不支持格式"等具体原因）完整入日志
+                self.logger.error(f"{label}\n{_raw_error_text(e)}")
+                yield text
+            elif self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
                 yield "\n\n[⛔ Generation halted by user.]"
             else:
                 # 未知错误：完整 traceback + 原始信息入日志，摘要反馈给用户
                 self.logger.error(f"Unexpected system error.\n{_raw_error_text(e)}", exc_info=True)
                 yield f"\n\n[System Error: {type(e).__name__}: {e}]\n"
+
+    @staticmethod
+    def _stream_error_map(e: Exception) -> Tuple[Optional[str], Optional[str]]:
+        """litellm 流式异常 → (UI 错误文本, 日志短标签)。
+
+        错误文案与历史版本逐字一致：UI 依据 ``[xxx Error]`` 标记前缀做
+        错误面板路由（runtime._is_error_token / chat_tasks 降级流），
+        不可改动标记格式。未知异常返回 (None, None) 由调用方兜底。
+        """
+        if isinstance(e, ContextWindowExceededError):
+            return ("\n\n[Context Exceeded Error]\nThe input text or document is too long for this model. "
+                    "Please clear history or use a model with a larger context window.\n",
+                    "Context window exceeded.")
+        if isinstance(e, RateLimitError):
+            return ("\n\n[Rate Limit Error]\nToo many requests or insufficient quota. "
+                    "Please try again later.\n", "Rate limit hit.")
+        if isinstance(e, Timeout):
+            return ("\n\n[Timeout Error]\nThe model took too long to respond. "
+                    "Please check your network or try a different provider.\n", "Request timeout.")
+        if isinstance(e, AuthenticationError):
+            return f"\n\n[API Request Error: HTTP 401]\n{getattr(e, 'message', str(e))}\n", "Authentication Error."
+        if isinstance(e, NotFoundError):
+            return f"\n\n[API Request Error: HTTP 404]\n{getattr(e, 'message', str(e))}\n", "Not Found Error."
+        if isinstance(e, BadRequestError):
+            return (f"\n\n[API Request Error: HTTP 400]\n{getattr(e, 'message', str(e))}\n"
+                    "💡 Tip: This might happen if you sent an image to a text-only model, "
+                    "used an unsupported image format, or provided invalid parameters.\n",
+                    "Bad Request Error.")
+        if isinstance(e, ServiceUnavailableError):
+            return (f"\n\n[API Request Error: HTTP 503]\nThe API service is currently overloaded or down. "
+                    f"Please try again later.\nDetails: {getattr(e, 'message', str(e))}\n",
+                    "Service Unavailable Error.")
+        if isinstance(e, APIConnectionError):
+            return (f"\n\n[System Error: Connection Failed]\nFailed to connect to the API endpoint. "
+                    f"Please check your proxy settings or local network.\nDetails: {getattr(e, 'message', str(e))}\n",
+                    "API Connection Error.")
+        if isinstance(e, APIError):
+            return f"\n\n[API Request Error: HTTP {e.status_code}]\n{e.message}\n", f"API Error ({e.status_code})."
+        return None, None
+
+    def stream_chat_events(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[Dict, None, None]:
+        """流式调用并收集完整响应（含 tool_calls 增量累积），供 Agent 循环使用。
+
+        与 stream_chat 的差异：
+        - 保留 tools/tool_choice 参数（工具调用轮次必需）；
+        - delta.tool_calls 分片按 index 累积，流结束后合成完整调用列表
+          （与 chat() 非流式返回的 tool_calls 结构一致）；
+        - 事件化输出：{"type": "reasoning"|"text", "text": str} 与收尾的
+          {"type": "final", "response": dict}；final.response 结构与
+          chat() 返回一致（content/reasoning_content/role/tool_calls/
+          _usage），供上层判定工具调用与用量统计。
+        内嵌 ``<think>`` 标签的模型其 content 原样进入 text 事件，与
+        非流式 chat() 的 content 行为保持一致。
+        """
+        if getattr(self, '_missing_api_key', False):
+            raise ValueError("API Key is missing. Please configure your API key in the settings before proceeding.")
+
+        payload = self._get_payload_kwargs()
+        payload.update(kwargs)
+        payload.pop("stream", None)  # 本方法强制流式
+        processed_messages = self._process_messages(messages)
+        self._log_params(payload)
+
+        content_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        # index -> {"id", "name", "args"}：tool_calls 增量分片累积槽位
+        collected_calls: Dict[int, Dict] = {}
+        usage_obj = None
+
+        def _build_final() -> Dict:
+            resp: Dict = {
+                "content": "".join(content_parts),
+                "reasoning_content": "".join(reasoning_parts),
+                "role": "assistant",
+            }
+            if collected_calls:
+                calls = []
+                for idx in sorted(collected_calls):
+                    slot = collected_calls[idx]
+                    calls.append({
+                        "id": slot["id"] or f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": slot["name"] or "unknown",
+                            "arguments": slot["args"] or "{}",
+                        },
+                    })
+                resp["tool_calls"] = calls
+            if usage_obj is not None:
+                try:
+                    resp["_usage"] = {
+                        "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
+                        "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
+                        "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
+                    }
+                except (TypeError, ValueError):
+                    pass
+            return resp
+
+        try:
+            litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=True)
+            response = completion(**litellm_kwargs)
+
+            for chunk in response:
+                if self._is_cancelled:
+                    content_parts.append("\n\n[⛔ Generation halted by user.]")
+                    break
+                if getattr(chunk, "usage", None):
+                    usage_obj = chunk.usage
+                if not getattr(chunk, 'choices', None) or not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                reasoning = getattr(delta, 'reasoning_content', None)
+                if not reasoning and hasattr(delta, 'model_extra') and delta.model_extra:
+                    reasoning = delta.model_extra.get('reasoning_content')
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                    yield {"type": "reasoning", "text": reasoning}
+
+                content = getattr(delta, 'content', None)
+                if content:
+                    content_parts.append(content)
+                    yield {"type": "text", "text": content}
+
+                for tc in (getattr(delta, 'tool_calls', None) or []):
+                    slot = collected_calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn:
+                        if fn.name:
+                            slot["name"] = fn.name
+                        if fn.arguments:
+                            slot["args"] += fn.arguments
+
+        except Exception as e:
+            text, label = self._stream_error_map(e)
+            if text is not None:
+                self.logger.error(f"{label}\n{_raw_error_text(e)}")
+                content_parts.append(text)
+            elif self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
+                content_parts.append("\n\n[⛔ Generation halted by user.]")
+            else:
+                self.logger.error(f"Unexpected system error.\n{_raw_error_text(e)}", exc_info=True)
+                content_parts.append(f"\n\n[System Error: {type(e).__name__}: {e}]\n")
+
+        yield {"type": "final", "response": _build_final()}
 
 
     def generate_image(self, prompt: str, **kwargs) -> str:

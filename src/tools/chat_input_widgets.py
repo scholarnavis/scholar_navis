@@ -165,6 +165,10 @@ class ChatDropTargetWidget(QWidget):
 
 class AutoResizingTextEdit(QPlainTextEdit):
     sig_send = Signal()
+    # 剪贴板粘贴图片路由：sig_paste_image 无参（由 ChatTool 读剪贴板
+    # 落盘），sig_paste_files 携带本地图片文件路径列表
+    sig_paste_image = Signal()
+    sig_paste_files = Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -183,6 +187,34 @@ class AutoResizingTextEdit(QPlainTextEdit):
         fixed_height = int((line_h * 5) + base_padding + 2)
         self.setFixedHeight(fixed_height)
 
+    def canInsertFromMimeData(self, source):
+        if source.hasImage() and not source.hasText():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source):
+        """粘贴路由：位图/图片文件转附件链路，其余保持默认文本插入。
+
+        优先级：本地图片 URL（资源管理器复制文件）> 纯位图（截图工具、
+        浏览器"复制图片"，均无纯文本伴生）> 文本。Excel 等同时携带
+        文本+位图的场景仍按文本粘贴，避免误吞表格数据。
+        """
+        if source.hasUrls():
+            img_paths = [
+                url.toLocalFile() for url in source.urls()
+                if url.isLocalFile()
+                and url.toLocalFile().lower().endswith(IMAGE_EXTENSIONS)
+            ]
+            if img_paths:
+                self.sig_paste_files.emit(img_paths)
+                return
+
+        if source.hasImage() and not source.hasText():
+            self.sig_paste_image.emit()
+            return
+
+        super().insertFromMimeData(source)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return and not event.modifiers() & Qt.ShiftModifier:
             self.sig_send.emit()
@@ -200,6 +232,8 @@ class ChatInputContainer(QFrame):
     sig_clear_context_clicked = Signal()
     sig_remove_image = Signal(object)
     sig_open_image = Signal(str)
+    sig_paste_image = Signal()
+    sig_paste_files = Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -362,6 +396,9 @@ class ChatInputContainer(QFrame):
 
         self.btn_send.clicked.connect(self._emit_send)
         self.text_edit.sig_send.connect(self._emit_send)
+        # 剪贴板粘贴图片（Ctrl+V / 右键粘贴）：转发给 ChatTool 附件链路
+        self.text_edit.sig_paste_image.connect(self.sig_paste_image.emit)
+        self.text_edit.sig_paste_files.connect(self.sig_paste_files.emit)
 
         GlobalSignals().mcp_status_changed.connect(self._on_mcp_status_changed)
 

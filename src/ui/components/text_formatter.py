@@ -14,19 +14,181 @@ from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
 
+def resolve_qt_font_families() -> list:
+    """返回应用生效字体族列表（代理 ``ThemeManager.font_families``）。
+
+    字体源已统一到 ThemeManager：首选系统默认 UI 字体的真实命中族
+    （QFontInfo 解析），附系统已装 CJK 族作按序回退。本函数仅为保持
+    既有调用点（chat_bubble 等）兼容的薄代理。
+    """
+    try:
+        return ThemeManager().font_families()
+    except Exception as e:
+        logger.warning(f"Failed to resolve app font families, fallback to Arial: {e}")
+        return ["Arial"]
+
+
+def qt_font_family_css() -> str:
+    """返回可安全内嵌进 Qt 富文本 style 属性的单族名（带单引号）。
+
+    只取一个真实族名：Qt 不支持字体栈，多余族名会导致声明整体失效。
+    单族选择走 :func:`pick_cjk_font_family`，保证中文字形由注入族直接
+    渲染，不依赖系统回退链。
+    """
+    families = resolve_qt_font_families()
+    return f"'{pick_cjk_font_family(families)}'"
+
+
+#: 已知含中日韩字形的族名片段（小写）。均为操作系统自带字体，
+#: 用于在解析出的族名列表中挑选可直接渲染中文的族。
+_CJK_FAMILY_HINTS = (
+    "microsoft yahei", "pingfang sc", "hiragino sans gb", "noto sans cjk",
+    "source han sans", "wenquanyi", "dengxian", "simhei",
+)
+
+
+def pick_cjk_font_family(families: list) -> str:
+    """从解析出的族名列表中挑第一个含中日韩字形的族。
+
+    背景：Qt 富文本对"显式西文单族（如 Segoe UI）+ 中文内容"的渲染
+    走系统字体回退，Windows 上常命中衬线宋体（SimSun），导致气泡
+    中英混排时中文显示为宋体。把所有单族注入点（HTML 内联样式、QSS、
+    文档默认字体主族）统一改为中文字形族（微软雅黑/苹方等，自身含
+    西文字形），中英文均由该族直接渲染，系统回退链不再参与。
+
+    找不到已知 CJK 族时退回首族（栈被用户自定义且无 CJK 字体的环境）。
+    """
+    for name in families:
+        low = name.lower()
+        if any(hint in low for hint in _CJK_FAMILY_HINTS):
+            return name
+    return families[0] if families else "Arial"
+
+
 class TextFormatter:
+
+    #: 常见 LaTeX 命令 → Unicode 符号映射（键不含反斜杠）。
+    #: 仅用于行内简单公式的降级渲染（无 LaTeX 引擎场景），映射均为
+    #: 数学/物理标准符号，保证公式语义不变。
+    _LATEX_SYMBOLS = {
+        # 运算与关系
+        "times": "×", "div": "÷", "pm": "±", "mp": "∓", "cdot": "·",
+        "approx": "≈", "simeq": "≃", "cong": "≅", "equiv": "≡",
+        "neq": "≠", "ne": "≠", "leq": "≤", "geq": "≥",
+        "ll": "≪", "gg": "≫", "sim": "∼", "propto": "∝",
+        # 希腊字母（小写）
+        "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ",
+        "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ", "eta": "η",
+        "theta": "θ", "vartheta": "ϑ", "iota": "ι", "kappa": "κ",
+        "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π",
+        "rho": "ρ", "sigma": "σ", "varsigma": "ς", "tau": "τ",
+        "upsilon": "υ", "phi": "φ", "varphi": "φ", "chi": "χ",
+        "psi": "ψ", "omega": "ω",
+        # 希腊字母（大写）
+        "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ",
+        "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ",
+        "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+        # 微积分 / 算子
+        "sum": "∑", "prod": "∏", "int": "∫", "iint": "∬", "iiint": "∭",
+        "oint": "∮", "partial": "∂", "nabla": "∇", "infty": "∞",
+        # 集合与逻辑
+        "in": "∈", "notin": "∉", "ni": "∋", "subset": "⊂", "subseteq": "⊆",
+        "supset": "⊃", "supseteq": "⊇", "cup": "∪", "cap": "∩",
+        "emptyset": "∅", "varnothing": "∅", "forall": "∀", "exists": "∃",
+        "neg": "¬", "land": "∧", "lor": "∨",
+        # 几何与其他
+        "perp": "⊥", "parallel": "∥", "angle": "∠", "degree": "°",
+        "hbar": "ℏ", "ell": "ℓ", "Re": "ℜ", "Im": "ℑ", "aleph": "ℵ",
+        "langle": "⟨", "rangle": "⟩", "prime": "′",
+        # 箭头
+        "to": "→", "rightarrow": "→", "leftarrow": "←",
+        "Rightarrow": "⇒", "Leftarrow": "⇐",
+        "leftrightarrow": "↔", "Leftrightarrow": "⇔",
+        "mapsto": "↦", "uparrow": "↑", "downarrow": "↓",
+        "longrightarrow": "⟶",
+        # 省略号
+        "cdots": "⋯", "ldots": "…", "dots": "…", "vdots": "⋮", "ddots": "⋱",
+    }
+
+    @staticmethod
+    def _latex_expand_frac_sqrt(formula):
+        """降级展开带参数命令：\\frac{a}{b} 与 \\sqrt{a} / \\sqrt[n]{a}。
+
+        堆叠分数转斜杠形式：参数长度 >1 时加括号保持运算优先级不变
+        （如 ``\\frac{\\Delta PE}{kT}`` → ``(ΔPE)/(kT)``），保证语义等价；
+        n 次根号转分数指数：``\\sqrt[3]{x}`` → ``x^(1/3)``。
+        迭代展开以支持嵌套（最多 4 层，防死循环）。
+        """
+        # \sqrt[n]{a} → a^(1/n)（先处理更具体的形式）
+        formula = re.sub(r'\\sqrt\[([^\[\]]*)\]\{([^{}]*)\}',
+                         lambda m: f"{m.group(2)}^(1/{m.group(1)})" if m.group(1)
+                         else f"√({m.group(2)})",
+                         formula)
+        # \frac{a}{b} 迭代展开（内层先展开，逐层向外）
+        for _ in range(4):
+            new = re.sub(
+                r'\\frac\{([^{}]*)\}\{([^{}]*)\}',
+                lambda m: f"{m.group(1)}/{m.group(2)}"
+                if (len(m.group(1)) == 1 and len(m.group(2)) == 1)
+                else f"({m.group(1)})/({m.group(2)})",
+                formula)
+            if new == formula:
+                break
+            formula = new
+        # \sqrt{a} → √(a)
+        for _ in range(4):
+            new = re.sub(r'\\sqrt\{([^{}]*)\}', r'√(\1)', formula)
+            if new == formula:
+                break
+            formula = new
+        return formula
 
     @staticmethod
     def _render_simple_latex(text):
+        """把行内/独立 LaTeX 公式降级为 Qt 富文本可显示的 HTML。
+
+        QTextBrowser 无 LaTeX 引擎，按顺序做四类转换：
+        1. ``\\text{...}`` 还原为纯文本，``\\left``/``\\right`` 定界符剥离；
+        2. 带参数命令展开（``\\frac`` / ``\\sqrt``，见 _latex_expand_frac_sqrt）；
+        3. 符号命令映射为 Unicode（``\\approx``→≈、``\\Delta``→Δ 等）；
+        4. ``^{}``/``_{}`` 上下标转 HTML sup/sub。
+        转换后若仍残留未知命令，记录 debug 日志便于补充映射表。
+        """
 
         def replacer(match):
             formula = match.group(1)
             formula = re.sub(r'\\text\{([^}]+)\}', r'\1', formula)
+            formula = re.sub(r'\\mathrm\{([^}]+)\}', r'\1', formula)
+            formula = re.sub(r'\\mathit\{([^}]+)\}', r'\1', formula)
+            # \left( \right) 等自适应定界符：剥离前缀，保留定界符本身
+            formula = re.sub(r'\\left\s*', '', formula)
+            formula = re.sub(r'\\right\s*', '', formula)
+            # 间距命令降级：薄空格/空隙 → 普通空格
+            formula = re.sub(r'\\[,;:]', ' ', formula)
+            formula = re.sub(r'\\quad|\\qquad', ' ', formula)
+            formula = re.sub(r'\\ ', ' ', formula)
+            # ^\circ / _\circ → °（温度/角度常见写法，需在符号映射前处理）
+            formula = re.sub(r'([\^_])\s*\\circ(?![a-zA-Z])', '°', formula)
+
+            formula = TextFormatter._latex_expand_frac_sqrt(formula)
+
+            # 符号命令映射：按命令名长度降序替换，防止前缀误吃
+            # （如 \simeq 必须先于 \sim、\neq 先于 \ne）。
+            for name in sorted(TextFormatter._LATEX_SYMBOLS, key=len, reverse=True):
+                formula = re.sub(r'\\' + name + r'(?![a-zA-Z])',
+                                 TextFormatter._LATEX_SYMBOLS[name], formula)
+
+            # 上下标（花括号形式优先，再处理单字符形式）
             formula = re.sub(r'\^\{([^}]+)\}', r'<sup>\1</sup>', formula)
             formula = re.sub(r'\^([a-zA-Z0-9])', r'<sup>\1</sup>', formula)
             formula = re.sub(r'_\{([^}]+)\}', r'<sub>\1</sub>', formula)
             formula = re.sub(r'_([a-zA-Z0-9])', r'<sub>\1</sub>', formula)
             formula = formula.replace('{}', '')
+
+            residual = sorted(set(re.findall(r'\\[a-zA-Z]+', formula)))
+            if residual:
+                logger.debug("Unresolved LaTeX commands in inline formula: %s", residual)
+
             return f"<i>{formula}</i>"
 
         text = re.sub(r'\$\$(.*?)\$\$', replacer, text, flags=re.DOTALL)
@@ -191,7 +353,6 @@ class TextFormatter:
 
     @staticmethod
     def markdown_to_html(text):
-        tm = ThemeManager()
         processed_text = text
 
         # ================= 救砖：修复丢失换行符的极度压缩 Markdown =================
@@ -328,9 +489,68 @@ class TextFormatter:
                 )
         html = ''.join(parts)
 
-        final_html = f"<div style='font-family: {tm.font_family()};'>{html}</div>"
+        # Qt 富文本引擎不支持 CSS 逗号字体栈；这里只注入第一个真实族名，
+        # 且 style 属性统一用双引号，避免族名内单引号截断属性导致声明失效。
+        final_html = f"<div style=\"font-family: {qt_font_family_css()};\">{html}</div>"
 
         return final_html
+
+    @staticmethod
+    def _strip_tool_json(text: str) -> str:
+        """从导出文本剥离"工具调用"形态的 JSON/JSONL，避免中间产物混入。
+
+        agent 流式（reasoning 模型无原生 function-calling 时）可能把 fallback 的
+        工具调用 JSON（``{"name": ..., "arguments": ...}``）当作正文 token 输出，
+        造成"正文中断后跟着一段工具调用 JSONL"。这里只删明确是工具调用的对象
+        （含 ``name`` 且 ``arguments``/``parameters``/``input`` 键），保留正文里
+        合法的 JSON 示例/表格数据。
+        """
+        import json as _json
+
+        def _is_tool_call(obj):
+            return (isinstance(obj, dict)
+                    and "name" in obj
+                    and any(k in obj for k in ("arguments", "parameters", "input")))
+
+        # 1) ```json ... ``` 围栏块：整块是工具调用则删除
+        def _fence_repl(m):
+            block = m.group(1)
+            try:
+                data = _json.loads(block)
+                return "" if _is_tool_call(data) else m.group(0)
+            except Exception:
+                return m.group(0)
+
+        text = re.sub(r"```json[ \t]*\r?\n(.*?)```",
+                      _fence_repl, text, flags=re.DOTALL | re.IGNORECASE)
+
+        # 2) 独立的裸 JSON 工具调用（含 JSONL，每行一个对象）：括号平衡扫描
+        out = []
+        i, n = 0, len(text)
+        while i < n:
+            if text[i] == "{":
+                depth = 0
+                j = i
+                while j < n:
+                    if text[j] == "{":
+                        depth += 1
+                    elif text[j] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    j += 1
+                if depth == 0:
+                    candidate = text[i:j + 1]
+                    try:
+                        data = _json.loads(candidate)
+                        if _is_tool_call(data):
+                            i = j + 1
+                            continue
+                    except Exception:
+                        pass
+            out.append(text[i])
+            i += 1
+        return "".join(out).strip()
 
     @staticmethod
     def clean_text_for_export(text, include_citations=True):
@@ -360,7 +580,9 @@ class TextFormatter:
         else:
             text = re.sub(r"<[^>]+>", "", text.replace("<br>", "\n")).strip()
 
-        return text.strip()
+        # 兜底：剥离混入正文的工具调用 JSON/JSONL（reasoning fallback 常见泄漏），
+        # 避免导出里出现"正文中断后跟一段工具 JSON"。
+        return TextFormatter._strip_tool_json(text).strip()
 
     @staticmethod
     def hide_think_tags(text, for_display=False):

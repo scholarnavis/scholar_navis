@@ -45,17 +45,27 @@ class ScrollInterceptTableWidget(QTableWidget):
 
 
 class FloatingOverlayFilter(QObject):
-    """Keeps a button pinned to the bottom-center of a parent widget."""
+    """Keeps a button pinned to the edge of a parent widget on resize.
 
-    def __init__(self, parent_widget, btn):
+    :param anchor: 定位锚点，"bottom-center"（默认，历史行为）或
+                   "bottom-right"；新锚点仅供聊天区导航按钮使用。
+    :param margin: 距父控件边缘的间距（逻辑像素）。
+    """
+
+    def __init__(self, parent_widget, btn, anchor="bottom-center", margin=20):
         super().__init__()
         self.parent_widget = parent_widget
         self.btn = btn
+        self.anchor = anchor
+        self.margin = margin
 
     def eventFilter(self, obj, event):
         if obj == self.parent_widget and event.type() == QEvent.Resize:
-            x = (self.parent_widget.width() - self.btn.width()) // 2
-            y = self.parent_widget.height() - self.btn.height() - 20
+            if self.anchor == "bottom-right":
+                x = self.parent_widget.width() - self.btn.width() - self.margin
+            else:
+                x = (self.parent_widget.width() - self.btn.width()) // 2
+            y = self.parent_widget.height() - self.btn.height() - self.margin
             self.btn.move(x, y)
         return super().eventFilter(obj, event)
 

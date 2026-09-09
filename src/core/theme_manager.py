@@ -81,8 +81,77 @@ class ThemeManager(QObject):
         except Exception as e:
             self.logger.error(f"Failed to load theme from ConfigManager: {str(e)}")
 
+    # 系统字体解析缓存：QFontInfo/QFontDatabase 查询有开销，且系统字体
+    # 运行期不变，进程内解析一次即可。None 表示尚未解析。
+    _font_families_cache = None
+
+    # 含中日韩字形的系统族候选（按平台常见度排序，取第一个已安装者）
+    _CJK_FAMILY_CANDIDATES = (
+        "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+        "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC",
+        "WenQuanYi Micro Hei",
+    )
+
+    def font_families(self) -> list:
+        """应用生效字体族列表（按回退优先序），全应用统一字体源。
+
+        首选"系统/用户正在使用的默认 UI 字体"：取 QApplication.font()
+        经 QFontInfo 解析出的真实命中族——它由 Qt 依据平台与系统区域
+        设置得出（中文 Windows 为雅黑系，macOS 为苹方系），用户自定义
+        系统字体时自动跟随。该族不含中文字形时（如西文环境的
+        Segoe UI），追加系统已安装的中文字形族作按序回退，保证中文
+        渲染不落入衬线宋体。解析结果缓存，失败时兜底 Arial。
+        """
+        if ThemeManager._font_families_cache is not None:
+            return list(ThemeManager._font_families_cache)
+
+        families = []
+        # 1. 系统默认 UI 字体的真实命中族
+        try:
+            from PySide6.QtGui import QFontInfo
+            app = QApplication.instance()
+            if app is not None:
+                real = QFontInfo(app.font()).family()
+                if real:
+                    families.append(real)
+        except Exception as e:
+            self.logger.warning(f"Failed to read system default font: {e}")
+
+        # 2. 系统已安装字体中挑中文字形族（默认族缺中文时提供按序回退；
+        #    默认族本身已是 CJK 族则不会重复追加）
+        try:
+            from PySide6.QtGui import QFontDatabase
+            db = QFontDatabase()
+            installed = set(db.families())
+            cjk = next((c for c in self._CJK_FAMILY_CANDIDATES if c in installed), None)
+            if cjk and cjk not in families:
+                families.append(cjk)
+            if not families:
+                # QApplication 未就绪等极端情况的静态兜底
+                fallback = next(
+                    (c for c in ("Segoe UI", "Helvetica Neue", "Roboto", "Arial")
+                     if c in installed), None)
+                if fallback:
+                    families.append(fallback)
+                if cjk and cjk not in families:
+                    families.append(cjk)
+        except Exception as e:
+            self.logger.warning(f"QFontDatabase unavailable: {e}")
+
+        families = [f for f in families if f] or ["Arial"]
+        self.logger.info(f"Resolved app font families: {families}")
+        ThemeManager._font_families_cache = families
+        return list(families)
+
     def font_family(self) -> str:
-        return "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', Roboto, sans-serif"
+        """应用统一字体的单族名（带引号），供 QSS / 富文本 HTML 直接注入。
+
+        富文本引擎不支持字体栈，返回多族栈会导致声明整体失效并触发
+        衬线回退（Windows 中文显示宋体），因此统一返回经 CJK 优先挑选
+        的单族；20+ 处调用点（QSS、HTML div、代码查看器等）自动统一。
+        """
+        from src.ui.components.text_formatter import pick_cjk_font_family
+        return f"'{pick_cjk_font_family(self.font_families())}'"
 
     def _get_system_theme(self) -> str:
         palette = QApplication.instance().palette()

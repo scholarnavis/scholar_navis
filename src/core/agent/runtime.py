@@ -37,6 +37,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional
 
+from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
+                                      resolve_context_window, derive_context_budgets)
+
 
 def _html_escape(text) -> str:
     """Escape a value for safe inline HTML injection (used by plot results)."""
@@ -46,10 +49,21 @@ logger = logging.getLogger("Agent.Runtime")
 
 # Safety limits
 MAX_ITERATIONS = 12
-_MAX_TOOL_RESULT_CHARS = 6000
+# 单条工具结果字符上限与工具 token 预算不再写死：按主模型上下文窗口
+# 动态推导（见 AgentRuntime.__init__ 与 token_estimator.derive_context_budgets），
+# 使 GPT/Claude/Gemini/DeepSeek/Qwen/本地小模型等各按自身容量治理。
 _MAX_REASONING_CHARS = 4000
 # 同一轮内并发执行的工具数量上限；避免一次性拉起过多线程挤占本地推理资源
 _MAX_PARALLEL_TOOLS = 6
+# ---- 上下文治理：单轮工具循环中的旧工具结果淘汰 ----
+# 多步迭代（最多 12 轮 x 6 并发工具）中，旧工具结果会随每步 LLM 请求
+# 线性重发。token 预算超限时从最旧未清理条目开始，就地替换为占位摘要。
+# - _TOOL_RESULT_KEEP_RECENT：无论预算如何，始终保留最近 N 条原文。
+# 注意：OpenAI 协议要求 assistant(tool_calls) 与 tool 消息成对存在，不能
+# 直接删除 tool 消息（会触发 400 invalid_request），故只做内容替换，
+# 保持消息结构完整。
+_TOOL_RESULT_KEEP_RECENT = 3
+_TOOL_RESULT_CLEARED_TAG = "[Tool result cleared to save context]"
 _ALWAYS_TOOLS = {
     "generate_image": {
         "type": "function",
@@ -176,6 +190,26 @@ class AgentRuntime:
         # 可跨轮次注入（由调用方传入上一轮缓存），且每次新图注册都会落盘
         # （plot_registry.json），因此即使进程重启、runtime 重建也能恢复。
         self._plot_registry: Dict[str, Dict] = dict(plot_registry or {})
+        # 本轮生成任务的 token 用量统计（真实 provider usage 优先，估算兜底）。
+        # prompt_tokens 为每次 LLM 调用重发的全部上下文之和（计费视角累计），
+        # completion_tokens 含各步工具调用输出与最终流式回答。
+        self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "estimated": False}
+        # 按主模型上下文窗口动态推导治理预算：litellm 自带的模型元数据
+        # （model_cost，含 max_input_tokens）优先，内置家族表兜底，使
+        # DeepSeek(1M) / GPT / Claude / Gemini / Qwen / 本地小模型各按
+        # 自身容量执行截断与淘汰，而非套用固定阈值。
+        try:
+            _model_name = getattr(self.main_llm, "model_name", "") or ""
+        except Exception:
+            _model_name = ""
+        _ctx_window = resolve_context_window(_model_name)
+        _budgets = derive_context_budgets(_ctx_window)
+        self._tool_result_chars = _budgets["tool_result_chars"]
+        self._tool_token_budget = _budgets["tool_token_budget"]
+        logger.info("Context budgets derived from model '%s': window=%d tokens, "
+                    "tool_result_chars=%d, tool_token_budget=%d",
+                    _model_name or "<unknown>", _ctx_window,
+                    self._tool_result_chars, self._tool_token_budget)
         self._plot_seq = int(plot_seq) if plot_seq else (max((int(k.split("_")[-1]) for k in self._plot_registry if k.startswith("plot_")), default=0) if self._plot_registry else 0)
 
     # ------------------------------------------------------------------ #
@@ -239,13 +273,13 @@ class AgentRuntime:
             # current set of charts (grows as charts are drawn within this run).
             self._refresh_modify_chart_tools(candidate_tools)
 
-            response = self._llm_step(messages, candidate_tools)
+            response = self._llm_step(messages, candidate_tools, _emit, is_cancelled)
             tool_calls = self._extract_tool_calls(response)
             reasoning = (response or {}).get("reasoning_content", "") or ""
             content = (response or {}).get("content", "") or ""
 
-            if reasoning:
-                _emit(f"<think>\n{reasoning[: _MAX_REASONING_CHARS]}\n</think>\n\n")
+            # reasoning 已在 _llm_step 流式阶段实时透出（<think> 包裹 + 展示
+            # 截断），此处不再重复 emit
 
             # No tools requested -> final answer text.
             if not tool_calls:
@@ -279,6 +313,7 @@ class AgentRuntime:
 
                     _emit("[CLEAR_SEARCH]")
                     self._stream_final_text(content, _emit, is_cancelled)
+                    self._finalize_usage("".join(full_response_cache))
                     return "".join(full_response_cache)
                 # Empty answer with no tool calls: force the model to produce a
                 # real final answer instead of returning an empty response.
@@ -292,8 +327,10 @@ class AgentRuntime:
                 })
                 _emit("[CLEAR_SEARCH]")
                 _emit("[START_LLM_NETWORK]")
+                self._compact_tool_history(messages)
                 for token in self._final_stream(messages, [], is_cancelled):
                     _emit(token)
+                self._finalize_usage("".join(full_response_cache))
                 return "".join(full_response_cache)
 
             # Execute requested tools, then loop back to the model.
@@ -319,16 +356,166 @@ class AgentRuntime:
 
         _emit("[CLEAR_SEARCH]")
         _emit("[START_LLM_NETWORK]")
+        self._compact_tool_history(messages)
         for token in self._final_stream(messages, candidate_tools, is_cancelled):
             _emit(token)
+        self._finalize_usage("".join(full_response_cache))
         return "".join(full_response_cache)
 
     # ------------------------------------------------------------------ #
     #  Step / observe helpers
     # ------------------------------------------------------------------ #
-    def _llm_step(self, messages: List[Dict], tools: List[Dict]) -> Dict:
+    def _compact_tool_history(self, messages: List[Dict]) -> None:
+        """多步工具循环中的旧工具结果清理（就地替换为占位摘要）。
+
+        触发条件：全部 ``role=tool`` 消息的 token 估算总量超过
+        ``_TOOL_CONTEXT_TOKEN_BUDGET``。从最旧的未清理条目开始替换，
+        始终跳过最近 ``_TOOL_RESULT_KEEP_RECENT`` 条原文；以占位符前缀
+        识别已清理条目，保证每步 LLM 调用前重复调用幂等无副作用。
+        占位摘要保留工具名、原始长度与头部摘录，并提示模型需要数据时
+        重新调用工具获取。
+        """
+        tool_msgs = [m for m in messages
+                     if m.get("role") == "tool" and isinstance(m.get("content"), str)]
+        if not tool_msgs:
+            return
+        total = estimate_message_tokens(tool_msgs)
+        budget = self._tool_token_budget
+        if total <= budget:
+            return
+        keep_ids = {id(m) for m in tool_msgs[-_TOOL_RESULT_KEEP_RECENT:]}
+        cleared = 0
+        for m in tool_msgs:
+            if total <= budget:
+                break
+            if id(m) in keep_ids or m["content"].startswith(_TOOL_RESULT_CLEARED_TAG):
+                continue
+            content = m["content"]
+            excerpt = content[:200].replace("\n", " ")
+            placeholder = (
+                f"{_TOOL_RESULT_CLEARED_TAG} [{m.get('name', 'tool')}] "
+                f"original {len(content)} chars. Head excerpt: {excerpt}..."
+                "\n(Data removed from context; call the tool again if you need it.)"
+            )
+            total -= estimate_tokens(content) - estimate_tokens(placeholder)
+            m["content"] = placeholder
+            cleared += 1
+        if cleared:
+            logger.info("Compacted %d stale tool result(s) to save context "
+                        "(tool-token budget=%d).", cleared, budget)
+
+    @staticmethod
+    def _strip_stale_reasoning(messages: List[Dict]) -> None:
+        """剥除所有 assistant 消息中的思维链（reasoning_content），不回传上下文。
+
+        与 DeepSeek / Qwen 等推理模型的官方约定一致：思维链只属于产生它的
+        那一轮（UI 已流式展示），下一轮请求不再拼接——既节约 token，也避免
+        部分 provider 对回传 reasoning_content 返回 400 错误。
+        """
+        for m in messages:
+            if m.get("role") == "assistant" and "reasoning_content" in m:
+                m.pop("reasoning_content", None)
+
+    def _accumulate_usage(self, messages: List[Dict], response) -> None:
+        """累计单次 LLM 调用的 token 用量（真实 usage 优先，估算兜底）。"""
+        usage = None
+        if isinstance(response, dict):
+            usage = response.pop("_usage", None)
+        if usage:
+            self.last_usage["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+            self.last_usage["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            return
+        self.last_usage["estimated"] = True
+        self.last_usage["prompt_tokens"] += estimate_message_tokens(messages)
+        if isinstance(response, dict):
+            text = (response.get("content") or "") + (response.get("reasoning_content") or "")
+            self.last_usage["completion_tokens"] += estimate_tokens(text)
+
+    def _finalize_usage(self, final_text: str) -> None:
+        """把最终流式回答的 completion token 计入统计。
+
+        流式接口不回传 usage，此处按 token 估算兜底（计入 estimated 标记）。
+        """
+        self.last_usage["estimated"] = True
+        self.last_usage["completion_tokens"] += estimate_tokens(final_text)
+
+    def _llm_step(self, messages: List[Dict], tools: List[Dict],
+                  emit_token: Optional[Callable[[str], None]] = None,
+                  is_cancelled: Optional[Callable[[], bool]] = None) -> Dict:
+        # 发送前执行上下文治理（均幂等）：旧工具结果淘汰 + 思维链剥除。
+        self._compact_tool_history(messages)
+        self._strip_stale_reasoning(messages)
         kwargs = {"messages": messages, "tools": tools, "tool_choice": "auto"} if tools else {"messages": messages}
-        return self.main_llm.chat(**kwargs)
+        response = None
+        if emit_token is not None:
+            try:
+                response = self._llm_step_stream(kwargs, emit_token)
+            except Exception as e:
+                # 流式路径异常（provider 不支持流式工具调用等）：回退非流式
+                # 完整调用，保证结果正确；重复计费由异常场景兜底接受
+                logger.warning(f"Streamed LLM step failed; falling back to blocking chat: {e}")
+        if response is None:
+            response = self.main_llm.chat(**kwargs)
+        self._accumulate_usage(messages, response)
+        return response
+
+    def _llm_step_stream(self, kwargs: Dict, emit_token: Callable[[str], None]) -> Dict:
+        """流式执行一步 Agent LLM 调用。
+
+        - reasoning delta 实时 emit（``<think>`` 包裹 + 展示截断），长思考
+          阶段用户可见，消除非流式整块等待的干等感；
+        - content delta 缓冲不 emit：工具调用轮次的正文属于 SILENT
+          EXECUTION 协议（不展示），且流结束前无法预知本轮是否携带
+          tool_calls，故流结束后按最终结果统一处置；
+        - 返回与 chat() 结构一致的完整 response dict。
+        """
+        reasoning_parts: List[str] = []
+        content_parts: List[str] = []
+        response: Dict = {}
+        think_open = False
+        truncated = False
+        try:
+            for ev in self.main_llm.stream_chat_events(**kwargs):
+                ev_type = ev.get("type")
+                if ev_type == "reasoning":
+                    text = ev.get("text") or ""
+                    reasoning_parts.append(text)
+                    if not think_open:
+                        emit_token("<think>\n")
+                        think_open = True
+                    if not truncated:
+                        if sum(map(len, reasoning_parts)) <= _MAX_REASONING_CHARS:
+                            emit_token(text)
+                        else:
+                            emit_token("\n...[thinking truncated for display]\n")
+                            truncated = True
+                elif ev_type == "text":
+                    content_parts.append(ev.get("text") or "")
+                elif ev_type == "final":
+                    response = ev.get("response") or {}
+        finally:
+            # 任何异常路径都保证闭合 <think> 标签，避免 UI 残留未闭合块
+            if think_open:
+                emit_token("\n</think>\n\n")
+
+        content = "".join(content_parts)
+        # 流式错误文本转统一错误面板（与 _final_stream 相同的处理路径）
+        if content and self._is_error_token(content):
+            content = self._format_error(content)
+
+        if response:
+            # 以缓冲内容为准（错误映射/停止标记已同步进缓冲）
+            response["content"] = content
+            response.setdefault("reasoning_content", "".join(reasoning_parts))
+            response.setdefault("role", "assistant")
+        else:
+            # 生成器未产出 final（异常兜底）：用已收集内容组装
+            response = {
+                "content": content,
+                "reasoning_content": "".join(reasoning_parts),
+                "role": "assistant",
+            }
+        return response
 
     @staticmethod
     def _has_tool(tools: List[Dict], name: str) -> bool:
@@ -561,7 +748,7 @@ class AgentRuntime:
             self._emit_tool_start(name, args, emit_token)
             try:
                 results[idx] = self._truncate(
-                    self._dispatch_tool(name, args, emit_token), _MAX_TOOL_RESULT_CHARS
+                    self._dispatch_tool(name, args, emit_token), self._tool_result_chars
                 )
             except Exception as e:
                 logger.error(f"Tool '{name}' raised unexpectedly: {e}")
@@ -1251,18 +1438,37 @@ class AgentRuntime:
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
+        """超长工具结果截断为 head + tail 形式（上限不变）。
+
+        纯头部硬切会把 JSON 尾部汇总字段、文献列表末尾条目（DOI/URL/
+        统计常在末尾）全部切掉，且可能把 JSON 切成非法半截。head+tail
+        在总长度不变的前提下保留两端信息，中段插入含省略量的明确标记。
+        """
         text = text or ""
         if len(text) <= limit:
             return text
-        return text[:limit] + "\n...[truncated]"
+        reserve = 64  # 省略标记自身长度预算
+        head = max(1, int((limit - reserve) * 0.75))
+        tail = max(0, limit - reserve - head)
+        omitted = len(text) - head - tail
+        mid = f"\n...[... omitted {omitted} chars ...]...\n"
+        if tail > 0:
+            return text[:head] + mid + text[-tail:]
+        return text[:head] + mid
 
     @staticmethod
     def _stream_final_text(content: str, emit_token: Callable[[str], None], is_cancelled):
-        for i in range(0, len(content), 5):
+        """非流式最终答案的轻量打字机回放。
+
+        纯视觉平滑效果：UI 端另有 60ms 渲染节流。块尺寸 32 字符、间隔
+        5ms 时 2000 字回答约 0.3s 回放完毕；旧实现（5 字符 / 15ms）会
+        引入约 6s 的固定空转延迟，是纯浪费。
+        """
+        for i in range(0, len(content), 32):
             if is_cancelled():
                 break
-            emit_token(content[i:i + 5])
-            time.sleep(0.015)
+            emit_token(content[i:i + 32])
+            time.sleep(0.005)
 
     @staticmethod
     def _emit_cancel_notice(emit_token: Callable[[str], None]):

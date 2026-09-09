@@ -46,6 +46,72 @@ class ChatAttachmentsMixin:
             if file_infos:
                 self.process_attached_files(file_infos)
 
+    def attach_from_clipboard(self):
+        """从剪贴板取图并走统一附件校验链路（Ctrl+V 与 Attach 菜单共用）。
+
+        优先级：本地图片文件（资源管理器复制）> 位图（截图工具 / 浏览器
+        "复制图片"）。位图落盘到临时缓存目录后按普通文件处理（大小校验、
+        数量上限、缩略图预览与多模态发送链路全部复用）；剪贴板无图或
+        落盘失败时给出明确提示。
+        """
+        from PySide6.QtGui import QGuiApplication
+
+        clipboard = QGuiApplication.clipboard()
+        mime = clipboard.mimeData()
+
+        if mime.hasUrls():
+            from src.core.image_utils import IMAGE_EXTENSIONS
+            img_paths = [
+                url.toLocalFile() for url in mime.urls()
+                if url.isLocalFile()
+                and url.toLocalFile().lower().endswith(IMAGE_EXTENSIONS)
+            ]
+            if img_paths:
+                self.process_attached_files(img_paths)
+                return
+
+        image = clipboard.image()
+        if image.isNull():
+            ToastManager().show("No image found in clipboard.", "warning")
+            return
+
+        path = self._save_clipboard_image(image)
+        if not path:
+            ToastManager().show("Failed to save clipboard image.", "error")
+            return
+
+        self.process_attached_files([path])
+
+    @staticmethod
+    def _save_clipboard_image(image):
+        """把剪贴板位图落盘为 PNG（内容哈希命名，重复粘贴自动去重）。
+
+        :param image: 非空的 QImage（来自剪贴板）。
+        :return: 临时 PNG 路径；保存失败返回 None。
+        """
+        import hashlib
+        import tempfile
+
+        try:
+            digest = hashlib.md5()
+            # 位图内容哈希：同一次截图重复粘贴命中同一文件，不产生冗余副本
+            bits = image.constBits()
+            digest.update(bytes(bits) if bits is not None else b"")
+            digest.update(f"{image.width()}x{image.height()}".encode())
+
+            cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            path = os.path.join(cache_dir, f"clipboard_{digest.hexdigest()[:12]}.png")
+
+            if os.path.exists(path):
+                return path
+            if not image.save(path, "PNG"):
+                return None
+            return path
+        except Exception as e:
+            logger.warning(f"Clipboard image save failed: {e}")
+            return None
+
     def show_attachment_menu(self):
         tm = ThemeManager()
         menu = QMenu(self.widget)
@@ -57,9 +123,11 @@ class ChatAttachmentsMixin:
 
         act_kb = menu.addAction(tm.icon("folder", "text_main"), "Select from Knowledge Base")
         act_local = menu.addAction(tm.icon("upload", "text_main"), "Upload Local File")
+        act_clip = menu.addAction(tm.icon("copy", "text_main"), "Paste Image from Clipboard")
 
         act_kb.triggered.connect(self.attach_from_kb)
         act_local.triggered.connect(self.attach_from_local)
+        act_clip.triggered.connect(self.attach_from_clipboard)
 
         menu.exec(QCursor.pos())
 
@@ -493,8 +561,21 @@ class ChatAttachmentsMixin:
             ctx_html = msg.get("context_html")
             msg_images = [c for c in msg.get("external_files", []) if c.get("type") == "image"] \
                 if msg.get("external_files") else []
-            self.add_bubble(display_text, is_user=is_user, context_html=ctx_html,
-                            image_files=msg_images)
+            bubble = self.add_bubble(display_text, is_user=is_user, context_html=ctx_html,
+                                     image_files=msg_images)
+            if not is_user and bubble is not None:
+                # AI 消息必须走与正常生成流一致的渲染管线（_format_response）：
+                # 无损导出的 content 是原始 markdown，含 <think>/<mcp_process>
+                # 思考块、[FINAL_ANSWER] 标记与 mermaid 代码块。若直接
+                # set_content（仅 markdown_to_html），未闭合标签会被透传成
+                # 一坨原始文本，导致导入后排版混乱。此处理会生成 think 折叠
+                # 面板 / mermaid 卡片，并缓存 mermaid 源码供点击查看。
+                try:
+                    final_html = self._format_response(content, getattr(bubble, "index", -1))
+                    if final_html:
+                        bubble.set_content(final_html)
+                except Exception as e:
+                    logger.warning("Failed to render imported AI message with format_response: %s", e)
             self.history.append(msg)
 
         # 恢复输入控件状态

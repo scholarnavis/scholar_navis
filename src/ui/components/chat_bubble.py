@@ -10,21 +10,18 @@ logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize
 from PySide6.QtGui import (QGuiApplication, QPixmap, QTextBlockFormat,
-                           QTextCursor, QFont, QFontDatabase)
+                           QTextCursor, QFont)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
 from src.core.core_task import TaskManager, TaskMode
 from src.core.theme_manager import ThemeManager
 from src.task.chat_tasks import DownloadImageTask
-from src.ui.components.text_formatter import TextFormatter
+from src.ui.components.text_formatter import (TextFormatter, pick_cjk_font_family,
+                                              resolve_qt_font_families)
 from src.ui.components.toast import ToastManager
 from src.ui.components.image_viewer import open_image_viewer
 
-
-#: CSS 通用关键字（Qt 无法当作真实族名解析，需过滤）。
-_FONT_KEYWORDS = {"system-ui", "-apple-system", "blinkmacsystemfont",
-                  "sans-serif", "serif", "monospace", "cursive", "fantasy"}
 
 #: 行距（按字体高度的百分比，100 为单倍行高）。
 _LINE_HEIGHT_PERCENT = 150
@@ -33,38 +30,8 @@ _BLOCK_BOTTOM_MARGIN = 8.0
 _BLOCK_TOP_MARGIN = 4.0
 
 
-_QT_FAMILIES_CACHE = None
-
-
-def resolve_qt_font_families() -> list:
-    """把 ``ThemeManager.font_family()`` 的 CSS 字体栈解析为 Qt 可用族名列表。
-
-    Qt 的 ``QFont.setFamilies`` 不接受 ``system-ui`` / ``sans-serif`` 等通用关键字，
-    这里过滤掉它们，仅保留真实族名（如 Segoe UI / Microsoft YaHei 等），
-    供 QTextBrowser 的富文本文档使用，保证气泡正文与全局无衬线字体一致。
-    结果缓存，避免流式渲染频繁重复解析。
-    """
-    global _QT_FAMILIES_CACHE
-    if _QT_FAMILIES_CACHE is not None:
-        return _QT_FAMILIES_CACHE
-
-    tm = ThemeManager()
-    stack = tm.font_family()
-    families = []
-    for raw in stack.split(','):
-        name = raw.strip().strip("'\"")
-        if not name:
-            continue
-        if name.lower() in _FONT_KEYWORDS:
-            continue
-        families.append(name)
-    # 保底：至少给一个可用族，避免空列表导致 Qt 回退默认衬线。
-    if not families:
-        db = QFontDatabase()
-        preferred = ["Segoe UI", "Microsoft YaHei", "PingFang SC", "Roboto", "Arial"]
-        families = [f for f in preferred if f in db.families()] or ["Arial"]
-    _QT_FAMILIES_CACHE = list(families)
-    return _QT_FAMILIES_CACHE
+#: Qt 族名解析已统一由 text_formatter.resolve_qt_font_families 提供（含缓存），
+#: 本模块直接复用，保证 HTML 内联样式与文档默认字体来源一致。
 
 
 def hex_to_rgba(hex_color, alpha):
@@ -314,6 +281,8 @@ class ChatBubbleWidget(QWidget):
         self.init_ui()
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
+        # "Thinking" 等纯文本 setText 不经过 set_content，提前固化文档默认字体
+        self._ensure_document_font()
 
     # --- 3. 完整的 init_ui 方法 ---
     def init_ui(self):
@@ -335,8 +304,6 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.setContentsMargins(12, 12, 12, 12)
         self.content_layout.setSpacing(6)
         self.content_layout.setAlignment(Qt.AlignTop)
-
-        font_family = tm.font_family()
 
         if self.context_html:
             self.ctx_frame = QFrame()
@@ -377,18 +344,21 @@ class ChatBubbleWidget(QWidget):
 
         self.lbl_text.document().documentLayout().documentSizeChanged.connect(self._adjust_browser_height)
 
-        # 布局逻辑：MSG_ERROR 靠左（类似 AI 气泡）
+        # 布局逻辑：MSG_ERROR 靠左（类似 AI 气泡）。
+        # 气泡与弹簧按 17:3 的 stretch 比例分配宽度（气泡约 85%）：此前
+        # 两者同为 Expanding 策略会被平分为各约 50%，气泡永远只占半窗宽，
+        # 文本过早换行；stretch 比例使气泡无论内容长短都稳定填充 85%。
         if self.msg_type == self.MSG_ERROR:
-            self.main_layout.addWidget(self.content_container)
-            self.main_layout.addWidget(self.spacer)
+            self.main_layout.addWidget(self.content_container, 17)
+            self.main_layout.addWidget(self.spacer, 3)
             btn_alignment = Qt.AlignLeft
         elif self.is_user:
-            self.main_layout.addWidget(self.spacer)
-            self.main_layout.addWidget(self.content_container)
+            self.main_layout.addWidget(self.spacer, 3)
+            self.main_layout.addWidget(self.content_container, 17)
             btn_alignment = Qt.AlignRight
         else:
-            self.main_layout.addWidget(self.content_container)
-            self.main_layout.addWidget(self.spacer)
+            self.main_layout.addWidget(self.content_container, 17)
+            self.main_layout.addWidget(self.spacer, 3)
             btn_alignment = Qt.AlignLeft
 
         self.set_content(self.original_text, msg_type=self.msg_type)
@@ -506,7 +476,10 @@ class ChatBubbleWidget(QWidget):
         super().resizeEvent(event)
         parent = self.parentWidget()
         if parent:
-            max_w = int(parent.width() * 0.80)
+            # 文本区上限为父宽 85%：气泡主体已由布局 stretch 固定为约 85%
+            # 父宽，此上限仅作兜底（≥ 气泡内容区实际宽度，正常不触发约束），
+            # 防止极端情况下文档 idealWidth 撑破容器
+            max_w = int(parent.width() * 0.85)
 
             if self.lbl_text.maximumWidth() != max_w:
                 self.lbl_text.setMaximumWidth(max_w)
@@ -580,7 +553,13 @@ class ChatBubbleWidget(QWidget):
 
     def _apply_theme(self):
         tm = ThemeManager()
-        font_family = tm.font_family()
+        # QSS 的 font-family 不接受 CSS 通用关键字/逗号栈：system-ui 等
+        # 未知族名会让 Qt 走 last-resort 回退（Windows 下为衬线体），
+        # 且控件字体随后会同步覆盖 QTextDocument 默认字体。这里统一
+        # 注入真实存在且含中文字形的族名：西文族（Segoe UI）会让中文
+        # 走系统回退并常命中宋体，必须直接选中文字形族。
+        _families = resolve_qt_font_families()
+        css_family = f"'{pick_cjk_font_family(_families)}'"
 
         # MSG_ERROR 气泡：错误框线（danger 左侧竖条 + 浅色底）由
         # ErrorPanelWidget 统一承载，容器使用与 AI 气泡一致的卡片样式，
@@ -611,7 +590,7 @@ class ChatBubbleWidget(QWidget):
                     QTextBrowser {{
                         background-color: transparent; color: {tm.color('text_main')};
                         border: none; padding: 0px; 
-                        font-size: 14px; font-family: {font_family};
+                        font-size: 14px; font-family: {css_family};
                     }}
                     QScrollBar:horizontal {{
                         background: transparent; height: 8px; margin: 0px;
@@ -627,7 +606,7 @@ class ChatBubbleWidget(QWidget):
         self.edit_input.setStyleSheet(f"""
             QTextEdit {{ 
                 background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('accent')}; 
-                border-radius: 6px; padding: 6px 10px; font-family: {font_family}; font-size: 14px;
+                border-radius: 6px; padding: 6px 10px; font-family: {css_family}; font-size: 14px;
             }}
         """)
 
@@ -642,9 +621,14 @@ class ChatBubbleWidget(QWidget):
                 QFrame#ContextFrame {{ background-color: {hex_to_rgba(tm.color('bg_input'), 0.5)}; border-left: 3px solid {tm.color('accent')}; border-radius: 4px; }}
             """)
             self.ctx_header.setStyleSheet(
-                f"color: {tm.color('accent')}; font-size: 11px; font-weight: bold; border: none; background: transparent; font-family: {font_family};")
+                f"color: {tm.color('accent')}; font-size: 11px; font-weight: bold; border: none; background: transparent; font-family: {css_family};")
             self.ctx_content.setStyleSheet(
-                f"color: {tm.color('text_muted')}; font-size: 12px; border: none; background: transparent; font-family: {font_family}; margin: 0px; padding: 0px;")
+                f"color: {tm.color('text_muted')}; font-size: 12px; border: none; background: transparent; font-family: {css_family}; margin: 0px; padding: 0px;")
+
+        # QSS 重新应用（polish）会改变控件字体并可能同步覆盖文档默认字体，
+        # 必须在其后重新固化无衬线默认字体，保证正文渲染命中预定字体。
+        self._ensure_document_font()
+        self._apply_token_stats_style()
 
     def set_loading(self, loading: bool):
         self.is_loading = loading
@@ -833,34 +817,102 @@ class ChatBubbleWidget(QWidget):
 
         self.lbl_text.setVisible(False)
 
-    # --- 4.8 排版优化：富文本文档字体 / 行距 / 段距 ---
-    def _apply_typography(self):
-        """让气泡正文与全局无衬线字体一致，并拉大行距与段落间距。
+    # --- Token 用量展示（AI 气泡） ---
+    def set_token_stats(self, prompt_tokens, completion_tokens, estimated=False):
+        """在气泡按钮行显示本次生成任务的 token 用量。
 
-        QTextBrowser 通过 ``setText`` 渲染富文本时，其内容字体不由控件
-        QSS 的 ``font-family`` 决定，而回退到 QTextDocument 的默认字体
-        （常为系统衬线/紧凑行距）。这里显式设置文档默认字体族，并逐块
-        提高行高与块间距，改善长时间阅读的舒适度。
+        数据来源：provider 返回的真实 usage（runtime 逐步累计）；provider
+        未返回 usage 时为估算值（estimated=True，显示带 ~ 前缀）。用户
+        气泡或数据无效时不显示。
+        """
+        if self.is_user:
+            return
+        try:
+            p_txt = f"{int(prompt_tokens):,}"
+            c_txt = f"{int(completion_tokens):,}"
+        except (TypeError, ValueError):
+            return
+        if getattr(self, "lbl_token_stats", None) is None:
+            from PySide6.QtWidgets import QLabel
+            self.lbl_token_stats = QLabel()
+            self.lbl_token_stats.setVisible(False)
+            # 插到按钮组最前（Copy 之前），不干扰既有按钮布局
+            self.btn_layout.insertWidget(0, self.lbl_token_stats)
+        prefix = "~" if estimated else ""
+        self.lbl_token_stats.setText(f"{prefix}Tokens: {p_txt} in / {c_txt} out")
+        self.lbl_token_stats.setVisible(True)
+        self._apply_token_stats_style()
+
+    def _apply_token_stats_style(self):
+        """同步用量标签的 QSS 样式（由 _apply_theme 一并刷新）。"""
+        lbl = getattr(self, "lbl_token_stats", None)
+        if lbl is None:
+            return
+        tm = ThemeManager()
+        lbl.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 11px; "
+            "background: transparent; border: none; padding: 0px;")
+
+    # --- 4.8 排版优化：富文本文档字体 / 行距 / 段距 ---
+    def _ensure_document_font(self):
+        """把 QTextDocument 默认字体设为全局无衬线栈（必须在 setText 之前调用）。
+
+        Qt 在 ``setText`` 解析 HTML 时即用当时的默认字体固化未显式指定
+        font-family 的文本；且渲染时未显式指定字体的文本块会**动态**取
+        文档默认字体。因此除 ``setText`` 前调用外，还需在 QSS 重新应用
+        （``_apply_theme``）后调用，防止 QSS polish 触发的 FontChange 把
+        默认字体覆盖为 Qt 未知族名的 last-resort 回退（衬线体）。
         """
         try:
             doc = self.lbl_text.document()
             if doc is None:
                 return
 
-            # 1) 文档默认字体：沿用控件字号，仅把字体族换成全局无衬线栈。
+            # 沿用控件字号（QSS font-size），仅把字体族换成全局无衬线栈。
             f = QFont(self.lbl_text.font())
             families = resolve_qt_font_families()
             if families:
+                # 主族提前为 CJK 字形族：与 HTML 内联/QSS 注入族保持同一
+                # 族源，中英文均由该族直接渲染；西文族保留在列表尾部作
+                # 为 Qt 6 setFamilies 按序回退的兜底。
+                cjk = pick_cjk_font_family(families)
+                ordered = [cjk] + [f for f in families if f != cjk]
                 if hasattr(f, "setFamilies"):
                     try:
-                        f.setFamilies(families)
+                        f.setFamilies(ordered)
                     except TypeError:  # 老版本无 setFamilies，退化为单族
-                        f.setFamily(families[0])
+                        f.setFamily(ordered[0])
                 else:
-                    f.setFamily(families[0])
+                    f.setFamily(ordered[0])
             doc.setDefaultFont(f)
+            # 控件字体与文档默认字体保持同源：QSS polish / FontChange 触发的
+            # widget→document 字体同步只会回写同一个正确值，而非衬线回退。
+            self.lbl_text.setFont(f)
 
-            # 2) 逐块拉大行距与段落/列表项间距。
+            # 诊断日志：每个气泡仅记录一次，便于核对实际命中的字体族。
+            if not getattr(self, "_font_diag_logged", False):
+                from PySide6.QtGui import QFontInfo
+                try:
+                    resolved = QFontInfo(f).family()
+                except Exception:
+                    resolved = "<unavailable>"
+                logger.info("Bubble font applied: families=%s, resolved=%s",
+                            families, resolved)
+                self._font_diag_logged = True
+        except Exception as e:
+            logger.debug(f"Failed to set document default font: {e}")
+
+    def _apply_typography(self):
+        """逐块拉大行距与段落/列表项间距（在 setText 之后调用）。
+
+        字体族由 ``_ensure_document_font`` 在 setText 前设置；本方法只负责
+        排版密度，改善长时间阅读的舒适度。
+        """
+        try:
+            doc = self.lbl_text.document()
+            if doc is None:
+                return
+
             block = doc.begin()
             while block.isValid():
                 fmt = block.blockFormat()
@@ -1048,6 +1100,7 @@ class ChatBubbleWidget(QWidget):
 
             html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
 
+            self._ensure_document_font()
             self.lbl_text.setText(html)
             self._apply_typography()
             self.lbl_text.adjustSize()
@@ -1057,6 +1110,7 @@ class ChatBubbleWidget(QWidget):
 
         except Exception as e:
             logger.warning(f"Failed to render bubble content: {e}")
+            self._ensure_document_font()
             self.lbl_text.setText(text)
             self._apply_typography()
             self.lbl_text.adjustSize()
@@ -1119,7 +1173,10 @@ class ChatBubbleWidget(QWidget):
             return
 
         tm = ThemeManager()
-        font_family = tm.font_family()
+        # 与 _apply_theme 一致：QSS 仅接受真实族名，且须含中文字形，
+        # 避免未知族或西文族的衬线/宋体回退。
+        _families = resolve_qt_font_families()
+        css_family = f"'{pick_cjk_font_family(_families)}'"
 
         self.btn_toggle_trans.setIcon(tm.icon("language", "text_muted"))
         self.btn_toggle_trans.setStyleSheet(f"""
@@ -1130,7 +1187,7 @@ class ChatBubbleWidget(QWidget):
                 color: {tm.color('text_muted')};
                 font-size: 11px;
                 font-weight: bold;
-                font-family: {font_family};
+                font-family: {css_family};
                 padding: 2px 0px;
             }}
             QPushButton:hover {{
@@ -1156,7 +1213,7 @@ class ChatBubbleWidget(QWidget):
                        border-radius: 6px;
                        padding: 8px 10px;
                        font-size: 12px;
-                       font-family: {font_family};
+                       font-family: {css_family};
                    }}
                """)
 

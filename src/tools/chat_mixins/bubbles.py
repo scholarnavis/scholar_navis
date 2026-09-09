@@ -101,13 +101,15 @@ class ChatBubblesMixin:
         else:
             sb.setValue(target)
 
-    def scroll_to_user_message(self, bubble_widget):
-        QApplication.processEvents()
+    def scroll_to_message_top(self, bubble_widget, smooth=True):
+        """滚动到指定气泡的顶部，使其顶端完整可见（留 10px 呼吸间距）。
 
+        供长回答导航按钮使用：点击后回到当前阅读的 AI 回答开头。
+        """
         target_y = max(0, bubble_widget.y() - 10)
         sb = self.scroll_area.verticalScrollBar()
 
-        if hasattr(self, 'scroll_anim'):
+        if smooth and hasattr(self, 'scroll_anim') and sb.value() != target_y:
             self.scroll_anim.stop()
             self.scroll_anim.setDuration(300)
             self.scroll_anim.setStartValue(sb.value())
@@ -115,6 +117,10 @@ class ChatBubblesMixin:
             self.scroll_anim.start()
         else:
             sb.setValue(target_y)
+
+    def scroll_to_user_message(self, bubble_widget):
+        QApplication.processEvents()
+        self.scroll_to_message_top(bubble_widget)
 
     def render_follow_up_buttons(self, questions):
         if not questions:

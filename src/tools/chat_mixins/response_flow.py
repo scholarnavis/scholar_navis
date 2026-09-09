@@ -119,6 +119,21 @@ class ChatResponseFlowMixin:
         self.current_ai_text += token
         self._is_rendering_dirty = True
 
+        # 长文本渲染降频：markdown 全量重排（split_follow_ups + format_response
+        # + QTextBrowser 重排）随文本长度线性变贵，固定 60ms 间隔在长回答
+        # 后期会产生可感知卡顿；按已累计长度自适应放宽节流间隔。
+        n = len(self.current_ai_text)
+        if n > 24000:
+            interval = 240
+        elif n > 12000:
+            interval = 160
+        elif n > 6000:
+            interval = 100
+        else:
+            interval = 60
+        if hasattr(self, '_render_timer') and self._render_timer.interval() != interval:
+            self._render_timer.setInterval(interval)
+
     def _format_response(self, text, index):
         """统一代理给 TextFormatter，保持内部调用无需修改"""
         from src.ui.components.text_formatter import TextFormatter
@@ -147,6 +162,15 @@ class ChatResponseFlowMixin:
     def _on_chat_result(self, payload):
         if isinstance(payload, dict) and payload.get("event") == "translated":
             self._on_query_translated(payload.get("text"))
+        elif isinstance(payload, dict) and payload.get("event") == "usage":
+            # 本次生成任务的 token 用量：显示在当前 AI 气泡下方。
+            bubble = getattr(self, "current_ai_bubble", None)
+            if bubble is not None and hasattr(bubble, "set_token_stats"):
+                bubble.set_token_stats(
+                    payload.get("prompt_tokens", 0),
+                    payload.get("completion_tokens", 0),
+                    estimated=bool(payload.get("estimated", False)),
+                )
 
     def on_chat_finished(self, is_cancelled=False):
         if hasattr(self, '_render_timer'):
