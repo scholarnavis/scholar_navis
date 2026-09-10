@@ -171,6 +171,16 @@ class ChatResponseFlowMixin:
                     payload.get("completion_tokens", 0),
                     estimated=bool(payload.get("estimated", False)),
                 )
+        elif isinstance(payload, dict) and payload.get("event") == "ask_user":
+            # Human-in-the-loop 提问卡：结构化通道直达渲染，绕过文本管线。
+            # 同时进入等待作答状态：锁定通用发送直到卡片提交或强制终止。
+            self._awaiting_user_input = True
+            bubble = getattr(self, "current_ai_bubble", None)
+            if bubble is not None and hasattr(bubble, "attach_ask_user_card"):
+                bubble.attach_ask_user_card(payload.get("data") or {})
+        elif isinstance(payload, dict) and payload.get("event") == "await_user":
+            # deep-plan 等待确认：同样进入等待状态锁定通用发送。
+            self._awaiting_user_input = True
 
     def on_chat_finished(self, is_cancelled=False):
         if hasattr(self, '_render_timer'):
@@ -185,10 +195,19 @@ class ChatResponseFlowMixin:
 
         self.input_container.btn_stop.setText("Stop")
         self.input_container.btn_stop.setEnabled(True)
-        self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_send.setVisible(True)
+        awaiting = getattr(self, '_awaiting_user_input', False)
+
+        # Stop 按钮旧连接统一断开；等待作答分支将其重连为强制终止出口。
+        try:
+            self.input_container.btn_stop.clicked.disconnect()
+        except Exception:
+            pass
 
         if is_cancelled:
+            self._awaiting_user_input = False
+            self.input_container.btn_stop.setVisible(False)
+            self.input_container.btn_send.setVisible(True)
+
             if self.current_ai_bubble:
                 self.current_ai_bubble.is_interrupted = True
             StandardDialog(self.widget, "Task Cancelled", "The AI generation has been stopped by the user.",
@@ -201,10 +220,20 @@ class ChatResponseFlowMixin:
             self.scroll_to_bottom()
             return
 
-        try:
-            self.input_container.btn_stop.clicked.disconnect()
-        except Exception:
-            pass
+        if awaiting:
+            # Human-in-the-loop 暂停（ask_user / deep-plan 卡等待操作）：
+            # 本轮对话尚未真正结束，通用输入框保持锁定防止重复发送；
+            # Stop 保留为强制终止出口（cancel_generation 解除等待状态）。
+            self.input_container.btn_send.setVisible(False)
+            self.input_container.btn_stop.setVisible(True)
+            self.input_container.set_send_locked(True)
+            self.input_container.btn_stop.clicked.connect(self.cancel_generation)
+            self.logger.info(
+                "Turn paused for user input; general send locked until the pending card is answered or dismissed.")
+        else:
+            self.input_container.btn_stop.setVisible(False)
+            self.input_container.btn_send.setVisible(True)
+            self.input_container.set_send_locked(False)
 
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
@@ -278,8 +307,15 @@ class ChatResponseFlowMixin:
 
         self.input_container.btn_stop.setText("Stop")
         self.input_container.btn_stop.setEnabled(True)
-        self.input_container.btn_stop.setVisible(False)
-        self.input_container.btn_send.setVisible(True)
+        if getattr(self, '_awaiting_user_input', False):
+            # 提问卡已渲染但本轮后续流程失败：保持等待锁定，
+            # 用户仍可在卡片上作答，或点 Stop 解除等待状态。
+            self.input_container.btn_send.setVisible(False)
+            self.input_container.btn_stop.setVisible(True)
+            self.input_container.set_send_locked(True)
+        else:
+            self.input_container.btn_stop.setVisible(False)
+            self.input_container.btn_send.setVisible(True)
 
         if self.current_ai_bubble:
             self.current_ai_bubble.set_loading(False)

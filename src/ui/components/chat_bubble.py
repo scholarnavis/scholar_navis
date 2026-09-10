@@ -218,6 +218,9 @@ class ChatBubbleWidget(QWidget):
     sig_link_clicked = Signal(str)
     sig_retry_clicked = Signal(int)
     sig_plot_plan_confirm = Signal(str)
+    sig_ask_user_submit = Signal(str)
+    sig_deep_plan_confirm = Signal(str)
+    sig_deep_plan_skip = Signal(str)
 
     # 由 init_ui/add_translation_widget 创建，仅作静态检查声明
     main_layout: QHBoxLayout
@@ -745,7 +748,116 @@ class ChatBubbleWidget(QWidget):
         text = re.sub(r"<plot_plan[^>]*>", "", text)
         return text
 
-    # --- 4.7 统一错误面板提取（流式标记 → 固定 QWidget） ---
+    # --- 4.7 Ask-user 澄清卡（文本标记提取 + 结构化事件双通道） ---
+    def _create_ask_user_card(self, data) -> bool:
+        """创建 ask_user 卡并插入气泡；按问题文本去重（返回是否创建）。
+
+        卡片可能从两条通道到达：文本标记（历史持久化后备）与结构化
+        事件（runtime 暂存载荷，任务层经状态事件送达）。两路竞速，
+        以去重集保证只渲染一张。
+        """
+        if not hasattr(self, "_ask_user_rendered"):
+            self._ask_user_rendered = set()
+        key = (data or {}).get("question", "") or "question"
+        if key in self._ask_user_rendered:
+            return False
+        from src.ui.components.ask_user_card import AskUserCardWidget
+
+        card = AskUserCardWidget(data)
+        card.sig_submit.connect(self.sig_ask_user_submit)
+        self._ask_user_rendered.add(key)
+        self._insert_card(card)
+        return True
+
+    def attach_ask_user_card(self, data):
+        """结构化事件入口：由 ChatTool._on_chat_result 调用（UI 线程）。"""
+        try:
+            self._create_ask_user_card(data)
+        except Exception as e:
+            logger.error(f"Failed to attach ask-user card: {e}")
+
+    def _extract_ask_user_cards(self, text: str) -> str:
+        """检测 ``<ask_user data="...">`` 标记并转换为 AskUserCardWidget。
+
+        标记内为 base64 编码的 JSON（见 runtime._handle_ask_user）；用户在
+        卡内点选/输入答案后通过 ``sig_ask_user_submit`` 交回发送管线。
+        主通路为结构化事件（attach_ask_user_card），本提取为历史重渲染
+        提供后备。
+        """
+        if "<ask_user" not in text:
+            return text
+        import base64
+        import json
+
+        def _replace(match):
+            try:
+                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                logger.warning("Malformed <ask_user> marker dropped")
+                return ""
+            try:
+                self._create_ask_user_card(data)
+            except Exception as e:
+                logger.error(f"Failed to create ask-user card: {e}")
+            return ""
+
+        text = re.sub(r'<ask_user data="([^"]*)"\s*></ask_user>', _replace, text)
+        # 清理流式中可能残留的不完整标记，以及上游被 HTML 转义的标记残迹
+        text = re.sub(r"<ask_user[^>]*/?>", "", text)
+        text = re.sub(r'&lt;/?ask_user[^&]*&gt;', "", text)
+        return text
+
+    # --- 4.8 Deep-plan 计划确认卡提取（流式标记 → DeepPlanCardWidget） ---
+    def _extract_deep_plan_cards(self, text: str) -> str:
+        """检测 ``<deep_plan data="...">`` 标记并转换为 DeepPlanCardWidget。
+
+        标记内为 base64 编码的 JSON（见 chat_tasks._propose_deep_plan）；
+        用户确认/跳过后分别触发 ``sig_deep_plan_confirm`` / ``sig_deep_plan_skip``。
+        """
+        if "<deep_plan" not in text:
+            return text
+        if not hasattr(self, "_deep_plan_rendered"):
+            self._deep_plan_rendered = set()
+
+        import base64
+        import json
+
+        def _replace(match):
+            try:
+                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                logger.warning("Malformed <deep_plan> marker dropped")
+                return ""
+            key = data.get("query", "") or "plan"
+            if key in self._deep_plan_rendered:
+                return ""
+            self._deep_plan_rendered.add(key)
+            try:
+                from src.ui.components.deep_plan_card import DeepPlanCardWidget
+
+                card = DeepPlanCardWidget(data)
+                card.sig_confirm.connect(self.sig_deep_plan_confirm)
+                card.sig_skip.connect(self.sig_deep_plan_skip)
+                self._insert_card(card)
+            except Exception as e:
+                logger.error(f"Failed to create deep plan card: {e}")
+            return ""
+
+        text = re.sub(r'<deep_plan data="([^"]*)"\s*></deep_plan>', _replace, text)
+        # 清理流式中可能残留的不完整标记
+        text = re.sub(r"<deep_plan[^>]*/?>", "", text)
+        return text
+
+    def _insert_card(self, card):
+        """把交互卡片插到气泡尾部按钮区之前（多种卡片共用的插入逻辑）。"""
+        anchor = getattr(self, "btn_widget", None)
+        idx = self.content_layout.indexOf(anchor) if anchor is not None else -1
+        if idx >= 0:
+            self.content_layout.insertWidget(idx, card)
+        else:
+            self.content_layout.addWidget(card)
+
+    # --- 4.9 统一错误面板提取（流式标记 → 固定 QWidget） ---
     def _extract_error_panels(self, text: str) -> str:
         """检测 ``<error_panel data="...">`` 标记并转换为 ErrorPanelWidget。
 
@@ -935,6 +1047,8 @@ class ChatBubbleWidget(QWidget):
         text = self._extract_error_panels(text)
         text = self._extract_rplot_cards(text)
         text = self._extract_plot_plan_cards(text)
+        text = self._extract_ask_user_cards(text)
+        text = self._extract_deep_plan_cards(text)
         self.original_text = text
         if msg_type is not None:
             self.msg_type = msg_type

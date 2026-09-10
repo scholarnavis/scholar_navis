@@ -47,10 +47,8 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
     model_selector: ModelSelectorWidget
     collapsed_placeholder: QLabel
     btn_ribbon_state: QPushButton
-    trans_selector: ModelSelectorWidget
     lbl_kb: QLabel
     combo_kb: BaseComboBox
-    lbl_hardware_status: QLabel
     ribbon_state: str
     scroll_area: QScrollArea
     chat_container: QWidget
@@ -82,6 +80,9 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         self.user_toggled_thinks = set()
         self.external_context_buffer = ""
         self.external_context_html = ""
+        # Human-in-the-loop 等待状态：ask_user / deep-plan 卡等待用户操作时为
+        # True，期间锁定通用输入框的发送，直到卡片提交或用户按 Stop 强制终止。
+        self._awaiting_user_input = False
 
         GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
         GlobalSignals().kb_switched.connect(self.on_global_kb_switched)
@@ -120,12 +121,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         row1_layout.addWidget(self.model_selector, 1)
         row1_layout.addWidget(self.collapsed_placeholder, 1)
 
-        # 硬件状态显示标签
-        self.lbl_hardware_status = QLabel()
-        self._update_hardware_status()
-        row1_layout.addWidget(self.lbl_hardware_status)
-
-        # Pin/Toggle Button for Ribbon State
+        # 收起按钮放在第 2 行（与 KB 同一行）；Compute Device 状态已按要求移除
         tm = ThemeManager()
         self.btn_ribbon_state = QPushButton(" Pinned")
         self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
@@ -135,27 +131,22 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
                             QPushButton { background: transparent; border: 1px solid #555; border-radius: 4px; color: #aaa; font-size: 11px; padding: 2px 6px; text-align: left;}
                             QPushButton:hover { background: #333; color: #fff; }
                         """)
-        row1_layout.addWidget(self.btn_ribbon_state)
 
-        row2_layout = QHBoxLayout()
-        self.trans_selector = ModelSelectorWidget(label_text=" Translator:", config_key="chat_trans_llm_id",
-                                                  model_key="chat_trans_model_name", enable_vision=False)
-
-        self.lbl_kb = QLabel(" Knowledge Base:")
-        self.combo_kb = BaseComboBox(max_width=400)
+        # 顶栏两行：第 1 行 = 主模型（已含 Vision），第 2 行 = KB + 收起按钮。
+        # Compute Device 与 Translator 均按要求移除。
+        self.lbl_kb = QLabel(" KB:")
+        self.combo_kb = BaseComboBox(max_width=240)
         self.refresh_kb_list()
 
-        row2_layout.addWidget(self.trans_selector)
-        row2_layout.addSpacing(15)
+        row2_layout = QHBoxLayout()
+        row2_layout.setSpacing(8)
+        row2_layout.setContentsMargins(0, 0, 0, 0)
         row2_layout.addWidget(self.lbl_kb)
         row2_layout.addWidget(self.combo_kb, 1)
+        row2_layout.addWidget(self.btn_ribbon_state)
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
-
-        self.lbl_hardware_status = QLabel("Compute Device: Detecting...")
-        top_bar.addWidget(self.lbl_hardware_status)
-        self._update_hardware_status()
 
         main_layout.addWidget(self.top_bar_wrapper)
 
@@ -164,12 +155,8 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         def set_ribbon_visible(visible):
             self.model_selector.setVisible(visible)
             self.collapsed_placeholder.setVisible(not visible)
-            self.trans_selector.setVisible(visible)
             self.lbl_kb.setVisible(visible)
             self.combo_kb.setVisible(visible)
-
-            if hasattr(self, 'lbl_hardware_status'):
-                self.lbl_hardware_status.setVisible(visible)
 
         def apply_ribbon_state(state):
             tm = ThemeManager()
@@ -286,17 +273,6 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
 
         return self.widget
 
-    def _update_hardware_status(self):
-        """异步获取当前推理设备，防止阻塞主界面"""
-        from src.task.chat_tasks import FetchHardwareStatusTask
-        self.hw_task_mgr = TaskManager()
-        self.hw_task_mgr.sig_result.connect(self._on_hw_status_result)
-        self.hw_task_mgr.start_task(FetchHardwareStatusTask, task_id="fetch_hw_chat", mode=TaskMode.THREAD)
-
-    def _on_hw_status_result(self, result):
-        if result and "dev_name" in result:
-            self.lbl_hardware_status.setText(f"Compute Device: {result['dev_name']}")
-
     def eventFilter(self, obj, event):
         if obj == self.scroll_area and event.type() == QEvent.Resize:
             # 窗口缩放时按钮直接跟手就位（无动画），避免连续 resize 期间
@@ -308,29 +284,21 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
                 if event.type() == QEvent.Enter:
                     self.model_selector.setVisible(True)
                     self.collapsed_placeholder.setVisible(False)
-                    self.trans_selector.setVisible(True)
                     self.lbl_kb.setVisible(True)
                     self.combo_kb.setVisible(True)
-                    if hasattr(self, 'lbl_hardware_status'):
-                        self.lbl_hardware_status.setVisible(True)
 
                 elif event.type() == QEvent.Leave:
                     if not self.top_bar_wrapper.geometry().contains(self.widget.mapFromGlobal(QCursor.pos())):
                         self.model_selector.setVisible(False)
                         self.collapsed_placeholder.setVisible(True)
-                        self.trans_selector.setVisible(False)
                         self.lbl_kb.setVisible(False)
                         self.combo_kb.setVisible(False)
-                        if hasattr(self, 'lbl_hardware_status'):
-                            self.lbl_hardware_status.setVisible(False)
 
         return super().eventFilter(obj, event)
 
     def load_llm_configs(self):
         if hasattr(self, 'model_selector'):
             self.model_selector.load_llm_configs()
-        if hasattr(self, 'trans_selector'):
-            self.trans_selector.load_llm_configs()
 
     def refresh_kb_list(self):
         self.load_llm_configs()

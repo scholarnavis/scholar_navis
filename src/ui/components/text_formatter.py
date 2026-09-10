@@ -452,9 +452,9 @@ class TextFormatter:
             # ChEBI ID 映射
             (r'\b(CHEBI:\d+)\b', r'<a href="https://www.ebi.ac.uk/chebi/searchId.do?chebiId=\1">\1</a>'),
 
-            # 拟南芥 AGI 基因号
+            # 拟南芥 AGI 基因号（TAIR 官方检索）
             (r'\b(AT[1-5CM]G\d{5})\b',
-             r'<a href="https://plants.ensembl.org/Arabidopsis_thaliana/Gene/Summary?g=\1">\1</a>'),
+             r'<a href="https://www.arabidopsis.org/results?mainType=general&amp;searchText=\1&amp;category=genes">\1</a>'),
 
             # JASPAR Motif ID (例如: MA0001.1)
             (r'\b(MA\d{4}\.\d+)\b', r'<a href="https://jaspar.elixir.no/matrix/\1/">JASPAR \1</a>'),

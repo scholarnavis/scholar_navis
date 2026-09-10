@@ -23,12 +23,28 @@ logger = logging.getLogger(__name__)
 class ChatSendFlowMixin:
     """发送链路：process_send -> start_ai_response -> (task events handled elsewhere)。"""
 
-    def process_send(self, text):
+    def process_send(self, text, display_text=None):
+        """发送用户消息 → 现代异步管线（线程执行，UI 不冻结）。
+
+        Args:
+            text: 送入 LLM 管线的完整文本。
+            display_text: 气泡与历史展示用文本；协议哨兵消息（如 deep-plan
+                确认）传纯文本以避免 UI 显示协议前缀。
+        """
         # 0. 取消待刷新的附件预览定时器：同步链路（如开发者测试）在同一调用栈内
         #    attach -> send，若不取消，延迟回调会在发送完成后残留输入区预览。
         timer = getattr(self, '_attach_preview_timer', None)
         if timer is not None:
             timer.stop()
+
+        # 0.5 Human-in-the-loop 等待作答阶段拦截一切通用发送（含追问、编辑重发等
+        #     全部入口），防止与交互卡的作答流程互相干扰造成重复发送。
+        if getattr(self, '_awaiting_user_input', False):
+            ToastManager().show(
+                "Please answer the pending question card above first "
+                "(or press Stop to dismiss it).", "warning")
+            self.logger.debug("Send blocked: turn is waiting for an interactive-card answer.")
+            return
 
         # 1. 获取并格式化 KB ID
         kb_data = self.combo_kb.currentData()
@@ -61,7 +77,8 @@ class ChatSendFlowMixin:
         self.input_container.clear_text()
 
         # 将上下文的 HTML 链接渲染在气泡上方；图片以缩略图形式展示
-        self.add_bubble(text, is_user=True, context_html=current_html if current_html else None,
+        shown_text = display_text or text
+        self.add_bubble(shown_text, is_user=True, context_html=current_html if current_html else None,
                         image_files=image_files)
 
         llm_text = text
@@ -75,7 +92,7 @@ class ChatSendFlowMixin:
         self.history.append({
             "role": "user",
             "content": llm_text,
-            "display_text": text,
+            "display_text": shown_text,
             "context_html": current_html if current_html else None,
             "external_files": current_files
         })
@@ -131,9 +148,34 @@ class ChatSendFlowMixin:
                         self.logger.warning("ChatBubbleWidget is missing 'add_translation_widget' method.")
                     break
 
+    def _resolve_trans_config(self):
+        """从配置读取翻译模型配置（Translator UI 已移除，改用存储的 provider/model）。
+
+        与原先 ModelSelectorWidget.get_current_config 等价：读取 chat_trans_llm_id
+        对应的 provider，并以 chat_trans_model_name_<provider> 记录的具体模型作为
+        model_name。独立翻译往返默认关闭，仅当 chat_skip_translation_roundtrip=False
+        时才真正需要此配置。
+        """
+        try:
+            from src.core.config_manager import ConfigManager
+            cm = ConfigManager()
+            pid = cm.user_settings.get("chat_trans_llm_id")
+            if not pid:
+                return None
+            for cfg in cm.load_llm_configs():
+                if cfg.get("id") == pid:
+                    out = dict(cfg)
+                    m = cm.user_settings.get(f"chat_trans_model_name_{pid}")
+                    if m:
+                        out["model_name"] = str(m).strip()
+                    return out
+        except Exception:
+            return None
+        return None
+
     def start_ai_response(self, kb_id, requires_translation=False):
         main_config = self.model_selector.get_current_config()
-        trans_config = self.trans_selector.get_current_config()
+        trans_config = self._resolve_trans_config()
 
         use_academic_agent = self.input_container.chk_academic_agent.isChecked() if hasattr(self.input_container,
                                                                                             'chk_academic_agent') else True
@@ -333,8 +375,73 @@ class ChatSendFlowMixin:
         self.logger.info(f"Plot plan confirmed -> sending render request: {text[:80]}")
         self.process_send(text)
 
+    def handle_ask_user_submit(self, answer: str):
+        """把用户对 ask_user 澄清卡的作答回灌为下一条用户消息。
+
+        Agent 上一轮已通过 ask_user 工具暂停等待；此处走正常发送管线，
+        模型凭历史中的工具调用即可将答案与其问题对上，继续任务。
+        """
+        if getattr(self, 'is_locked', False):
+            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            return
+        answer = (answer or "").strip()
+        if not answer:
+            ToastManager().show("Empty answer.", "warning")
+            return
+        # 卡片作答即本轮继续：解除等待锁定，走正常发送管线。
+        self._awaiting_user_input = False
+        self.input_container.set_send_locked(False)
+        self.logger.info(f"Ask-user answer -> resuming agent: {answer[:80]}")
+        self.process_send(answer)
+
+    def handle_deep_plan_confirm(self, plan_text: str):
+        """用户确认深度研究计划：以哨兵文本重进管线，跳过分解直接执行。
+
+        Args:
+            plan_text: 卡片中编辑后的编号计划文本（一行一个子问题）。
+        """
+        if getattr(self, 'is_locked', False):
+            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            return
+        plan_text = (plan_text or "").strip()
+        if not plan_text:
+            ToastManager().show("The plan is empty.", "warning")
+            return
+        # 计划确认即本轮继续：解除等待锁定。
+        self._awaiting_user_input = False
+        self.input_container.set_send_locked(False)
+        self.logger.info(
+            f"Deep plan confirmed -> executing ({len(plan_text.splitlines())} sub-task line(s))")
+        # 协议前缀 [DEEP_PLAN_CONFIRMED] 仅在 LLM 文本中传递；气泡展示纯计划。
+        self.process_send(f"[DEEP_PLAN_CONFIRMED]\n{plan_text}", display_text=plan_text)
+
+    def handle_deep_plan_skip(self, original_query: str):
+        """用户跳过深度拆解：本轮按普通单 Agent 直接作答。"""
+        if getattr(self, 'is_locked', False):
+            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            return
+        original_query = (original_query or "").strip()
+        if not original_query:
+            return
+        # 跳过拆解即本轮继续：解除等待锁定。
+        self._awaiting_user_input = False
+        self.input_container.set_send_locked(False)
+        self.logger.info("Deep plan skipped -> answering directly without decomposition.")
+        self.process_send(f"[DEEP_PLAN_SKIPPED]\n{original_query}", display_text=original_query)
+
     def cancel_generation(self):
         if not self.input_container.btn_stop.isEnabled():
+            return
+
+        # Human-in-the-loop 等待作答阶段的强制终止：任务早已结束，
+        # 此处仅解除等待锁定并恢复常规对话状态，不弹取消确认框。
+        if getattr(self, '_awaiting_user_input', False):
+            self._awaiting_user_input = False
+            self.input_container.set_send_locked(False)
+            self.input_container.btn_stop.setVisible(False)
+            self.input_container.btn_send.setVisible(True)
+            self.logger.info("Waiting state dismissed by user; normal chat restored.")
+            ToastManager().show("Waiting dismissed. You can chat normally now.", "info")
             return
 
         self.input_container.btn_stop.setEnabled(False)

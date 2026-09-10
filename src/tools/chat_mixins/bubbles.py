@@ -54,6 +54,10 @@ class ChatBubblesMixin:
         # Plot-plan confirmation cards may appear in AI bubbles; forward the final
         # English requirement to the chat tool so it re-sends it to the AI to render.
         bubble.sig_plot_plan_confirm.connect(self.handle_plot_plan_confirm)
+        # Ask-user 澄清卡 / Deep-plan 计划卡：用户操作回灌到发送管线
+        bubble.sig_ask_user_submit.connect(self.handle_ask_user_submit)
+        bubble.sig_deep_plan_confirm.connect(self.handle_deep_plan_confirm)
+        bubble.sig_deep_plan_skip.connect(self.handle_deep_plan_skip)
 
         if is_user:
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)

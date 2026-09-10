@@ -162,6 +162,55 @@ _ALWAYS_TOOLS = {
             },
         },
     },
+    "ask_user": {
+        "type": "function",
+        "function": {
+            "name": "ask_user",
+            "description": (
+                "Pause and ask the user ONE clarifying question with clickable preset options, "
+                "then wait for their answer as the next user message. STRICT POLICY: use it ONLY "
+                "when an ambiguity would materially change the scientific result or right before "
+                "a costly/irreversible operation — e.g. which organism/species or strain, which "
+                "gene/protein identifier system (AGI locus vs UniProt vs RefSeq), which omics "
+                "data type or database scope, or which of several very different interpretations "
+                "of the request. Do NOT ask when the request is already clear; proceed directly "
+                "instead. Ask AT MOST one question per response, provide 2-6 concrete, "
+                "mutually-exclusive options whenever possible, and write the question and options "
+                "in the USER'S LANGUAGE. After this tool runs you MUST STOP: do not call any "
+                "other tool; end your turn with one short sentence saying you are waiting for "
+                "the user's answer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The single clarifying question, written in the user's language.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "2-6 concrete candidate answers shown as clickable options (in the "
+                            "user's language). Omit only when no sensible preset exists."
+                        ),
+                    },
+                    "multi_select": {
+                        "type": "boolean",
+                        "description": "True when the user may pick several options at once (default false).",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": (
+                            "Optional one-line explanation of why this decision matters / what "
+                            "depends on it (in the user's language)."
+                        ),
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
 }
 
 
@@ -336,6 +385,24 @@ class AgentRuntime:
             # Execute requested tools, then loop back to the model.
             messages.append(self._assistant_tool_msg(content, reasoning, tool_calls))
             self._execute_tool_calls(tool_calls, messages, _emit, is_cancelled)
+
+            # Human-in-the-loop: ask_user pauses the run DETERMINISTICALLY.
+            # The question card is already on screen. The pause must be
+            # mechanical — relying on the model to "stop by itself" fails in
+            # practice (models ignore the instruction and keep calling
+            # retrieval tools), so the run ends here unconditionally.
+            if any((tc.get("function") or {}).get("name") == "ask_user"
+                   for tc in tool_calls):
+                self.log_fn("INFO", "ask_user triggered; pausing run for user input.")
+                _emit(
+                    "\n\n---\n"
+                    "<img src='assets/icons/pause_circle.svg' width='14' height='14' "
+                    "style='vertical-align: middle;' /> "
+                    "<i>Paused for your input — answer the question card above "
+                    "and the task will continue.</i>\n"
+                )
+                self._finalize_usage("".join(full_response_cache))
+                return "".join(full_response_cache)
 
         # Loop exhausted: force a final plain-text answer.
         if not messages or messages[-1].get("role") != "tool":
@@ -801,6 +868,10 @@ class AgentRuntime:
         if name == "propose_plot_plan":
             return self._handle_propose_plot_plan(args, emit_token)
 
+        # 1d. Built-in human-in-the-loop clarification (pause for user input).
+        if name == "ask_user":
+            return self._handle_ask_user(args, emit_token)
+
         # 2. Local Skills (academic + external) — zero latency.
         if self.skill_manager.is_skill_available(name):
             prefix = "[ACADEMIC]" if getattr(self.skill_manager, "academic_skills", None) and \
@@ -1260,6 +1331,56 @@ class AgentRuntime:
                 "plot_chart (or any other rendering tool) now. Wait for the user's next "
                 "message; once they confirm the plan, follow their finalized requirements "
                 "and call plot_chart to render the figure."
+            ),
+        }, ensure_ascii=False)
+
+    def _handle_ask_user(self, args: dict, emit_token) -> str:
+        """Show an ask-user clarification card and pause the task for user input.
+
+        The tool streams an ``<ask_user data="...">`` marker (base64 JSON) to the
+        UI, which renders an interactive card (preset options + free text). The
+        user's composed answer is re-sent as the next user message through the
+        normal send pipeline. The return value instructs the LLM to stop and
+        wait (end-turn), mirroring the propose_plot_plan protocol.
+        """
+        question = str((args or {}).get("question", "") or "").strip()
+        if not question:
+            return json.dumps({
+                "status": "error",
+                "message": (
+                    "The 'question' argument is empty. Provide a concrete clarifying "
+                    "question, or proceed with your best judgement instead of asking."
+                ),
+            }, ensure_ascii=False)
+
+        options = [str(o).strip() for o in ((args or {}).get("options") or [])
+                   if str(o).strip()][:8]
+        payload = {
+            "question": question,
+            "options": options,
+            "multi_select": bool((args or {}).get("multi_select", False)),
+            "context": str((args or {}).get("context", "") or "").strip(),
+        }
+        import base64
+        encoded = base64.b64encode(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        # 结构化通道：payload 暂存于 runtime 实例，任务层在 run() 返回后
+        # 经状态事件送达 UI（文本标记只作历史持久化后备——它要穿过
+        # markdown/链接化多层管线，存在被改写的风险，不能作为唯一通路）。
+        self.last_ask_user = payload
+        if emit_token is not None:
+            emit_token(f'<ask_user data="{encoded}"></ask_user>\n')
+        self.log_fn("INFO", f"Agent paused for user input: {question[:80]}")
+
+        return json.dumps({
+            "status": "success",
+            "message": (
+                "A clarification card with your question and options has been shown to "
+                "the user. STOP NOW: do not call any further tool. End your turn with ONE "
+                "short sentence (in the user's language) telling them to answer the "
+                "question above. Their answer will arrive as the next user message; "
+                "continue the task from there."
             ),
         }, ensure_ascii=False)
 

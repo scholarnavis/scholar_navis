@@ -33,7 +33,13 @@ import os
 import tempfile
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QLabel, QPushButton, QHBoxLayout)
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QLabel,
+    QPushButton,
+    QHBoxLayout,
+    QRadioButton,
+)
 
 from src.ui.components.dialog import BaseDialog
 from src.ui.components.source_code_viewer import SourceCodeViewer
@@ -120,6 +126,36 @@ AI_TESTS = {
         #: 测试用合成图片（1x1 红色 PNG），由 _ai_test 动态生成并附加
         "image": "synthetic",
     },
+    "ask_user_clarify": {
+        "note": (
+            "Developer test: exercising the <b>ask_user</b> human-in-the-loop tool. "
+            "The prompt contains a deliberate scientific ambiguity (MAPK6 exists in "
+            "Arabidopsis, rice, human, etc.; IDs and sequences differ per organism). "
+            "Expected: the agent calls ask_user with clickable options INSTEAD of "
+            "guessing, an input card appears in the chat, and after the user answers, "
+            "the agent continues the task scoped to the chosen organism."
+        ),
+        "prompt": (
+            "I'm working on stress signaling and I'd like a quick briefing on the MAPK6 "
+            "gene: what's known about its function, a couple of recent papers on it, and "
+            "its protein sequence. Thanks!"
+        ),
+    },
+    "deep_plan_confirm": {
+        "note": (
+            "Developer test: exercising the <b>deep-research plan card</b> (requires "
+            "the Deep Mode toggle ON). Expected: the query decomposes, a plan card "
+            "lists the sub-investigations and WAITS (no parallel execution yet); "
+            "'Confirm & Execute' runs the confirmed plan directly, 'Answer Directly' "
+            "answers without decomposition."
+        ),
+        "prompt": (
+            "I'm writing the technology section of a review on CRISPR gene editing in "
+            "crops. Please do a deep dive covering: current delivery methods, the main "
+            "crops edited so far, reported yield outcomes, and the recent regulatory "
+            "landscape. Be thorough."
+        ),
+    },
 }
 
 
@@ -162,6 +198,18 @@ class DeveloperDialog(BaseDialog):
         ai_row.addStretch()
         self.content_layout.addLayout(ai_row)
 
+        # AI 测试第二行：human-in-the-loop（ask_user / deep plan 卡）
+        ai_row2 = QHBoxLayout()
+        ai_row2.setSpacing(8)
+        self.btn_ai_ask = self._make_btn("AI: Ask-User (HITL)",
+                                         lambda: self._ai_test("ask_user_clarify"))
+        self.btn_ai_deep = self._make_btn("AI: Deep Plan Card",
+                                          lambda: self._ai_test("deep_plan_confirm"))
+        ai_row2.addWidget(self.btn_ai_ask)
+        ai_row2.addWidget(self.btn_ai_deep)
+        ai_row2.addStretch()
+        self.content_layout.addLayout(ai_row2)
+
         # --- Functional tests ---
         self.content_layout.addWidget(self._section_label("Functional Tests"))
         func_row = QHBoxLayout()
@@ -178,6 +226,17 @@ class DeveloperDialog(BaseDialog):
             func_row.addWidget(b)
         func_row.addStretch()
         self.content_layout.addLayout(func_row)
+
+        # 功能测试第二行：交互卡链路。Deep Plan Card 放在首位 —— 不依赖
+        # AI / 网络，点击立即完成"组件行为 + 气泡渲染链路"全量自检。
+        func_row2 = QHBoxLayout()
+        func_row2.setSpacing(8)
+        self.btn_deep_card = self._make_btn("Deep Plan Card", self._test_deep_plan_card)
+        self.btn_hitl = self._make_btn("HITL Pipeline", self._test_hitl_pipeline)
+        func_row2.addWidget(self.btn_deep_card)
+        func_row2.addWidget(self.btn_hitl)
+        func_row2.addStretch()
+        self.content_layout.addLayout(func_row2)
 
         # --- Output area（专属源码/日志输出控件：固定最大高度 + 独立滚动条、
         #     边框底纹、复制、折叠、深色模式自适应） ---
@@ -316,6 +375,8 @@ class DeveloperDialog(BaseDialog):
         self._test_provenance(clear=False)
         self._test_literature_merge(clear=False)
         self._test_image_pipeline(clear=False)
+        self._test_deep_plan_card(clear=False)
+        self._test_hitl_pipeline(clear=False)
         self._log("=== All functional tests finished ===", "INFO")
 
     def _test_r_engine(self, clear: bool = True):
@@ -649,6 +710,349 @@ class DeveloperDialog(BaseDialog):
         else:
             self._log("Image pipeline test passed.", "OK")
 
+    def _test_deep_plan_card(self, clear: bool = True):
+        """Dedicated offline test for the deep-plan card (no AI, no network).
+
+        Part A (widget): confirm emits the edited plan and locks the card;
+        decisions after lock are ignored; skip emits the original query;
+        restore resets the checklist to the original plan.
+        Part B (render chain): the ``<deep_plan data=...>`` marker ->
+        base64 JSON -> ChatBubbleWidget must render exactly one
+        DeepPlanCardWidget, strip the marker from the body, forward
+        confirm/skip through the bubble signals, dedupe repeated markers
+        by query key, and drop malformed payloads without side effects.
+        """
+        if clear:
+            self._clear()
+        self._log("--- Deep Plan Card (widget + render chain) ---", "INFO")
+        fails = []
+
+        from src.ui.components.chat_bubble import ChatBubbleWidget
+        from src.ui.components.deep_plan_card import DeepPlanCardWidget
+
+        query = "CRISPR in crops: deep dive"
+        sub_tasks = [{"query": "Delivery methods", "rationale": "core"},
+                     {"query": "Regulation", "rationale": ""}]
+
+        # --- Part A: 组件级行为 ---
+        try:
+            plan = DeepPlanCardWidget({"query": query, "sub_tasks": sub_tasks})
+            conf = []
+            plan.sig_confirm.connect(conf.append)
+            plan._edit.setPlainText("1. Delivery methods\n2. Yield outcomes")
+            plan._on_confirm()
+            if not conf or conf[0] != "1. Delivery methods\n2. Yield outcomes":
+                fails.append(f"confirm mismatch: {conf}")
+            else:
+                self._log("Confirm emits the edited plan.", "OK")
+            if plan._btn_confirm.isEnabled() or plan._btn_skip.isEnabled() \
+                    or plan._edit.isEnabled():
+                fails.append("card must fully lock after confirm (no duplicate send)")
+            else:
+                self._log("Card fully locks after confirm.", "OK")
+            plan._on_skip()
+            plan._on_confirm()
+            if len(conf) != 1:
+                fails.append("decisions after lock must be ignored")
+            else:
+                self._log("Decisions after lock are ignored.", "OK")
+            plan.close()
+            plan.deleteLater()
+
+            plan2 = DeepPlanCardWidget({"query": query, "sub_tasks": sub_tasks})
+            skip = []
+            plan2.sig_skip.connect(skip.append)
+            plan2._edit.setPlainText("user-edited plan")
+            plan2._on_restore()
+            restored = plan2._edit.toPlainText()
+            if "Delivery methods" not in restored or "user-edited" in restored:
+                fails.append(f"restore did not reset to the original plan: {restored!r}")
+            else:
+                self._log("Restore resets to the original plan.", "OK")
+            plan2._on_skip()
+            if not skip or skip[0] != query:
+                fails.append(f"skip mismatch: {skip}")
+            else:
+                self._log("Skip emits the original query.", "OK")
+            plan2.close()
+            plan2.deleteLater()
+        except Exception as e:
+            fails.append(f"widget level: {e}")
+
+        # --- Part B: 渲染链路级（标记 -> 气泡卡片 -> 信号转发） ---
+        try:
+            encoded = base64.b64encode(
+                json.dumps({"query": query, "sub_tasks": sub_tasks}).encode("utf-8")
+            ).decode("ascii")
+            marker = f'<deep_plan data="{encoded}"></deep_plan>'
+
+            bubble = ChatBubbleWidget("", is_user=False, index=0)
+            confirmed, skipped = [], []
+            bubble.sig_deep_plan_confirm.connect(confirmed.append)
+            bubble.sig_deep_plan_skip.connect(skipped.append)
+            bubble.set_content(f"Before {marker} after")
+
+            cards = bubble.findChildren(DeepPlanCardWidget)
+            if len(cards) != 1:
+                fails.append(f"render chain: expected exactly 1 card, got {len(cards)}")
+            else:
+                self._log("Marker rendered as exactly one DeepPlanCard.", "OK")
+            body = bubble.original_text
+            if "<deep_plan" in body or "Before" not in body or "after" not in body:
+                fails.append(f"marker not stripped from body cleanly: {body!r}")
+            else:
+                self._log("Marker stripped; body text preserved.", "OK")
+
+            if cards:
+                cards[0]._edit.setPlainText("1. Delivery methods")
+                cards[0]._on_confirm()
+                if not confirmed or confirmed[0] != "1. Delivery methods":
+                    fails.append(f"bubble signal forwarding (confirm) mismatch: {confirmed}")
+                else:
+                    self._log("Confirm forwards through the bubble signal.", "OK")
+
+            bubble.set_content(marker)  # 同一 query 重复到达 -> 必须去重
+            if len(bubble.findChildren(DeepPlanCardWidget)) != 1:
+                fails.append("duplicate marker must be deduped by query key")
+            else:
+                self._log("Duplicate marker deduped.", "OK")
+            bubble.close()
+            bubble.deleteLater()
+
+            bad = ChatBubbleWidget("", is_user=False, index=0)
+            bad.set_content('Body <deep_plan data="!!!not-base64!!!"></deep_plan> tail')
+            if bad.findChildren(DeepPlanCardWidget):
+                fails.append("malformed payload must not render a card")
+            elif "Body" not in bad.original_text or "tail" not in bad.original_text:
+                fails.append(f"malformed marker must be dropped cleanly: {bad.original_text!r}")
+            else:
+                self._log("Malformed payload dropped without side effects.", "OK")
+            bad.close()
+            bad.deleteLater()
+        except Exception as e:
+            fails.append(f"render chain: {e}")
+
+        if fails:
+            for msg in fails:
+                self._log(msg, "FAIL")
+            self._log("Deep plan card test FAILED.", "FAIL")
+        else:
+            self._log("Deep plan card test passed.", "OK")
+
+    def _test_hitl_pipeline(self, clear: bool = True):
+        """Functional test for the human-in-the-loop pipeline (no AI, no network).
+
+        Validates, in order:
+          * registration - ask_user schema present in runtime._ALWAYS_TOOLS
+          * runtime      - AgentRuntime._handle_ask_user emits an
+                           ``<ask_user data=...>`` marker whose base64 JSON
+                           payload round-trips; empty question rejected
+          * tasks        - _strip_interactive_markers removes card markers;
+                           _parse_confirmed_deep_plan / skipped sentinel;
+                           _deep_plan_waiting_text localization
+          * cards        - AskUserCardWidget (single/multi select + free text)
+                           signals behave as wired into the send pipeline
+                           (DeepPlanCardWidget has its own dedicated test:
+                           the "Deep Plan Card" button, which also covers the
+                           marker -> bubble render chain)
+        """
+        if clear:
+            self._clear()
+        self._log("--- HITL Pipeline (ask_user / deep_plan) ---", "INFO")
+        fails = []
+
+        # 1) 工具注册：ask_user 出现在常驻工具池且参数齐全
+        try:
+            from src.core.agent import runtime as agent_runtime
+            schema = agent_runtime._ALWAYS_TOOLS.get("ask_user")
+            params = (schema or {}).get("function", {}).get("parameters", {})
+            props = params.get("properties", {})
+            if "question" not in props or "options" not in props:
+                fails.append("ask_user missing from runtime._ALWAYS_TOOLS "
+                             "(or no question/options params)")
+            else:
+                self._log("ask_user registered with question/options/multi_select.", "OK")
+        except Exception as e:
+            fails.append(f"tool registration: {e}")
+
+        # 2) runtime._handle_ask_user：标记流出与 base64 载荷往返
+        try:
+            from src.core.agent.runtime import AgentRuntime
+            rt = AgentRuntime.__new__(AgentRuntime)
+            rt.log_fn = lambda *a, **k: None
+            emitted = []
+            args = {"question": "Which species?", "options": ["Arabidopsis", "Rice"],
+                    "multi_select": False, "context": "ID mapping differs"}
+            ret = json.loads(AgentRuntime._handle_ask_user(rt, args, emitted.append))
+            if ret.get("status") != "success":
+                fails.append(f"_handle_ask_user returned status={ret.get('status')}")
+            marker = next((t for t in emitted if t.startswith("<ask_user")), "")
+            m = re.search(r'<ask_user data="([^"]*)"', marker)
+            if not m:
+                fails.append("no <ask_user data=...> marker emitted")
+            else:
+                payload = json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
+                if (payload.get("question") != "Which species?"
+                        or payload.get("options") != ["Arabidopsis", "Rice"]):
+                    fails.append("ask_user payload round-trip mismatch")
+                else:
+                    self._log("ask_user marker emitted; payload round-trip OK.", "OK")
+            ret2 = json.loads(AgentRuntime._handle_ask_user(rt, {"question": "  "}, None))
+            if ret2.get("status") != "error":
+                fails.append("empty question should return status=error")
+            else:
+                self._log("Empty question correctly rejected.", "OK")
+        except Exception as e:
+            fails.append(f"runtime handler: {e}")
+
+        # 3) 任务层：哨兵解析 / 卡片标记剥离 / 等待文案
+        try:
+            from src.task import chat_tasks as ct
+            from src.task.chat_tasks import ChatGenerationTask
+
+            class _Stub:
+                pass
+
+            stub = _Stub()
+            sentinels = (ct._DEEP_PLAN_CONFIRMED_TAG, ct._DEEP_PLAN_SKIPPED_TAG)
+            if not all(s.startswith("[") and s.endswith("]") for s in sentinels):
+                fails.append(f"deep-plan sentinels malformed: {sentinels}")
+
+            tasks = ChatGenerationTask._parse_confirmed_deep_plan(
+                stub, f"{ct._DEEP_PLAN_CONFIRMED_TAG}\n"
+                      "1. Delivery methods\n2) Regulatory landscape\n- Yield outcomes")
+            want = ["Delivery methods", "Regulatory landscape", "Yield outcomes"]
+            if tasks is None or [t.query for t in tasks] != want:
+                fails.append(f"_parse_confirmed_deep_plan mismatch: {tasks}")
+            else:
+                self._log("Confirmed-plan sentinel parsed; numbering stripped.", "OK")
+            if ChatGenerationTask._parse_confirmed_deep_plan(
+                    stub, "a normal user question") is not None:
+                fails.append("non-sentinel text must return None from plan parser")
+
+            dirty = ('before <ask_user data="QUJD"></ask_user> mid '
+                     '<deep_plan data="WFla"></deep_plan> after')
+            clean = ChatGenerationTask._strip_interactive_markers(dirty)
+            if any(t in clean for t in ("ask_user", "deep_plan")) or \
+                    not (clean.startswith("before") and clean.endswith("after")):
+                fails.append(f"_strip_interactive_markers mismatch: {clean!r}")
+            else:
+                self._log("Interactive markers stripped before LLM context.", "OK")
+
+            wait_en = ChatGenerationTask._deep_plan_waiting_text(stub)
+            stub.reply_lang = "Chinese"
+            wait_zh = ChatGenerationTask._deep_plan_waiting_text(stub)
+            if "Confirm" not in wait_en or "确认" not in wait_zh:
+                fails.append("_deep_plan_waiting_text localization mismatch")
+            else:
+                self._log("Plan waiting text localized (EN/ZH).", "OK")
+        except Exception as e:
+            fails.append(f"sentinel/strip: {e}")
+
+        # 4) 卡片组件：选项逻辑与确认/跳过信号（QApplication 内直接实例化）
+        try:
+            from src.ui.components.ask_user_card import AskUserCardWidget
+
+            # --- 单选：预设选项提交 + 提交后整卡锁定 ---
+            card = AskUserCardWidget({"question": "Species?",
+                                      "options": ["Arabidopsis", "Rice"],
+                                      "multi_select": False})
+            answers = []
+            card.sig_submit.connect(answers.append)
+            radios = card.findChildren(QRadioButton)
+            if len(radios) != 3:  # 2 预设 + 1 "My own answer"
+                fails.append(f"expected 3 radio options, got {len(radios)}")
+            else:
+                if card._edit.isEnabled():
+                    fails.append("free-text edit must stay disabled until 'My own answer' is selected")
+                if card._btn_submit.isEnabled():
+                    fails.append("submit must stay disabled before any selection")
+                radios[1].setChecked(True)
+                if not card._btn_submit.isEnabled():
+                    fails.append("submit must enable after selecting a preset option")
+                card._on_submit()
+                if not answers or answers[0] != "Rice":
+                    fails.append(f"single-select submit mismatch: {answers}")
+                else:
+                    self._log("AskUserCard single-select preset submit OK.", "OK")
+                if card._btn_submit.isEnabled():
+                    fails.append("card must lock after submit (no duplicate send)")
+                card._on_submit()
+                if len(answers) != 1:
+                    fails.append("resubmit after lock must be ignored by AskUserCard")
+                else:
+                    self._log("AskUserCard locks after submit OK.", "OK")
+            card.close()
+            card.deleteLater()
+
+            # --- 单选：选中 "My own answer" 才能输入自由文本 ---
+            own_card = AskUserCardWidget({"question": "Species?",
+                                          "options": ["Arabidopsis", "Rice"],
+                                          "multi_select": False})
+            own_ans = []
+            own_card.sig_submit.connect(own_ans.append)
+            own_radios = own_card.findChildren(QRadioButton)
+            own_radios[2].setChecked(True)  # "My own answer"
+            if not own_card._edit.isEnabled():
+                fails.append("'My own answer' must enable the free-text edit")
+            if own_card._btn_submit.isEnabled():
+                fails.append("own answer without text must keep submit disabled")
+            own_card._edit.setPlainText("AT1G63700, please expand")
+            if not own_card._btn_submit.isEnabled():
+                fails.append("submit must enable with non-empty own answer")
+            own_card._on_submit()
+            if not own_ans or own_ans[0] != "AT1G63700, please expand":
+                fails.append(f"own-answer submit mismatch: {own_ans}")
+            else:
+                self._log("AskUserCard own-answer submit OK.", "OK")
+            own_card.close()
+            own_card.deleteLater()
+
+            # --- 多选：预设选项组合提交 ---
+            multi = AskUserCardWidget({"question": "Which omics layers?",
+                                       "options": ["Transcriptomics", "Proteomics"],
+                                       "multi_select": True})
+            m_ans = []
+            multi.sig_submit.connect(m_ans.append)
+            boxes = multi.findChildren(QCheckBox)
+            if len(boxes) != 3:  # 2 预设 + 1 "My own answer"
+                fails.append(f"expected 3 checkboxes, got {len(boxes)}")
+            else:
+                boxes[0].setChecked(True)
+                boxes[1].setChecked(True)
+                multi._on_submit()
+                if not m_ans or m_ans[0] != "Transcriptomics; Proteomics":
+                    fails.append(f"multi-select join mismatch: {m_ans}")
+                else:
+                    self._log("AskUserCard multi-select join OK.", "OK")
+            multi.close()
+            multi.deleteLater()
+
+            # --- 多选："My own answer" 与预设选项互斥 ---
+            multi2 = AskUserCardWidget({"question": "Which omics layers?",
+                                        "options": ["Transcriptomics", "Proteomics"],
+                                        "multi_select": True})
+            m2_boxes = multi2.findChildren(QCheckBox)
+            m2_boxes[0].setChecked(True)
+            m2_boxes[2].setChecked(True)  # "My own answer"
+            if m2_boxes[0].isChecked():
+                fails.append("'My own answer' must deselect preset options (mutual exclusion)")
+            if not multi2._edit.isEnabled():
+                fails.append("'My own answer' must enable the free-text edit (multi-select)")
+            else:
+                self._log("AskUserCard own-answer mutual exclusion OK.", "OK")
+            multi2.close()
+            multi2.deleteLater()
+        except Exception as e:
+            fails.append(f"card widgets: {e}")
+
+        if fails:
+            for msg in fails:
+                self._log(msg, "FAIL")
+            self._log("HITL pipeline test FAILED.", "FAIL")
+        else:
+            self._log("HITL pipeline test passed.", "OK")
+
     def _test_skill_gate(self, clear: bool = True):
         if clear:
             self._clear()
@@ -695,6 +1099,8 @@ class DeveloperDialog(BaseDialog):
             "src/core/agent/synthesizer.py",
             "src/task/chat_tasks.py",
             "src/core/image_utils.py",
+            "src/ui/components/ask_user_card.py",
+            "src/ui/components/deep_plan_card.py",
             "src/ui/components/chat_bubble.py",
             "src/ui/components/dialog.py",
             "src/ui/components/developer_dialog.py",

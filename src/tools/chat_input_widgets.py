@@ -301,8 +301,11 @@ class ChatInputContainer(QFrame):
         self.chk_deep_mode.setStyleSheet("color: #05B8CC; font-weight: bold;")
         self.chk_deep_mode.setChecked(use_deep)
         self.chk_deep_mode.setToolTip(
-            "Decompose the query into parallel sub-investigations, then synthesize "
-            "a section-by-section answer (higher cost, deeper coverage)")
+            "Deep research mode.\n"
+            "Off (default): single-agent answer, faster.\n"
+            "On: decompose the query into parallel sub-investigations, "
+            "then synthesize a section-by-section answer (broader coverage, "
+            "higher cost)")
         self.chk_deep_mode.toggled.connect(lambda c: self._save_agent_state("agent_deep_mode", c))
 
         self.btn_mcp_tags = QToolButton()
@@ -676,6 +679,19 @@ class ChatInputContainer(QFrame):
         except Exception as e:
             self.logger.error(f"Failed to retrieve selected user tags: {e}")
             return []
+
+    def set_send_locked(self, locked: bool, reason: str = ""):
+        """锁定通用发送（等待交互卡作答期间调用）。
+
+        禁用 Send 按钮即可同时拦截按钮点击与 Enter 快捷发送
+        （_emit_send 统一检查 btn_send.isEnabled()）。
+        """
+        self.btn_send.setEnabled(not locked)
+        if locked:
+            self.btn_send.setToolTip(
+                reason or "Answer the pending question card in the chat first.")
+        else:
+            self.btn_send.setToolTip("")
 
     def _emit_send(self):
         if not self.btn_send.isEnabled():
