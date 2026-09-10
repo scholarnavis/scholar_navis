@@ -1605,7 +1605,10 @@ class ExportChatTask(BackgroundTask):
                 for msg in clean_history:
                     is_user = (msg['role'] == "user")
                     clean_content = TextFormatter.clean_text_for_export(msg['content'])
-                    rendered_html = TextFormatter.markdown_to_html(clean_content)
+                    # PDF 版式固定白底浅色文档（见上方 setDefaultStyleSheet），
+                    # 传 theme_key="light" 使代码块/链接等内联主题色与版式
+                    # 一致，不随应用当前主题漂移。
+                    rendered_html = TextFormatter.markdown_to_html(clean_content, theme_key="light")
 
                     if is_user:
                         header = f"<div class='header-user'><img src='{user_icon}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"

@@ -49,6 +49,13 @@ class ThemeManager(QObject):
                 "btn_bg": "#3e3e42",
                 "btn_hover": "#4e4e52",
                 "selection_fg": "#1e1e1e",
+                # Markdown 富文本代码配色：块级代码底色比气泡卡底（#252526）
+                # 更深形成层次；行内代码用中灰底与正文区分。文字色需与底色
+                # 成对设计并显式注入 HTML，杜绝"深底配深字"的失效对比。
+                "code_bg": "#1a1a1a",
+                "code_fg": "#e8eaed",
+                "code_border": "#3d3d3d",
+                "inline_code_bg": "#333333",
             },
             "light": {
                 "bg_main": "#f3f3f3",
@@ -68,6 +75,12 @@ class ThemeManager(QObject):
                 "btn_bg": "#e0e0e0",
                 "btn_hover": "#d5d5d5",
                 "selection_fg": "#ffffff",
+                # 浅色代码配色（GitHub 风格）：白色气泡上用浅灰底保证可区分，
+                # 避免此前直接复用 bg_input（#ffffff）导致代码块完全隐形。
+                "code_bg": "#f6f7f8",
+                "code_fg": "#24292f",
+                "code_border": "#e1e4e8",
+                "inline_code_bg": "#eff1f3",
             }
         }
         self.current_theme = "dark"
@@ -184,7 +197,12 @@ class ThemeManager(QObject):
             self.current_theme = theme_name
             self.theme_changed.emit()
 
-    def color(self, role: str) -> str:
+    def color(self, role: str, theme: str = None) -> str:
+        """按角色取色。``theme`` 缺省跟随当前主题；显式传入（如 PDF 导出
+        固定 "light"）时按指定主题取色，未知主题名回落当前主题。
+        """
+        if theme and theme in self.themes:
+            return self.themes[theme].get(role, "#ff00ff")
         return self.themes[self.current_theme].get(role, "#ff00ff")
 
     def icon(self, icon_name: str, color_key: str) -> QIcon:

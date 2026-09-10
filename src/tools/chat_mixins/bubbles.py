@@ -92,6 +92,28 @@ class ChatBubblesMixin:
         QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True))
         return bubble
 
+    def inject_dev_demo(self, user_text, ai_text):
+        """Inject a fake user+AI bubble pair (developer render preview).
+
+        Used by the Developer Mode "Render Preview" test to showcase the
+        rendering capabilities without any AI / network call:
+
+        * Neither bubble is appended to ``self.history``, so the demo text
+          never leaks into the LLM context of later real turns.
+        * The AI bubble goes through the same final rendering pipeline as a
+          real answer (``_format_response``: Markdown / LaTeX degradation /
+          identifier auto-linking / file links / Mermaid cards).
+        * The user bubble has editing disabled so the demo text cannot be
+          accidentally re-sent through the real generation pipeline.
+        """
+        self._ensure_chat_ui()
+        user_bubble = self.add_bubble(user_text, is_user=True)
+        user_bubble.disable_edit()
+        ai_bubble = self.add_bubble("", is_user=False)
+        ai_bubble.set_content(self._format_response(ai_text, ai_bubble.index))
+        logger.info("Dev render preview injected (2 bubbles, no history, no LLM call).")
+        return ai_bubble
+
     def scroll_to_bottom(self, smooth=False):
         sb = self.scroll_area.verticalScrollBar()
         target = sb.maximum()

@@ -65,6 +65,41 @@ def pick_cjk_font_family(families: list) -> str:
     return families[0] if families else "Arial"
 
 
+#: 等宽字体候选（按平台常见度排序：Windows → macOS → Linux）。
+#: 均为操作系统自带或发行版常装字体，取第一个已安装者。
+_MONO_FAMILY_CANDIDATES = (
+    "Consolas", "Cascadia Mono", "Menlo", "DejaVu Sans Mono",
+    "Liberation Mono", "Noto Sans Mono", "Courier New",
+)
+
+#: 等宽族解析缓存（None = 未解析）。QFontDatabase 查询有开销且系统字体
+#: 运行期不变，进程内解析一次即可；流式渲染高频调用依赖此缓存。
+_mono_family_cache = None
+
+
+def mono_font_family_css() -> str:
+    """返回等宽单族名（带引号），供代码块 / 行内代码 HTML 直接注入。
+
+    Qt 富文本不支持字体栈（同 CJK 族解析的限制），多族名会导致声明
+    整体失效并回退正文字体，使代码失去等宽形态。这里按平台常见度在
+    已安装字体中挑第一个等宽候选单族注入；结果进程内缓存，极端环境
+    兜底 Courier New（各平台最低限度可用的等宽族）。
+    """
+    global _mono_family_cache
+    if _mono_family_cache is None:
+        resolved = "Courier New"
+        try:
+            from PySide6.QtGui import QFontDatabase
+            installed = set(QFontDatabase().families())
+            resolved = next(
+                (c for c in _MONO_FAMILY_CANDIDATES if c in installed), resolved)
+        except Exception as e:
+            logger.warning(f"Failed to resolve monospace font, fallback to Courier New: {e}")
+        logger.info(f"Resolved monospace font family: {resolved}")
+        _mono_family_cache = resolved
+    return f"'{_mono_family_cache}'"
+
+
 class TextFormatter:
 
     #: 常见 LaTeX 命令 → Unicode 符号映射（键不含反斜杠）。
@@ -352,7 +387,14 @@ class TextFormatter:
         return final_html
 
     @staticmethod
-    def markdown_to_html(text):
+    def markdown_to_html(text, theme_key=None):
+        """Markdown → Qt 富文本 HTML。
+
+        :param theme_key: 显式指定取色主题（如 PDF 导出固定 "light"）；
+                          None 时跟随 ThemeManager 当前主题。主题色以
+                          HTML 内联样式固化进文档，调用方（气泡层）需在
+                          theme_changed 时重渲染以刷新内联主题色。
+        """
         processed_text = text
 
         # ================= 救砖：修复丢失换行符的极度压缩 Markdown =================
@@ -376,6 +418,60 @@ class TextFormatter:
 
         html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
 
+        # ================= 代码视觉区分（对齐主流商业聊天软件惯例） =================
+        # QTextBrowser 无原生代码样式：为块级 <pre><code> 与行内 <code> 注入
+        # 主题化底色/边框/等宽字体（深浅色主题各自适配），使代码与正文明显
+        # 区分。所有颜色（含文字色）按主题显式注入——HTML 内联样式会随文档
+        # 固化，主题切换后由气泡层重渲染整体重建，避免"深底配深字"失效对比。
+        # Qt 富文本不支持 border-radius 与行内 padding，无效属性会被静默忽略。
+        _tm = ThemeManager()
+        _mono_css = mono_font_family_css()
+        _code_bg = _tm.color('code_bg', theme_key)
+        _code_fg = _tm.color('code_fg', theme_key)
+        _code_border = _tm.color('code_border', theme_key)
+        _inline_bg = _tm.color('inline_code_bg', theme_key)
+        # 块级代码：底色/边框挂在 <pre>，内部 <code> 置透明，避免双层底色叠加
+        _pre_style = (f"background-color:{_code_bg}; border:1px solid {_code_border}; "
+                      f"padding:8px 12px; margin:8px 0; border-radius:4px; "
+                      f"font-family:{_mono_css}; color:{_code_fg};")
+        _block_code_style = (f"font-family:{_mono_css}; color:{_code_fg}; "
+                             f"background-color:transparent;")
+        # 行内代码：主题灰底 + 等宽 + 显式文字色
+        _code_style = (f"background-color:{_inline_bg}; font-family:{_mono_css}; "
+                       f"color:{_code_fg};")
+
+        # 1) 围栏代码块：<pre><code ...>（含无语言标注的裸 <code>）。
+        #    块内 code 一并注入 style，行内规则凭 style= 前瞻跳过，避免重复命中。
+        html = re.sub(r'<pre><code([^>]*)>',
+                      lambda m: (f'<pre style="{_pre_style}">'
+                                 f'<code{m.group(1)} style="{_block_code_style}">'),
+                      html)
+        # 2) 行内代码：剩余不带 style 的 <code>（至此仅剩正文行内形式）
+        html = re.sub(r'<code(?![^>]*style=)', f'<code style="{_code_style}"', html)
+
+        # 3) 标题层级：显式主题正文色 + 递减字号；h1/h2 加下边框增强分区感。
+        #    不依赖文档默认色渲染，保证深浅主题与任意容器底色下对比稳定。
+        _text_main = _tm.color('text_main', theme_key)
+        _border = _tm.color('border', theme_key)
+        for _lvl, _size in ((1, 21), (2, 18), (3, 16), (4, 15), (5, 14), (6, 13)):
+            _h_style = (f"color:{_text_main}; font-size:{_size}px; "
+                        f"margin-top:12px; margin-bottom:4px;")
+            if _lvl <= 2:
+                _h_style += f" border-bottom:1px solid {_border}; padding-bottom:4px;"
+            html = html.replace(f'<h{_lvl}>', f'<h{_lvl} style="{_h_style}">')
+
+        # 4) 引用块：主题色左边条 + 弱化文字色（Qt 忽略不支持的属性，无害）
+        html = html.replace(
+            '<blockquote>',
+            f'<blockquote style="border-left:3px solid {_border}; '
+            f'padding-left:10px; margin:8px 0; '
+            f'color:{_tm.color("text_muted", theme_key)};">')
+
+        # 5) 水平分割线：显式主题边框色（默认黑线在深色主题下几乎不可见）
+        _hr_html = f'<hr style="border:none; border-top:1px solid {_border}; margin:10px 0;" />'
+        html = re.sub(r'<hr\s*/?>', lambda m: _hr_html, html)
+        # =========================================================================
+
         skip_pattern = r'(?si)(<a\b[^>]*>.*?</a>|<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>|<img\b[^>]*>)'
 
         url_pattern = skip_pattern + r'|(?<![="\'/])\b((?:https?|ftp|file)://[^\s<>\)\]"\'，。？！；：“”‘’\n]+(?<![.,?!;:：]))'
@@ -388,6 +484,18 @@ class TextFormatter:
 
         # 3. 匹配常见科研数据库/论文 ID 及其它标识，自动挂载官方解析链接
         replacements = [
+            # 棉花基因 ID（CottonGen feature 页；置于首位优先建链获得 skip 保护）。
+            # 覆盖多套命名体系（[AD]=亚基因组，\d{2}=染色体号）：
+            #   Ghir_[AD]xxGxxxx / Gxxxxx（4-5 位，可带 .x 版本号，TM-1 参考基因组）
+            #   GH_[AD]xxGxxxx / GhChr[AD]xxGxxxx / Gh_[AD]xxGxxxx（4 位）
+            #   Gh_[AD]xxGxxxxxx（6 位）/ Ghi_[AD]xxGxxxx / Gohir.[AD]xxGxxxxxx（6 位）
+            # 注意：skip_pattern 前缀的 (?si) 对合并后正则全局生效，本条与
+            # 其余标识符一致为不区分大小写匹配（链接文本保留原始大小写）。
+            # 捕获组为整体 ID：skip 机制占用 group(1)，模板中的 \1 即 group(2)。
+            (r'\b((?:Ghir_[AD]\d{2}G\d{4,5}|Gohir\.[AD]\d{2}G\d{6}'
+             r'|GhChr[AD]\d{2}G\d{4}|GH_[AD]\d{2}G\d{4}'
+             r'|Gh_[AD]\d{2}G\d{6}|Ghi?_[AD]\d{2}G\d{4})(?:\.\d+)?)\b',
+             r'<a href="https://www.cottongen.org/feature/\1">\1</a>'),
             # DOI
             (r'\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)(?<![.,?!;:：])', r'<a href="https://doi.org/\1">\1</a>'),
             # TaxID
@@ -478,7 +586,16 @@ class TextFormatter:
 
             html = combined_pat.sub(get_replacer(template), html)
 
-        html = html.replace("<a href=", "<a style='color: #4daafc; text-decoration: none; font-weight: bold;' href=")
+        # 链接主题化：跟随主题 accent 色（原硬编码 #4daafc 在浅色主题下
+        # 对比度不足）。负向前瞻跳过已自带 style 的专用链接（如 AlphaFold
+        # 下载绿色、think/mermaid 面板），避免产生重复 style 属性导致
+        # 专用样式被通用链接色覆盖。
+        _accent = _tm.color('accent', theme_key)
+        html = re.sub(
+            r'<a(?![^>]*style=)(\s+href=)',
+            lambda m: (f'<a style="color:{_accent}; text-decoration:none; '
+                       f'font-weight:bold;"{m.group(1)}'),
+            html)
         parts = re.split(r'(<[^>]+>)', html)
         for i in range(0, len(parts), 2):
             if parts[i]:
@@ -681,14 +798,19 @@ class TextFormatter:
 
         # 3. 处理文献/PDF引用跳转
         if scheme == "cite":
-            file_path = query.queryItemValue("path")
+            # 必须用 FullyDecoded 取值：QUrlQuery 默认的 PrettyDecoded 不解码
+            # %3A（冒号），而 cite:// 各生产方（chat_tasks / attachments /
+            # send_flow / ncbi）统一用 urllib.parse.quote 编码路径，Windows
+            # 盘符路径会被解码成 "C%3A\..." 导致文件永远找不到。
+            fully_decoded = QUrl.ComponentFormattingOption.FullyDecoded
+            file_path = query.queryItemValue("path", fully_decoded)
 
             if file_path.startswith(("http://", "https://")):
                 QDesktopServices.openUrl(QUrl(file_path))
                 return
 
-            text_snippet = query.queryItemValue("text")
-            source_name = query.queryItemValue("name")
+            text_snippet = query.queryItemValue("text", fully_decoded)
+            source_name = query.queryItemValue("name", fully_decoded)
 
             if os.path.exists(file_path):
                 ext = source_name.lower().split('.')[-1] if '.' in source_name else ""

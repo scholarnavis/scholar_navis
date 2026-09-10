@@ -454,6 +454,42 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def route_dev_render_preview(self, note_text, user_text, ai_text):
+        """Developer-mode render preview: switch to Chat and inject a fake
+        conversation (one user bubble + one AI bubble) WITHOUT any AI call.
+
+        Unlike ``route_dev_test`` (which sends a real prompt to the LLM),
+        this only exercises the rendering pipeline: identifier auto-linking,
+        file links, advanced Markdown / LaTeX and Mermaid cards. The fake
+        bubbles never enter the chat history, so subsequent real turns are
+        not affected."""
+        chat_index = 1
+        self.sidebar.setCurrentRow(chat_index)
+
+        def _inject():
+            chat_tool = self.tools[chat_index]
+            if not chat_tool:
+                return
+            # 0) 确保 Chat UI 已构建（懒加载，与 route_dev_test 相同前置）
+            if hasattr(chat_tool, 'get_ui_widget'):
+                chat_tool.get_ui_widget()
+            # 1) 展示测试说明（仅给用户看，不进 LLM 历史）
+            if note_text and hasattr(chat_tool, 'show_dev_note'):
+                chat_tool.show_dev_note(note_text)
+            # 2) 注入假对话（不进 history，不触发生成管线）
+            if hasattr(chat_tool, 'inject_dev_demo'):
+                chat_tool.inject_dev_demo(user_text, ai_text)
+            else:
+                logging.getLogger(__name__).warning(
+                    "ChatTool.inject_dev_demo missing; render preview skipped.")
+
+        # 延迟一帧，确保 ChatTool 完成实例化（与 route_dev_test 相同时序绕行）
+        QTimer.singleShot(50, _inject)
+
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
     def route_to_chat_with_mcp(self, context_text, prompt_text, target_tag):
         chat_index = 1
         self.sidebar.setCurrentRow(chat_index)

@@ -283,6 +283,9 @@ class ChatBubbleWidget(QWidget):
 
         self.init_ui()
         ThemeManager().theme_changed.connect(self._apply_theme)
+        # 主题切换后富文本必须重渲染：代码块底色、行内代码、链接色等主题色
+        # 以 HTML 内联样式固化在文档里，仅刷 QSS 无法更新（详见 _rerender_on_theme）。
+        ThemeManager().theme_changed.connect(self._rerender_on_theme)
         self._apply_theme()
         # "Thinking" 等纯文本 setText 不经过 set_content，提前固化文档默认字体
         self._ensure_document_font()
@@ -632,6 +635,24 @@ class ChatBubbleWidget(QWidget):
         # 必须在其后重新固化无衬线默认字体，保证正文渲染命中预定字体。
         self._ensure_document_font()
         self._apply_token_stats_style()
+
+    def _rerender_on_theme(self):
+        """主题切换后重渲染富文本内容。
+
+        ``TextFormatter.markdown_to_html`` 把代码块底色、行内代码底色、
+        链接色、标题色、表格表头底色等以 HTML 内联样式写入文档——内联
+        样式优先级高于 QSS，主题切换时若只刷 QSS，会残留旧主题色的
+        组合（如深色代码底配浅色正文文字）。这里用渲染前的源文本重走
+        渲染管线，让全部内联主题样式随新主题整体重建。
+
+        ``original_text`` 即最近一次渲染的源文本，重渲染幂等；流式输出
+        中的气泡内容为当前累积文本，同样安全。图片下载缓存与卡片去重
+        集保证重渲染不产生副作用（不重复下载、不重复插卡）。
+        """
+        try:
+            self.set_content(self.original_text)
+        except Exception as e:
+            logger.warning(f"Failed to re-render bubble content on theme change: {e}")
 
     def set_loading(self, loading: bool):
         self.is_loading = loading
@@ -1072,7 +1093,11 @@ class ChatBubbleWidget(QWidget):
             html = TextFormatter.markdown_to_html(text)
             tm = ThemeManager()
             border_color = tm.color('border')
-            bg_header = hex_to_rgba(tm.color('bg_input'), 0.5) if tm.current_theme == 'dark' else '#f5f5f5'
+            # 表头底色统一取自主题（原浅色 #f5f5f5 硬编码改为 border 低透明
+            # 叠加），保证表头与正文行在两种主题下都有稳定的层次对比。
+            bg_header = (hex_to_rgba(tm.color('bg_input'), 0.5)
+                         if tm.current_theme == 'dark'
+                         else hex_to_rgba(tm.color('border'), 0.12))
 
             html = html.replace('<table>',
                                 f'<table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; border-color: {border_color}; margin-top: 10px; margin-bottom: 10px; width: 100%; table-layout: fixed; word-break: break-all;">')

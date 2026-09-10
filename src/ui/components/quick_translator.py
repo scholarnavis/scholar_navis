@@ -597,10 +597,20 @@ class QuickTranslatorWindow(QWidget):
         self.btn_copy.setText(" Copy")
         self.btn_copy.setIcon(tm.icon("copy", "text_main"))
         self.btn_copy.setStyleSheet(f"""
-            QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; 
+            QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')};
                          border-radius: 6px; padding: 6px; }}
             QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
         """)
+
+        # 主题切换后重渲染输出区：Markdown 模式下代码块/链接等主题色以
+        # HTML 内联样式固化在文档里，仅刷 QSS 无法更新，必须重走渲染管线
+        # （与 ChatBubbleWidget._rerender_on_theme 同一策略）。
+        if getattr(self, 'current_out_text', '') and self.chk_markdown.isChecked():
+            try:
+                self.output_box.setHtml(self._format_response(self.current_out_text, index=0))
+                self.logger.info("Quick translator output re-rendered after theme change.")
+            except Exception as e:
+                self.logger.warning(f"Failed to re-render translator output on theme change: {e}")
 
 
     def _get_resize_dir(self, pos):
