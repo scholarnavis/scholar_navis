@@ -10,12 +10,46 @@ from Bio import Entrez
 from src.core.academic.base import (
     logger, simple_retry, global_rate_limiter,
     ncbi_api_key, is_ncbi_enabled, WORKSPACE_DIR,
+    record_auth_rejection, is_auth_blocked,
 )
 
 __all__ = [
     "search_omics_datasets", "fetch_sequence_fasta",
     "fetch_taxonomy_info", "universal_ncbi_summary",
 ]
+
+# NCBI E-utilities host（Bio.Entrez 内部 urllib 直连，绕过 mcp_request，
+# 必须经 guarded_entrez 纳入全局鉴权熔断体系；与 www.ncbi.nlm.nih.gov
+# （idconv/PMC）在熔断器内归一为同一服务键 "ncbi"）
+_NCBI_EUTILS_HOST = "eutils.ncbi.nlm.nih.gov"
+
+
+def guarded_entrez(fn_name: str, *args, **kwargs):
+    """鉴权熔断保护下的 Bio.Entrez 调用。
+
+    - 调用前检查 NCBI 是否已在本轮被熔断：是则零网络开销跳过（raise，
+      由工具函数的 except 分支转为 error JSON）；
+    - 401/403（key 无效/被拒/IP 封禁）计入全局鉴权熔断器（阈值 2，
+      新对话发送时复位）。HTTP 错误在 esearch/esummary/efetch 调用时
+      同步抛出（urllib.error.HTTPError），此处捕获计数后原样重抛，
+      不改变调用方的既有错误处理语义。
+    """
+    if is_auth_blocked(_NCBI_EUTILS_HOST):
+        raise RuntimeError(
+            f"Entrez.{fn_name} skipped: NCBI is blocked by the auth-rejection "
+            f"breaker for the current chat round.")
+    try:
+        return getattr(Entrez, fn_name)(*args, **kwargs)
+    except Exception as e:
+        code = getattr(e, "code", None)
+        if not isinstance(code, int):
+            m = re.search(r"HTTP Error (\d{3})", str(e))
+            code = int(m.group(1)) if m else None
+        if code in (401, 403):
+            record_auth_rejection(
+                f"https://{_NCBI_EUTILS_HOST}",
+                context=f"Entrez.{fn_name}: HTTP {code}.")
+        raise
 
 
 @simple_retry()
@@ -31,13 +65,13 @@ def search_omics_datasets(query: str, db_type: Literal["sra", "geo"] = "sra", ma
 
     try:
         db = "gds" if db_type.lower() == "geo" else "sra"
-        search_handle = Entrez.esearch(db=db, term=query, retmax=max_results)
+        search_handle = guarded_entrez("esearch", db=db, term=query, retmax=max_results)
         ids = Entrez.read(search_handle).get("IdList", [])
         search_handle.close()
 
         if not ids: return json.dumps({"status": "success", "results": []})
 
-        summary_handle = Entrez.esummary(db=db, id=",".join(ids))
+        summary_handle = guarded_entrez("esummary", db=db, id=",".join(ids))
         summaries = Entrez.read(summary_handle)
         summary_handle.close()
 
@@ -97,7 +131,7 @@ def fetch_sequence_fasta(accession_id: str, db_type: Literal["nuccore", "protein
         safe_db = "protein"
 
     try:
-        fetch_handle = Entrez.efetch(db=safe_db, id=safe_id, rettype="fasta", retmode="text")
+        fetch_handle = guarded_entrez("efetch", db=safe_db, id=safe_id, rettype="fasta", retmode="text")
         data = fetch_handle.read()
         fetch_handle.close()
         if not data: return json.dumps({"status": "error", "message": "Empty sequence."})
@@ -127,12 +161,12 @@ def fetch_taxonomy_info(organism_name: str) -> str:
     global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
 
     try:
-        search_handle = Entrez.esearch(db="taxonomy", term=organism_name, retmax=1)
+        search_handle = guarded_entrez("esearch", db="taxonomy", term=organism_name, retmax=1)
         ids = Entrez.read(search_handle).get("IdList", [])
         search_handle.close()
         if not ids: return json.dumps({"status": "success", "message": f"Organism '{organism_name}' not found."})
 
-        fetch_handle = Entrez.efetch(db="taxonomy", id=ids[0], retmode="xml")
+        fetch_handle = guarded_entrez("efetch", db="taxonomy", id=ids[0], retmode="xml")
         tax_records = Entrez.read(fetch_handle)
         fetch_handle.close()
         record = tax_records[0]
@@ -156,13 +190,13 @@ def universal_ncbi_summary(query: str, database: Literal["gene", "protein", "nuc
     global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
 
     try:
-        search_handle = Entrez.esearch(db=database, term=query, retmax=max_results)
+        search_handle = guarded_entrez("esearch", db=database, term=query, retmax=max_results)
         ids = Entrez.read(search_handle, validate=False).get("IdList",[])
         search_handle.close()
         if not ids: return json.dumps(
             {"status": "success", "results":[], "message": f"No records found in {database}."})
 
-        summary_handle = Entrez.esummary(db=database, id=",".join(ids))
+        summary_handle = guarded_entrez("esummary", db=database, id=",".join(ids))
         summaries = Entrez.read(summary_handle, validate=False)
         summary_handle.close()
 

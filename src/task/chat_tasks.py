@@ -1,4 +1,6 @@
+import html
 import json
+import logging
 import os
 import re
 import time
@@ -15,6 +17,8 @@ from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
 
 
+logger = logging.getLogger(__name__)
+
 # KB 检索注入治理：单 chunk 字符上限固定；总 token 预算按主模型上下文
 # 窗口动态推导（derive_context_budgets，litellm 模型元数据优先），使不同
 # 模型各按自身容量注入。被省略的文档仍写入 sources_map，引用可点开原文。
@@ -25,6 +29,81 @@ _KB_CHUNK_MAX_CHARS = 1600
 # 或关闭本轮 deep 模式。
 _DEEP_PLAN_CONFIRMED_TAG = "[DEEP_PLAN_CONFIRMED]"
 _DEEP_PLAN_SKIPPED_TAG = "[DEEP_PLAN_SKIPPED]"
+
+
+def _source_dedupe_key(meta):
+    """引用来源归一键：URL/DOI 优先，其次 标题|年份，用于引用去重合并。
+
+    同一来源在多轮工具调用（或 Deep Mode 多路并行子任务）中被重复收集时，
+    归一键命中即复用既有引用号：参考文献列表不虚增、引用块更省 token，
+    编号与实际来源一一对应（准确度↑）。无可归一字段时返回 None（按新来源处理）。
+
+    字段覆盖说明：AgentRuntime._collect_mcp_citations 注入的在线来源用
+    ``path`` 携带 URL、``name`` 携带标题；其他调用点可能用 ``url``/``title``，
+    故全部纳入候选。
+    """
+    if not isinstance(meta, dict):
+        return None
+    for field in ("url", "path", "link", "href", "doi"):
+        val = str(meta.get(field) or "").strip().lower().rstrip("/")
+        if val:
+            return val
+    title = str(meta.get("title") or meta.get("name") or "").strip().lower()
+    if title:
+        year = str(meta.get("year") or "").strip()
+        return f"{title}|{year}"
+    return None
+
+
+def _trim_history_for_budget(history, token_budget):
+    """按轮次边界裁剪历史消息至 token 预算内（从最新往回保留）。
+
+    长会话全量回传是 Agent 循环中增长最快的 token 开销（每轮工具循环都要
+    重发全部历史）。按 user 消息为界的"轮"从新到旧贪心保留：
+    - 整轮取舍，不拆散 assistant(tool_calls) 与 tool 结果的配对（API 约束）；
+    - 至少保留最新一轮（对话连续性下限）；
+    - 预算内原样返回（短会话零行为变化，仅长会话生效）。
+    """
+    if not history:
+        return history
+
+    def _tokens(msgs):
+        return sum(estimate_message_tokens([m]) for m in msgs)
+
+    total = _tokens(history)
+    if total <= token_budget:
+        return history
+
+    rounds, current = [], None
+    for m in history:
+        if m.get("role") == "user":
+            if current:
+                rounds.append(current)
+            current = [m]
+        else:
+            if current is None:
+                current = []
+            current.append(m)
+    if current:
+        rounds.append(current)
+
+    kept, used = [], 0
+    for r in reversed(rounds):
+        r_tokens = _tokens(r)
+        if kept and used + r_tokens > token_budget:
+            break
+        kept.insert(0, r)
+        used += r_tokens
+
+    flat = [m for r in kept for m in r]
+    # 防御：头部残留 assistant/tool 消息（无 user 起始的孤立轮）会导致部分
+    # API 报"tool 结果无对应 tool_calls"，裁到首个 user/system 为止。
+    while flat and flat[0].get("role") not in ("user", "system"):
+        flat.pop(0)
+    logger.info(
+        f"History trimmed for context budget: {len(history)} -> {len(flat)} "
+        f"messages (~{total} -> ~{used} tokens).")
+    return flat
 
 
 def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context=""):
@@ -241,6 +320,11 @@ class ChatGenerationTask(BackgroundTask):
 
     def _execute(self):
         from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
+
+        # 新对话发送：复位鉴权拒绝熔断计数（用户规格——熔断只在本轮对话内
+        # 生效，"发送新对话"即重置点，而非清除聊天记录）。
+        from src.core.network_worker import auth_breaker
+        auth_breaker.reset()
 
         self.send_log("INFO", f"Chat task started. KB_ID: {self.kwargs.get('kb_id')}")
         time.sleep(0.1)
@@ -836,14 +920,34 @@ class ChatGenerationTask(BackgroundTask):
                 if m.get("name"): msg["name"] = m["name"]
                 clean_history.append(msg)
 
+        # ---- 历史预算裁剪：按主模型窗口推导历史 token 预算，超限按轮次
+        # 从旧到新丢弃（保留最新完整轮）。短会话零影响；长会话显著降低
+        # Agent 循环每轮重发历史的 token 开销，单 Agent / Deep 模式均受益。
+        try:
+            _hist_budget = derive_context_budgets(
+                resolve_context_window(self.main_config.get("model_name", ""))
+            )["history_token_budget"]
+            clean_history = _trim_history_for_budget(clean_history, _hist_budget)
+        except Exception as e:
+            self.logger.warning(f"History budget trim skipped: {e}")
+
         rag_messages = [{"role": "system", "content": system_prompt}] + clean_history
         rag_messages.append({"role": "user", "content": llm_content})
 
         # ---- Run the modern Agent loop (plan -> execute -> observe) ----
 
         def _cite_collector(source_meta: dict):
-            """Register an online MCP source for the 'Cited Sources' UI block."""
-            ref_id = len(sources_map) + 101
+            """Register an online MCP source for the 'Cited Sources' UI block.
+
+            按归一键去重：同一来源被多次工具调用重复收集时复用既有引用号，
+            参考文献列表不虚增、引用块更省 token。
+            """
+            key = _source_dedupe_key(source_meta)
+            if key:
+                for rid, registered in sources_map.items():
+                    if _source_dedupe_key(registered) == key:
+                        return rid
+            ref_id = max((k for k in sources_map if isinstance(k, int)), default=100) + 1
             sources_map[ref_id] = source_meta
             return ref_id
 
@@ -1197,12 +1301,29 @@ class ChatGenerationTask(BackgroundTask):
             local_sources = {}
 
             def _local_cite(meta):
-                rid = len(local_sources) + 101
+                """子任务局部引用注册（带去重，与主路径 _cite_collector 同键）。"""
+                key = _source_dedupe_key(meta)
+                if key:
+                    for rid, registered in local_sources.items():
+                        if _source_dedupe_key(registered) == key:
+                            return rid
+                rid = max((k for k in local_sources if isinstance(k, int)), default=100) + 1
                 local_sources[rid] = meta
                 return rid
 
+            # 兄弟任务上下文：告知本子 Agent 其他并行子任务的分工，减少重复
+            # 检索与内容重叠，各路覆盖不同侧面（广度↑、综合更干净、token↓）。
+            siblings = "\n".join(
+                f"- {s.query}" for j, s in enumerate(sub_tasks) if j != idx)
+            query_text = f"User Query:\n{st.query}"
+            if siblings:
+                query_text += (
+                    "\n\nSibling sub-investigations (handled by other parallel agents; "
+                    "do NOT answer them here — stay focused on the query above and "
+                    "avoid redundant searches already covered by siblings):\n" + siblings)
+
             sub_llm_content = list(llm_content[:-1]) + [
-                {"type": "text", "text": f"User Query:\n{st.query}"}
+                {"type": "text", "text": query_text}
             ]
             sub_rag = [dict(m) for m in rag_messages]
             sub_rag[-1] = dict(sub_rag[-1])
@@ -1229,17 +1350,34 @@ class ChatGenerationTask(BackgroundTask):
 
         with ThreadPoolExecutor(max_workers=len(sub_tasks)) as pool:
             futures = [pool.submit(_run_sub, i, st) for i, st in enumerate(sub_tasks)]
+            done_count = 0
             for fut in as_completed(futures):
                 try:
                     idx, text, local_sources = fut.result()
                     results[idx] = (text, local_sources)
+                    # 完成即上屏一行状态：消除"确认计划后长时间黑箱等待"，
+                    # 用户可提前感知各路进度（as_completed 顺序不定，标注原编号）。
+                    done_count += 1
+                    heading = html.escape(str(sub_tasks[idx].query))[:80]
+                    self._emit_token(
+                        f"<div class='status-msg' style='color:#05B8CC;'>"
+                        f"✓ Sub-investigation {idx + 1}/{len(sub_tasks)} completed "
+                        f"({done_count}/{len(sub_tasks)} done): {heading}</div>\n")
                 except Exception as e:
                     self.logger.warning(f"Sub-task future failed: {e}")
 
-        # ---- 合并引用并重映射 ----
+        # ---- 合并引用并重映射（跨子任务去重 + 未引用剔除）----
         next_id = max((k for k in sources_map if isinstance(k, int)), default=0) + 1
         merged = []
         plot_markers = []  # 收集子任务产生的 <rplot_card> 标记，避免 base64 污染合成器
+        # 归一键 -> 全局引用号：单 Agent 阶段（KB/在线工具）已注册的来源先入
+        # 索引，多个子任务重复发现同一来源时直接复用其引用号，参考文献不虚增。
+        global_keys = {}
+        for gid, gmeta in sources_map.items():
+            _gk = _source_dedupe_key(gmeta)
+            if _gk and _gk not in global_keys:
+                global_keys[_gk] = gid
+        new_ids = []  # 本轮 deep 合并新增的全局引用号（用于未引用剔除）
 
         def _pull_plot_markers(m):
             plot_markers.append(m.group(0))
@@ -1252,8 +1390,16 @@ class ChatGenerationTask(BackgroundTask):
                 text, local_sources = res
             remap = {}
             for local_id, meta in local_sources.items():
+                key = _source_dedupe_key(meta)
+                if key and key in global_keys:
+                    # 跨子任务重复来源：复用既有全局引用号
+                    remap[local_id] = global_keys[key]
+                    continue
                 remap[local_id] = next_id
                 sources_map[next_id] = meta
+                if key:
+                    global_keys[key] = next_id
+                new_ids.append(next_id)
                 next_id += 1
             text = self._clean_sub_result(text)
             text = self._remap_citations(text, remap)
@@ -1263,6 +1409,18 @@ class ChatGenerationTask(BackgroundTask):
                 "query": st.query,
                 "text": text,
             })
+
+        # 未被任何子任务正文引用的来源不进参考文献块：子 Agent 常注册了工具
+        # 来源但正文最终未引用，剔除后引用块更短、编号与正文引用一致。
+        if new_ids:
+            body = "\n".join(m["text"] for m in merged)
+            used_ids = {int(n) for n in re.findall(r'\[(\d+)\]', body)}
+            dropped = [gid for gid in new_ids if gid not in used_ids]
+            for gid in dropped:
+                sources_map.pop(gid, None)
+            if dropped:
+                self.send_log("INFO",
+                              f"Deep mode: dropped {len(dropped)} uncited source(s) from references.")
 
         # ---- 分节汇总 ----
         self._emit_token(

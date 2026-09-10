@@ -161,13 +161,17 @@ def derive_context_budgets(context_window: int) -> dict:
     - tool_result_chars：单条工具结果字符上限（≈窗口的 1.6%，按 4
       chars/token 即 0.4% 窗口）；
     - tool_token_budget：单轮内全部 role=tool 消息的 token 预算（≈10%）；
-    - kb_token_budget：KB 检索注入 system prompt 的 token 预算（≈2.4%）。
+    - kb_token_budget：KB 检索注入 system prompt 的 token 预算（≈2.4%）；
+    - history_token_budget：历史对话回传 token 预算（≈25%），供按轮次
+      裁剪长会话历史（_trim_history_for_budget）。
 
-    小窗口模型自动收紧（如 8K 窗口 → 工具 2K / KB 2K），大窗口模型放宽
-    （1M → 工具 100K / KB 24K / 单条 16K 字符），保证各模型符合自身容量。
+    小窗口模型自动收紧（如 8K 窗口 → 工具 2K / KB 2K / 历史 4K），大窗口
+    模型放宽（1M → 工具 100K / KB 24K / 历史 256K / 单条 16K 字符），保证
+    各模型符合自身容量。
     """
     return {
         "tool_result_chars": max(4_000, min(int(context_window * 0.016), 16_000)),
         "tool_token_budget": max(2_000, min(int(context_window * 0.10), 128_000)),
         "kb_token_budget": max(2_000, min(int(context_window * 0.024), 48_000)),
+        "history_token_budget": max(4_000, min(int(context_window * 0.25), 256_000)),
     }

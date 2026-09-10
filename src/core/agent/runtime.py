@@ -361,7 +361,11 @@ class AgentRuntime:
                         continue
 
                     _emit("[CLEAR_SEARCH]")
-                    self._stream_final_text(content, _emit, is_cancelled)
+                    # 真流式路径（_llm_step_stream）正文已实时上屏，跳过回放；
+                    # 仅非流式回退路径（provider 不支持流式工具调用、正文整块
+                    # 产出）才用轻量打字机回放补足视觉平滑。
+                    if not response.get("_live_streamed"):
+                        self._stream_final_text(content, _emit, is_cancelled)
                     self._finalize_usage("".join(full_response_cache))
                     return "".join(full_response_cache)
                 # Empty answer with no tool calls: force the model to produce a
@@ -531,9 +535,12 @@ class AgentRuntime:
 
         - reasoning delta 实时 emit（``<think>`` 包裹 + 展示截断），长思考
           阶段用户可见，消除非流式整块等待的干等感；
-        - content delta 缓冲不 emit：工具调用轮次的正文属于 SILENT
-          EXECUTION 协议（不展示），且流结束前无法预知本轮是否携带
-          tool_calls，故流结束后按最终结果统一处置；
+        - content delta 实时 emit（真流式）：LLM 产出的正文 token 逐段透传
+          给 UI，最终答案生成期间用户实时可见，不再等待整轮结束后假打字机
+          回放。SILENT EXECUTION 协议下模型在工具轮次原则上不产出正文，
+          故中间轮的额外 emit 极少；协议违规文本（如 plot 参数泄漏）会
+          可见，属可接受的透明化。流结束后调用方按 ``_live_streamed``
+          标记跳过重复回放；
         - 返回与 chat() 结构一致的完整 response dict。
         """
         reasoning_parts: List[str] = []
@@ -541,6 +548,7 @@ class AgentRuntime:
         response: Dict = {}
         think_open = False
         truncated = False
+        live_text = False
         try:
             for ev in self.main_llm.stream_chat_events(**kwargs):
                 ev_type = ev.get("type")
@@ -557,7 +565,16 @@ class AgentRuntime:
                             emit_token("\n...[thinking truncated for display]\n")
                             truncated = True
                 elif ev_type == "text":
-                    content_parts.append(ev.get("text") or "")
+                    text = ev.get("text") or ""
+                    content_parts.append(text)
+                    # 正文 token 真流式上屏。首个正文前若 <think> 仍开启，
+                    # 先闭合思考块，避免正文被吞进 think 区间渲染异常。
+                    if text:
+                        if think_open:
+                            emit_token("\n</think>\n\n")
+                            think_open = False
+                        emit_token(text)
+                        live_text = True
                 elif ev_type == "final":
                     response = ev.get("response") or {}
         finally:
@@ -582,6 +599,9 @@ class AgentRuntime:
                 "reasoning_content": "".join(reasoning_parts),
                 "role": "assistant",
             }
+        # 真流式标记：本轮正文已实时上屏，主循环据此跳过打字机回放，
+        # 防止最终答案显示两遍。
+        response["_live_streamed"] = live_text
         return response
 
     @staticmethod

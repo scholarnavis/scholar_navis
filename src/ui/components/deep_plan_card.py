@@ -82,9 +82,15 @@ class DeepPlanCardWidget(QFrame):
         title = QLabel("Proposed Deep-Research Plan")
         title.setObjectName("deepPlanTitle")
         title_box.addWidget(title)
+        # 预估执行成本：确认后还需 N 路并行子 Agent + 1 次综合（分解已在
+        # 出卡前完成）。让用户在确认闸门上有明确的 token/时间预期。
+        n_subs = len([st for st in self._sub_tasks
+                      if str((st or {}).get("query", "") or "").strip()])
+        cost_hint = (f" Estimated on confirm: {n_subs} parallel agents + 1 synthesis "
+                     f"({n_subs + 1} model runs)." if n_subs else "")
         hint = QLabel(
             "Review or edit the sub-investigations below, then confirm to run them "
-            "in parallel; or answer directly without decomposition."
+            "in parallel; or answer directly without decomposition." + cost_hint
         )
         hint.setObjectName("deepPlanHint")
         hint.setWordWrap(True)

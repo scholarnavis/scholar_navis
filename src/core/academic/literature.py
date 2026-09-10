@@ -2,6 +2,7 @@
 import json
 import re
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
 
 from Bio import Entrez
@@ -283,32 +284,53 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
     all_records = []
     source_stats = {}
 
+    # ---- 数据库并行查询：OA/Crossref/PubMed/S2 各库延迟独立（1-3s），串行时
+    # 单个工具调用的墙钟时间是各库之和（~7s），并行后降至最慢库延迟（~2-3s）。
+    # 一次会话常含 10+ 次检索调用，累计节省 30-60s 墙钟时间。
+    # 线程安全：各 parser 均经 mcp_request/s2_request 每调用新建 HTTP session，
+    # 限流器内部持锁，Entrez 基于 urllib，可安全并发；失败隔离沿用逐库 try/except。
+    def _query_db(db):
+        """查询单库，返回 (db, recs)。S2 配置门控保持原语义。"""
+        if db == "openalex":
+            return db, _parse_openalex()
+        if db == "crossref":
+            return db, _parse_crossref()
+        if db == "pubmed":
+            return db, _parse_pubmed()
+        if db == "semantic_scholar":
+            if not s2_api_key:
+                logger.debug("Semantic Scholar skipped: no API key configured.")
+                return db, []
+            if not is_s2_enabled():
+                return db, []
+            return db, _parse_s2()
+        return db, []
+
+    # 显式指定 semantic_scholar 但未配 key：保持原提前返回语义（错误直达调用方）
+    if source == "semantic_scholar" and not s2_api_key:
+        logger.warning("Semantic Scholar is disabled due to missing API Key.")
+        return json.dumps(
+            {"status": "error",
+             "message": "Semantic Scholar API is disabled. Please configure an API Key."})
+
+    db_results = {}
+    if wanted:
+        with ThreadPoolExecutor(max_workers=len(wanted),
+                                thread_name_prefix="litsearch") as pool:
+            futures = {pool.submit(_query_db, db): db for db in wanted}
+            for fut in as_completed(futures):
+                db = futures[fut]
+                try:
+                    _, recs = fut.result()
+                    db_results[db] = recs
+                except Exception as e:
+                    logger.warning(f"{db} search failed: {e}")
+                    db_results[db] = []
+    # 按 wanted 原序合并：聚合输出顺序与串行版保持一致（确定性）
     for db in wanted:
-        try:
-            if db == "openalex":
-                recs = _parse_openalex()
-            elif db == "crossref":
-                recs = _parse_crossref()
-            elif db == "pubmed":
-                recs = _parse_pubmed()
-            elif db == "semantic_scholar":
-                if not s2_api_key:
-                    logger.warning("Semantic Scholar is disabled due to missing API Key.")
-                    if source == "semantic_scholar":
-                        return json.dumps(
-                            {"status": "error",
-                             "message": "Semantic Scholar API is disabled. Please configure an API Key."})
-                    continue
-                if not is_s2_enabled():
-                    continue
-                recs = _parse_s2()
-            else:
-                recs = []
-            source_stats[db] = len(recs)
-            all_records.extend(recs)
-        except Exception as e:
-            logger.warning(f"{db} search failed: {e}")
-            source_stats[db] = 0
+        recs = db_results.get(db, [])
+        source_stats[db] = len(recs)
+        all_records.extend(recs)
 
     # 按年份过滤（可选）
     if min_year is not None:

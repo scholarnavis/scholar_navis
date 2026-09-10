@@ -20,7 +20,7 @@ from Bio import Entrez
 from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.email_check import verify_email_robust
-from src.core.network_worker import setup_global_network_env, create_robust_session, GlobalRateLimiter, global_rate_limiter
+from src.core.network_worker import setup_global_network_env, create_robust_session, GlobalRateLimiter, global_rate_limiter, record_auth_rejection, is_auth_blocked
 
 __all__ = [
     "UdpJsonHandler", "logger", "ConfigManager", "BASE_DIR",
@@ -124,13 +124,25 @@ if ncbi_api_key:
 
 
 def mcp_request(method: str, url: str, **kwargs):
+    # 鉴权熔断前置检查：本轮内该服务已累计 2 次 401/403 时立即失败，
+    # 不再发起网络请求（零开销跳过），由调用方的 except 分支按既有
+    # 语义降级。每次被跳过的调用可省 1-3s 往返。
+    if is_auth_blocked(url):
+        raise RuntimeError(
+            f"Request skipped: '{url}' belongs to a source blocked by the "
+            f"auth-rejection breaker for the current chat round.")
     session = create_robust_session()
     custom_headers = kwargs.pop("headers", {})
     if "User-Agent" in custom_headers and custom_headers["User-Agent"] == "Mozilla/5.0":
         custom_headers.pop("User-Agent")
     session.headers.update(custom_headers)
     try:
-        return session.request(method, url, **kwargs)
+        response = session.request(method, url, **kwargs)
+        # 鉴权类拒绝计数（401/403）：非网络原因，本轮内重试无意义。
+        # 只计数不改变返回——调用方的既有状态码处理逻辑保持原样。
+        if response.status_code in (401, 403):
+            record_auth_rejection(url, context=f"HTTP {response.status_code} via mcp_request.")
+        return response
     except Exception as e:
         err_str = str(e).lower()
         if any(keyword in err_str for keyword in["tls", "closed abruptly", "empty reply", "certificate", "ssl", "time"]):

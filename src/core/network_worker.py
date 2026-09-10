@@ -322,6 +322,13 @@ class LightNetworkWorker(QObject):
 
     def download_image(self, url, save_path):
         self._is_cancelled = False
+        # 鉴权熔断前置拦截：本轮内该图床已累计 2 次 401/403 时零开销跳过
+        # （每个气泡的图片下载独立线程，熔断避免反复撞被拒的图床）
+        if url and is_auth_blocked(url):
+            self.sig_image_downloaded.emit(
+                False, url,
+                "Skipped: image host blocked by auth-rejection breaker (current chat round).")
+            return
         self._req_session = requests.Session()
 
         proxy_cfg = _get_explicit_proxy_kwargs()
@@ -337,6 +344,9 @@ class LightNetworkWorker(QObject):
                 "User-Agent": "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
             res = self._req_session.get(url, timeout=30, headers=headers)
+            # 401/403 计入全局鉴权熔断器（阈值 2，本轮内生效）
+            if res.status_code in (401, 403):
+                record_auth_rejection(url, context=f"HTTP {res.status_code} via image download.")
             res.raise_for_status()
 
             with open(save_path, 'wb') as f:
@@ -379,14 +389,24 @@ class NetworkEmbeddingFunction(EmbeddingFunction):
         logger.debug(f"Requesting embeddings for {len(input)} documents using {self.model_name}")
 
         try:
+            embed_url = f"{self.api_url}/v1/embeddings"
+            # 鉴权熔断：本轮内该 embedding 服务累计 2 次 401/403 后零开销跳过
+            # （KB 检索链路，key 失效时避免每轮检索反复撞）
+            if is_auth_blocked(embed_url):
+                raise RuntimeError(
+                    "Embedding request skipped: service blocked by the "
+                    "auth-rejection breaker for the current chat round.")
             response = requests.post(
-                f"{self.api_url}/v1/embeddings",
+                embed_url,
                 headers=headers,
                 json=payload,
                 timeout=30,
                 proxies=proxies,
                 verify=True
             )
+            if response.status_code in (401, 403):
+                record_auth_rejection(
+                    embed_url, context=f"HTTP {response.status_code} via embeddings API.")
             response.raise_for_status()
             data = response.json()
             return [item["embedding"] for item in data["data"]]
@@ -422,14 +442,24 @@ class NetworkRerankerFunction:
         logger.debug(f"Requesting rerank for {len(docs)} documents using {self.model_name}")
 
         try:
+            rerank_url = f"{self.api_url}/v1/rerank"
+            # 鉴权熔断：本轮内该 rerank 服务累计 2 次 401/403 后零开销跳过
+            if is_auth_blocked(rerank_url):
+                # 返回空列表与既有错误路径语义一致（检索降级不崩溃）
+                logger.error("Rerank request skipped: service blocked by the "
+                             "auth-rejection breaker for the current chat round.")
+                return []
             response = requests.post(
-                f"{self.api_url}/v1/rerank",
+                rerank_url,
                 headers=headers,
                 json=payload,
                 timeout=30,
                 proxies=proxies,
                 verify=True
             )
+            if response.status_code in (401, 403):
+                record_auth_rejection(
+                    rerank_url, context=f"HTTP {response.status_code} via rerank API.")
             response.raise_for_status()
             data = response.json()
             return data.get("results", [])
@@ -477,3 +507,102 @@ class GlobalRateLimiter:
 
 
 global_rate_limiter = GlobalRateLimiter()
+
+
+class AuthRejectionBreaker:
+    """按服务的鉴权拒绝熔断器（401/403 等非网络原因的服务端拒绝）。
+
+    与 GlobalRateLimiter 同层：429/超时等瞬时性问题交由重试与限流处理，
+    而鉴权类拒绝（key 无效/被拒/IP 被服务端封禁）在本轮内重试不可能成功，
+    继续请求只会白白消耗限流配额并拖慢对话。
+
+    语义（按用户规格）：
+    - 同一服务（按 URL host 归一）累计 2 次鉴权拒绝即熔断；
+    - 熔断后本轮内所有经过此层的请求对该服务立即失败（零网络开销），
+      其他服务不受影响；
+    - 计数在每次新对话发送时整体复位（ChatGenerationTask._execute 入口），
+      即熔断只在"本轮对话"内生效，不跨对话。
+
+    线程安全：计数操作全程持锁（Agent 工具循环与 Deep Mode 并行子任务
+    都会在工作线程触发）。
+    """
+
+    THRESHOLD = 2
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts = {}  # service(host) -> 拒绝次数
+
+    # 服务商别名归一：同一服务商的多个 host 共享一个熔断键（鉴权按服务商
+    # 生效——NCBI key 被 ban 时 eutils（Entrez）与 www（idconv/PMC）同步熔断）
+    _HOST_ALIASES = {
+        "eutils.ncbi.nlm.nih.gov": "ncbi",
+        "www.ncbi.nlm.nih.gov": "ncbi",
+    }
+
+    @staticmethod
+    def _key_for_url(url):
+        """按 URL 推导服务键：host 归一 + 服务商别名映射。
+
+        - 无 scheme 的裸 host（如 S2TaskManager 传入的
+          "api.semanticscholar.org"）自动补 https:// 后解析；
+        - 未知 host 直接用 host 本身作键。
+        """
+        try:
+            raw = str(url or "").strip()
+            if raw and "://" not in raw:
+                raw = f"https://{raw}"
+            from urllib.parse import urlparse
+            host = (urlparse(raw).hostname or "unknown").lower()
+            return AuthRejectionBreaker._HOST_ALIASES.get(host, host)
+        except Exception:
+            return "unknown"
+
+    def reset(self):
+        with self._lock:
+            self._counts.clear()
+
+    def reset_service(self, url_or_key):
+        """仅复位单个服务的计数（如设置更新后恢复该源的可用性）。"""
+        key = self._key_for_url(url_or_key) if "://" in str(url_or_key) else str(url_or_key)
+        with self._lock:
+            self._counts.pop(key, None)
+
+    def record(self, url) -> bool:
+        """记录一次鉴权拒绝；返回是否已达到熔断阈值。"""
+        key = self._key_for_url(url)
+        with self._lock:
+            count = self._counts.get(key, 0) + 1
+            self._counts[key] = count
+            return count >= self.THRESHOLD
+
+    def is_blocked(self, url) -> bool:
+        key = self._key_for_url(url)
+        with self._lock:
+            return self._counts.get(key, 0) >= self.THRESHOLD
+
+
+auth_breaker = AuthRejectionBreaker()
+
+
+def record_auth_rejection(url, context=""):
+    """向全局熔断器记录一次鉴权拒绝，并在达到阈值时输出明确日志。
+
+    供 mcp_request / s2_task 等网络入口在拿到 401/403 响应时调用；
+    调用方自身的 raise/重试语义保持不变。
+    """
+    blocked_now = auth_breaker.record(url)
+    host = AuthRejectionBreaker._key_for_url(url)
+    if blocked_now:
+        logger.warning(
+            f"[AuthBreaker] '{host}' reached {AuthRejectionBreaker.THRESHOLD} auth "
+            f"rejections; further requests to it are SKIPPED for the current chat round "
+            f"(reset on next conversation). {context}")
+    else:
+        logger.info(f"[AuthBreaker] '{host}' auth rejection recorded. {context}")
+    return blocked_now
+
+
+def is_auth_blocked(url) -> bool:
+    """该 URL 所属服务是否已被本轮鉴权熔断。"""
+    return auth_breaker.is_blocked(url)
