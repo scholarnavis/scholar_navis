@@ -27,6 +27,8 @@ settings_tasks 共用，避免各处重复实现同一次判断）：
 
 from __future__ import annotations
 
+import contextlib
+import io
 import logging
 import os
 import threading
@@ -71,7 +73,13 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _probe_cache: dict = {}
 _probe_lock = threading.Lock()
 _probe_model_cache: Optional[bytes] = None
-_ort_severity_applied = False
+
+#: 静默窗口嵌套深度（见 :func:`_probe_log_quiet`）。
+_probe_quiet_depth = 0
+#: 窗口内的 ORT 全局日志级别（4 = FATAL）。
+_PROBE_LOG_SEVERITY = 4
+#: 窗口结束后的基线级别（3 = ERROR）：保留真实错误，压掉重复警告。
+_RUNTIME_LOG_SEVERITY = 3
 
 
 @dataclass(frozen=True)
@@ -182,10 +190,17 @@ def tensorrt_runtime_available() -> bool:
 
 
 def list_available_providers() -> list:
-    """构建期支持的提供者列表（ORT 不可用时返回 CPU）。"""
+    """构建期支持的提供者列表（ORT 不可用时返回 CPU）。
+
+    查询本身就处于静默窗口内：实测（缺 libcublasLt 的机器）``get_available_providers()``
+    就会让 ORT 尝试加载 CUDA 提供者库并向 stderr 打印整段报错，因此它和建会话
+    一样需要放进 :func:`_probe_log_quiet`。窗口可重入（见该函数的深度计数），
+    嵌套调用不会提前把日志级别降回去。
+    """
     try:
-        import onnxruntime as ort
-        return list(ort.get_available_providers())
+        with _probe_log_quiet():
+            import onnxruntime as ort
+            return list(ort.get_available_providers())
     except Exception as e:  # ImportError / OSError（缺运行库）等
         logger.warning(f"onnxruntime unavailable, assuming CPU only: {e}")
         return [PROVIDER_CPU]
@@ -235,61 +250,111 @@ def probe_provider(provider: str, provider_options: Optional[dict] = None) -> bo
 
 
 def _probe_impl(provider: str, provider_options: Optional[dict]) -> bool:
-    available = list_available_providers()
-    if provider not in available:
-        logger.info(f"Provider '{provider}' not present in this onnxruntime build.")
-        return False
+    # 整个探测（含可用性查询）都在静默窗口内：查询本身就会让 ORT 尝试加载
+    # CUDA/TensorRT 提供者库，从而打印整段 C++ 报错与 Python 层 EP Error。
+    with _probe_log_quiet():
+        available = list_available_providers()
+        if provider not in available:
+            logger.info(f"Provider '{provider}' not present in this onnxruntime build.")
+            return False
 
-    if _skip_probe():
-        logger.info(f"Provider probe skipped by env flag; trusting build list for '{provider}'.")
-        return True
+        if _skip_probe():
+            logger.info(f"Provider probe skipped by env flag; trusting build list for '{provider}'.")
+            return True
 
-    model_bytes = _probe_model_bytes()
-    if model_bytes is None:
-        # 无法构造探测模型（onnx 缺失）：不做判断，避免误杀可用加速。
-        logger.warning(f"Cannot probe '{provider}'; assuming available.")
-        return True
+        model_bytes = _probe_model_bytes()
+        if model_bytes is None:
+            # 无法构造探测模型（onnx 缺失）：不做判断，避免误杀可用加速。
+            logger.warning(f"Cannot probe '{provider}'; assuming available.")
+            return True
 
-    _silence_ort_warnings()
+        candidates = [(provider, provider_options)] if provider_options else [provider]
+        candidates.append(PROVIDER_CPU)  # 兜底，避免会话创建直接抛错
 
-    candidates = [(provider, provider_options)] if provider_options else [provider]
-    candidates.append(PROVIDER_CPU)  # 兜底，避免会话创建直接抛错
+        try:
+            import onnxruntime as ort
 
-    try:
-        import onnxruntime as ort
-
-        session = ort.InferenceSession(model_bytes, providers=candidates)
-        active = session.get_providers()
-        ok = bool(active) and active[0] == provider
-        if ok:
-            logger.info(f"Provider probe OK: '{provider}' {provider_options or ''}")
-        else:
-            logger.warning(
-                f"Provider probe: requested '{provider}' {provider_options or ''} "
-                f"but onnxruntime activated {active}. Runtime libraries are likely missing.")
-        return ok
-    except Exception as e:
-        logger.warning(f"Provider probe failed for '{provider}': {e}")
-        return False
+            session = ort.InferenceSession(model_bytes, providers=candidates)
+            active = session.get_providers()
+            ok = bool(active) and active[0] == provider
+            if ok:
+                logger.info(f"Provider probe OK: '{provider}' {provider_options or ''}")
+            else:
+                logger.warning(
+                    f"Provider probe: requested '{provider}' {provider_options or ''} "
+                    f"but onnxruntime activated {active}. Runtime libraries are likely missing.")
+            return ok
+        except Exception as e:
+            logger.warning(f"Provider probe failed for '{provider}': {e}")
+            return False
 
 
-def _silence_ort_warnings() -> None:
-    """把 ORT 全局日志级别提到 ERROR，只压掉探测期的重复警告。
+@contextlib.contextmanager
+def _probe_log_quiet():
+    """屏蔽 ORT 的整段噪声（C++ 层 stderr + Python 层 stdout），**可重入**。
 
-    ORT 在会话创建失败时会自行向 stderr 打印整段 CUDA/cuDNN 报错，而本模块
-    会把同一结论整理成一条可读日志，重复输出只会污染应用日志。ERROR 及以上
-    仍然保留，不影响真实错误可见性。
+    两个噪声源（在缺少 CUDA/TensorRT 运行库的机器上每次启动都会出现）：
+
+    1. **C++ 层**：提供者库（或 ``get_available_providers()`` 内部的提供者信息
+       查询）加载失败时直接向 stderr 打印整段报错，例如
+       ``[E:onnxruntime:Default, provider_bridge_ort.cc:...] Failed to load library
+       libonnxruntime_providers_cuda.so with error: libcublasLt.so.12 ...``。
+       把 ORT 全局日志级别临时提到 FATAL 即可压下（实测有效，含首次加载）。
+    2. **Python 层**：``onnxruntime_inference_collection`` 在建会话失败并自动回退
+       时用 ``print()`` 输出 ``EP Error ... Falling back to ...``。通过重定向
+       stdout 捕获，并以 DEBUG 级别写入日志（信息不丢失）。
+
+    本模块是这两个噪声源的唯一触发点，结论都会由 :func:`probe_provider` 整理成
+    一条可读警告，因此窗口内只需静默；窗口结束后恢复 ERROR 基线，真实会话错误
+    依旧可见。
+
+    **可重入**：:func:`list_available_providers` 自身也在窗口内，会被
+    :func:`_probe_impl` 嵌套调用。深度计数保证只有最外层设置/恢复日志级别与
+    重定向，内层退出不会把级别提前降回去（早期版本正是踩了这个坑：内层把级别
+    降回 3，导致后续建会话的报错又冒出来）。
+
+    注意：``redirect_stdout`` 作用于 ``sys.stdout``，窗口极短（毫秒级）；探测通常
+    在后台线程执行，该窗口内其它线程的 ``print`` 会一并被收进 DEBUG 日志。
     """
-    global _ort_severity_applied
-    if _ort_severity_applied:
-        return
+    global _probe_quiet_depth
     try:
         import onnxruntime as ort
+    except Exception:  # onnxruntime 不可用时无需处理
+        yield
+        return
 
-        ort.set_default_logger_severity(3)
-        _ort_severity_applied = True
-    except Exception:  # 非关键路径，失败静默
-        pass
+    with _probe_lock:
+        _probe_quiet_depth += 1
+        outermost = _probe_quiet_depth == 1
+
+    captured = io.StringIO() if outermost else None
+    if outermost:
+        try:
+            ort.set_default_logger_severity(_PROBE_LOG_SEVERITY)
+        except Exception as e:
+            logger.debug(f"Could not raise ORT log severity for probe: {e}")
+
+    try:
+        if outermost:
+            with contextlib.redirect_stdout(captured):
+                yield
+        else:
+            yield
+    finally:
+        with _probe_lock:
+            _probe_quiet_depth -= 1
+            last = _probe_quiet_depth <= 0
+            if last:
+                _probe_quiet_depth = 0  # 防御异常路径下的计数漂移
+        if last:
+            try:
+                ort.set_default_logger_severity(_RUNTIME_LOG_SEVERITY)
+            except Exception:  # 非关键路径，失败静默
+                pass
+
+            noise = captured.getvalue().strip() if captured else ""
+            if noise:
+                logger.debug(f"Suppressed ORT output during provider probe:\n{noise}")
 
 
 def resolve_provider(device_str: Optional[str], probe: bool = True) -> ResolvedProvider:
