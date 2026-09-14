@@ -17,6 +17,13 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+
+def platform_tag() -> str:
+    """产物命名用的平台标记（win / mac / linux）。"""
+    return {"Windows": "win", "Darwin": "mac", "Linux": "linux"}.get(
+        platform.system(), "unknown")
+
+
 def sync_pyproject_version():
     toml_path = "pyproject.toml"
     if not os.path.exists(toml_path):
@@ -78,16 +85,15 @@ def build_app():
     sync_pyproject_version()
 
     sys_os = platform.system()
-    if sys_os != "Windows":
-        print(f"\n[-] Official packaging for {sys_os} is currently suspended. Please run from source.")
-        return
+    tag = platform_tag()
+    is_windows = sys_os == "Windows"
 
     dist_dir = "dist"
     build_dir = "build"
     app_name_safe = __app_name__.replace(" ", "_").lower()
     entry_point = "main.py"
 
-    print(f"\n[1/4] Preparing PyInstaller Build for {__app_name__} v{__version__} on Windows...")
+    print(f"\n[1/4] Preparing PyInstaller Build for {__app_name__} v{__version__} on {sys_os}...")
 
     if os.path.exists(dist_dir):
         shutil.rmtree(dist_dir)
@@ -103,10 +109,15 @@ def build_app():
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--onedir",
-        "--windowed",
         f"--name={app_name_safe}",
         f"--runtime-hook={hook_file}",
     ]
+
+    if sys_os in ("Windows", "Darwin"):
+        # Linux 下不加 --windowed：该选项在 Linux 上只是丢弃 stdout/stderr，
+        # 而桌面启动器本就无终端，日志改由 logs/ 目录承载（见 setup_logger）。
+        # 保留 stdout 便于从终端启动时直接观察启动期异常。
+        cmd.append("--windowed")
 
     packages_to_collect = [
         "optimum", "transformers", "onnxruntime", "onnx", "tokenizers",
@@ -126,29 +137,32 @@ def build_app():
         "tiktoken_ext"
     ]
 
-    ssl_search_paths = [
-        sys.prefix,  # venv 根目录
-        os.path.join(sys.prefix, "DLLs"),  # venv DLLs
-        os.path.join(sys.prefix, "Scripts"),  # venv Scripts
-        sys.base_prefix,  # uv 底层基础 Python 根目录
-        os.path.join(sys.base_prefix, "DLLs"),  # uv 底层基础 Python DLLs
-        os.path.join(sys.base_prefix, "Scripts"),  # uv 底层基础 Python Scripts
-    ]
+    if is_windows:
+        # Windows 需要显式附带 OpenSSL DLL（uv 环境的 Python 不一定带上）。
+        # Linux/macOS 的 CPython 由系统或自带的 .so 提供 ssl，无需额外收集。
+        ssl_search_paths = [
+            sys.prefix,  # venv 根目录
+            os.path.join(sys.prefix, "DLLs"),  # venv DLLs
+            os.path.join(sys.prefix, "Scripts"),  # venv Scripts
+            sys.base_prefix,  # uv 底层基础 Python 根目录
+            os.path.join(sys.base_prefix, "DLLs"),  # uv 底层基础 Python DLLs
+            os.path.join(sys.base_prefix, "Scripts"),  # uv 底层基础 Python Scripts
+        ]
 
-    ssl_dlls_found = False
-    for path in set(ssl_search_paths):  # 用 set 去重
-        if not os.path.exists(path):
-            continue
-        dlls = glob.glob(os.path.join(path, "libcrypto*.dll")) + \
-               glob.glob(os.path.join(path, "libssl*.dll"))
-        for dll in dlls:
-            cmd.append(f"--add-binary={dll};.")
-            ssl_dlls_found = True
+        ssl_dlls_found = False
+        for path in set(ssl_search_paths):  # 用 set 去重
+            if not os.path.exists(path):
+                continue
+            dlls = glob.glob(os.path.join(path, "libcrypto*.dll")) + \
+                   glob.glob(os.path.join(path, "libssl*.dll"))
+            for dll in dlls:
+                cmd.append(f"--add-binary={dll};.")
+                ssl_dlls_found = True
 
-    if not ssl_dlls_found:
-        print("\n[!] Warning: OpenSSL dynamic-link libraries (libcrypto/libssl) were not detected within the uv Python environment. Please verify the environment configuration should runtime errors occur.\n")
-    else:
-        print("\n[*] The OpenSSL DLLs have been successfully identified and integrated.")
+        if not ssl_dlls_found:
+            print("\n[!] Warning: OpenSSL dynamic-link libraries (libcrypto/libssl) were not detected within the uv Python environment. Please verify the environment configuration should runtime errors occur.\n")
+        else:
+            print("\n[*] The OpenSSL DLLs have been successfully identified and integrated.")
 
 
     for pkg in packages_to_collect:
@@ -168,7 +182,8 @@ def build_app():
     cmd.extend(["--copy-metadata", "onnxruntime"])
     cmd.extend(["--copy-metadata", "optimum"])
 
-    cmd.append("--add-data=Assets;Assets")
+    # --add-data 的分隔符是平台相关的：Windows 为 ';'，POSIX 为 ':'。
+    cmd.append(f"--add-data=Assets{os.pathsep}Assets")
 
     excludes = [
         "tkinter", "matplotlib", "seaborn", "jupyter", "notebook",
@@ -179,8 +194,11 @@ def build_app():
     for ex in excludes:
         cmd.append(f"--exclude-module={ex}")
 
-    if os.path.exists("Assets/icon.ico"):
+    if is_windows and os.path.exists("Assets/icon.ico"):
         cmd.append("--icon=Assets/icon.ico")
+    elif sys_os == "Darwin" and os.path.exists("Assets/icon.icns"):
+        cmd.append("--icon=Assets/icon.icns")
+    # Linux 的 .desktop 图标不由 PyInstaller 嵌入，运行时使用 Assets/icon.png。
 
     cmd.append(entry_point)
 
@@ -195,7 +213,7 @@ def build_app():
         print("\n[-] PyInstaller build failed.")
         return
 
-    output_archive_name = f"{app_name_safe}_win_v{__version__}"
+    output_archive_name = f"{app_name_safe}_{tag}_v{__version__}"
     target_folder = os.path.join(dist_dir, app_name_safe)
     archive_path = f"{output_archive_name}.zip"
 
@@ -223,6 +241,7 @@ def build_app():
         upload_to_r2(s3_client, bucket_name, archive_path, object_name)
         delete_old_r2_versions(s3_client, bucket_name, object_name)
         print(f"\n[+] All GitHub Actions workflows completed successfully!")
+
 
 if __name__ == "__main__":
     build_app()

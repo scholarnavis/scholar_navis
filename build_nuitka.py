@@ -17,6 +17,13 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+
+def platform_tag() -> str:
+    """产物命名用的平台标记（win / mac / linux）。"""
+    return {"Windows": "win", "Darwin": "mac", "Linux": "linux"}.get(
+        platform.system(), "unknown")
+
+
 def sync_pyproject_version():
     toml_path = "pyproject.toml"
     if not os.path.exists(toml_path):
@@ -78,9 +85,7 @@ def build_app():
     sync_pyproject_version()
 
     sys_os = platform.system()
-    if sys_os != "Windows":
-        print(f"\n[-] Official packaging for {sys_os} is currently suspended. Please run from source.")
-        return
+    tag = platform_tag()
 
     dist_dir = "dist"
     app_name_safe = __app_name__.replace(" ", "_").lower()
@@ -88,7 +93,7 @@ def build_app():
     # Nuitka 默认会将独立打包结果放在 xxx.dist 文件夹中
     nuitka_dist_dir = f"{entry_point.replace('.py', '')}.dist"
 
-    print(f"\n[1/4] Preparing Nuitka Build for {__app_name__} v{__version__} on Windows...")
+    print(f"\n[1/4] Preparing Nuitka Build for {__app_name__} v{__version__} on {sys_os}...")
 
     if os.path.exists(dist_dir):
         shutil.rmtree(dist_dir)
@@ -106,11 +111,13 @@ def build_app():
         "--enable-plugin=anti-bloat",    # 排除常见的冗余库
     ]
 
-    # 不显示终端黑框 (如需调试可注释掉这行)
+    # 不显示终端黑框 (如需调试可注释掉这行)；该选项仅 Windows 存在
     # cmd.append("--windows-disable-console")
 
-    if os.path.exists("Assets/icon.ico"):
+    if sys_os == "Windows" and os.path.exists("Assets/icon.ico"):
         cmd.append("--windows-icon-from-ico=Assets/icon.ico")
+    elif sys_os == "Darwin" and os.path.exists("Assets/icon.icns"):
+        cmd.append("--macos-app-icon=Assets/icon.icns")
 
     # 1. 包含数据文件
     cmd.append("--include-data-dir=Assets=Assets")
@@ -155,7 +162,7 @@ def build_app():
         print("\n[-] Nuitka build failed.")
         return
 
-    output_archive_name = f"{app_name_safe}_win_v{__version__}"
+    output_archive_name = f"{app_name_safe}_{tag}_v{__version__}"
     target_folder = os.path.join(dist_dir, nuitka_dist_dir)
     archive_path = f"{output_archive_name}.zip"
 

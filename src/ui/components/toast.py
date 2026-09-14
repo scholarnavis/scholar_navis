@@ -3,6 +3,8 @@ import logging
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QGraphicsOpacityEffect
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, Signal
 
+from src.core.theme_manager import ThemeManager
+
 logger = logging.getLogger("UI.Toast")
 
 class ToastManager:
@@ -116,7 +118,7 @@ class ToastWidget(QWidget):
                 padding: 10px 20px;
                 background-color: {bg_color};
                 border-radius: 20px;
-                font-family: 'Segoe UI';
+                font-family: {ThemeManager().font_family()};
             }}
         """)
         layout.addWidget(self.lbl)

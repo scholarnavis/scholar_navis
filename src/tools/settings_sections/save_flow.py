@@ -7,7 +7,6 @@ Email 校验 -> 配置落盘 -> 环境变量同步 -> 模型校验任务 -> MCP 
 import logging
 import os
 
-import qdarktheme
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication
 
@@ -185,8 +184,7 @@ class SaveFlowMixin:
 
         new_theme = self.combo_theme.currentText().lower()
 
-        qdarktheme.setup_theme(new_theme)
-        ThemeManager().set_theme(new_theme)
+        ThemeManager().apply_application_theme(new_theme)
 
         try:
             api_port = int(self.input_api_port.text().strip())
@@ -222,8 +220,7 @@ class SaveFlowMixin:
         self.config.save_settings()
 
         new_theme_lower = new_theme.lower()
-        qdarktheme.setup_theme(new_theme_lower)
-        ThemeManager().set_theme(new_theme_lower)
+        ThemeManager().apply_application_theme(new_theme_lower)
 
         if new_s2_key:
             os.environ["S2_API_KEY"] = new_s2_key

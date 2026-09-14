@@ -10,6 +10,7 @@ from src.tools.base_tool import BaseTool
 from src.core.theme_manager import ThemeManager
 from src.core.core_task import TaskManager, TaskMode
 from src.ui.components.dialog import LicenseDialog, ApiProvidersDialog
+from src.ui.components.text_formatter import mono_font_family_css
 from src.core.version import __version__, __app_name__, __description__, __website__, __github__, __dl__
 
 
@@ -236,7 +237,8 @@ class AboutTool(BaseTool):
         self.lbl_desc.setStyleSheet(f"{base_font} color: {tm.color('text_main')}; font-size: 15px; margin-bottom: 5px;")
 
         self.lbl_version.setStyleSheet(
-            f"color: {tm.color('text_muted')}; font-size: 13px; font-family: 'Consolas', monospace;")
+            f"color: {tm.color('text_muted')}; font-size: 13px; "
+            f"font-family: {mono_font_family_css()};")
         self.lbl_update.setStyleSheet(f"{base_font} font-weight: bold; font-size: 13px;")
         if hasattr(self, '_update_link_ui'):
             self._update_link_ui()

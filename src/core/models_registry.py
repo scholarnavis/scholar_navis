@@ -147,8 +147,13 @@ def get_optimal_chunk_settings(embedding_model_id: str, reranker_model_id: str):
 
 
 def resolve_auto_model(model_type="embedding", device="cpu"):
-    # 加入 "dml" (DirectML) 的识别，以兼容未来的 DeviceManager 传参
-    has_gpu = device in ["cuda", "mps", "dml", "directml"]
+    # DeviceManager 返回的是带序号的设备串（"cuda:0" / "trt:0" / "dml:1" / "rocm:0"），
+    # 精确匹配会永远判定为"无 GPU"，导致 auto 永远落到最小模型。按前缀识别。
+    # TensorRT / CoreML 同属硬件加速：漏判会让选了 TRT 的用户反而拿到最小模型。
+    device_str = str(device or "").strip().lower()
+    has_gpu = device_str.startswith((
+        "cuda", "trt", "tensorrt", "dml", "directml", "rocm", "coreml", "mps",
+    ))
 
     if model_type == "embedding":
         if has_gpu:

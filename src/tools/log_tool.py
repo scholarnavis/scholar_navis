@@ -283,7 +283,7 @@ class LogTool(BaseTool):
                         color: {tm.color('text_main')};
                         selection-background-color: {tm.color('accent')};
                         selection-color: {tm.color('bg_base')};
-                        font-family: 'Consolas', monospace; font-size: 13px;
+                        font-family: {tm.mono_font_family()}; font-size: 13px;
                         border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 10px;
                     }}
                 """)

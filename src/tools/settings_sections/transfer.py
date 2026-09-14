@@ -206,7 +206,11 @@ class ConfigTransferMixin:
                 imported_settings = final_data.get("settings", {}).copy()
 
                 imported_device = imported_settings.get("inference_device", "auto")
-                if self.combo_device.findData(imported_device) < 0:
+                imported_index = self.combo_device.findData(imported_device)
+                imported_item = (self.combo_device.model().item(imported_index)
+                                 if imported_index >= 0 else None)
+                # 被禁用（不可用）的条目等同于不存在：导入的配置可能来自另一台机器
+                if imported_item is None or not imported_item.isEnabled():
                     fallback_dev = "cpu" if self.combo_device.findData("cpu") >= 0 else "auto"
                     imported_settings["inference_device"] = fallback_dev
                     from src.ui.components.toast import ToastManager

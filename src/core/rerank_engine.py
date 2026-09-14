@@ -5,6 +5,7 @@ from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 from src.core.models_registry import resolve_auto_model, get_model_conf, ensure_onnx_model, \
     check_model_exists
+from src.core.onnx_provider import resolve_provider
 
 
 class RerankEngine:
@@ -104,26 +105,17 @@ class RerankEngine:
             raise FileNotFoundError("Reranker model directory not found.")
 
         available_providers = ort.get_available_providers()
-        provider = "CPUExecutionProvider"
-        provider_options = None
         device_str = str(self.device).lower()
 
-        if device_str.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
-            provider = "CUDAExecutionProvider"
-            if ":" in device_str:
-                provider_options = {"device_id": int(device_str.split(":")[1])}
-        elif device_str.startswith("dml") and "DmlExecutionProvider" in available_providers:
-            provider = "DmlExecutionProvider"
-            if ":" in device_str:
-                provider_options = {"device_id": int(device_str.split(":")[1])}
-        elif device_str.startswith("rocm") and "ROCmExecutionProvider" in available_providers:
-            provider = "ROCmExecutionProvider"
-            if ":" in device_str:
-                provider_options = {"device_id": int(device_str.split(":")[1])}
-        elif device_str.startswith("coreml") and "CoreMLExecutionProvider" in available_providers:
-            provider = "CoreMLExecutionProvider"
+        # 统一走 onnx_provider 的真实可用性解析（详见该模块说明）。
+        resolved = resolve_provider(device_str)
+        if resolved.degraded:
+            self.logger.warning(f"Reranker device degraded to CPU: {resolved.reason}")
+        self.logger.info(
+            f"Reranker provider resolved: requested={device_str} -> {resolved.provider} "
+            f"(build-time providers: {available_providers})")
 
-        return onnx_dir, provider, provider_options
+        return onnx_dir, resolved.provider, resolved.provider_options
 
     def _load_model_locked(self):
         try:

@@ -147,6 +147,19 @@ def apply_native_titlebar_theme(window, is_dark: bool) -> bool:
         return False
 
 
+def installed_font_families(qfont_database) -> list:
+    """列出系统已安装字体族。
+
+    Qt 6.10 起 ``QFontDatabase`` 已改为纯静态类，实例化会触发 DeprecationWarning
+    且未来版本会移除；旧版本则只提供实例方法。两种调用方式都兼容，因此全应用
+    统一通过本函数访问，避免各处重复写兼容分支。
+    """
+    try:
+        return qfont_database.families()
+    except TypeError:
+        return qfont_database().families()
+
+
 def hex_to_rgba(hex_color: str, alpha: float) -> str:
     """``#RGB`` / ``#RRGGBB`` → ``rgba(r, g, b, a)``，非 hex 值原样返回。
 
@@ -263,72 +276,204 @@ class ThemeManager(QObject):
         "WenQuanYi Micro Hei",
     )
 
-    def font_families(self) -> list:
-        """应用生效字体族列表（按回退优先序），全应用统一字体源。
+    # 西文（拉丁）字体族候选，仅在**系统字体无法解析**时作为兜底使用。
+    #
+    # 设计原则（与 KDE/GNOME 等桌面应用一致）：字体族一律跟随系统设置
+    # （``QApplication.font()``，用户可在系统里配置字体与字号），应用不自作主
+    # 张替换字体族，这样界面才能与桌面其它应用保持一致、并自动适配用户设置。
+    # 因此该列表只在拿不到系统字体时（Qt 平台主题缺失等）才被采用。
+    _FALLBACK_LATIN_FAMILIES = (
+        "Segoe UI",         # Windows 默认 UI 族
+        "Helvetica Neue",   # macOS
+        "Liberation Sans",
+        "Arial",
+        "Noto Sans",
+        "DejaVu Sans",
+        "Roboto",
+        "Cantarell",
+        "Ubuntu",
+    )
 
-        首选"系统/用户正在使用的默认 UI 字体"：取 QApplication.font()
-        经 QFontInfo 解析出的真实命中族——它由 Qt 依据平台与系统区域
-        设置得出（中文 Windows 为雅黑系，macOS 为苹方系），用户自定义
-        系统字体时自动跟随。该族不含中文字形时（如西文环境的
-        Segoe UI），追加系统已安装的中文字形族作按序回退，保证中文
-        渲染不落入衬线宋体。解析结果缓存，失败时兜底 Arial。
+    def font_families(self) -> list:
+        """应用生效字体栈（顺序即渲染优先级），全应用唯一字体源。
+
+        **字体族跟随系统设置**（与 KDE/GNOME 等桌面应用一致）：
+
+        1. 栈首始终是系统默认 UI 字体（``QApplication.font()`` 经 ``QFontInfo``
+           解析）。用户在系统里配置的字体（含其内置的中英文与其它文字）就是
+           应用字体，界面因此与桌面其它应用一致，也不会出现"应用字体与系统
+           不符"的观感问题。
+        2. 仅当系统字体**自身不含中文字形**时，才在栈尾补一个已安装的 CJK 族
+           兜底，避免中文落到系统默认回退（Windows 上常命中宋体）。
+        3. 系统字体完全取不到时（Qt 平台主题缺失等）才退回到内置候选列表。
+
+        解析结果进程内缓存。
         """
         if ThemeManager._font_families_cache is not None:
             return list(ThemeManager._font_families_cache)
 
-        families = []
-        # 1. 系统默认 UI 字体的真实命中族
+        system_default = None
         try:
             from PySide6.QtGui import QFontInfo
             app = QApplication.instance()
             if app is not None:
-                real = QFontInfo(app.font()).family()
-                if real:
-                    families.append(real)
+                system_default = QFontInfo(app.font()).family() or None
         except Exception as e:
             self.logger.warning(f"Failed to read system default font: {e}")
 
-        # 2. 系统已安装字体中挑中文字形族（默认族缺中文时提供按序回退；
-        #    默认族本身已是 CJK 族则不会重复追加）
+        installed = set()
         try:
             from PySide6.QtGui import QFontDatabase
-            db = QFontDatabase()
-            installed = set(db.families())
-            cjk = next((c for c in self._CJK_FAMILY_CANDIDATES if c in installed), None)
-            if cjk and cjk not in families:
-                families.append(cjk)
-            if not families:
-                # QApplication 未就绪等极端情况的静态兜底
-                fallback = next(
-                    (c for c in ("Segoe UI", "Helvetica Neue", "Roboto", "Arial")
-                     if c in installed), None)
-                if fallback:
-                    families.append(fallback)
-                if cjk and cjk not in families:
-                    families.append(cjk)
+            installed = set(installed_font_families(QFontDatabase))
         except Exception as e:
             self.logger.warning(f"QFontDatabase unavailable: {e}")
 
-        families = [f for f in families if f] or ["Arial"]
-        self.logger.info(f"Resolved app font families: {families}")
+        families = []
+        if system_default:
+            families.append(system_default)
+
+        # 系统字体不含中文时才补 CJK 兜底族
+        if not self._font_renders_cjk(system_default):
+            cjk = next((c for c in self._CJK_FAMILY_CANDIDATES if c in installed), None)
+            if cjk:
+                families.append(cjk)
+
+        if not families:
+            # 拿不到系统字体（无平台主题/无 QApplication）：用内置候选兜底
+            fallback = next((c for c in self._FALLBACK_LATIN_FAMILIES if c in installed), None)
+            if fallback:
+                families.append(fallback)
+            cjk = next((c for c in self._CJK_FAMILY_CANDIDATES if c in installed), None)
+            if cjk and cjk not in families:
+                families.append(cjk)
+
+        if not families:
+            families.append("Arial")
+
+        self.logger.info(
+            f"Resolved app font families: {families} (system default={system_default!r})")
         ThemeManager._font_families_cache = families
         return list(families)
 
-    def font_family(self) -> str:
-        """应用统一字体的单族名（带引号），供 QSS / 富文本 HTML 直接注入。
+    @staticmethod
+    def _font_renders_cjk(family) -> bool:
+        """该字体族**自身**是否带中文字形（不依赖系统回退链）。
 
-        富文本引擎不支持字体栈，返回多族栈会导致声明整体失效并触发
-        衬线回退（Windows 中文显示宋体），因此统一返回经 CJK 优先挑选
-        的单族；20+ 处调用点（QSS、HTML div、代码查看器等）自动统一。
+        用于判断"系统默认字体是否已覆盖中文"：已覆盖时把西文族提前，让它专门
+        承担拉丁字形（CJK 字体的西文子集字重偏重且常缺真 Bold）；未覆盖时保持
+        用户设置的族在首位，仅在栈尾补 CJK 族兜底。
+
+        实现要点：**不能用** ``QFontMetrics.inFont("中")``——fontconfig 会为缺失
+        字形挂上回退字体，导致任何西文族都被误判为"支持中文"（DejaVu Sans 实测
+        就会误判）。``QRawFont`` 直接加载目标字体文件、不参与回退，是准确判据。
+        """
+        if not family:
+            return False
+
+        try:
+            from PySide6.QtGui import QFont, QRawFont
+
+            raw = QRawFont.fromFont(QFont(str(family)))
+            if raw.isValid():
+                return bool(raw.supportsCharacter("中"))
+        except Exception as e:
+            logger.debug(f"QRawFont probe failed for {family!r}: {e}")
+
+        # QRawFont 不可用时的兜底：按族名判断（覆盖主流 CJK UI 字体名）
+        low = str(family).lower()
+        return any(name.lower() in low for name in ThemeManager._CJK_FAMILY_CANDIDATES)
+
+    def font_family(self) -> str:
+        """字体栈（带引号、逗号分隔），供 QSS 与富文本 HTML 直接注入。
+
+        Qt 6 的 QSS 与富文本引擎都接受逗号字体栈（按字形回退），因此这里返回
+        完整栈而不是单一族名：英文命中栈首的西文族（字重正常），中文回退到
+        栈内的 CJK 族。需要"单一族名"的 API（``QFont(...)`` 等）请用
+        :meth:`font_family_name`。
+        """
+        stack = ", ".join(f"'{name}'" for name in self.font_families())
+        return stack or "'Arial'"
+
+    def qfont(self, point_size: int = 10, weight=None):
+        """构造带完整字体栈的 ``QFont``（西文族在前、CJK 族随后）。
+
+        ``QFont("Arial")`` 这类单族构造不参与跨族回退：中文会落到系统默认回退
+        （Windows 上常为宋体），英文则失去栈首西文族的字重优势。凡需要用 QFont
+        绘制文本的地方统一走这里（QPainter 自绘、委托等）。
+        """
+        from PySide6.QtGui import QFont
+
+        font = QFont()
+        if point_size:
+            font.setPointSize(point_size)
+        if weight is not None:
+            font.setWeight(weight)
+
+        families = self.font_families()
+        if hasattr(font, "setFamilies") and families:
+            font.setFamilies(families)
+        else:
+            font.setFamily(self.font_family_name())
+        return font
+
+    def font_family_name(self) -> str:
+        """统一字体的**裸族名**（不带引号），供 QFont 等需要纯族名的 API 使用。
+
+        硬编码 "Segoe UI" 在 Linux 上根本不存在，Qt 会静默回退到默认族，
+        与 QSS 注入的族不一致（同一界面出现两种字体）。所有 QFont(...)
+        构造点统一走这里。
         """
         from src.ui.components.text_formatter import pick_cjk_font_family
-        return f"'{pick_cjk_font_family(self.font_families())}'"
+        return pick_cjk_font_family(self.font_families())
+
+    def mono_font_family(self) -> str:
+        """等宽字体裸族名（不带引号），供 QFont 构造使用。"""
+        from src.ui.components.text_formatter import mono_font_family_css
+        return mono_font_family_css().strip("'")
 
     def _get_system_theme(self) -> str:
-        palette = QApplication.instance().palette()
+        """判断桌面深浅色偏好；无 GUI 应用实例（API 模式）时回落 dark。
+
+        优先使用 Qt 6.5+ 的 ``QStyleHints.colorScheme()``（由平台主题/portal
+        提供，Linux 桌面下同样准确）；不可用时再回退到调色板亮度判断。
+
+        注意：调色板判断必须在 qdarktheme 覆盖 QApplication 调色板**之前**
+        执行，否则读到的是库下发的默认浅色调色板，会把暗色桌面误判为浅色。
+        """
+        app = QApplication.instance()
+        if not isinstance(app, QApplication):
+            return "dark"
+
+        try:
+            from PySide6.QtGui import QGuiApplication
+
+            scheme = QGuiApplication.styleHints().colorScheme()
+            if scheme == Qt.ColorScheme.Dark:
+                return "dark"
+            if scheme == Qt.ColorScheme.Light:
+                return "light"
+        except Exception as e:
+            self.logger.debug(f"colorScheme() unavailable, falling back to palette: {e}")
+
+        palette = app.palette()
         bg_color = palette.color(palette.ColorRole.Window)
         return "light" if bg_color.lightness() > 128 else "dark"
 
+
+    #: 目录内容索引缓存：dir -> {小写名: 真实名}。资源目录运行期不变，
+    #: 缓存后大小写回退查找退化为一次字典命中（零 syscall）。
+    _dir_index_cache: dict = {}
+
+    @staticmethod
+    def _dir_index(path: str) -> dict:
+        index = ThemeManager._dir_index_cache.get(path)
+        if index is None:
+            try:
+                index = {entry.lower(): entry for entry in os.listdir(path)}
+            except OSError:
+                index = {}
+            ThemeManager._dir_index_cache[path] = index
+        return index
 
     @staticmethod
     def get_resource_path(*paths):
@@ -343,7 +488,26 @@ class ThemeManager(QObject):
         else:
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-        return os.path.join(base_dir, *paths)
+        target = os.path.join(base_dir, *paths)
+        if not paths or os.path.exists(target):
+            return target
+
+        # 历史调用点混用了 "Assets/Icons" 与 "assets/icons" 两种拼写：Windows /
+        # macOS 的文件系统不区分大小写，二者都能命中；Linux 区分大小写，按错误
+        # 拼写查找会直接失败（症状是整套图标、Mermaid 脚本静默消失）。这里在
+        # 精确路径不存在时按组件逐级做大小写不敏感回退，一次性覆盖所有调用点。
+        return ThemeManager._resolve_case_insensitive(base_dir, paths) or target
+
+    @staticmethod
+    def _resolve_case_insensitive(base_dir: str, paths) -> str:
+        """按大小写不敏感方式逐级解析路径；任一级缺失返回空串。"""
+        current = base_dir
+        for part in paths:
+            real = ThemeManager._dir_index(current).get(str(part).lower())
+            if real is None:
+                return ""
+            current = os.path.join(current, real)
+        return current
 
     def set_theme(self, theme_name: str):
         theme_name = theme_name.lower()
@@ -354,6 +518,109 @@ class ThemeManager(QObject):
         if theme_name in self.themes and self.current_theme != theme_name:
             self.current_theme = theme_name
             self.theme_changed.emit()
+
+        # 调色板必须与样式表同源：qdarktheme 只下发样式表（其调色板刻意保留为
+        # 系统默认），凡样式表未覆盖的部件都会按调色板取色。
+        self.apply_palette()
+
+    def apply_palette(self) -> None:
+        """把当前主题色写入 QApplication 调色板。
+
+        背景：``qdarktheme.setup_theme()`` 内部调用
+        ``load_palette(..., for_stylesheet=True)``，该分支**返回系统默认（浅色）
+        调色板**——库的设计意图是"颜色全部由样式表负责"。结果是：样式表覆盖到
+        的部件是深色，而窗口留白、滚动区视口、工具提示、原生文件对话框、未显式
+        配色的容器等按调色板取色，仍然保持浅色，在 Linux（Breeze/Adwaita 等
+        平台样式参与绘制）上表现为"深色模式里到处冒出浅色块"。
+
+        这里按 ThemeManager 的主题色显式下发调色板，使未被样式表覆盖的部分也
+        与主题一致；浅色/深色切换时同步刷新。
+        """
+        from PySide6.QtGui import QColor, QPalette
+
+        app = QApplication.instance()
+        # API 模式（--api-server）只有 QCoreApplication：没有 setPalette/setStyle，
+        # 此处直接跳过，避免无谓的 AttributeError 日志。
+        if not isinstance(app, QApplication):
+            return
+
+        role = QPalette.ColorRole
+        palette = QPalette()
+        palette.setColor(role.Window, QColor(self.color('bg_main')))
+        palette.setColor(role.WindowText, QColor(self.color('text_main')))
+        palette.setColor(role.Base, QColor(self.color('bg_input')))
+        palette.setColor(role.AlternateBase, QColor(self.color('bg_card')))
+        palette.setColor(role.ToolTipBase, QColor(self.color('bg_card')))
+        palette.setColor(role.ToolTipText, QColor(self.color('text_main')))
+        palette.setColor(role.Text, QColor(self.color('text_main')))
+        palette.setColor(role.PlaceholderText, QColor(self.color('text_muted')))
+        palette.setColor(role.Button, QColor(self.color('btn_bg')))
+        palette.setColor(role.ButtonText, QColor(self.color('text_main')))
+        palette.setColor(role.BrightText, QColor(self.color('danger')))
+        palette.setColor(role.Link, QColor(self.color('accent')))
+        palette.setColor(role.LinkVisited, QColor(self.color('accent_hover')))
+        palette.setColor(role.Highlight, QColor(self.color('accent')))
+        palette.setColor(role.HighlightedText, QColor(self.color('selection_fg')))
+        # Fusion 风格会用 Light/Mid/Dark 画立体边框；一律收敛到主题边框色，
+        # 否则深色主题下会出现发亮的 3D 边线。
+        for flat_role, color_key in (
+            (role.Light, 'btn_hover'), (role.Midlight, 'btn_bg'),
+            (role.Mid, 'border'), (role.Dark, 'border'), (role.Shadow, 'bg_main'),
+        ):
+            palette.setColor(flat_role, QColor(self.color(color_key)))
+
+        disabled = QPalette.ColorGroup.Disabled
+        for disabled_role, color_key in (
+            (role.WindowText, 'text_muted'), (role.Text, 'text_muted'),
+            (role.ButtonText, 'text_muted'), (role.Button, 'bg_main'),
+            (role.Base, 'bg_main'), (role.PlaceholderText, 'text_muted'),
+        ):
+            palette.setColor(disabled, disabled_role, QColor(self.color(color_key)))
+
+        app.setPalette(palette)
+
+    def apply_application_theme(self, theme_name: str) -> None:
+        """把主题应用到整个 QApplication（样式 + 调色板），全局唯一入口。
+
+        调用方只需给出 ``dark`` / ``light`` / ``auto``：
+
+        1. 先把基础样式固定为 Fusion。qdarktheme 的样式表与度量按 Fusion 设计，
+           而 Linux 桌面常注入 Breeze/Adwaita 等平台样式，二者叠加会出现尺寸与
+           配色错位（例如深色下部分控件仍按平台调色板绘制）。
+        2. 应用 qdarktheme 样式表（仅首次会包裹代理样式）。
+        3. 切换 ThemeManager 主题并下发同源调色板。
+        """
+        app = QApplication.instance()
+        if not isinstance(app, QApplication):
+            # 未创建 QApplication（如 API 模式/测试）时不适用 GUI 主题。
+            self.logger.debug("apply_application_theme skipped: no QApplication instance.")
+            return
+
+        # "auto" 必须在 qdarktheme 覆盖调色板之前解析成具体主题，否则
+        # _get_system_theme 读到的是库下发的默认浅色调色板，暗色桌面会误判。
+        resolved = str(theme_name or "dark").lower()
+        if resolved == "auto":
+            resolved = self._get_system_theme()
+
+        # qdarktheme 会设置该属性表示样式已由它接管；此时不再覆盖基础样式，
+        # 否则会把它的代理样式替换掉。
+        if not app.property("_qdarktheme_use_setup_style"):
+            try:
+                app.setStyle("Fusion")
+            except Exception as e:
+                self.logger.warning(f"Could not switch to Fusion style: {e}")
+
+        try:
+            import qdarktheme
+
+            qdarktheme.setup_theme(resolved)
+        except Exception as e:
+            self.logger.error(f"Failed to apply qdarktheme stylesheet: {e}")
+
+        self.set_theme(resolved)
+        # 主题名未变化时 set_theme 不会重复下发调色板，这里兜底一次，保证
+        # 首次启动/样式切换后调色板一定是当前主题的。
+        self.apply_palette()
 
     def color(self, role: str, theme: str = None) -> str:
         """按角色取色。``theme`` 缺省跟随当前主题；显式传入（如 PDF 导出

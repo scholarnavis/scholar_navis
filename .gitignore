@@ -244,3 +244,9 @@ scholar_navis.exe
 _internal
 /benchmark/
 /RSS/
+
+# 平台/开发环境残留产物
+*.lnk
+_tmp_*
+*.nuitka
+

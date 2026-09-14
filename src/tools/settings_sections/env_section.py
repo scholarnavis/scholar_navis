@@ -4,6 +4,9 @@
 通过 `self` 访问其状态（config / layout / 各输入控件）。
 """
 
+import logging
+import sys
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QFormLayout, QHBoxLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QVBoxLayout)
@@ -11,6 +14,8 @@ from PySide6.QtWidgets import (QFormLayout, QHBoxLayout, QLineEdit,
 from src.core.theme_manager import ThemeManager
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
+
+logger = logging.getLogger("Settings.EnvSection")
 
 
 class EnvSectionMixin:
@@ -41,15 +46,47 @@ class EnvSectionMixin:
         self.combo_device.clear()
         for dev in devs:
             self.combo_device.addItem(dev["name"], dev["id"])
+            index = self.combo_device.count() - 1
+            hint = dev.get("hint", "")
+            if hint:
+                self.combo_device.setItemData(index, hint, Qt.ItemDataRole.ToolTipRole)
+            if not dev.get("selectable", True):
+                # 不可用设备（如显卡存在但缺 CUDA 运行库）只作说明展示：
+                # 禁止选中，避免保存成无效配置后再去"测试设备"得到无意义报错。
+                item = self.combo_device.model().item(index)
+                if item is not None:
+                    item.setEnabled(False)
 
         idx_dev = self.combo_device.findData(curr_device)
-        if idx_dev >= 0:
+        saved_selectable = (
+            idx_dev >= 0
+            and self.combo_device.model().item(idx_dev) is not None
+            and self.combo_device.model().item(idx_dev).isEnabled()
+        )
+
+        if saved_selectable:
             self.combo_device.setCurrentIndex(idx_dev)
         else:
-            self.combo_device.addItem(f"Saved Device (Offline): {curr_device}", curr_device)
-            self.combo_device.setCurrentIndex(self.combo_device.count() - 1)
+            fallback = self.combo_device.findData("auto")
+            self.combo_device.setCurrentIndex(fallback if fallback >= 0 else 0)
+            if curr_device and curr_device != "auto":
+                logger.warning(
+                    f"Saved compute device '{curr_device}' is no longer available; "
+                    f"switched to Auto Detect.")
+                self._notify_device_fallback(curr_device)
 
         self.combo_device.blockSignals(False)
+
+    def _notify_device_fallback(self, unavailable_device: str):
+        """告知用户"已保存的设备在当前机器上不可用，已回落到自动选择"。"""
+        try:
+            from src.ui.components.toast import ToastManager
+
+            ToastManager().show(
+                f"Saved compute device '{unavailable_device}' is not available on this "
+                f"machine. Switched to Auto Detect.", "warning")
+        except Exception as e:  # Toast 不可用不应影响设置页加载
+            logger.debug(f"Could not notify device fallback: {e}")
 
     def _update_hardware_html(self):
         if not hasattr(self, 'lbl_hw_info') or not getattr(self, '_cached_hw_info', None): return
@@ -64,7 +101,10 @@ class EnvSectionMixin:
         ])
         if not gpu_str: gpu_str = "None detected"
 
-        has_accel = any(p in info.get('ort_providers', []) for p in
+        # 判定是否真的在加速：优先用"运行期真实可用"的探测结果；旧版本/异常时
+        # 回退到构建期列表（避免字段缺失导致显示异常）。
+        accel_providers = info.get('ort_providers_active') or info.get('ort_providers', [])
+        has_accel = any(p in accel_providers for p in
                         ["CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider",
                          "ROCmExecutionProvider"])
 
@@ -74,7 +114,7 @@ class EnvSectionMixin:
         clean_providers = [p.replace("ExecutionProvider", "") for p in info.get('ort_providers', [])]
 
         html = f"""
-        <div style='font-family: Consolas, "Courier New", monospace; font-size: 13px; color: {tm.color("text_main")}; line-height: 1.6;'>
+        <div style='font-family: {tm.mono_font_family()}; font-size: 13px; color: {tm.color("text_main")}; line-height: 1.6;'>
             <b>OS:</b> {info.get('os', 'Unknown')}<br>
             <b>CPU:</b> {info.get('cpu', 'Unknown')} ({info.get('cpu_cores', 'Unknown')})<br>
             <b>RAM:</b> {info.get('ram_available', 'Unknown')} / {info.get('ram_total', 'Unknown')}<br>
@@ -103,7 +143,12 @@ class EnvSectionMixin:
         # Path selection row
         path_layout = QHBoxLayout()
         self.edit_r_path = QLineEdit()
-        self.edit_r_path.setPlaceholderText("Rscript path, e.g. C:\\Program Files\\R\\R-4.3.1\\bin\\Rscript.exe")
+        if sys.platform == "win32":
+            self.edit_r_path.setPlaceholderText(
+                "Rscript path, e.g. C:\\Program Files\\R\\R-4.3.1\\bin\\Rscript.exe")
+        else:
+            self.edit_r_path.setPlaceholderText(
+                "Rscript path, e.g. /usr/bin/Rscript (leave empty to auto-detect from PATH)")
         self.edit_r_path.textChanged.connect(self._on_r_path_edited)
         path_layout.addWidget(self.edit_r_path, stretch=1)
 
@@ -141,6 +186,7 @@ class EnvSectionMixin:
                 f"<b>Rscript:</b> {info.get('executable', '')}<br>"
                 f"<b>Version:</b> R {info.get('version', 'Unknown')}"
             )
+            detail += self._r_packages_html(engine)
         else:
             status_color = tm.color("warning")
             status_text = "R not detected"
@@ -166,12 +212,46 @@ class EnvSectionMixin:
         self.config.set_r_path(_text.strip() or "")
         self._refresh_r_status()
 
+    def _r_packages_html(self, engine) -> str:
+        """检查核心 R 绘图包并生成状态片段（缺失即给出安装命令）。
+
+        可视化依赖 ggplot2 等包。Linux 发行版通常把 R 包拆成独立软件包
+        （r-cran-* 或需 install.packages），把缺失项提前显示出来可以避免
+        用户在出图阶段才遇到报错。
+        """
+        from src.core.plot_engine import CORE_R_PACKAGES
+
+        tm = ThemeManager()
+        try:
+            status = engine.check_packages(CORE_R_PACKAGES)
+        except Exception as e:
+            logger.warning(f"R package check skipped: {e}")
+            return ""
+
+        missing = [p for p in CORE_R_PACKAGES if not status.get(p)]
+        if not missing:
+            return (f"<br><b>R packages:</b> "
+                    f"<span style='color:{tm.color('success')};'>all core packages available</span>")
+
+        install_cmd = "install.packages(c(" + ", ".join(f'"{p}"' for p in missing) + "))"
+        return (
+            f"<br><b>R packages missing:</b> "
+            f"<span style='color:{tm.color('warning')};'>{', '.join(missing)}</span><br>"
+            f"In an R session run: <code>{install_cmd}</code>"
+        )
+
     def _on_browse_r_path(self):
         from PySide6.QtWidgets import QFileDialog
+
+        # 过滤器按平台给首选项：Windows 的可执行文件是 *.exe，POSIX 上
+        # Rscript 无扩展名（旧的 *.exe 优先过滤在 Linux 上会让用户以为选不中）。
+        if sys.platform == "win32":
+            filters = "Rscript executable (*.exe);;All Files (*)"
+        else:
+            filters = "Rscript executable (Rscript);;All Files (*)"
+
         path, _ = QFileDialog.getOpenFileName(
-            self.widget, "Select Rscript executable", "",
-            "Rscript (*.exe);;Rscript (Rscript);;All Files (*)"
-        )
+            self.widget, "Select Rscript executable", "", filters)
         if path:
             self.edit_r_path.setText(path)
 

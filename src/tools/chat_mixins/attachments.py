@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QFileDialog, QMenu
 
 from src.core.core_task import TaskManager, TaskMode
 from src.core.theme_manager import ThemeManager
+from src.ui.components.text_formatter import mono_font_family_css
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -450,6 +451,7 @@ class ChatAttachmentsMixin:
             export_fmt=default_ext,
             colors=colors,
             font_family=tm.font_family(),
+            mono_font_family=mono_font_family_css(),
             user_icon=user_icon_b64,
             ai_icon=ai_icon_b64
         )

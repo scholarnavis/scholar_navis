@@ -45,6 +45,29 @@ def _html_escape(text) -> str:
     """Escape a value for safe inline HTML injection (used by plot results)."""
     return _html_mod.escape("" if text is None else str(text), quote=False)
 
+
+def _rich_text_icon_uri(icon_name: str) -> str:
+    """把图标解析为绝对 file:// URI，供富文本 ``<img src=...>`` 使用。
+
+    富文本里的相对路径由 QTextBrowser 相对"文档基址"解析，默认基址是进程工作
+    目录：换目录启动或在大小写敏感的文件系统（Linux）上会静默丢图。此处复用
+    ThemeManager 的资源定位（含打包后的 _MEIPASS 分支），保证与其它图标一致。
+
+    仅在真正需要发这条消息时才导入 ThemeManager：Agent 运行时是核心层，
+    不需要在导入期就把它与 UI/主题模块绑定。
+    """
+    try:
+        from pathlib import Path
+
+        from src.core.theme_manager import ThemeManager
+
+        path = ThemeManager.get_resource_path("Assets", "Icons", f"{icon_name}.svg")
+        return Path(path).as_uri() if os.path.exists(path) else ""
+    except Exception as e:  # 图标属装饰性内容，失败不影响消息正文
+        logger.debug(f"Rich-text icon resolution failed for '{icon_name}': {e}")
+        return ""
+
+
 logger = logging.getLogger("Agent.Runtime")
 
 # Safety limits
@@ -398,10 +421,12 @@ class AgentRuntime:
             if any((tc.get("function") or {}).get("name") == "ask_user"
                    for tc in tool_calls):
                 self.log_fn("INFO", "ask_user triggered; pausing run for user input.")
+                _icon = _rich_text_icon_uri("pause_circle")
+                _icon_tag = (f"<img src='{_icon}' width='14' height='14' "
+                             f"style='vertical-align: middle;' /> ") if _icon else ""
                 _emit(
                     "\n\n---\n"
-                    "<img src='assets/icons/pause_circle.svg' width='14' height='14' "
-                    "style='vertical-align: middle;' /> "
+                    f"{_icon_tag}"
                     "<i>Paused for your input — answer the question card above "
                     "and the task will continue.</i>\n"
                 )

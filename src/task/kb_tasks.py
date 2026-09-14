@@ -10,6 +10,7 @@ from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.models_registry import get_model_conf, ensure_onnx_model, ModelMissingError
+from src.core.onnx_provider import resolve_provider
 from src.core.rerank_engine import RerankEngine
 
 logger = logging.getLogger("Task.kb")
@@ -83,41 +84,19 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
         self.tokenizer = AutoTokenizer.from_pretrained(onnx_cache_dir, local_files_only=True)
         available_providers = ort.get_available_providers()
 
-        provider = "CPUExecutionProvider"
-        provider_options = None
         device_str = str(device).lower()
 
         logger.info(f"ONNX Init Requested Device: {device_str}")
         logger.info(f"Available ONNX Providers in Env: {available_providers}")
 
-        if device_str.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
-            provider = "CUDAExecutionProvider"
-            if ":" in device_str:
-                provider_options = {'device_id': int(device_str.split(":")[1])}
+        # 统一走 onnx_provider 的真实可用性解析：构建期支持 ≠ 运行期可用。
+        # 请求的加速设备不可用时降级到 CPU（只影响速度），绝不因此中断索引。
+        resolved = resolve_provider(device_str)
+        provider = resolved.provider
+        provider_options = resolved.provider_options
 
-        elif device_str.startswith("dml") and "DmlExecutionProvider" in available_providers:
-            provider = "DmlExecutionProvider"
-            if ":" in device_str:
-                provider_options = {'device_id': int(device_str.split(":")[1])}
-
-        elif device_str.startswith("rocm") and "ROCmExecutionProvider" in available_providers:
-            provider = "ROCmExecutionProvider"
-            if ":" in device_str:
-                provider_options = {'device_id': int(device_str.split(":")[1])}
-
-        elif device_str.startswith("coreml") and "CoreMLExecutionProvider" in available_providers:
-            provider = "CoreMLExecutionProvider"
-
-        elif device_str == "auto":
-            if "CUDAExecutionProvider" in available_providers:
-                provider = "CUDAExecutionProvider"
-            elif "DmlExecutionProvider" in available_providers:
-                provider = "DmlExecutionProvider"
-            elif "ROCmExecutionProvider" in available_providers:
-                provider = "ROCmExecutionProvider"
-            elif "CoreMLExecutionProvider" in available_providers:
-                provider = "CoreMLExecutionProvider"
-
+        if resolved.degraded:
+            logger.warning(f"Embedding device degraded to CPU: {resolved.reason}")
         logger.info(f"Final Selected ONNX Provider: {provider}")
         logger.info(f"Provider Options: {provider_options}")
 
@@ -134,9 +113,11 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
 
         actual_providers = self.model.providers
         if provider != "CPUExecutionProvider" and actual_providers and actual_providers[0] == "CPUExecutionProvider":
-            fallback_msg = f"CRITICAL: Silent fallback detected! Requested '{provider}' but ONNX Runtime forced 'CPUExecutionProvider'. Hardware acceleration failed."
-            logger.error(fallback_msg)
-            raise RuntimeError(fallback_msg)
+            # 静默回退只降速不降质：记录告警后继续使用已加载的 CPU 模型。
+            logger.error(
+                "Silent fallback detected: requested '%s' but ONNX Runtime activated "
+                "'CPUExecutionProvider'. Continuing on CPU; verify GPU runtime libraries "
+                "in Settings -> Hardware.", provider)
 
     def __call__(self, input: Documents) -> Embeddings:
         import torch.nn.functional as F

@@ -1710,6 +1710,9 @@ class ExportChatTask(BackgroundTask):
         export_fmt = self.kwargs.get('export_fmt')
         colors = self.kwargs.get('colors', {})
         font_family = self.kwargs.get('font_family', 'sans-serif')
+        # 等宽族同样由调用方（主线程，能访问 QFontDatabase）解析后传入：
+        # 硬编码 Consolas 在 Linux 上不存在，导出文档会整体回退到默认字体。
+        mono_font_family = self.kwargs.get('mono_font_family', 'monospace')
         user_icon = self.kwargs.get('user_icon', '')
         ai_icon = self.kwargs.get('ai_icon', '')
 
@@ -1746,15 +1749,15 @@ class ExportChatTask(BackgroundTask):
                     .header-user {{ color: {colors.get('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
                     .header-ai {{ color: {colors.get('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
                     .content {{ margin-top: 5px; }}
-                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }}
-                    code {{ font-family: Consolas, "Courier New", monospace; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
+                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: {mono_font_family}; font-size: 9.5pt; }}
+                    code {{ font-family: {mono_font_family}; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
                     pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
                     blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
                     table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
                     th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
                     th {{ background-color: #f6f8fa; font-weight: bold; }}
                     .doc-header {{ text-align: center; border-bottom: 2px solid {colors.get('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
-                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {colors.get('title_blue')}; font-family: 'Segoe UI', sans-serif; }}
+                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {colors.get('title_blue')}; font-family: {font_family}; }}
                     .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
                 """)
 

@@ -145,13 +145,39 @@ class ModelSectionMixin:
         QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
 
     # ---------- Device test ----------
+    def _selected_device_is_unavailable(self) -> bool:
+        """当前选项是否为"不可用设备说明项"（列表中被禁用的条目）。
+
+        这类条目只是解释"为什么某块显卡用不了"，不是可测试的设备；旧实现允许
+        选中它们，测试后会弹出 'Device unsupported_0 is not a recognized ONNX
+        accelerator' 这种无法行动的提示。这里直接改成给出原因与建议。
+        """
+        index = self.combo_device.currentIndex()
+        model = self.combo_device.model()
+        item = model.item(index) if (model is not None and index >= 0) else None
+        if item is None or item.isEnabled():
+            return False
+
+        hint = item.data(Qt.ItemDataRole.ToolTipRole) or (
+            "This device is listed for information only and cannot be used.")
+        StandardDialog(self.widget, "Device Not Available",
+                       f"{item.text()}\n\n{hint}").exec()
+        return True
+
     def _test_compute_device(self):
         device_id = self.combo_device.currentData()
         if not device_id:
             return
 
-        self.test_dev_pd = ProgressDialog(self.widget, "Device Connection Test",
-                                          f"Testing inference device '{device_id}'...")
+        if self._selected_device_is_unavailable():
+            return
+
+        detail = f"Testing inference device '{device_id}'..."
+        if str(device_id).startswith(("trt", "tensorrt")):
+            detail = ("Testing TensorRT device; the first run compiles engines "
+                      "(may take tens of seconds), later runs reuse the cache...")
+
+        self.test_dev_pd = ProgressDialog(self.widget, "Device Connection Test", detail)
         self.test_dev_pd.show()
 
         self.test_dev_task_mgr = TaskManager()
@@ -269,7 +295,7 @@ class ModelSectionMixin:
         prio_color = tm.color("warning") if "High-End" in prio or "Required" in prio else tm.color("text_muted")
 
         return f"""
-        <div style='margin-top:4px; font-family:Consolas; font-size:10px; color:{tm.color("text_muted")};'>
+        <div style='margin-top:4px; font-family:{tm.mono_font_family()}; font-size:10px; color:{tm.color("text_muted")};'>
            <span style='color:{prio_color}; font-weight:bold;'>[{prio}]</span> 
            | VRAM: <span style='color:{tm.color("text_muted")}'>{vram}</span> 
            | RAM: <span style='color:{tm.color("text_muted")}'>{ram}</span>

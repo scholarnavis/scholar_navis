@@ -9,7 +9,7 @@ import hashlib
 from urllib.parse import urlparse, parse_qs
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, installed_font_families
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,20 @@ def _rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r}, {g}, {b}, {max(0.0, min(1.0, float(alpha)))})"
 
 
+def _icon_uri(icon_name: str) -> str:
+    """把资源图标解析为绝对 ``file://`` URI，供富文本 ``<img src=...>`` 使用。
+
+    相对路径（``assets/icons/x.svg``）由 QTextBrowser 相对"文档基址"解析，而
+    基址默认是进程工作目录：换一个目录启动、或在大小写敏感的文件系统上，
+    图标就会静默丢失。这里统一解析为绝对 URI，与工作目录、平台大小写无关。
+    """
+    path = ThemeManager.get_resource_path("Assets", "Icons", f"{icon_name}.svg")
+    if not os.path.exists(path):
+        logger.debug(f"Icon not found for rich text: {icon_name}.svg")
+        return ""
+    return QUrl.fromLocalFile(path).toString()
+
+
 def resolve_qt_font_families() -> list:
     """返回应用生效字体族列表（代理 ``ThemeManager.font_families``）。
 
@@ -47,14 +61,15 @@ def resolve_qt_font_families() -> list:
 
 
 def qt_font_family_css() -> str:
-    """返回可安全内嵌进 Qt 富文本 style 属性的单族名（带单引号）。
+    """返回可内嵌进 Qt 富文本 style 属性的字体栈（带引号、逗号分隔）。
 
-    只取一个真实族名：Qt 不支持字体栈，多余族名会导致声明整体失效。
-    单族选择走 :func:`pick_cjk_font_family`，保证中文字形由注入族直接
-    渲染，不依赖系统回退链。
+    Qt 6 的富文本引擎支持 CSS 字体栈并按字形逐个回退（``QTextCharFormat``
+    会把整条 ``font-family`` 列表交给 QFont 的字体族列表），因此这里直接下发
+    ``'西文族', '中文族'``：英文命中栈首西文族（字重正常、有原生粗体），中文
+    回退到 CJK 族。旧实现注入单一 CJK 族，英文由 CJK 字体的拉丁子集渲染，
+    小字号下合成加粗、笔画粘连，是"英文又粗又难分辨"的根因。
     """
-    families = resolve_qt_font_families()
-    return f"'{pick_cjk_font_family(families)}'"
+    return ThemeManager().font_family()
 
 
 #: 已知含中日韩字形的族名片段（小写）。均为操作系统自带字体，
@@ -108,7 +123,7 @@ def mono_font_family_css() -> str:
         resolved = "Courier New"
         try:
             from PySide6.QtGui import QFontDatabase
-            installed = set(QFontDatabase().families())
+            installed = set(installed_font_families(QFontDatabase))
             resolved = next(
                 (c for c in _MONO_FAMILY_CANDIDATES if c in installed), resolved)
         except Exception as e:
@@ -440,7 +455,9 @@ class TextFormatter:
 
             action = "collapse" if is_expanded else "expand"
             icon_name = "chevron-down" if is_expanded else "chevron-right"
-            icon_html = f"<img src='assets/icons/{icon_name}.svg' width='14' height='14' style='vertical-align: middle;' />"
+            icon_uri = _icon_uri(icon_name)
+            icon_html = (f"<img src='{icon_uri}' width='14' height='14' "
+                         f"style='vertical-align: middle;' />") if icon_uri else ""
 
             # 根据内容智能显示折叠面板标题
             if mcp_contents and not think_contents:
@@ -754,12 +771,10 @@ class TextFormatter:
                 )
         html = ''.join(parts)
 
-        # Qt 富文本引擎不支持 CSS 逗号字体栈；这里只注入第一个真实族名，
-        # 且 style 属性统一用双引号，避免族名内单引号截断属性导致声明失效。
-        # 同时显式注入正文文字色：正文/段落/列表/加粗等无独立样式的节点由
-        # 容器调色板着色，而调色板（qdarktheme）与 ThemeManager 当前主题在
-        # 极端时序下可能不一致，导致"主题色节点正确、正文节点反色"。外div
-        # 显式 color 让所有无样式文本跟随 theme_key，与主题色节点同源。
+        # 注入全局字体栈（西文族优先、CJK 族回退）与正文文字色：
+        # style 属性统一用双引号，避免族名内单引号截断属性导致声明失效；
+        # 显式 color 让所有无独立样式的节点跟随 theme_key，避免正文与主题色
+        # 节点不同源时出现反色。
         final_html = (f"<div style=\"font-family: {qt_font_family_css()}; "
                       f"color: {_text_main};\">{html}</div>")
 

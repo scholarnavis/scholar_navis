@@ -38,10 +38,9 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.theme_manager import ThemeManager
+from src.ui.components.text_formatter import mono_font_family_css
 
 logger = logging.getLogger(__name__)
-
-_MONO_FAMILY = "'Consolas', 'Courier New', monospace"
 
 
 def _hex_to_rgba(color: str, alpha: float) -> str:
@@ -199,7 +198,7 @@ class SourceCodeViewer(QFrame):
                 border-bottom-left-radius: 5px;
                 border-bottom-right-radius: 5px;
                 padding: 4px;
-                font-family: {_MONO_FAMILY};
+                font-family: {mono_font_family_css()};
                 font-size: 12px;
                 selection-background-color: {accent};
                 selection-color: #ffffff;

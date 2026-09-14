@@ -103,7 +103,7 @@ class FollowUpPillButton(QFrame):
         actual_color = tm.color(self.color_key)
 
         self.lbl.setStyleSheet(
-            f"color: {actual_color}; background: transparent; border: none; font-size: 13px; font-family: 'Segoe UI'; line-height: 1.4;"
+            f"color: {actual_color}; background: transparent; border: none; font-size: 13px; font-family: {tm.font_family()}; line-height: 1.4;"
         )
 
         self._default_style = f"QFrame#FollowUpPill {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 12px; }}"

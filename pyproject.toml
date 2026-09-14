@@ -27,9 +27,14 @@ dependencies = [
     "chardet<6.0",
     "hf-xet>=1.2.0",
     "optimum-onnx>=0.1.0",
-    "onnxruntime-directml>=1.19.0 ; sys_platform == 'win32'",
-    "onnxruntime-gpu>=1.19.0 ; sys_platform == 'linux'",
-    "onnxruntime>=1.19.0 ; sys_platform == 'darwin'",
+    # ONNX Runtime 的 CPU / CUDA / DirectML 是三个独立发行包，但提供同一个
+    # onnxruntime 包目录。三者版本必须严格一致（见 [tool.uv] override-dependencies）：
+    # 版本不一致时后安装者覆盖前者的文件，会出现"元数据版本 ≠ 实际模块版本"的
+    # 隐性损坏，且 CUDA/DirectML 运行库缺失时更难定位。1.24.4 是三个包同时存在的
+    # 最新公共版本（DirectML 版更新较慢，是版本上限的约束方）。
+    "onnxruntime-directml==1.24.4 ; sys_platform == 'win32'",
+    "onnxruntime-gpu==1.24.4 ; sys_platform == 'linux'",
+    "onnxruntime==1.24.4 ; sys_platform == 'darwin'",
     "python-docx>=1.2.0",
     "email-validator>=2.3.0",
     "disposable-email-domains>=0.0.167",
@@ -71,5 +76,13 @@ explicit = true
 torch = { index = "pytorch-cpu" }
 torchaudio = { index = "pytorch-cpu" }
 torchvision = { index = "pytorch-cpu" }
+
+
+[tool.uv]
+# chromadb 会间接拉入 CPU 版 onnxruntime，与平台加速包（linux: onnxruntime-gpu /
+# win32: onnxruntime-directml）并存。两个发行包写入同一目录，版本一致时覆盖是
+# 幂等的、无害的；不一致时则会破坏环境。这里统一钉死版本，避免解析器为不同平台
+# 选出不同构建。
+override-dependencies = ["onnxruntime==1.24.4"]
 
 

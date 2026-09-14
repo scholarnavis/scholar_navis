@@ -55,6 +55,7 @@ class REngine:
                 cls._instance = super().__new__(cls)
                 cls._instance._custom_path = None
                 cls._instance._cached = None
+                cls._instance._package_cache = {}
                 cls._instance._cache_lock = threading.RLock()
         return cls._instance
 
@@ -69,6 +70,8 @@ class REngine:
         with self._cache_lock:
             self._custom_path = path.strip() if path else None
             self._cached = None
+            # 解释器变了，包检查结果不再有效
+            self._package_cache.clear()
         logger.info(f"R engine custom path set: {self._custom_path!r}")
 
     def detect(self) -> dict:
@@ -172,6 +175,68 @@ class REngine:
             candidates.append("/usr/local/bin/Rscript")
 
         return candidates
+
+    def check_packages(self, packages) -> dict:
+        """批量检查 R 包是否已安装，返回 ``{包名: 是否可用}``。
+
+        可视化引擎依赖 ggplot2 等 R 包；Windows 用户通常按官方引导一次装好，
+        而 Linux 发行版的 R 包往往是分离的（打包为 r-cran-* 或需自行
+        ``install.packages``），因此把"缺哪个包"提前暴露给用户，比等到出图时
+        才报错更友好。结果按（解释器 + 包集合）缓存，避免重复拉起 R 进程。
+        """
+        pkg_list = [str(p).strip() for p in packages if str(p).strip()]
+        if not pkg_list:
+            return {}
+
+        info = self.detect()
+        if not info.get("available"):
+            return {p: False for p in pkg_list}
+
+        exe = info.get("executable", "")
+        cache_key = (exe, tuple(pkg_list))
+        with self._cache_lock:
+            cached = self._package_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        quoted = ", ".join(f'"{p}"' for p in pkg_list)
+        snippet = (
+            f".pkgs <- c({quoted});"
+            ".ok <- vapply(.pkgs, function(p) "
+            "if (requireNamespace(p, quietly = TRUE)) '1' else '0', character(1));"
+            "cat(paste(.ok, collapse = ''))"
+        )
+
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        result = {p: False for p in pkg_list}
+        try:
+            proc = subprocess.run(
+                [exe, "--vanilla", "-e", snippet],
+                capture_output=True, text=True, timeout=60,
+                creationflags=creationflags,
+            )
+            flags = (proc.stdout or "").strip().splitlines()
+            flags = flags[-1].strip() if flags else ""
+            if len(flags) == len(pkg_list) and set(flags) <= {"0", "1"}:
+                result = {p: flag == "1" for p, flag in zip(pkg_list, flags)}
+            else:
+                logger.warning(
+                    f"Unexpected R package probe output: {proc.stdout!r} / {proc.stderr!r}")
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.warning(f"R package check failed: {e}")
+
+        missing = [p for p, ok in result.items() if not ok]
+        if missing:
+            logger.warning(f"Missing R packages: {', '.join(missing)}")
+        else:
+            logger.info(f"All {len(pkg_list)} checked R packages are available.")
+
+        with self._cache_lock:
+            self._package_cache[cache_key] = dict(result)
+        return result
 
     @staticmethod
     def _validate(executable: str) -> Optional[dict]:

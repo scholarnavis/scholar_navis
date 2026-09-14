@@ -68,6 +68,122 @@ Given the extreme sensitivity of pre-published biological data, Scholar Navis is
 
 -----
 
+## 🖥️ Platform Support and Running from Source
+
+| Platform | Packaged build | Run from source |
+| :--- | :--- | :--- |
+| Windows 10/11 (x64) | ✅ (`scholar_navis_win_*.zip`) | ✅ |
+| Linux (x86_64) | ✅ (`scholar_navis_linux_*.zip`, build on Ubuntu 22.04+) | ✅ |
+| macOS | — | ✅ (untested in CI) |
+
+### Linux prerequisites
+
+The PySide6 wheels are dynamically linked against the system Qt/X11 stack. Install
+these with your distribution's package manager (Debian/Ubuntu names shown):
+
+```bash
+sudo apt install -y libgl1 libegl1 libglib2.0-0 libdbus-1-3 \
+  libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 \
+  libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 \
+  libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libxcb-xinerama0 \
+  libnss3 libnspr4 libxcomposite1 libxdamage1 libxrandr2 libxshmfence1 \
+  libxtst6 libasound2 libcups2 libdrm2 libgbm1 libfontconfig1
+```
+
+The PDF and Mermaid viewers are backed by QtWebEngine and additionally need
+`libnss3`, `libxcomposite`, `libxdamage`, `libxrandr` and `libxshmfence`.
+
+If a library is missing, the application prints an actionable install command
+before exiting instead of failing with a raw `ImportError`. Headless machines can
+run the API server without any GUI stack:
+
+```bash
+uv run main.py --api-server
+```
+
+### NixOS
+
+PySide6 / QtWebEngine wheels are linked against libraries at standard paths
+(`/lib`, `/usr/lib`), which NixOS does not provide — a plain `uv run main.py`
+fails with `ImportError: libglib-2.0.so.0: cannot open shared object file`.
+Scholar Navis detects this and **relaunches itself inside the FHS environment
+provided by `steam-run`**, adding the few libraries `steam-run` does not ship
+(`nss`/`nspr`, `libXcomposite`, `libXtst`, `libxkbfile` and the `xcb-util*`
+family):
+
+```bash
+nix profile install nixpkgs#steam-run
+uv run main.py
+```
+
+The discovered library directories are cached in
+`~/.cache/scholar_navis/nixos_libs.txt`.
+
+For a permanent system-wide alternative (no `steam-run`), add the libraries to
+`programs.nix-ld.libraries` in `/etc/nixos/configuration.nix` — `glib`, `libx11`,
+`libxcb`, `libxkbcommon`, `libxcomposite`, `libxdamage`, `libxrandr`,
+`libxshmfence`, `libxtst`, `libxkbfile`, `nss`, `nspr`, `alsa-lib`, `cups`,
+`libdrm`, `mesa` — and run `sudo nixos-rebuild switch`.
+
+### Running from source
+
+```bash
+uv sync                # Python 3.12 is required
+uv run main.py
+```
+
+### R runtime (visualization)
+
+Charts are rendered by R (`ggplot2`). Linux distributions ship R packages
+separately — install the runtime plus the core plotting packages:
+
+```bash
+sudo apt install -y r-base              # or: dnf install R / pacman -S r
+Rscript -e 'install.packages(c("ggplot2","dplyr","tidyr","scales","RColorBrewer"))'
+```
+
+Settings → *R Environment* reports the detected interpreter, the version, and any
+missing plotting packages with the exact `install.packages(...)` command.
+
+### Hardware acceleration
+
+ONNX Runtime selects the fastest **actually working** execution provider. The
+device list under Settings → *AI Models Configuration → Compute Device* only
+offers accelerators that were verified on this machine at startup:
+
+| Option | Requirement | Notes |
+| :--- | :--- | :--- |
+| Auto Detect | — | CUDA → DirectML → ROCm → CoreML, CPU as final fallback |
+| CPU | — | Always available; slowest but never fails |
+| TensorRT | `onnxruntime-gpu` + TensorRT (`libnvinfer`) + CUDA 12 + cuDNN 9 | Fastest NVIDIA path. Engines are compiled on first use (tens of seconds) and cached in `models/tensorrt_cache`, so later runs start instantly |
+| CUDA | `onnxruntime-gpu` + CUDA 12 + cuDNN 9 | No engine compilation; good default for NVIDIA |
+| DirectML | `onnxruntime-directml` (Windows) | Works on AMD/Intel/NVIDIA without CUDA |
+| ROCm | ROCm-enabled onnxruntime (Linux) | AMD GPUs |
+| CoreML | macOS build | Apple Silicon |
+
+GPUs that exist but cannot be used are still listed — greyed out and not
+selectable — with the reason (e.g. *"unavailable - CUDA runtime missing"*) and a
+tooltip explaining how to enable them, so the situation is visible instead of
+silently degrading. `TensorRT` is never picked by *Auto Detect*: its first run
+compiles engines, and hiding that cost inside "auto" would look like a hang.
+
+`TensorRT` and `CUDA` need the matching runtime libraries; when they are absent
+the application falls back to CPU, logs the reason, and *Test Compute Device*
+reports exactly what is missing (results are identical, only throughput changes).
+Override the engine cache location with `SCHOLAR_NAVIS_TRT_CACHE` if needed.
+
+### Packaging
+
+```bash
+uv run build_app.py      # PyInstaller (Windows / Linux)
+uv run build_nuitka.py   # Nuitka (Windows / Linux)
+```
+
+Artifacts are named `scholar_navis_<platform>_v<version>.zip`; the release workflow
+builds Windows and Linux in parallel.
+
+-----
+
 ## 📚 Integrated Authoritative Databases and References
 
 Scholar Navis deeply integrates with a consortium of international biological and chemical databases via its dynamic academic agent architecture (MCP/SKILLs) to perform real-time fact-checking.

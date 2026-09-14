@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
             QListWidget {{ 
                 border: none; 
                 background-color: transparent; 
-                font-family: 'Segoe UI', sans-serif;
+                font-family: {tm.font_family()};
                 font-size: 14px; 
                 outline: none; 
             }}

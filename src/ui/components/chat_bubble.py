@@ -18,7 +18,7 @@ from src.core.core_task import TaskManager, TaskMode
 # hex_to_rgba 由核心层统一实现（全应用唯一来源，避免各 UI 模块各自复制）
 from src.core.theme_manager import ThemeManager, hex_to_rgba
 from src.task.chat_tasks import DownloadImageTask
-from src.ui.components.text_formatter import (TextFormatter, pick_cjk_font_family,
+from src.ui.components.text_formatter import (TextFormatter, qt_font_family_css,
                                               resolve_qt_font_families,
                                               naturalize_table_html)
 from src.ui.components.toast import ToastManager
@@ -738,7 +738,9 @@ class ChatBubbleWidget(QWidget):
     def _browser_qss(self) -> str:
         """正文浏览器 / 块内浏览器的 QSS：透明底 + 主题文字色 + 全局字体。"""
         tm = ThemeManager()
-        css_family = f"'{pick_cjk_font_family(resolve_qt_font_families())}'"
+        # 字体栈与 HTML 内联样式同源（西文族优先、CJK 族回退），见
+        # text_formatter.qt_font_family_css 的说明。
+        css_family = qt_font_family_css()
         return f"""
             QTextBrowser {{
                 background-color: transparent; color: {tm.color('text_main')};
@@ -784,13 +786,9 @@ class ChatBubbleWidget(QWidget):
 
     def _apply_theme(self):
         tm = ThemeManager()
-        # QSS 的 font-family 不接受 CSS 通用关键字/逗号栈：system-ui 等
-        # 未知族名会让 Qt 走 last-resort 回退（Windows 下为衬线体），
-        # 且控件字体随后会同步覆盖 QTextDocument 默认字体。这里统一
-        # 注入真实存在且含中文字形的族名：西文族（Segoe UI）会让中文
-        # 走系统回退并常命中宋体，必须直接选中文字形族。
-        _families = resolve_qt_font_families()
-        css_family = f"'{pick_cjk_font_family(_families)}'"
+        # 注入"西文族优先 + CJK 族回退"的字体栈：栈内所有族都经过存在性校验，
+        # 不含 system-ui 之类通用关键字，避免 Qt 走 last-resort 回退。
+        css_family = qt_font_family_css()
 
         # MSG_ERROR 气泡：错误框线（danger 左侧竖条 + 浅色底）由
         # ErrorPanelWidget 统一承载，容器使用与 AI 气泡一致的卡片样式，
@@ -1253,15 +1251,14 @@ class ChatBubbleWidget(QWidget):
             if doc is None:
                 return
 
-            # 沿用控件字号（QSS font-size），仅把字体族换成全局无衬线栈。
+            # 沿用控件字号（QSS font-size），仅把字体族换成全局字体栈。
             f = QFont(browser.font())
             families = resolve_qt_font_families()
             if families:
-                # 主族提前为 CJK 字形族：与 HTML 内联/QSS 注入族保持同一
-                # 族源，中英文均由该族直接渲染；西文族保留在列表尾部作
-                # 为 Qt 6 setFamilies 按序回退的兜底。
-                cjk = pick_cjk_font_family(families)
-                ordered = [cjk] + [f for f in families if f != cjk]
+                # 直接用 ThemeManager 的栈序（西文族在前、CJK 族随后）：
+                # setFamilies 按字形逐个回退，英文取西文族的原生字重，
+                # 中文取 CJK 字形。与 HTML 内联 / QSS 注入族完全同源。
+                ordered = list(families)
                 if hasattr(f, "setFamilies"):
                     try:
                         f.setFamilies(ordered)

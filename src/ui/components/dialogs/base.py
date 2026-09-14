@@ -225,7 +225,7 @@ class BaseDialog(QDialog):
         if b_type == "primary":
             style = f"""
                 QPushButton {{
-                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: 500;
                     background-color: {tm.color('accent')};
                     color: {tm.color('bg_main')};
                     border: 1px solid {tm.color('accent')};
@@ -235,7 +235,7 @@ class BaseDialog(QDialog):
         elif b_type == "danger":
             style = f"""
                 QPushButton {{
-                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: 500;
                     background-color: transparent;
                     color: {tm.color('danger')};
                     border: 1px solid {tm.color('danger')};
@@ -245,7 +245,7 @@ class BaseDialog(QDialog):
         else:
             style = f"""
                 QPushButton {{
-                    border-radius: 4px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 500;
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: 500;
                     background-color: {tm.color('btn_bg')};
                     color: {tm.color('text_main')};
                     border: 1px solid {tm.color('border')};
