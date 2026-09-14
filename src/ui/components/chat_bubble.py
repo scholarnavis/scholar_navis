@@ -15,10 +15,12 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
 from src.core.core_task import TaskManager, TaskMode
-from src.core.theme_manager import ThemeManager
+# hex_to_rgba 由核心层统一实现（全应用唯一来源，避免各 UI 模块各自复制）
+from src.core.theme_manager import ThemeManager, hex_to_rgba
 from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import (TextFormatter, pick_cjk_font_family,
-                                              resolve_qt_font_families)
+                                              resolve_qt_font_families,
+                                              naturalize_table_html)
 from src.ui.components.toast import ToastManager
 from src.ui.components.image_viewer import open_image_viewer
 
@@ -29,19 +31,17 @@ _LINE_HEIGHT_PERCENT = 150
 _BLOCK_BOTTOM_MARGIN = 8.0
 _BLOCK_TOP_MARGIN = 4.0
 
+#: 独立滚动块的高度上限（逻辑像素）。取值兼顾「一次能看到足够内容」与
+#: 「不让单个块吃掉整屏」：思考链约 20 行、代码块约 24 行、引用约 18 行。
+_THINK_MAX_HEIGHT = 340
+_CODE_MAX_HEIGHT = 420
+_QUOTE_MAX_HEIGHT = 300
+#: 滚动条与内容之间的呼吸间距（避免滚动条紧贴表格边框/代码底色）。
+_BLOCK_SCROLL_GAP = 8
+
 
 #: Qt 族名解析已统一由 text_formatter.resolve_qt_font_families 提供（含缓存），
 #: 本模块直接复用，保证 HTML 内联样式与文档默认字体来源一致。
-
-
-def hex_to_rgba(hex_color, alpha):
-    hex_color = hex_color.lstrip('#')
-    if len(hex_color) == 3:
-        hex_color = ''.join([c * 2 for c in hex_color])
-    r = int(hex_color[0:2], 16)
-    g = int(hex_color[2:4], 16)
-    b = int(hex_color[4:6], 16)
-    return f"rgba({r}, {g}, {b}, {alpha})"
 
 
 class ImageAwareTextBrowser(QTextBrowser):
@@ -98,6 +98,166 @@ class ImageAwareTextBrowser(QTextBrowser):
             except (ValueError, OSError):
                 return ""
         return src if os.path.isabs(src) else ""
+
+
+class OverflowBlock(QScrollArea):
+    """为「超宽 / 超高」的富文本块提供独立滚动条。
+
+    Qt 富文本引擎无法在同一个文档内为单个元素（表格、引用、代码块、思考
+    链）单独加滚动条，因此 :meth:`ChatBubbleWidget._render_blocks` 会先把
+    这些块从正文文档中拆出来，再各自放进本容器：
+
+    * ``wrap=False``（表格 / 代码块）：按内容自然宽度布局（不换行），内容
+      宽于容器时出现横向滚动条；
+    * ``wrap=True``（引用 / 思考链）：先按容器宽度换行排版，若仍有内容无
+      法收纳（超长不可断行片段、内嵌宽表）则退化为自然宽度并横向滚动。
+
+    垂直方向由 ``max_height`` 限制（``None`` 表示不限制），超出时出现纵向
+    滚动条；``viewportMargins`` 预留了滚动条与内容之间的呼吸间距，符合常见
+    软件 / 网页的视觉习惯。
+    """
+
+    def __init__(self, html="", *, block_kind="text", horizontal=True,
+                 vertical=True, max_height=None, wrap=False, parent=None):
+        super().__init__(parent)
+        self._block_kind = block_kind
+        self._max_height = max_height
+        self._wrap = wrap
+        self._horizontal = horizontal
+        self._vertical = vertical
+
+        self._inner_html = ""
+        self._html_natural = ""
+        self._html_fill = ""
+        self._applied_html = None
+        self._natural_width = None
+        self._last_html = None
+        self._last_outer_h = -1
+        self._syncing = False
+
+        self.setFrameShape(QFrame.NoFrame)
+        self.setWidgetResizable(False)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded if horizontal else Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded if vertical else Qt.ScrollBarAlwaysOff)
+        # 右侧留出滚动条间距（横向滚动条在底部，由高度计算单独预留）
+        self.setViewportMargins(0, 0, _BLOCK_SCROLL_GAP if horizontal else 0, 0)
+
+        self.browser = ImageAwareTextBrowser()
+        self.browser.setFrameShape(QFrame.NoFrame)
+        self.browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.browser.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        doc = self.browser.document()
+        doc.setDocumentMargin(0)
+        self.setWidget(self.browser)
+
+        if html:
+            self.set_content(html)
+
+    # --- 内容与尺寸同步 ---
+    def set_content(self, html):
+        """更新块内容；内容未变化时直接返回（流式渲染下的高频调用保护）。"""
+        if html == self._last_html:
+            return
+        self._last_html = html
+        self._inner_html = html
+        if self._block_kind == 'table':
+            self._html_natural = naturalize_table_html(html)
+            self._html_fill = html
+        else:
+            self._html_natural = html
+            self._html_fill = html
+        self._applied_html = None
+        self._natural_width = None
+        self._resync(force=True)
+
+    def sync_layout(self):
+        """外部布局变化（窗口/气泡宽度改变）后重新测量并收敛高度。"""
+        self._resync(force=False)
+
+    def _apply_html(self, html):
+        if html != self._applied_html:
+            self._applied_html = html
+            self.browser.setHtml(html)
+
+    def _set_wrap_mode(self, wrap):
+        """切换浏览器换行模式。
+
+        ``NoWrap`` 是获得横向滚动的前提：QTextBrowser 默认按视口宽度换行
+        并同步文档宽度，会彻底吃掉"内容比容器宽"的信息。
+        """
+        mode = QTextEdit.WidgetWidth if wrap else QTextEdit.NoWrap
+        if self.browser.lineWrapMode() != mode:
+            self.browser.setLineWrapMode(mode)
+
+    def _resync(self, force=False):
+        if self._syncing or not self._inner_html:
+            return
+        self._syncing = True
+        try:
+            vw = self.viewport().width()
+            if vw < 20:  # 尚未完成首次布局，避免按错误宽度排版
+                return
+            doc = self.browser.document()
+
+            if self._block_kind == 'table':
+                # 表格：先量一次自然宽度，能放下就撑满容器（width:100% 换行
+                # 排版），放不下则按自然宽度布局并交给横向滚动条。
+                if self._natural_width is None:
+                    self._set_wrap_mode(False)
+                    self._apply_html(self._html_natural)
+                    doc.setTextWidth(-1)
+                    self._natural_width = max(1, int(doc.size().width()))
+                if self._natural_width > vw + 1:
+                    self._set_wrap_mode(False)
+                    self._apply_html(self._html_natural)
+                    doc.setTextWidth(-1)
+                    can_fit_width = False
+                else:
+                    self._set_wrap_mode(True)
+                    self._apply_html(self._html_fill)
+                    doc.setTextWidth(vw)
+                    can_fit_width = True
+            elif self._wrap:
+                self._set_wrap_mode(True)
+                self._apply_html(self._inner_html)
+                doc.setTextWidth(vw)
+                can_fit_width = True
+            else:
+                self._set_wrap_mode(False)
+                self._apply_html(self._inner_html)
+                doc.setTextWidth(-1)
+                can_fit_width = False
+
+            size = doc.size()
+            content_w = max(1, int(size.width()))
+            content_h = max(1, int(size.height()) + 1)
+            if not can_fit_width:
+                content_w = max(content_w, vw)
+
+            # 1px 容差：QTextDocument 的浮点宽度取整后可能与视口差 1px，
+            # 若按严格比较会误判为溢出并弹出多余的横向滚动条。
+            needs_h_scroll = self._horizontal and content_w > vw + 1
+            self.browser.setFixedSize(content_w, content_h)
+
+            outer_h = content_h
+            if self._max_height is not None:
+                outer_h = min(content_h, self._max_height)
+            if needs_h_scroll:
+                outer_h += self.horizontalScrollBar().sizeHint().height()
+
+            if force or outer_h != self._last_outer_h:
+                self._last_outer_h = outer_h
+                self.setFixedHeight(outer_h)
+        finally:
+            self._syncing = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resync(force=False)
 
 
 class _ImageThumb(QLabel):
@@ -231,6 +391,8 @@ class ChatBubbleWidget(QWidget):
     ctx_header: QLabel
     ctx_content: QLabel
     lbl_text: QTextBrowser
+    blocks_host: QWidget
+    blocks_layout: QVBoxLayout
     edit_input: QTextEdit
     btn_widget: QWidget
     btn_layout: QHBoxLayout
@@ -280,6 +442,12 @@ class ChatBubbleWidget(QWidget):
         self.image_loading_timer = QTimer(self)
         self.image_loading_timer.timeout.connect(self._animate_image_loading)
         self.image_loading_dots = 0
+
+        # 正文块渲染状态：lbl_text 承载首个文本块，后续的表格/引用/代码块/
+        # 思考链由 _extra_blocks 中的独立滚动控件承载（见 _render_blocks）。
+        self._extra_blocks = []
+        self._lbl_last_height = -1
+        self._height_sync_pending = False
 
         self.init_ui()
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -335,6 +503,15 @@ class ChatBubbleWidget(QWidget):
             ctx_layout.addWidget(self.ctx_content)
             self.content_layout.addWidget(self.ctx_frame)
 
+        # 正文块容器：lbl_text 承载第一段常规文本，表格/引用/代码块/思考链
+        # 作为独立滚动控件追加在同一竖直布局里，从而在文档内部获得"按块滚动"
+        # 的能力（Qt 富文本自身无法为单个元素加滚动条）。
+        self.blocks_host = QWidget()
+        self.blocks_host.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        self.blocks_layout = QVBoxLayout(self.blocks_host)
+        self.blocks_layout.setContentsMargins(0, 0, 0, 0)
+        self.blocks_layout.setSpacing(6)
+
         self.lbl_text = ImageAwareTextBrowser()
         self.lbl_text.setOpenExternalLinks(False)
         self.lbl_text.setOpenLinks(False)
@@ -347,8 +524,12 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
         # 双击内联图片（AI 生成 / 工具产图）时打开内部查看器
         self.lbl_text.sig_image_activated.connect(self.open_image_viewer)
+        self.blocks_layout.addWidget(self.lbl_text)
 
-        self.lbl_text.document().documentLayout().documentSizeChanged.connect(self._adjust_browser_height)
+        # 文档尺寸变化只做"合并调度"：流式期间 documentSizeChanged 会高频触发，
+        # 逐次同步高度会引发"改高度 → 重排 → 再改高度"的正反馈抖动（闪烁）。
+        self.lbl_text.document().documentLayout().documentSizeChanged.connect(
+            lambda *_: self._schedule_height_sync())
 
         # 布局逻辑：MSG_ERROR 靠左（类似 AI 气泡）。
         # 气泡与弹簧按 17:3 的 stretch 比例分配宽度（气泡约 85%）：此前
@@ -375,7 +556,7 @@ class ChatBubbleWidget(QWidget):
         self.edit_input.installEventFilter(self)
         self.edit_input.textChanged.connect(self.adjust_edit_height)
 
-        self.content_layout.addWidget(self.lbl_text)
+        self.content_layout.addWidget(self.blocks_host)
         self.content_layout.addWidget(self.edit_input)
 
         self.btn_widget = QWidget()
@@ -400,10 +581,7 @@ class ChatBubbleWidget(QWidget):
             self.btn_bubble_retry = QPushButton(" Retry")
             self.btn_bubble_retry.setIcon(tm.icon("refresh", "warning"))
             self.btn_bubble_retry.setCursor(Qt.PointingHandCursor)
-            self.btn_bubble_retry.setStyleSheet("""
-                                QPushButton { background-color: transparent; border: none; color: #ff9800; font-size: 12px; padding: 2px 4px; border-radius: 4px; font-weight: bold;} 
-                                QPushButton:hover { color: #fff; background-color: #f57c00; }
-                            """)
+            # 配色在 _apply_theme 中按主题注入（原硬编码橙/白在浅色下对比不足）
             self.btn_bubble_retry.clicked.connect(lambda: self.sig_retry_clicked.emit(self.index))
             self.btn_bubble_retry.setVisible(False)
             self.btn_layout.addWidget(self.btn_bubble_retry)
@@ -430,11 +608,7 @@ class ChatBubbleWidget(QWidget):
 
             self.btn_confirm = QPushButton(" Confirm")
             self.btn_confirm.setIcon(tm.icon("check-circle", "bg_main"))
-            confirm_style = """
-                QPushButton { background-color: #007acc; border: none; color: white; font-size: 12px; padding: 5px 12px; border-radius: 4px; font-weight: bold;} 
-                QPushButton:hover { background-color: #005a9e; }
-            """
-            self.btn_confirm.setStyleSheet(confirm_style)
+            # 配色在 _apply_theme 中按主题注入（academic_blue 为跨主题固定蓝）
             self.btn_confirm.clicked.connect(self.save_edit)
 
             self.edit_btn_layout.addWidget(self.btn_cancel)
@@ -487,14 +661,14 @@ class ChatBubbleWidget(QWidget):
             # 防止极端情况下文档 idealWidth 撑破容器
             max_w = int(parent.width() * 0.85)
 
-            if self.lbl_text.maximumWidth() != max_w:
-                self.lbl_text.setMaximumWidth(max_w)
+            if self.blocks_host.maximumWidth() != max_w:
+                self.blocks_host.setMaximumWidth(max_w)
                 if hasattr(self, 'edit_input'):
                     self.edit_input.setMaximumWidth(max_w)
+                # 不再调用 updateGeometry()：宽度约束变化本身会让布局失效，
+                # 额外触发一次会在窗口拖动时放大重排抖动。
 
-                self.lbl_text.updateGeometry()
-
-        self._adjust_browser_height()
+        self._schedule_height_sync()
 
     def adjust_edit_height(self):
         doc_h = int(self.edit_input.document().size().height())
@@ -548,7 +722,10 @@ class ChatBubbleWidget(QWidget):
             act_edit = menu.addAction(tm.icon("edit", "text_main"), "编辑 (Edit)")
             act_edit.triggered.connect(self.toggle_edit)
 
-        menu.exec(self.lbl_text.mapToGlobal(pos))
+        source = self.sender()
+        if not isinstance(source, QWidget):
+            source = self.lbl_text
+        menu.exec(source.mapToGlobal(pos))
 
     def disable_edit(self):
         self._can_edit = False
@@ -556,6 +733,54 @@ class ChatBubbleWidget(QWidget):
             self.btn_edit.setVisible(False)
         if self.is_editing:
             self.cancel_edit()
+
+    # --- 3.2 富文本浏览器 / 滚动块的统一样式（随主题刷新） ---
+    def _browser_qss(self) -> str:
+        """正文浏览器 / 块内浏览器的 QSS：透明底 + 主题文字色 + 全局字体。"""
+        tm = ThemeManager()
+        css_family = f"'{pick_cjk_font_family(resolve_qt_font_families())}'"
+        return f"""
+            QTextBrowser {{
+                background-color: transparent; color: {tm.color('text_main')};
+                border: none; padding: 0px;
+                font-size: 14px; font-family: {css_family};
+            }}
+        """
+
+    def _scrollbar_qss(self) -> str:
+        """统一滚动条外观：细圆角滑块、无箭头、悬停高亮，深浅主题自适应。
+
+        与系统/网页的默认体验保持一致（轨道极淡、滑块常显、悬停变色），
+        横向与纵向尺寸一致均为 8px。
+        """
+        tm = ThemeManager()
+        handle = hex_to_rgba(tm.color('text_muted'), 0.4)
+        handle_hover = tm.color('accent')
+        return f"""
+            QScrollBar:vertical {{
+                background: transparent; width: 8px; margin: 0px; border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {handle}; min-height: 24px; border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {handle_hover}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+            QScrollBar:horizontal {{
+                background: transparent; height: 8px; margin: 0px; border: none;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {handle}; min-width: 24px; border-radius: 4px;
+            }}
+            QScrollBar::handle:horizontal:hover {{ background: {handle_hover}; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
+        """
+
+    def _style_block(self, block: "OverflowBlock"):
+        """给独立滚动块套上当前主题的滚动条与浏览器样式。"""
+        block.setStyleSheet(self._scrollbar_qss())
+        block.browser.setStyleSheet(self._browser_qss())
 
     def _apply_theme(self):
         tm = ThemeManager()
@@ -592,22 +817,11 @@ class ChatBubbleWidget(QWidget):
                 }}
             """)
 
-        self.lbl_text.setStyleSheet(f"""
-                    QTextBrowser {{
-                        background-color: transparent; color: {tm.color('text_main')};
-                        border: none; padding: 0px; 
-                        font-size: 14px; font-family: {css_family};
-                    }}
-                    QScrollBar:horizontal {{
-                        background: transparent; height: 8px; margin: 0px;
-                    }}
-                    QScrollBar::handle:horizontal {{
-                        background: {hex_to_rgba(tm.color('text_muted'), 0.4) if 'hex_to_rgba' in globals() else 'rgba(150, 150, 150, 0.35)'}; 
-                        border-radius: 4px;
-                    }}
-                    QScrollBar::handle:horizontal:hover {{ background: {tm.color('accent')}; }}
-                    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
-                """)
+        self.lbl_text.setStyleSheet(self._browser_qss() + self._scrollbar_qss())
+
+        # 拆分出的滚动块（表格 / 引用 / 代码块 / 思考链）同步刷新配色
+        for block in getattr(self, '_extra_blocks', ()):
+            self._style_block(block)
 
         self.edit_input.setStyleSheet(f"""
             QTextEdit {{ 
@@ -621,6 +835,26 @@ class ChatBubbleWidget(QWidget):
         if hasattr(self, 'btn_copy_md'): self.btn_copy_md.setStyleSheet(btn_style)
         if hasattr(self, 'btn_edit'): self.btn_edit.setStyleSheet(btn_style)
         if hasattr(self, 'btn_cancel'): self.btn_cancel.setStyleSheet(btn_style)
+
+        # Retry / Confirm：原为硬编码橙色与固定蓝，改为主题取色后随深浅模式
+        # 自动刷新（浅色主题下 warning 用更深的橙，背景填充时文字取 bg_main
+        # 保证对比度）。
+        if hasattr(self, 'btn_bubble_retry'):
+            self.btn_bubble_retry.setIcon(tm.icon("refresh", "warning"))
+            self.btn_bubble_retry.setStyleSheet(f"""
+                QPushButton {{ background-color: transparent; border: none;
+                               color: {tm.color('warning')}; font-size: 12px;
+                               padding: 2px 4px; border-radius: 4px; font-weight: bold; }}
+                QPushButton:hover {{ color: {tm.color('bg_main')}; background-color: {tm.color('warning')}; }}
+            """)
+        if hasattr(self, 'btn_confirm'):
+            self.btn_confirm.setIcon(tm.icon("check-circle", "bg_main"))
+            self.btn_confirm.setStyleSheet(f"""
+                QPushButton {{ background-color: {tm.color('academic_blue')}; border: none;
+                               color: #ffffff; font-size: 12px; padding: 5px 12px;
+                               border-radius: 4px; font-weight: bold; }}
+                QPushButton:hover {{ background-color: {tm.color('academic_blue_hover')}; }}
+            """)
 
         if hasattr(self, 'ctx_frame'):
             self.ctx_frame.setStyleSheet(f"""
@@ -639,16 +873,28 @@ class ChatBubbleWidget(QWidget):
     def _rerender_on_theme(self):
         """主题切换后重渲染富文本内容。
 
-        ``TextFormatter.markdown_to_html`` 把代码块底色、行内代码底色、
-        链接色、标题色、表格表头底色等以 HTML 内联样式写入文档——内联
-        样式优先级高于 QSS，主题切换时若只刷 QSS，会残留旧主题色的
-        组合（如深色代码底配浅色正文文字）。这里用渲染前的源文本重走
-        渲染管线，让全部内联主题样式随新主题整体重建。
+        ``TextFormatter`` 把标题色、代码块/行内代码底色、表格表头底色等
+        以 HTML 内联样式写入文档（内联样式优先级高于 QSS），此外
+        ``format_chat_text`` 注入的 think 折叠面板与 Mermaid 卡片也自带
+        主题色固化的内联样式。因此主题切换时仅刷 QSS 不够，必须重渲染：
 
-        ``original_text`` 即最近一次渲染的源文本，重渲染幂等；流式输出
-        中的气泡内容为当前累积文本，同样安全。图片下载缓存与卡片去重
-        集保证重渲染不产生副作用（不重复下载、不重复插卡）。
+        1. 首选让所属 ChatTool 用**原始文本**重跑完整渲染管线
+           （``rerender_bubble_from_source``）——只有这样才能刷新 think 面板
+           与 Mermaid 卡片这类由上游生成的区块；
+        2. 拿不到原始文本时回退为对 ``original_text`` 重渲染：渲染管线本身
+           已做幂等处理（先清除上次注入的内联样式再按当前主题重建），因此
+           标题/表格/代码块等仍能正确切换主题。
+
+        图片下载缓存与卡片去重集保证重渲染不产生副作用（不重复下载、
+        不重复插卡）。
         """
+        tool = getattr(self, '_owner_tool', None)
+        if tool is not None and hasattr(tool, 'rerender_bubble_from_source'):
+            try:
+                if tool.rerender_bubble_from_source(self):
+                    return
+            except Exception as e:
+                logger.warning(f"Source-based re-render failed, falling back: {e}")
         try:
             self.set_content(self.original_text)
         except Exception as e:
@@ -940,7 +1186,7 @@ class ChatBubbleWidget(QWidget):
         if getattr(self, '_error_panel', None) is None:
             from src.ui.components.error_panel import ErrorPanelWidget
             self._error_panel = ErrorPanelWidget(data)
-            idx = self.content_layout.indexOf(self.lbl_text)
+            idx = self.content_layout.indexOf(self.blocks_host)
             if idx >= 0:
                 self.content_layout.insertWidget(idx, self._error_panel)
             else:
@@ -948,7 +1194,7 @@ class ChatBubbleWidget(QWidget):
         else:
             self._error_panel.update_payload(data)
 
-        self.lbl_text.setVisible(False)
+        self.blocks_host.setVisible(False)
 
     # --- Token 用量展示（AI 气泡） ---
     def set_token_stats(self, prompt_tokens, completion_tokens, estimated=False):
@@ -987,7 +1233,7 @@ class ChatBubbleWidget(QWidget):
             "background: transparent; border: none; padding: 0px;")
 
     # --- 4.8 排版优化：富文本文档字体 / 行距 / 段距 ---
-    def _ensure_document_font(self):
+    def _ensure_document_font(self, browser=None):
         """把 QTextDocument 默认字体设为全局无衬线栈（必须在 setText 之前调用）。
 
         Qt 在 ``setText`` 解析 HTML 时即用当时的默认字体固化未显式指定
@@ -995,14 +1241,20 @@ class ChatBubbleWidget(QWidget):
         文档默认字体。因此除 ``setText`` 前调用外，还需在 QSS 重新应用
         （``_apply_theme``）后调用，防止 QSS polish 触发的 FontChange 把
         默认字体覆盖为 Qt 未知族名的 last-resort 回退（衬线体）。
+
+        同一方法服务 ``lbl_text`` 与拆分出的滚动块浏览器（``browser`` 参数），
+        保证两者排版完全同源。
         """
+        browser = browser if browser is not None else getattr(self, 'lbl_text', None)
+        if browser is None:
+            return
         try:
-            doc = self.lbl_text.document()
+            doc = browser.document()
             if doc is None:
                 return
 
             # 沿用控件字号（QSS font-size），仅把字体族换成全局无衬线栈。
-            f = QFont(self.lbl_text.font())
+            f = QFont(browser.font())
             families = resolve_qt_font_families()
             if families:
                 # 主族提前为 CJK 字形族：与 HTML 内联/QSS 注入族保持同一
@@ -1017,13 +1269,17 @@ class ChatBubbleWidget(QWidget):
                         f.setFamily(ordered[0])
                 else:
                     f.setFamily(ordered[0])
-            doc.setDefaultFont(f)
-            # 控件字体与文档默认字体保持同源：QSS polish / FontChange 触发的
-            # widget→document 字体同步只会回写同一个正确值，而非衬线回退。
-            self.lbl_text.setFont(f)
+            # 流式渲染会高频调用本方法；字体未变化时跳过写回，避免触发
+            # 文档字体变更信号与随之而来的整篇重排。
+            if doc.defaultFont() != f:
+                doc.setDefaultFont(f)
+            if browser.font() != f:
+                # 控件字体与文档默认字体保持同源：QSS polish / FontChange 触发的
+                # widget→document 字体同步只会回写同一个正确值，而非衬线回退。
+                browser.setFont(f)
 
             # 诊断日志：每个气泡仅记录一次，便于核对实际命中的字体族。
-            if not getattr(self, "_font_diag_logged", False):
+            if browser is getattr(self, 'lbl_text', None) and not getattr(self, "_font_diag_logged", False):
                 from PySide6.QtGui import QFontInfo
                 try:
                     resolved = QFontInfo(f).family()
@@ -1035,14 +1291,17 @@ class ChatBubbleWidget(QWidget):
         except Exception as e:
             logger.debug(f"Failed to set document default font: {e}")
 
-    def _apply_typography(self):
+    def _apply_typography(self, browser=None):
         """逐块拉大行距与段落/列表项间距（在 setText 之后调用）。
 
         字体族由 ``_ensure_document_font`` 在 setText 前设置；本方法只负责
         排版密度，改善长时间阅读的舒适度。
         """
+        browser = browser if browser is not None else getattr(self, 'lbl_text', None)
+        if browser is None:
+            return
         try:
-            doc = self.lbl_text.document()
+            doc = browser.document()
             if doc is None:
                 return
 
@@ -1090,20 +1349,13 @@ class ChatBubbleWidget(QWidget):
                     self.loading_timer.stop()
 
         try:
+            # 表格/表头/单元格的主题化样式已统一由 TextFormatter.markdown_to_html
+            # 注入（theme_key 决定配色），此处不再二次替换：消费方（气泡、PDF
+            # 导出等）拿到的是同一套样式，避免"某一方漏主题化"。
             html = TextFormatter.markdown_to_html(text)
             tm = ThemeManager()
-            border_color = tm.color('border')
-            # 表头底色统一取自主题（原浅色 #f5f5f5 硬编码改为 border 低透明
-            # 叠加），保证表头与正文行在两种主题下都有稳定的层次对比。
-            bg_header = (hex_to_rgba(tm.color('bg_input'), 0.5)
-                         if tm.current_theme == 'dark'
-                         else hex_to_rgba(tm.color('border'), 0.12))
-
-            html = html.replace('<table>',
-                                f'<table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; border-color: {border_color}; margin-top: 10px; margin-bottom: 10px; width: 100%; table-layout: fixed; word-break: break-all;">')
-
-            html = html.replace('<th>',
-                                f'<th style="background-color: {bg_header}; font-weight: bold; text-align: left;">')
+            _accent = tm.color('accent')
+            _danger = tm.color('danger')
 
             def _convert_svg_to_png(svg_path: str) -> str:
                 """Convert an SVG file to PNG (cached) for inline display.
@@ -1195,7 +1447,7 @@ class ChatBubbleWidget(QWidget):
                         return (
                             f'<a href="{cite_url}" style="text-decoration:none;">'
                             f'<div style="display:inline-block; padding:14px 18px; border:2px dashed '
-                            f'#05B8CC; border-radius:8px; margin-top:5px; color:#05B8CC; '
+                            f'{_accent}; border-radius:8px; margin-top:5px; color:{_accent}; '
                             f'font-weight:bold;">📄 View PDF (open in internal viewer)</div></a>'
                         )
 
@@ -1220,7 +1472,7 @@ class ChatBubbleWidget(QWidget):
 
                     elif src_url in getattr(self, 'download_failed_urls', {}):
                         error_msg = self.download_failed_urls[src_url]
-                        return f'<div style="color:#ff6b6b; padding: 15px; border: 2px dashed #ff6b6b; border-radius: 8px; width: 400px; margin-top: 5px;">❌ <b>Image download failed.</b><br><span style="font-size: 12px;">{error_msg}</span></div>'
+                        return f'<div style="color:{_danger}; padding: 15px; border: 2px dashed {_danger}; border-radius: 8px; width: 400px; margin-top: 5px;">❌ <b>Image download failed.</b><br><span style="font-size: 12px;">{error_msg}</span></div>'
 
                     else:
                         import time
@@ -1233,29 +1485,167 @@ class ChatBubbleWidget(QWidget):
                                 self.image_loading_timer.start(500)
 
                         dots = "." * getattr(self, 'image_loading_dots', 0)
-                        return f'<div style="color:#05B8CC; padding: 20px; border: 2px dashed #05B8CC; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">Downloading image to local cache, please wait. {dots}</span></div>'
+                        return f'<div style="color:{_accent}; padding: 20px; border: 2px dashed {_accent}; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">Downloading image to local cache, please wait. {dots}</span></div>'
 
                 return match.group(0)
 
             html = re.sub(r'<img[^>]+src="([^">]+)"[^>]*>', repl_img, html)
 
             self._ensure_document_font()
-            self.lbl_text.setText(html)
-            self._apply_typography()
-            self.lbl_text.adjustSize()
-            self.content_container.adjustSize()
-            self.adjustSize()
-            self.updateGeometry()
+            self._render_blocks(html)
 
         except Exception as e:
             logger.warning(f"Failed to render bubble content: {e}")
-            self._ensure_document_font()
-            self.lbl_text.setText(text)
-            self._apply_typography()
-            self.lbl_text.adjustSize()
-            self.content_container.adjustSize()
-            self.adjustSize()
-            self.updateGeometry()
+            self._set_browser_text(self.lbl_text, text)
+
+    # --- 5.1 分块渲染：正文 / 表格 / 引用 / 代码块 / 思考链 ---
+    def _render_blocks(self, html):
+        """把完整富文本按块拆分，逐块交给合适的控件渲染。
+
+        * 第一段 ``text`` 块复用 ``lbl_text``（保持既有的字体、样式、链接与
+          图片交互连接），其余块（含后续 text 块）作为独立滚动控件承载；
+        * 最终按块在原文中的顺序重排 ``blocks_layout``（思考链通常排在正文
+          之前，不能简单把 lbl_text 固定在首位）；
+        * 复用同类型的既有控件，流式渲染下只在尾部增长时零重建；
+        * 整个过程批量关闭重绘（``setUpdatesEnabled``），结束后统一恢复，
+          避免流式中高频调用时中间态被反复绘制造成闪烁。
+        """
+        blocks = TextFormatter.split_overflow_blocks(html)
+        text_slot = next((i for i, (kind, _) in enumerate(blocks) if kind == 'text'), -1)
+
+        self.setUpdatesEnabled(False)
+        try:
+            # 1) 除 lbl_text 之外的全部块（顺序即其在文档中的先后顺序）
+            extras_target = [bf for i, bf in enumerate(blocks) if i != text_slot]
+            extra_widgets = self._acquire_extra_blocks(extras_target)
+
+            # 2) lbl_text：承载第一段文本；没有文本块时隐藏（不占位）
+            if text_slot >= 0:
+                if not self.lbl_text.isVisible():
+                    self.lbl_text.setVisible(True)
+                self._set_browser_text(self.lbl_text, blocks[text_slot][1])
+            else:
+                self.lbl_text.setText("")
+                self.lbl_text.setVisible(False)
+
+            # 3) 按块顺序重排并写入内容
+            order = []
+            ei = 0
+            for i, (kind, fragment) in enumerate(blocks):
+                if i == text_slot:
+                    order.append((self.lbl_text, None))
+                else:
+                    order.append((extra_widgets[ei], fragment))
+                    ei += 1
+
+            for position, (widget, fragment) in enumerate(order):
+                if self.blocks_layout.indexOf(widget) != position:
+                    self.blocks_layout.removeWidget(widget)
+                    self.blocks_layout.insertWidget(position, widget)
+                if fragment is not None:
+                    self._fill_block(widget, fragment)
+        finally:
+            self.setUpdatesEnabled(True)
+            self.update()
+
+        self._schedule_height_sync()
+
+    def _acquire_extra_blocks(self, extras_target):
+        """按目标块序列复用 / 新建滚动块控件，返回与目标一一对应的控件列表。
+
+        流式渲染时块序列基本只在尾部增长，按下标比对类型即可命中绝大多数
+        复用分支；类型变化（例如表格从「文本」变为「表格」）才从该下标起
+        重建（一次性代价）。
+        """
+        existing = self._extra_blocks
+        widgets = []
+        for i, (kind, _fragment) in enumerate(extras_target):
+            if i < len(existing) and existing[i]._block_kind == kind:
+                widget = existing[i]
+                if not widget.isVisible():
+                    widget.setVisible(True)
+            else:
+                if i < len(existing):
+                    self._discard_blocks(existing, i)
+                widget = self._create_block(kind)
+                self.blocks_layout.addWidget(widget)
+                existing.append(widget)
+            widgets.append(widget)
+
+        if len(existing) > len(extras_target):
+            self._discard_blocks(existing, len(extras_target))
+        return widgets
+
+    def _set_browser_text(self, browser, html):
+        """写入 HTML 并固化字体/排版（对文本块与滚动块一致）。"""
+        self._ensure_document_font(browser)
+        browser.setText(html)
+        self._apply_typography(browser)
+
+    def _fill_block(self, block, html):
+        """写入块内容：字体必须在写 HTML 前固化，排版在写 HTML 后应用。"""
+        self._ensure_document_font(block.browser)
+        block.set_content(html)
+        self._apply_typography(block.browser)
+
+    def _discard_blocks(self, existing, start):
+        """移除并回收下标 ``start`` 起的滚动块控件。"""
+        for widget in existing[start:]:
+            self.blocks_layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+        del existing[start:]
+
+    def _create_block(self, kind):
+        """按块类型创建带独立滚动条的控件（内容随后经 ``_fill_block`` 写入）。"""
+        if kind == 'text':
+            # 后续文本块（正文被表格/代码块打断后的延续段）：与 lbl_text 一致，
+            # 高度自适应、不出现滚动条。
+            block = OverflowBlock(block_kind=kind, horizontal=False,
+                                  vertical=False, max_height=None, wrap=True)
+        elif kind == 'think':
+            # 思考链：限制最大高度，超出后内部纵向滚动；横向仅在内嵌宽内容
+            # 时出现（换行排版优先）。
+            block = OverflowBlock(block_kind=kind, horizontal=True,
+                                  vertical=True, max_height=_THINK_MAX_HEIGHT, wrap=True)
+        elif kind == 'table':
+            # 表格：只关心左右太宽；高度按内容自适应（不压缩列宽）。
+            block = OverflowBlock(block_kind=kind, horizontal=True,
+                                  vertical=False, wrap=False)
+        elif kind == 'code':
+            # 代码块：上下太长与左右太宽都要可滚动。
+            block = OverflowBlock(block_kind=kind, horizontal=True,
+                                  vertical=True, max_height=_CODE_MAX_HEIGHT, wrap=False)
+        else:  # quote
+            # 引用块：上下太长与左右太宽都要可滚动。
+            block = OverflowBlock(block_kind=kind, horizontal=True,
+                                  vertical=True, max_height=_QUOTE_MAX_HEIGHT, wrap=True)
+
+        browser = block.browser
+        browser.setOpenExternalLinks(False)
+        browser.setOpenLinks(False)
+        browser.setContextMenuPolicy(Qt.CustomContextMenu)
+        browser.customContextMenuRequested.connect(self.show_context_menu)
+        browser.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
+        browser.sig_image_activated.connect(self.open_image_viewer)
+
+        self._style_block(block)
+        return block
+
+    # --- 5.2 高度同步（合并调度，杜绝布局正反馈抖动） ---
+    def _schedule_height_sync(self):
+        """请求一次延迟的高度收敛；同一事件循环内多次请求只执行一次。"""
+        if self._height_sync_pending:
+            return
+        self._height_sync_pending = True
+        QTimer.singleShot(0, self._sync_heights)
+
+    def _sync_heights(self):
+        self._height_sync_pending = False
+        if self.lbl_text.isVisible():
+            self._adjust_browser_height()
+        for block in getattr(self, '_extra_blocks', ()):
+            block.sync_layout()
 
     def clean_up_images(self):
         for path in self.downloaded_images.values():
@@ -1357,17 +1747,29 @@ class ChatBubbleWidget(QWidget):
                """)
 
     def _adjust_browser_height(self):
-        doc_height = int(self.lbl_text.document().size().height())
+        """把正文浏览器高度收敛到文档内容高度（幂等，变化时才写回）。
+
+        仅在目标高度真正变化时调用 ``setFixedHeight``：流式期间文档尺寸
+        会高频变化，反复写入相同高度会持续触发父布局失效，形成
+        「改高度 → 重排 → 再改高度」的抖动（视觉上表现为闪烁）。
+        """
+        if not self.lbl_text.isVisible():
+            return
+        doc = self.lbl_text.document()
+        doc_height = int(doc.size().height())
         sb = self.lbl_text.horizontalScrollBar()
         sb_height = 0
 
         if sb.isVisible():
             sb_height = sb.height()
         else:
-            if self.lbl_text.document().idealWidth() > self.lbl_text.viewport().width():
+            if doc.idealWidth() > self.lbl_text.viewport().width():
                 sb_height = sb.sizeHint().height()
 
-        self.lbl_text.setFixedHeight(doc_height + sb_height + 15)
+        target = doc_height + sb_height + 15
+        if target != self._lbl_last_height:
+            self._lbl_last_height = target
+            self.lbl_text.setFixedHeight(target)
 
 
     def _start_image_download(self, url):
@@ -1548,7 +1950,7 @@ class ChatBubbleWidget(QWidget):
             scroll_area = self.window().findChild(QScrollArea)
             current_scroll = scroll_area.verticalScrollBar().value() if scroll_area else 0
 
-            self.lbl_text.setVisible(False)
+            self.blocks_host.setVisible(False)
             self.btn_widget.setVisible(False)
 
             self.content_layout.setSpacing(4)
@@ -1574,7 +1976,7 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.setSpacing(6)
         self.content_layout.setContentsMargins(12, 12, 12, 12)
 
-        self.lbl_text.setVisible(True)
+        self.blocks_host.setVisible(True)
         self.btn_widget.setVisible(True)
 
     def eventFilter(self, obj, event):

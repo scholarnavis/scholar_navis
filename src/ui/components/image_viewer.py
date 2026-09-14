@@ -20,7 +20,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QPushButton, QFileDialog)
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,9 @@ class ImageViewerDialog(QDialog):
             QDialog {{ background-color: {tm.color('bg_main')}; }}
             QLabel {{ color: {tm.color('text_main')}; }}
         """)
+        # 查看器是独立顶层窗口，其原生标题栏不继承主窗口的深浅色状态，
+        # 必须自己按当前主题设置一次（否则深色模式下标题栏仍是系统浅色）。
+        apply_native_titlebar_theme(self, tm.current_theme == "dark")
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)

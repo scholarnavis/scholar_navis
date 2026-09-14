@@ -127,10 +127,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
         self.btn_ribbon_state.setCursor(Qt.PointingHandCursor)
         self.btn_ribbon_state.setFixedWidth(90)
-        self.btn_ribbon_state.setStyleSheet("""
-                            QPushButton { background: transparent; border: 1px solid #555; border-radius: 4px; color: #aaa; font-size: 11px; padding: 2px 6px; text-align: left;}
-                            QPushButton:hover { background: #333; color: #fff; }
-                        """)
+        self._apply_ribbon_button_style()
 
         # 顶栏两行：第 1 行 = 主模型（已含 Vision），第 2 行 = KB + 收起按钮。
         # Compute Device 与 Translator 均按要求移除。
@@ -271,7 +268,44 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         self._render_timer.timeout.connect(self._throttled_render)
         self._is_rendering_dirty = False
 
+        # 顶栏"收起状态"按钮的配色随主题刷新（本工具无独立 _apply_theme，
+        # 子控件各自订阅主题信号，这里补上本文件自有的控件）。
+        ThemeManager().theme_changed.connect(self._apply_ribbon_button_style)
+
         return self.widget
+
+    def _apply_ribbon_button_style(self):
+        """按当前主题刷新顶栏 ribbon 状态按钮（Pinned / Hover / Collapsed）。"""
+        btn = getattr(self, 'btn_ribbon_state', None)
+        if btn is None:
+            return
+        tm = ThemeManager()
+        state_icons = {"Pinned": "keep", "Hover": "menu", "Collapsed": "down"}
+        btn.setIcon(tm.icon(state_icons.get(getattr(self, 'ribbon_state', 'Pinned'), "keep"),
+                            "text_muted"))
+        btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: 1px solid {tm.color('border')};
+                           border-radius: 4px; color: {tm.color('text_muted')};
+                           font-size: 11px; padding: 2px 6px; text-align: left;
+                           font-family: {tm.font_family()}; }}
+            QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('text_main')}; }}
+        """)
+
+        # 悬浮导航圆按钮同样随主题刷新（构造期已按旧主题着色）
+        overlay_style = f"""
+            QPushButton {{
+                background-color: {tm.color('accent')};
+                border-radius: 20px; border: 1px solid {tm.color('border')};
+            }}
+            QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
+        """
+        for key, icon_name in (('btn_scroll_bottom', 'down'),
+                               ('btn_jump_msg_top', 'chevron-up')):
+            ob = getattr(self, key, None)
+            if ob is None:
+                continue
+            ob.setIcon(tm.icon(icon_name, "bg_main"))
+            ob.setStyleSheet(overlay_style)
 
     def eventFilter(self, obj, event):
         if obj == self.scroll_area and event.type() == QEvent.Resize:

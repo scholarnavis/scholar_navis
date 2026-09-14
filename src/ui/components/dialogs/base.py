@@ -1,6 +1,4 @@
 """Base dialog frame: themed container with anchored sizing and footer buttons."""
-import sys
-
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QWidget
@@ -66,6 +64,10 @@ class BaseDialog(QDialog):
 
         self._parent_ref = parent
         QTimer.singleShot(0, self._adjust_and_anchor)
+        # 首次主题应用：对话框是独立顶层窗口，其原生标题栏不会继承主窗口的
+        # 深浅色状态，必须自己设一次。放到事件循环第一帧（而非 __init__ 内同步
+        # 调用），因为子类重写的 _apply_theme 会访问其 __init__ 后段才创建的控件。
+        QTimer.singleShot(0, self._apply_theme)
 
     def _adjust_and_anchor(self):
         """动态尺寸结算修复：去除套娃滚动条，利用原生 sizeHint 进行精准测量"""
@@ -103,29 +105,11 @@ class BaseDialog(QDialog):
         self.move(target_x, target_y)
 
     def _apply_theme(self):
-        from src.core.theme_manager import ThemeManager
+        from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
         tm = ThemeManager()
 
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                from PySide6.QtGui import QColor
-
-                # 提取当前背景色，通过亮度判断是否处于深色模式
-                is_dark = QColor(tm.color('bg_main')).lightness() < 128
-
-                hwnd = int(self.winId())
-                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-                value = ctypes.c_int(1 if is_dark else 0)
-
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_USE_IMMERSIVE_DARK_MODE,
-                    ctypes.byref(value),
-                    ctypes.sizeof(value)
-                )
-            except Exception:
-                pass
+        # 原生标题栏跟随主题（统一由核心层实现，含 64 位句柄与 Win11 兜底）
+        apply_native_titlebar_theme(self, tm.current_theme == "dark")
 
         self.setStyleSheet(f"""
             QDialog, QWidget#ContentWidget {{

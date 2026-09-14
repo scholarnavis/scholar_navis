@@ -193,7 +193,10 @@ class ChatAttachmentsMixin:
             safe_path = quote(path)
             safe_name = quote(f_name)
             link = f"cite://view?path={safe_path}&page=1&name={safe_name}"
-            self.external_context_html += f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {f_name}</a></div>"
+            self.external_context_html += (
+                f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' "
+                f"style='color:{ThemeManager().color('accent')}; text-decoration:none;'>"
+                f"📄 {f_name}</a></div>")
 
         if self.external_files:
             names = []

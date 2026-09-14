@@ -41,6 +41,9 @@ class ChatBubblesMixin:
         index = len(self.history)
         bubble = ChatBubbleWidget(text, is_user, index, context_html=context_html)
         bubble.index = index
+        # 反向引用：气泡在主题切换时需要回到"原始文本"重跑完整渲染管线
+        # （think 面板 / Mermaid 卡片等上游生成区块的主题色只能这样刷新）。
+        bubble._owner_tool = self
 
         # 用户消息携带的图片附件：在气泡内渲染可点击的缩略图条
         if image_files:
@@ -59,11 +62,12 @@ class ChatBubblesMixin:
         bubble.sig_deep_plan_confirm.connect(self.handle_deep_plan_confirm)
         bubble.sig_deep_plan_skip.connect(self.handle_deep_plan_skip)
 
+        # 链接路由统一走气泡的 sig_link_clicked：正文块（lbl_text）与拆分出的
+        # 滚动块（表格 / 引用 / 代码块 / 思考链）内部的 anchorClicked 都会转发到
+        # 该信号，避免只连接 lbl_text 导致其他块里的链接（cite://、think:// 等）失效。
+        bubble.sig_link_clicked.connect(self.handle_link_click)
         if is_user:
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
-            bubble.sig_link_clicked.connect(self.handle_link_click)
-        else:
-            bubble.lbl_text.anchorClicked.connect(self.handle_link_click)
 
         self.chat_layout.addWidget(bubble)
 
@@ -110,9 +114,46 @@ class ChatBubblesMixin:
         user_bubble = self.add_bubble(user_text, is_user=True)
         user_bubble.disable_edit()
         ai_bubble = self.add_bubble("", is_user=False)
+        # 记住原始文本：演示气泡不进 history，主题切换时只能靠这里回源重渲染
+        ai_bubble._raw_source = ai_text
         ai_bubble.set_content(self._format_response(ai_text, ai_bubble.index))
         logger.info("Dev render preview injected (2 bubbles, no history, no LLM call).")
         return ai_bubble
+
+    def rerender_bubble_from_source(self, bubble) -> bool:
+        """用"原始文本"重跑完整渲染管线，刷新单个气泡的全部主题样式。
+
+        与 ``handle_link_click`` 的局部重绘同一思路，但可被气泡自身在
+        ``theme_changed`` 时调用。优先级：
+
+        1. 流式中的当前回答 -> ``current_ai_text``（最新累积文本）；
+        2. 气泡自带的 ``_raw_source``（如开发者模式的演示气泡）；
+        3. 会话历史 ``history[index]['content']``。
+
+        取不到原始文本时返回 False，由调用方回退为对已渲染内容重渲染。
+        """
+        idx = getattr(bubble, 'index', -1)
+        raw = ""
+        if bubble is getattr(self, 'current_ai_bubble', None):
+            # 流式中的回答与 _throttled_render 保持一致：先分离追问块，
+            # 避免重渲染瞬间把 suggestions 混进正文。
+            streaming = getattr(self, 'current_ai_text', "") or ""
+            if streaming.strip():
+                try:
+                    from src.core.follow_ups import split_follow_ups
+                    split = split_follow_ups(streaming.lstrip(), log_success=False)
+                    raw = split.main_text + split.cites_html
+                except Exception as e:
+                    logger.debug(f"split_follow_ups unavailable during re-render: {e}")
+                    raw = streaming
+        if not raw:
+            raw = getattr(bubble, '_raw_source', "") or ""
+        if not raw and 0 <= idx < len(self.history):
+            raw = self.history[idx].get('content', '') or ""
+        if not raw:
+            return False
+        bubble.set_content(self._format_response(raw, idx))
+        return True
 
     def scroll_to_bottom(self, smooth=False):
         sb = self.scroll_area.verticalScrollBar()

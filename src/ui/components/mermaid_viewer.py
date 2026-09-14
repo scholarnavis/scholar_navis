@@ -7,7 +7,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar, QCheckBox,
                                QFileDialog, QComboBox, QSplitter)
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
 # 🌟 引入你的自定义 Dialog
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.source_code_viewer import SourceCodeViewer
@@ -204,6 +204,9 @@ class MermaidViewer(QMainWindow):
     def _apply_theme(self):
         tm = ThemeManager()
 
+        # 0. 独立顶层窗口的原生标题栏不继承主窗口深浅色状态，需自行设置
+        apply_native_titlebar_theme(self, tm.current_theme == 'dark')
+
         # 1. 源码编辑器主题由 SourceCodeViewer 内部自适应，无需在此处理
 
         # 2. 更新工具栏
@@ -215,6 +218,38 @@ class MermaidViewer(QMainWindow):
         for tb in self.findChildren(QToolBar):
             tb.setStyleSheet(tb_style)
 
+        # 3. 工具栏内的下拉框 / 复选框（原硬编码深色，浅色主题下成为暗块）
+        combo_style = f"""
+            QComboBox {{ color: {tm.color('text_main')}; background: {tm.color('bg_input')};
+                         border: 1px solid {tm.color('border')}; border-radius: 4px;
+                         padding: 2px 8px; font-family: {tm.font_family()}; }}
+            QComboBox:hover {{ border-color: {tm.color('accent')}; }}
+            QComboBox QAbstractItemView {{ color: {tm.color('text_main')};
+                         background: {tm.color('bg_card')};
+                         border: 1px solid {tm.color('border')};
+                         selection-background-color: {tm.color('accent')};
+                         selection-color: {tm.color('bg_main')}; }}
+        """
+        combo = getattr(self, 'scale_combo', None)
+        if combo is not None:
+            combo.setStyleSheet(combo_style)
+        theme_combo = getattr(self, 'theme_combo', None)
+        if theme_combo is not None:
+            theme_combo.setStyleSheet(combo_style)
+        chk = getattr(self, 'chk_crop', None)
+        if chk is not None:
+            chk.setStyleSheet(
+                f"QCheckBox {{ color: {tm.color('text_main')}; padding-left: 4px; "
+                f"font-family: {tm.font_family()}; }}")
+
+        # 4. 工具栏图标随主题重新着色
+        for attr, icon_name in (('act_source', 'edit'), ('act_zoom_in', 'add'),
+                                ('act_zoom_out', 'remove'), ('act_reset_zoom', 'refresh'),
+                                ('act_export', 'download')):
+            action = getattr(self, attr, None)
+            if action is not None:
+                action.setIcon(tm.icon(icon_name, 'text_main'))
+
         if self.mermaid_code:
             self.render_diagram()
 
@@ -222,9 +257,6 @@ class MermaidViewer(QMainWindow):
     def _setup_toolbar(self):
         tb = QToolBar()
         tb.setMovable(False)
-        tb.setStyleSheet("QToolBar { background: #333; padding: 6px; border: none; } "
-                         "QToolButton { color: white; padding: 5px 10px; border-radius: 4px; font-weight: bold; } "
-                         "QToolButton:hover { background: #444; color: #05B8CC; }")
         self.addToolBar(Qt.TopToolBarArea, tb)
 
         # 主题切换
@@ -235,31 +267,31 @@ class MermaidViewer(QMainWindow):
 
         tb.addSeparator()
         tm = ThemeManager()
-        # 功能按钮
-        act_source = tb.addAction(tm.icon("edit", "text_main"), "Toggle Source")
-        act_source.triggered.connect(self._toggle_source)
+        # 功能按钮（保存 action 引用，主题切换时刷新图标与文案样式）
+        self.act_source = tb.addAction(tm.icon("edit", "text_main"), "Toggle Source")
+        self.act_source.triggered.connect(self._toggle_source)
 
-        tb.addAction(tm.icon("add", "text_main"), "Zoom In",
-                     lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() + 0.2))
-        tb.addAction(tm.icon("remove", "text_main"), "Zoom Out",
-                     lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() - 0.2))
-        tb.addAction(tm.icon("refresh", "text_main"), "Reset Zoom", lambda: self.web_view.setZoomFactor(1.0))
-        tb.addAction(tm.icon("download", "text_main"), "Export Image", self._export_image)
+        self.act_zoom_in = tb.addAction(tm.icon("add", "text_main"), "Zoom In",
+                                        lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() + 0.2))
+        self.act_zoom_out = tb.addAction(tm.icon("remove", "text_main"), "Zoom Out",
+                                         lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() - 0.2))
+        self.act_reset_zoom = tb.addAction(tm.icon("refresh", "text_main"), "Reset Zoom",
+                                           lambda: self.web_view.setZoomFactor(1.0))
+        self.act_export = tb.addAction(tm.icon("download", "text_main"), "Export Image",
+                                       self._export_image)
 
         tb.addSeparator()
 
-        # 导出设置：倍率（清晰度）与自动裁剪空白
+        # 导出设置：倍率（清晰度）与自动裁剪空白。配色统一由 _apply_theme
+        # 注入（原硬编码深色底在浅色主题下与周围工具栏割裂）。
         self.scale_combo = QComboBox()
         self.scale_combo.addItems(["1x", "2x", "3x", "4x"])
         self.scale_combo.setToolTip("Raster export scale (SVG export is always lossless)")
-        self.scale_combo.setStyleSheet("QComboBox { color: #ccc; background: #333; border: 1px solid #555; border-radius: 3px; padding: 2px 6px; } "
-                                       "QComboBox QAbstractItemView { color: #ccc; background: #222; selection-background-color: #05B8CC; selection-color: #fff; }")
         tb.addWidget(self.scale_combo)
 
         self.chk_crop = QCheckBox("Crop Whitespace")
         self.chk_crop.setToolTip("Automatically trim blank margins around the diagram")
         self.chk_crop.setChecked(True)
-        self.chk_crop.setStyleSheet("QCheckBox { color: #ccc; padding-left: 4px; }")
         tb.addWidget(self.chk_crop)
 
         tb.addSeparator()

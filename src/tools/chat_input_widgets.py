@@ -19,8 +19,7 @@ from src.core.image_utils import IMAGE_EXTENSIONS
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
-from src.core.theme_manager import ThemeManager
-from src.ui.components.chat_bubble import hex_to_rgba
+from src.core.theme_manager import ThemeManager, hex_to_rgba
 from src.ui.components.toast import ToastManager
 
 
@@ -240,13 +239,9 @@ class ChatInputContainer(QFrame):
         self.config = ConfigManager()
         self.logger = logging.getLogger("ChatInputContainer")
         self.setObjectName("ChatInputContainer")
-        self.setStyleSheet("""
-            QFrame#ChatInputContainer {
-                background-color: #2b2b2b;
-                border: 1px solid #444;
-                border-radius: 8px;
-            }
-        """)
+        # 初始样式留空：配色统一由 _apply_theme 注入（避免构造期的硬编码
+        # 深色底在浅色主题首帧短暂闪出）。
+        self.setStyleSheet("")
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
@@ -257,15 +252,11 @@ class ChatInputContainer(QFrame):
 
         self.context_banner = QWidget()
         self.context_banner.setVisible(False)
-        self.context_banner.setStyleSheet(
-            "background-color: rgba(5, 184, 204, 0.1); border: 1px solid #05B8CC; border-radius: 4px;")
         self.banner_layout = QHBoxLayout(self.context_banner)
         self.banner_layout.setContentsMargins(8, 4, 8, 4)
 
         self.lbl_context_icon = QLabel()
         self.lbl_context_info = QLabel("Context Attached")
-
-        self.lbl_context_info.setStyleSheet("color: #05B8CC; font-size: 12px; border: none;")
 
         self.btn_clear_context = QPushButton("")
         self.btn_clear_context.setCursor(Qt.PointingHandCursor)
@@ -283,14 +274,12 @@ class ChatInputContainer(QFrame):
 
         # 1. 学术 Agent 开关
         self.chk_academic_agent = QCheckBox("Academic Agent")
-        self.chk_academic_agent.setStyleSheet("color: #05B8CC; font-weight: bold;")
         self.chk_academic_agent.setChecked(use_academic)
         self.chk_academic_agent.setToolTip("Enable built-in native academic skills (Zero Latency)")
         self.chk_academic_agent.toggled.connect(lambda c: self._save_agent_state("chat_use_academic_agent", c))
 
         # 2. 外部 Tools 开关
         self.chk_external_tools = QCheckBox("External Tools")
-        self.chk_external_tools.setStyleSheet("color: #05B8CC; font-weight: bold;")
         self.chk_external_tools.setChecked(use_external)
         self.chk_external_tools.setToolTip("Enable external MCP servers and custom Python scripts")
         self.chk_external_tools.toggled.connect(lambda c: self._save_agent_state("chat_use_external_tools", c))
@@ -298,7 +287,6 @@ class ChatInputContainer(QFrame):
         # 3. 深度研究开关：分解为并行子任务，分节汇总（默认关闭）
         use_deep = self.config.user_settings.get("agent_deep_mode", False)
         self.chk_deep_mode = QCheckBox("Deep Mode")
-        self.chk_deep_mode.setStyleSheet("color: #05B8CC; font-weight: bold;")
         self.chk_deep_mode.setChecked(use_deep)
         self.chk_deep_mode.setToolTip(
             "Deep research mode.\n"
@@ -312,15 +300,8 @@ class ChatInputContainer(QFrame):
         self.btn_mcp_tags = QPushButton("Tools Filter", self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
-        self.btn_mcp_tags.setStyleSheet(
-            "QPushButton { color: #aaaaaa; background: transparent; border: 1px solid #555; border-radius: 4px; padding: 2px 8px; }"
-            "QPushButton:hover { background: #333; }"
-        )
 
         self.menu_mcp_tags = QMenu(self)
-        self.menu_mcp_tags.setStyleSheet(
-            "QMenu { background-color: #2b2b2b; border: 1px solid #555; border-radius: 6px; padding: 4px; }"
-        )
         self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
 
         self.lbl_tool_hint = QLabel(" (Tip: Selecting fewer tools improves accuracy)")
@@ -342,20 +323,14 @@ class ChatInputContainer(QFrame):
         self.bottom_bar = QHBoxLayout()
         self.bottom_bar.setContentsMargins(0, 0, 0, 0)
 
-        tool_btn_style = f"""
-                    QPushButton {{ background-color: transparent; color: #888888; border: 1px solid transparent; border-radius: 4px; padding: 4px 10px; font-family: {ThemeManager().font_family()}; font-size: 13px;}}
-                    QPushButton:hover {{ background-color: #333333; border: 1px solid #555555; color: #ffffff;}}
-                    QPushButton:pressed {{ background-color: #222222; }}
-                """
-
+        # 底部工具按钮：配色统一在 _apply_theme 注入，构造期不设样式，
+        # 避免浅色主题下首帧闪出硬编码深色。
         self.btn_export = QPushButton("Export")
         self.btn_export.setCursor(Qt.PointingHandCursor)
-        self.btn_export.setStyleSheet(tool_btn_style)
         self.btn_export.clicked.connect(self.sig_export_clicked.emit)
 
         self.btn_import = QPushButton("Import")
         self.btn_import.setCursor(Qt.PointingHandCursor)
-        self.btn_import.setStyleSheet(tool_btn_style)
         self.btn_import.setToolTip(
             "Load a previously exported chat history (.schat / .json lossless, "
             "or best-effort .md / .txt / .csv)")
@@ -363,12 +338,10 @@ class ChatInputContainer(QFrame):
 
         self.btn_clear = QPushButton("Clear")
         self.btn_clear.setCursor(Qt.PointingHandCursor)
-        self.btn_clear.setStyleSheet(tool_btn_style)
         self.btn_clear.clicked.connect(self.sig_clear_clicked.emit)
 
         self.btn_attach = QPushButton("Attach")
         self.btn_attach.setCursor(Qt.PointingHandCursor)
-        self.btn_attach.setStyleSheet(tool_btn_style)
         self.btn_attach.clicked.connect(self.sig_attach_clicked.emit)
         self.bottom_bar.insertWidget(0, self.btn_attach)
 
@@ -380,13 +353,6 @@ class ChatInputContainer(QFrame):
         self.btn_send = QPushButton("Send")
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.setFixedSize(90, 32)  # 加宽以防止文字截断
-        self.btn_send.setStyleSheet(f"""
-                           QPushButton {{ 
-                               background-color: #007acc; color: white; border-radius: 6px; 
-                               font-weight: bold; font-family: {ThemeManager().font_family()};
-                           }}
-                           QPushButton:hover {{ background-color: #0062a3; }}
-                       """)
         self.bottom_bar.addWidget(self.btn_send)
 
         self.btn_stop = QPushButton("Stop")
@@ -421,6 +387,28 @@ class ChatInputContainer(QFrame):
         self.setStyleSheet(
             f"QFrame#ChatInputContainer {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 8px; }}")
 
+        # 三个 Agent 开关：原为硬编码青色（浅色主题下白底青字对比度不足），
+        # 改为跟随 accent，并在主题切换时同步刷新。
+        agent_chk_style = (
+            f"QCheckBox {{ color: {tm.color('accent')}; font-weight: bold; "
+            f"font-family: {tm.font_family()}; }}"
+            f"QCheckBox:disabled {{ color: {tm.color('text_muted')}; }}"
+        )
+        for chk in (getattr(self, 'chk_academic_agent', None),
+                    getattr(self, 'chk_external_tools', None),
+                    getattr(self, 'chk_deep_mode', None)):
+            if chk is not None:
+                chk.setStyleSheet(agent_chk_style)
+
+        # 附件上下文提示条：主题色底纹 + 边框（原硬编码 rgba(5,184,204,…)）
+        if hasattr(self, 'context_banner'):
+            self.context_banner.setStyleSheet(
+                f"background-color: {hex_to_rgba(tm.color('accent'), 0.1)}; "
+                f"border: 1px solid {tm.color('accent')}; border-radius: 4px;")
+            self.lbl_context_info.setStyleSheet(
+                f"color: {tm.color('accent')}; font-size: 12px; border: none; "
+                f"font-family: {tm.font_family()};")
+
         self.text_edit.setStyleSheet(f"""
                     QPlainTextEdit {{ 
                         background-color: transparent; 
@@ -454,11 +442,11 @@ class ChatInputContainer(QFrame):
                  """
 
         self.btn_export.setText("Export")
-        self.btn_export.setIcon(tm.icon("download", "text_muted"))
+        self.btn_export.setIcon(tm.icon("upload", "text_muted"))
         self.btn_export.setStyleSheet(tool_btn_style)
 
         self.btn_import.setText("Import")
-        self.btn_import.setIcon(tm.icon("upload", "text_muted"))
+        self.btn_import.setIcon(tm.icon("download", "text_muted"))
         self.btn_import.setStyleSheet(tool_btn_style)
 
         self.btn_clear.setText("Clear")
@@ -532,14 +520,20 @@ class ChatInputContainer(QFrame):
         self.menu_mcp_tags.setStyleSheet(menu_style)
 
     def set_uploading(self, is_uploading: bool):
+        tm = ThemeManager()
         self.btn_send.setEnabled(not is_uploading)
         self.btn_attach.setEnabled(not is_uploading)
         if is_uploading:
             self.btn_send.setToolTip("Please wait for file upload to complete...")
+            # 禁用态取主题色（原硬编码 #555/#888 在浅色主题下观感突兀）
             self.btn_send.setStyleSheet(
-                self.btn_send.styleSheet() + "QPushButton:disabled { background-color: #555; color: #888; }")
+                self.btn_send.styleSheet()
+                + f"QPushButton:disabled {{ background-color: {tm.color('btn_bg')}; "
+                  f"color: {tm.color('text_muted')}; }}")
         else:
             self.btn_send.setToolTip("")
+            # 恢复 _apply_theme 注入的正常样式（去掉追加的禁用规则）
+            self._apply_theme()
 
     def _on_mcp_status_changed(self):
         if hasattr(self, 'chk_external_tools') and self.chk_external_tools.isChecked():

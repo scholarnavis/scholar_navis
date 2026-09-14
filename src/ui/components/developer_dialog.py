@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
 )
 
+from src.core.theme_manager import ThemeManager
 from src.ui.components.dialog import BaseDialog
 from src.ui.components.source_code_viewer import SourceCodeViewer
 
@@ -280,17 +281,18 @@ class DeveloperDialog(BaseDialog):
         self.setObjectName("DeveloperDialog")
 
         # --- Title ---
-        title = QLabel("Developer Mode")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        self.content_layout.addWidget(title)
+        self.title_lbl = QLabel("Developer Mode")
+        self.content_layout.addWidget(self.title_lbl)
 
-        subtitle = QLabel(
+        self.subtitle_lbl = QLabel(
             "AI tests run in the real Chat Assistant panel (note is display-only; "
             "the prompt drives the actual agent). Functional tests run in-process."
         )
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #888; font-size: 12px;")
-        self.content_layout.addWidget(subtitle)
+        self.subtitle_lbl.setWordWrap(True)
+        self.content_layout.addWidget(self.subtitle_lbl)
+
+        #: 分区标题（配色随主题刷新，见 _apply_theme）
+        self._section_labels: list = []
 
         # --- AI tests ---
         self.content_layout.addWidget(self._section_label("AI Tests (run in Chat panel)"))
@@ -359,6 +361,8 @@ class DeveloperDialog(BaseDialog):
         )
         self.content_layout.addWidget(self.txt_output, 1)
 
+        # 首次主题应用由 BaseDialog 在事件循环第一帧统一触发（此时本类
+        # __init__ 已执行完，_apply_theme 依赖的控件均已存在）。
         self._log("Developer Mode ready. AI tests route to the Chat panel; "
                   "functional tests run here.")
 
@@ -367,11 +371,35 @@ class DeveloperDialog(BaseDialog):
     # ------------------------------------------------------------------ #
     def _section_label(self, text) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet(
-            "font-weight: bold; color: #05B8CC; margin-top: 8px; "
-            "border-bottom: 1px solid #333; padding-bottom: 3px;"
-        )
+        self._section_labels.append(lbl)
         return lbl
+
+    # ------------------------------------------------------------------ #
+    #  Theme
+    # ------------------------------------------------------------------ #
+    def _apply_theme(self):
+        """主题化标题 / 副标题 / 分区标题。
+
+        原实现把 #05B8CC 与 #333 硬编码在控件样式里，浅色主题下分区标题的
+        分隔线与正文色对比不足、深色主题下又与背景糊在一起。这里统一改为
+        主题取色，并随 BaseDialog 的 theme_changed 自动刷新。
+        """
+        super()._apply_theme()
+        tm = ThemeManager()
+
+        self.title_lbl.setStyleSheet(
+            f"font-size: 18px; font-weight: bold; color: {tm.color('text_main')}; "
+            f"font-family: {tm.font_family()};")
+        self.subtitle_lbl.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 12px; "
+            f"font-family: {tm.font_family()};")
+
+        section_style = (
+            f"font-weight: bold; color: {tm.color('accent')}; margin-top: 8px; "
+            f"border-bottom: 1px solid {tm.color('border')}; padding-bottom: 3px; "
+            f"font-family: {tm.font_family()};")
+        for lbl in self._section_labels:
+            lbl.setStyleSheet(section_style)
 
     def _make_btn(self, text, handler) -> QPushButton:
         btn = QPushButton(text)
@@ -1302,6 +1330,28 @@ class DeveloperDialog(BaseDialog):
             mermaid_cache = {}
             html = TextFormatter.format_response(ai_text, 0, set(), set(), mermaid_cache)
 
+            def theme_rerender_is_clean(rendered_html: str) -> bool:
+                """主题重渲染幂等回归检查。
+
+                `set_content` 收到的入参是"已渲染 HTML"，主题切换时会对它
+                重渲染。渲染管线必须先把上一次注入的主题内联样式清掉再按新
+                主题重建，否则会出现"浅色主题下标题发白、代码块仍是深色底"
+                的残留。这里用另一个主题重渲染一次，断言当前主题的正文色与
+                边框色均不残留（两套主题这两个色值互不相同）。
+                """
+                themer = ThemeManager()
+                other = 'light' if themer.current_theme == 'dark' else 'dark'
+                stale_text = themer.color('text_main')
+                stale_border = themer.color('border')
+                regenerated = TextFormatter.markdown_to_html(rendered_html, theme_key=other)
+                if stale_text.lower() in regenerated.lower():
+                    self._log(f"stale text color survives re-render: {stale_text}", "FAIL")
+                    return False
+                if stale_border.lower() in regenerated.lower():
+                    self._log(f"stale border color survives re-render: {stale_border}", "FAIL")
+                    return False
+                return True
+
             checks = [
                 ("DOI auto-linked", "https://doi.org/10.1038/s41586-021-03819-2" in html),
                 ("PMID auto-linked", "pubmed.ncbi.nlm.nih.gov/31955348" in html),
@@ -1324,12 +1374,16 @@ class DeveloperDialog(BaseDialog):
                 ("file:// link present", "file://" in html),
                 ("LaTeX sup/sub", "<sup>" in html and "<sub>" in html),
                 ("LaTeX no command residue", not re.search(r"\\[a-zA-Z]+", html)),
-                ("Table rendered", "<table>" in html),
-                # 注意：样式注入后块级代码为 <pre style=...>，用前缀匹配
+                # 注意：主题化注入后表格/代码块均带属性，统一用前缀匹配
+                # （<table border=... style=...>、<pre style=...>）。
+                ("Table rendered", "<table" in html),
+                ("Table styled", "border-collapse:collapse" in html
+                 and 'border-color:' in html),
                 ("Code block rendered", "<pre" in html),
                 ("Chemistry subscript", "H<sub>12</sub>O<sub>6</sub>" in html),
                 ("Mermaid card", "mermaid://view?hash=" in html
                  and len(mermaid_cache) == 1),
+                ("Theme re-render idempotent", theme_rerender_is_clean(html)),
             ]
             for name, ok in checks:
                 self._log(f"{name}: {'OK' if ok else 'MISSING'}", "OK" if ok else "FAIL")

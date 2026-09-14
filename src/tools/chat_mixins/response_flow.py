@@ -98,7 +98,8 @@ class ChatResponseFlowMixin:
             base_html = self._format_response(self.current_ai_text.lstrip(), idx)
             self.current_ai_bubble.set_content(
                 base_html +
-                "<br><div style='color:#05B8CC;'><i>Connecting to LLM provider, please wait...</i></div>"
+                f"<br><div style='color:{ThemeManager().color('accent')};'>"
+                f"<i>Connecting to LLM provider, please wait...</i></div>"
             )
             self.slow_conn_timer = QTimer(self)
             self.slow_conn_timer.setSingleShot(True)

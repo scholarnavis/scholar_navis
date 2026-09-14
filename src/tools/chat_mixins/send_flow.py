@@ -14,6 +14,7 @@ from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
+from src.core.theme_manager import ThemeManager
 from src.task.chat_tasks import ChatGenerationTask
 from src.ui.components.toast import ToastManager
 
@@ -475,11 +476,13 @@ class ChatSendFlowMixin:
     def _show_slow_connection_warning(self):
         if self.current_ai_bubble and getattr(self, '_is_waiting_llm', False):
             idx = getattr(self.current_ai_bubble, 'index', -1)
+            tm = ThemeManager()
             base_html = self._format_response(self.current_ai_text.lstrip(), idx)
             self.current_ai_bubble.set_content(
                 base_html +
-                "<br><div style='color:#05B8CC;'><i>Still connecting...</i></div>"
-                "<div style='color:#e6a23c; font-size:12px; margin-top:5px; padding:8px; border:1px solid #e6a23c; border-radius:4px;'>"
+                f"<br><div style='color:{tm.color('accent')};'><i>Still connecting...</i></div>"
+                f"<div style='color:{tm.color('warning')}; font-size:12px; margin-top:5px; "
+                f"padding:8px; border:1px solid {tm.color('warning')}; border-radius:4px;'>"
                 "Warning: The connection is taking longer than expected. Please check your <b>Network Proxy</b> or <b>API Endpoint (URL)</b>."
                 "</div>"
             )
@@ -537,7 +540,10 @@ class ChatSendFlowMixin:
         link = f"cite://view?path={safe_path}&page=1&name={safe_name}"
 
         preview_text = context_text[:80].replace('\n', ' ') + "..."
-        self.external_context_html = f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' style='color:#05B8CC; text-decoration:none;'>📄 {preview_text} (Click to read more)</a></div>"
+        self.external_context_html = (
+            f"<div style='margin-bottom: 4px;'>▪ <a href='{link}' "
+            f"style='color:{ThemeManager().color('accent')}; text-decoration:none;'>"
+            f"📄 {preview_text} (Click to read more)</a></div>")
 
         if hasattr(self, 'input_container'):
             if hasattr(self.input_container, 'chk_external_tools'):

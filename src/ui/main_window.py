@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
 from src.tools.about_tool import AboutTool
 from src.tools.chat_tool import ChatTool
 from src.tools.import_tool import ImportTool
@@ -56,24 +56,9 @@ def force_windows_taskbar_icon(hwnd, icon_path):
         logging.getLogger("UI.MainWindow").debug(f"Taskbar icon patch failed: {e}")
 
 
-def set_window_titlebar_theme(hwnd, is_dark: bool):
-    if sys.platform == "win32":
-        try:
-            hwnd_int = int(hwnd)
-            value = ctypes.c_int(1 if is_dark else 0)
-
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd_int, 20, ctypes.byref(value), 4)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd_int, 19, ctypes.byref(value), 4)
-
-            ctypes.windll.user32.SetWindowPos(hwnd_int, 0, 0, 0, 0, 0, 0x0037)
-
-            ctypes.windll.user32.SendMessageW(hwnd_int, 0x0086, 0, 0)
-            ctypes.windll.user32.SendMessageW(hwnd_int, 0x0086, 1, 0)
-
-            ctypes.windll.user32.RedrawWindow(hwnd_int, None, None, 0x0400 | 0x0100 | 0x0001)
-        except Exception as e:
-            # 深色标题栏适配属外观增强，失败仅记录
-            logging.getLogger("UI.MainWindow").debug(f"Titlebar theme patch failed: {e}")
+# 原生标题栏深浅色适配统一走 src.core.theme_manager.apply_native_titlebar_theme：
+# 原实现内联 ctypes 调用未声明 argtypes，64 位系统上句柄值较大时会抛
+# OverflowError 并被 except 静默吞掉，表现为"主题切换后标题栏颜色不变"。
 
 
 class MainWindow(QMainWindow):
@@ -254,8 +239,12 @@ class MainWindow(QMainWindow):
         tm = self.tm
         is_dark = tm.current_theme == "dark"
 
-        hwnd = int(self.winId())
-        QTimer.singleShot(100, lambda: set_window_titlebar_theme(hwnd, is_dark))
+        # 原生标题栏立即同步一次，并在框架刷新完成后再兜底同步一次：
+        # DWM 在样式整体重建期间可能丢弃属性更新；延迟值与 qdarktheme 的
+        # 样式事件（changeEvent 中的同步）错开，保证最终状态以 ThemeManager
+        # 的当前主题为准。
+        self._sync_titlebar_theme()
+        self._sync_titlebar_theme(120)
 
         self._update_logo_theme()
         self.setStyleSheet(f"QMainWindow {{ background-color: {tm.color('bg_main')}; }}")
@@ -310,6 +299,25 @@ class MainWindow(QMainWindow):
             }}
         """)
 
+    def _sync_titlebar_theme(self, delay_ms: int = 0):
+        """把主窗口原生标题栏同步为 ThemeManager 的当前主题。
+
+        ``delay_ms > 0`` 时延迟执行，用于等待 DWM/qdarktheme 的框架刷新完成。
+        取值始终来自 :attr:`ThemeManager.current_theme`（延迟回调里重新读取），
+        不使用调用时刻的快照——否则"先换调色板、后更新主题"的时序会让迟到的
+        定时器把标题栏刷回旧颜色。
+        """
+        def _apply():
+            tm = getattr(self, 'tm', None)
+            if tm is None:  # __init__ 早期的样式事件可能早于 tm 就绪
+                return
+            apply_native_titlebar_theme(self, tm.current_theme == "dark")
+
+        if delay_ms > 0:
+            QTimer.singleShot(delay_ms, _apply)
+        else:
+            _apply()
+
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
@@ -317,8 +325,10 @@ class MainWindow(QMainWindow):
             if ConfigManager().user_settings.get("theme", "Dark").lower() == "auto":
                 self.tm.set_theme("auto")
 
-            is_dark = self.tm.current_theme == "dark"
-            QTimer.singleShot(10, lambda: set_window_titlebar_theme(self.winId(), is_dark))
+            # 与 _apply_theme 同源：立即 + 延迟各同步一次，避免迟到的样式事件
+            # 用旧主题覆盖刚设好的标题栏。
+            self._sync_titlebar_theme()
+            self._sync_titlebar_theme(120)
 
     def clean_old_logs(self):
         base_dir = ThemeManager.get_resource_path()

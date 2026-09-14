@@ -198,8 +198,11 @@ class ArticleWidget(QFrame):
             self.icon_oa.setToolTip("Open Access (OA)")
             header_layout.addWidget(self.icon_oa)
 
-        title_link = f"<a href='{article_data['link']}' style='color:#05B8CC; text-decoration:none; font-size: 16px; font-weight:bold;'>{article_data['title']}</a>"
-        self.lbl_title = QLabel(title_link)
+        # 标题链接色随主题刷新（见 _apply_theme）：原硬编码 #05B8CC 在浅色
+        # 主题下白底青光对比度不足。
+        self._title_link = article_data.get('link', '')
+        self._title_text = article_data.get('title', '')
+        self.lbl_title = QLabel()
         self.lbl_title.setOpenExternalLinks(True)
         self.lbl_title.setWordWrap(True)
 
@@ -328,6 +331,12 @@ class ArticleWidget(QFrame):
 
         if hasattr(self, 'lbl_tag_icon'):
             self.lbl_tag_icon.setPixmap(tm.icon("tag", "accent").pixmap(14, 14))
+
+        if hasattr(self, 'lbl_title'):
+            self.lbl_title.setText(
+                f"<a href='{self._title_link}' style='color:{tm.color('accent')}; "
+                f"text-decoration:none; font-size: 16px; font-weight:bold;'>"
+                f"{self._title_text}</a>")
 
 
     def _send_to_chat(self):

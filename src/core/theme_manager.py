@@ -9,6 +9,164 @@ from PySide6.QtSvg import QSvgRenderer
 from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 
+logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+#  Windows 原生标题栏深浅色适配
+# --------------------------------------------------------------------------- #
+
+#: 深色标题栏开关属性号（Windows 10 build 18985+ 与 Windows 11）
+_DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+#: 同上，早期 Windows 10 使用的属性号
+_DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
+#: Windows 11 起可显式指定标题栏底色 / 标题文字色（值为 COLORREF 0x00BBGGRR）
+_DWMWA_CAPTION_COLOR = 35
+_DWMWA_TEXT_COLOR = 36
+
+#: "属性不被支持"的告警只打一次，避免每次主题切换刷屏
+_win_titlebar_warned = False
+
+
+def _dwm_set_attribute(hwnd: int, attribute: int, value: int) -> int:
+    """调用 ``DwmSetWindowAttribute``，返回 HRESULT（负值表示失败）。
+
+    **必须显式声明 argtypes**：HWND 在 64 位 Windows 上是指针宽度，若让
+    ctypes 按默认的 32 位 int 传参，句柄值超过 2^31 时会抛 OverflowError，
+    被上层 ``except`` 吞掉 —— 外部表现就是"主题已切换但标题栏颜色不变"。
+    """
+    import ctypes
+
+    dwmapi = ctypes.WinDLL("dwmapi")
+    dwmapi.DwmSetWindowAttribute.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+    dwmapi.DwmSetWindowAttribute.restype = ctypes.c_int32
+    buf = ctypes.c_uint(value)
+    return dwmapi.DwmSetWindowAttribute(
+        ctypes.c_void_p(hwnd), attribute, ctypes.byref(buf), ctypes.sizeof(buf))
+
+
+def _windows_build() -> int:
+    """当前 Windows 内部版本号（非 Windows 或解析失败返回 0）。"""
+    try:
+        return int(sys.getwindowsversion().build)
+    except Exception:
+        try:
+            import platform
+            return int(platform.version().split(".")[2])
+        except Exception:
+            return 0
+
+
+def _to_colorref(hex_color: str) -> int:
+    """``#RRGGBB`` → COLORREF(0x00BBGGRR)。非法输入回退 0。"""
+    try:
+        value = str(hex_color).lstrip("#")
+        r, g, b = int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+        return (b << 16) | (g << 8) | r
+    except (ValueError, IndexError):
+        return 0
+
+
+def apply_native_titlebar_theme(window, is_dark: bool) -> bool:
+    """把 Windows 原生标题栏切换为深色 / 浅色，返回是否应用成功。
+
+    :param window: QWidget / QWindow（取其 ``winId()``）或直接的 HWND 整数。
+
+    实现要点（均为踩坑后的加固）：
+
+    * 句柄按指针宽度传递（见 :func:`_dwm_set_attribute`），避免大句柄静默失败；
+    * 属性号随系统版本回退：优先 20（Win10 20H1+ / Win11），失败再试 19；
+    * Windows 11 额外显式指定标题栏底色与文字色：部分系统配置下仅设 20 仍
+      会保留系统浅色标题栏（本函数存在的直接原因）；
+    * 属性更新后强制刷新非客户区，否则 DWM 可能沿用旧缓存直到窗口重绘。
+
+    非 Windows 平台直接返回 False，调用方无需自行判断平台。
+    """
+    if sys.platform != "win32":
+        return False
+
+    global _win_titlebar_warned
+
+    try:
+        hwnd = int(window.winId()) if hasattr(window, "winId") else int(window)
+    except (TypeError, ValueError):
+        logger.debug("Invalid window handle for titlebar theming: %r", window)
+        return False
+    if not hwnd:
+        return False
+
+    try:
+        import ctypes
+
+        value = 1 if is_dark else 0
+        hr = _dwm_set_attribute(hwnd, _DWMWA_USE_IMMERSIVE_DARK_MODE, value)
+        if hr < 0:
+            hr = _dwm_set_attribute(hwnd, _DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY, value)
+
+        if _windows_build() >= 22000:
+            theme_key = "dark" if is_dark else "light"
+            tm = ThemeManager()
+            _dwm_set_attribute(hwnd, _DWMWA_CAPTION_COLOR,
+                               _to_colorref(tm.color("bg_main", theme_key)))
+            _dwm_set_attribute(hwnd, _DWMWA_TEXT_COLOR,
+                               _to_colorref(tm.color("text_main", theme_key)))
+
+        if hr < 0 and not _win_titlebar_warned:
+            _win_titlebar_warned = True
+            logger.warning(
+                "DWM rejected immersive dark titlebar (hr=0x%08X); "
+                "caption colors are used as the fallback.", hr & 0xFFFFFFFF)
+
+        # 非客户区（标题栏）刷新：SWP_FRAMECHANGED 触发框架重绘，
+        # WM_NCACTIVATE 切换一次强制标题栏按新状态重画。
+        # 各接口同样显式声明签名（HWND/WPARAM/LPARAM 均为指针宽度）。
+        user32 = ctypes.windll.user32
+        user32.SetWindowPos.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        user32.SetWindowPos.restype = ctypes.c_int
+        user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                        ctypes.c_size_t, ctypes.c_ssize_t]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+        user32.RedrawWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.c_void_p, ctypes.c_uint]
+        user32.RedrawWindow.restype = ctypes.c_int
+
+        user32.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0, 0x0037)
+        user32.SendMessageW(ctypes.c_void_p(hwnd), 0x0086, 0, 0)
+        user32.SendMessageW(ctypes.c_void_p(hwnd), 0x0086, 1, 0)
+        user32.RedrawWindow(ctypes.c_void_p(hwnd), None, None,
+                            0x0400 | 0x0100 | 0x0001)
+        logger.debug("Native titlebar themed: hwnd=%s dark=%s hr=%s",
+                     hwnd, is_dark, hr)
+        return hr >= 0
+    except Exception as e:
+        # 标题栏适配属外观增强，失败不影响功能
+        logger.warning("Failed to theme native titlebar (hwnd=%s): %s", hwnd, e)
+        return False
+
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """``#RGB`` / ``#RRGGBB`` → ``rgba(r, g, b, a)``，非 hex 值原样返回。
+
+    主题色常需要"低透明度叠加"生成层次底色（悬浮层、提示条、危险态按钮
+    悬停背景等）；本函数作为全应用唯一实现放在核心层，避免各 UI 模块
+    各自复制一份（也避免 UI 模块之间为借用该工具而产生横向依赖）。
+    """
+    color = str(hex_color).strip().lstrip('#')
+    if len(color) == 3:
+        color = ''.join(c * 2 for c in color)
+    if len(color) != 6:
+        return str(hex_color)
+    try:
+        r = int(color[0:2], 16)
+        g = int(color[2:4], 16)
+        b = int(color[4:6], 16)
+    except ValueError:
+        return str(hex_color)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
 
 class ThemeManager(QObject):
     theme_changed = Signal()
@@ -301,6 +459,24 @@ class ThemeManager(QObject):
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0px; 
+        }}
+
+        QScrollBar:horizontal {{
+            background: {self.color('bg_main')};
+            height: 8px;
+            border-top: 1px solid {self.color('border')};
+            margin: 0px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {self.color('text_muted')};
+            min-width: 20px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: {self.color('accent')};
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0px;
         }}
 
         QLineEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, 

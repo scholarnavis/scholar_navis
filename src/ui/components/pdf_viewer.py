@@ -16,32 +16,16 @@ from PySide6.QtWidgets import (QMainWindow, QToolBar, QApplication, QFileDialog,
                                QTextBrowser, QWidget, QHBoxLayout, QLineEdit, QPushButton, QLabel, QMenu)
 
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
 
 
 def _apply_windows_dark_titlebar(window, tm):
-    """底层 Hack：强制将 Windows 操作系统原生标题栏适配深色/浅色模式"""
-    import sys
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            import platform
-            bg = tm.color('bg_main')
-            is_dark = False
-            # 通过主背景色的亮度来判定是否为深色模式
-            if bg and bg.startswith('#') and len(bg) >= 7:
-                r, g, b = int(bg[1:3], 16), int(bg[3:5], 16), int(bg[5:7], 16)
-                is_dark = (0.299 * r + 0.587 * g + 0.114 * b) < 128
+    """强制将 Windows 操作系统原生标题栏适配深色/浅色模式。
 
-            hwnd = int(window.winId())
-            build = int(platform.version().split('.')[2])
-            # Windows 11 及部分 Windows 10 使用 20，较老版本使用 19
-            attr = 20 if build >= 22000 else 19
-            val = ctypes.c_int(1 if is_dark else 0)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
-        except Exception as e:
-            # DWM 属外观增强，失败仅记录，不影响窗口功能
-            logging.getLogger("UI.PDFViewer").debug(f"DWM dark titlebar failed: {e}")
+    原生标题栏适配已统一到核心层 :func:`apply_native_titlebar_theme`（修复了
+    原先内联 ctypes 调用未声明 argtypes 导致大句柄静默失败的问题）。
+    """
+    apply_native_titlebar_theme(window, tm.current_theme == "dark")
 
 
 class InternalPDFViewer(QMainWindow):

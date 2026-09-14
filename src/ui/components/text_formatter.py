@@ -14,6 +14,24 @@ from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
 
+def _rgba(hex_color: str, alpha: float) -> str:
+    """``#RRGGBB`` → ``rgba(r, g, b, a)``；非 hex 值原样返回。
+
+    Qt 富文本支持 ``rgba()``，用于生成"低透明度叠加"的层次底色（表头、
+    引用块等）。非法输入直接回退原值，避免样式整体失效。
+    """
+    color = str(hex_color).strip()
+    if not color.startswith("#") or len(color) != 7:
+        return color
+    try:
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+    except ValueError:
+        return color
+    return f"rgba({r}, {g}, {b}, {max(0.0, min(1.0, float(alpha)))})"
+
+
 def resolve_qt_font_families() -> list:
     """返回应用生效字体族列表（代理 ``ThemeManager.font_families``）。
 
@@ -100,7 +118,78 @@ def mono_font_family_css() -> str:
     return f"'{_mono_family_cache}'"
 
 
+#: HTML 标签分词（属性值可含引号包裹的 ``>``，需按引号整体吞掉）。
+_TAG_TOKEN_RE = re.compile(
+    r'<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|\'[^\']*\'|[^>"\'])*)>')
+
+#: 表格标签匹配：用于把 ``width:100%`` / ``table-layout:fixed`` 换成自然宽度，
+#: 使过宽表格能触发独立横向滚动条而不是被压窄换行。
+_TABLE_TAG_RE = re.compile(r'<table\b[^>]*>', re.IGNORECASE)
+
+
+def naturalize_table_html(html: str) -> str:
+    """去掉表格的 ``width:100%`` 与 ``table-layout:fixed``，改按内容自然宽度布局。
+
+    Qt 富文本默认让表格撑满可用宽度并压缩列宽；科研数据表列多、
+    单元格窄，被压窄后换行严重影响可读性。去掉宽度约束后表格按内容定宽，
+    超出容器的部分由外层横向滚动条承担。
+    """
+    def _repl(match):
+        tag = match.group(0)
+        tag = re.sub(r'width\s*:\s*100%\s*;?', '', tag, flags=re.IGNORECASE)
+        tag = re.sub(r'table-layout\s*:\s*fixed\s*;?', '', tag, flags=re.IGNORECASE)
+        return tag
+    return _TABLE_TAG_RE.sub(_repl, html)
+
+
 class TextFormatter:
+
+    #: 本管线"自有样式"的标签：每次渲染都会重新注入这些标签的样式，因此渲染
+    #: 前必须先把上一次注入的 style 清掉。否则当入参已是"渲染结果"时（多处
+    #: 调用点把 ``_format_response(...)`` 的输出再送进 ``set_content``），主题
+    #: 切换后的重渲染只会保留固化在旧 HTML 里的主题色——典型症状是浅色主题
+    #: 下标题仍是深色主题的浅灰、代码块仍是深色底、表格仍是深色边框。
+    _STYLE_OWNED_TAGS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'th', 'td',
+                         'ul', 'ol', 'li', 'blockquote', 'hr', 'pre', 'code')
+
+    #: 上一次渲染注入的外层样式 div 的签名（font-family + color 组合，双引号）。
+    #: 命中后降级为无样式 div，避免其 color 继续影响正文，同时保留配对的
+    #: ``</div>`` 结构（Qt 富文本对多余闭合标签是容错的）。
+    _WRAPPER_SIGN_RE = re.compile(
+        r'<div style="font-family: [^"]*?;\s*color: [^"]*?;">', re.IGNORECASE)
+
+    #: 自有样式标签的匹配：属性段允许出现引号包裹的值（如 ``style="a: b;"``）。
+    #: ``\b`` 用于卡死标签名边界，避免 ``th`` 吃掉 ``<thead>``、``li`` 吃掉
+    #: ``<link ...>`` 之类的同前缀标签。
+    _OWNED_TAG_RE = re.compile(
+        r'<(' + '|'.join(_STYLE_OWNED_TAGS) + r')\b((?:"[^"]*"|[^>"])*)>',
+        re.IGNORECASE)
+
+    @classmethod
+    def _reset_injected_styles(cls, text: str) -> str:
+        """清除上一次渲染注入的内联样式，使本管线渲染幂等。
+
+        只处理 :attr:`_STYLE_OWNED_TAGS` 中的标签（这些标签的样式完全由本
+        管线决定），并保留 ``text-align``（python-markdown 表格列对齐语义）。
+        其它标签（``<a>``/``<img>``/``<span>`` 等）与 AI 自带的内联 HTML
+        不受影响。
+        """
+        if '<' not in text:
+            return text
+
+        text = cls._WRAPPER_SIGN_RE.sub('<div>', text)
+
+        def _clean(match):
+            tag, attrs = match.group(1), match.group(2)
+            align = re.search(r'text-align\s*:\s*[^;"\']+', attrs, re.IGNORECASE)
+            # 表格的历史表现型属性一并清掉，保证 <table> 能重新按主题重建
+            attrs = re.sub(r'\s*(?:style|border|cellspacing|cellpadding)="[^"]*"',
+                           '', attrs, flags=re.IGNORECASE)
+            if align:
+                attrs += f' style="{align.group(0).strip()}"'
+            return f'<{tag}{attrs}>'
+
+        return cls._OWNED_TAG_RE.sub(_clean, text)
 
     #: 常见 LaTeX 命令 → Unicode 符号映射（键不含反斜杠）。
     #: 仅用于行内简单公式的降级渲染（无 LaTeX 引擎场景），映射均为
@@ -363,15 +452,18 @@ class TextFormatter:
 
             link = f"<a href='think://{action}?index={index}' style='color:{accent_color}; text-decoration:none;'><nobr>{icon_html} <b>{status_title}</b></nobr></a>"
 
+            # data-navis-think 标记：仅供 UI 层拆分块时识别思考链面板
+            # （见 TextFormatter.split_overflow_blocks），Qt 渲染时忽略未知属性。
             if not is_expanded:
-                final_html += f"<div style='background:{bg_color}; border-left: 3px solid {border_color}; padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px;'>{link}</div>"
+                final_html += (f"<div data-navis-think='1' style='background:{bg_color}; border-left: 3px solid {border_color}; "
+                               f"padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px;'>{link}</div>")
             else:
                 safe_content = hidden_content.replace('\n', '<br>')
                 safe_content = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', safe_content)
                 safe_content = re.sub(r'\*(.*?)\*', r'<i>\1</i>', safe_content)
                 suffix = "" if is_closed else f" <span style='color:{accent_color};'><i>...</i></span>"
                 final_html += (
-                    f"<div style='background:{bg_color}; border-left: 3px solid {accent_color}; padding: 8px 12px; "
+                    f"<div data-navis-think='1' style='background:{bg_color}; border-left: 3px solid {accent_color}; padding: 8px 12px; "
                     f"margin: 10px 0; border-radius: 4px; font-size: 13px; color: {text_muted};'>"
                     f"{link}<br><br><div style='color:{text_muted};'>{safe_content}{suffix}</div></div>")
 
@@ -395,7 +487,9 @@ class TextFormatter:
                           HTML 内联样式固化进文档，调用方（气泡层）需在
                           theme_changed 时重渲染以刷新内联主题色。
         """
-        processed_text = text
+        # 幂等前提：先清掉上一次渲染注入的主题样式，再重新注入当前主题的样式。
+        # 入参既可能是原始 Markdown，也可能是已渲染过的 HTML（气泡重渲染路径）。
+        processed_text = TextFormatter._reset_injected_styles(text)
 
         # ================= 救砖：修复丢失换行符的极度压缩 Markdown =================
         # 1. 修复连成一行的水平分割线
@@ -470,6 +564,52 @@ class TextFormatter:
         # 5) 水平分割线：显式主题边框色（默认黑线在深色主题下几乎不可见）
         _hr_html = f'<hr style="border:none; border-top:1px solid {_border}; margin:10px 0;" />'
         html = re.sub(r'<hr\s*/?>', lambda m: _hr_html, html)
+
+        # 6) 表格：边框 / 表头底纹 / 单元格文字色全部显式注入。此前表头底纹与
+        #    边框在气泡层（chat_bubble.set_content）二次替换，导致其它消费者
+        #    （如 PDF 导出）拿不到主题化表格，且单元格文字色依赖容器调色板——
+        #    深浅模式与固定浅色导出混用时会出现"文字与底色同色"。统一在此处理，
+        #    theme_key 决定配色，任何调用方的结果一致。
+        #    python-markdown 的 tables 扩展会为对齐生成 <th style="text-align:...">，
+        #    直接再挂一个 style= 会产生重复属性（Qt 取首个，后者失效），故用
+        #    正则与既有 style 合并；无 style 的标签直接新建。
+        _is_dark_theme = (theme_key if theme_key in _tm.themes
+                          else _tm.current_theme) == 'dark'
+        _th_bg = (_rgba(_tm.color('bg_input', theme_key), 0.5) if _is_dark_theme
+                  else _rgba(_border, 0.12))
+        _cell_border = f"1px solid {_border}"
+
+        def _merge_style(tag: str, extra: str):
+            def _repl(match):
+                existing = (match.group(1) or "").strip().rstrip(";")
+                merged = f"{existing}; {extra}" if existing else extra
+                return f'<{tag} style="{merged}">'
+            return _repl
+
+        html = re.sub(r'<th(?:\s+style="([^"]*)")?\s*>',
+                      _merge_style('th', f"color:{_text_main}; background-color:{_th_bg}; "
+                                         f"font-weight:bold; border:{_cell_border}; "
+                                         f"padding:6px 10px; vertical-align:top;"), html)
+        html = re.sub(r'<td(?:\s+style="([^"]*)")?\s*>',
+                      _merge_style('td', f"color:{_text_main}; border:{_cell_border}; "
+                                         f"padding:6px 10px; vertical-align:top;"), html)
+        html = html.replace(
+            '<table>',
+            f'<table border="1" cellspacing="0" cellpadding="8" style="'
+            f'border-collapse:collapse; border-color:{_border}; margin:10px 0; '
+            f'width:100%; table-layout:fixed;">')
+
+        # 7) 列表：显式主题文字色 + 缩进/间距（Qt 对 ul/ol 的默认缩进偏小，
+        #    嵌套列表与正文几乎无区分度）。保留既有属性（如 <ol start="3">），
+        #    仅追加样式——渲染前已由 _reset_injected_styles 清掉旧 style，
+        #    不会产生重复属性。
+        html = re.sub(
+            r'<(ul|ol)([^>]*)>',
+            lambda m: (f'<{m.group(1)}{m.group(2)} style="-qt-list-indent:1; '
+                       f'color:{_text_main}; margin-top:4px; margin-bottom:8px;">'),
+            html)
+        html = re.sub(r'<li(?:\s+style="([^"]*)")?\s*>',
+                      _merge_style('li', f"color:{_text_main}; margin-bottom:2px;"), html)
         # =========================================================================
 
         # skip 保护：a/pre/code/img 维持"整元素"保护（元素内文本不再重复建链）；
@@ -616,9 +756,138 @@ class TextFormatter:
 
         # Qt 富文本引擎不支持 CSS 逗号字体栈；这里只注入第一个真实族名，
         # 且 style 属性统一用双引号，避免族名内单引号截断属性导致声明失效。
-        final_html = f"<div style=\"font-family: {qt_font_family_css()};\">{html}</div>"
+        # 同时显式注入正文文字色：正文/段落/列表/加粗等无独立样式的节点由
+        # 容器调色板着色，而调色板（qdarktheme）与 ThemeManager 当前主题在
+        # 极端时序下可能不一致，导致"主题色节点正确、正文节点反色"。外div
+        # 显式 color 让所有无样式文本跟随 theme_key，与主题色节点同源。
+        final_html = (f"<div style=\"font-family: {qt_font_family_css()}; "
+                      f"color: {_text_main};\">{html}</div>")
 
         return final_html
+
+    # ------------------------------------------------------------------
+    # 块拆分：为表格 / 引用 / 代码块 / 思考链提供独立滚动容器
+    # ------------------------------------------------------------------
+    @classmethod
+    def _matching_close_end(cls, html: str, start: int, tag: str) -> int:
+        """返回 ``tag`` 元素配对的闭合标签之后的位置；找不到返回 -1。
+
+        采用同名标签计数法：只统计同名的开/闭标签，忽略其它标签与自闭合
+        标签。渲染管线的 HTML 由 python-markdown 生成，结构良好（代码块
+        内的 ``<`` 已转义为实体），该计数法足够稳健。
+        """
+        depth = 1
+        pos = start
+        while True:
+            m = _TAG_TOKEN_RE.search(html, pos)
+            if not m:
+                return -1
+            pos = m.end()
+            if m.group(2).lower() != tag:
+                continue
+            if m.group(1):  # 闭合标签
+                depth -= 1
+                if depth == 0:
+                    return m.end()
+            elif not m.group(0).endswith('/>'):
+                depth += 1
+
+    @classmethod
+    def _strip_outer_wrapper(cls, html: str):
+        """剥掉最外层样式 wrapper，返回 ``(inner_html, wrapper_open_tag)``。
+
+        wrapper 由 :meth:`markdown_to_html` 注入（``<div style="font-family:
+        ...; color: ...">``），它包住整篇文档；拆分块时必须先剥掉，否则
+        首/末个文本片段会各自带着未配对的 ``<div>``。历史调用点会把「上一
+        轮渲染结果」再次送进管线，此时旧 wrapper 已被
+        :meth:`_reset_injected_styles` 降级为裸 ``<div>``，一并剥离。
+        """
+        wrapper = ""
+        m = cls._WRAPPER_SIGN_RE.match(html)
+        if m:
+            close_start = html.rfind('</div>')
+            if close_start > m.end():
+                wrapper = m.group(0)
+                html = html[m.end():close_start]
+
+        stripped = True
+        while stripped:
+            stripped = False
+            m2 = re.match(r'<div\s*>', html)
+            if m2:
+                end = cls._matching_close_end(html, m2.end(), 'div')
+                if end > 0 and not html[end:].strip():
+                    html = html[m2.end():end - len('</div>')]
+                    stripped = True
+        return html, wrapper
+
+    @classmethod
+    def split_overflow_blocks(cls, html: str):
+        """把渲染后的正文 HTML 拆成若干可独立承载滚动条的块。
+
+        返回 ``[(kind, html), ...]``，``kind`` 取值：
+
+        * ``text``  —— 常规富文本（段落 / 标题 / 列表 / 行内代码 / 图片…）；
+        * ``think`` —— 思考链折叠面板（带 ``data-navis-think`` 的顶层 div）；
+        * ``table`` —— Markdown 表格；
+        * ``quote`` —— Markdown 引用（``>``，**不含**文末参考文献区）；
+        * ``code``  —— 围栏代码块。
+
+        只拆``顶层``容器：嵌套在引用内的代码块仍归外层引用块管辖，避免
+        同一段内容被套两层滚动条。未命中任何目标块时原样返回单个 text 块，
+        保证「普通回答」与旧的单文档渲染路径完全一致。
+        """
+        if not html:
+            return []
+
+        inner, wrapper = cls._strip_outer_wrapper(html)
+
+        def _wrap(fragment: str) -> str:
+            return f"{wrapper}{fragment}</div>" if wrapper else fragment
+
+        blocks = []
+        buf_start = 0
+        pos = 0
+        hit = False
+        while True:
+            m = _TAG_TOKEN_RE.search(inner, pos)
+            if not m:
+                break
+            pos = m.end()
+            if m.group(1):  # 闭合标签，跳过
+                continue
+            name = m.group(2).lower()
+            tag_text = m.group(0)
+            if name == 'table':
+                kind = 'table'
+            elif name == 'blockquote':
+                kind = 'quote'
+            elif name == 'pre':
+                kind = 'code'
+            elif name == 'div' and 'data-navis-think' in tag_text:
+                kind = 'think'
+            else:
+                continue
+            if tag_text.endswith('/>'):
+                continue
+            end = cls._matching_close_end(inner, m.end(), name)
+            if end < 0:
+                continue
+            if m.start() > buf_start:
+                lead = inner[buf_start:m.start()]
+                if lead.strip():
+                    blocks.append(('text', _wrap(lead)))
+            blocks.append((kind, inner[m.start():end]))
+            buf_start = end
+            pos = end
+            hit = True
+
+        if not hit:
+            return [('text', html)]
+        tail = inner[buf_start:]
+        if tail.strip():
+            blocks.append(('text', _wrap(tail)))
+        return blocks
 
     @staticmethod
     def _strip_tool_json(text: str) -> str:

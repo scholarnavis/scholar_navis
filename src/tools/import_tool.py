@@ -433,19 +433,28 @@ class ImportTool(BaseTool):
 
             m_conf = get_model_conf(display_data.get('model_id'), "embedding")
 
+            # 状态色取自主题（原硬编码 #05B8CC / #f1c40f 在浅色底上对比不足）。
+            # 本方法在 _apply_theme -> update_file_list 链路中会被重跑，故可
+            # 直接读取当前主题色。
+            tm = ThemeManager()
+            accent = tm.color('accent')
+            warning = tm.color('warning')
+            danger = tm.color('danger')
+
             if m_conf:
                 is_downloaded = check_model_exists(m_conf.get('hf_repo_id'))
-                dl_tag = "" if is_downloaded else " <span style='color:#ffb86c; font-weight:bold;'>(Not Downloaded)</span>"
+                dl_tag = "" if is_downloaded else f" <span style='color:{warning}; font-weight:bold;'>(Not Downloaded)</span>"
                 m_ui = f"{m_conf['ui_name']}{dl_tag}"
             else:
-                m_ui = f"{display_data.get('model_id', 'Unknown')} <span style='color:#ff6b6b; font-weight:bold;'>(Unknown/External)</span>"
+                m_ui = f"{display_data.get('model_id', 'Unknown')} <span style='color:{danger}; font-weight:bold;'>(Unknown/External)</span>"
 
             status = display_data.get('status', 'ready')
-            status_color = "#ff6b6b" if status == "corrupted" else ("#f1c40f" if status == "building" else "#05B8CC")
+            status_color = danger if status == "corrupted" else (
+                warning if status == "building" else accent)
 
             info = (
                 f"<b>Project:</b> {display_data.get('name', 'Unknown')}<br>"
-                f"<b>Domain:</b> <span style='color:#05B8CC'>{display_data.get('domain', 'Gen')}</span><br>"
+                f"<b>Domain:</b> <span style='color:{accent}'>{display_data.get('domain', 'Gen')}</span><br>"
                 f"<b>Status:</b> <span style='color:{status_color}; font-weight:bold;'>{status.upper()}</span><br>"
                 f"<b>Model:</b> {m_ui}<br>"
                 f"<b>Storage:</b> {display_data.get('doc_count', 0)} files ({display_data.get('size_mb', 0)} MB)"
@@ -553,13 +562,17 @@ class ImportTool(BaseTool):
 
         self.lbl_staged_status.setText(msg)
 
-        # 样式调整：有改动或者是损坏状态，都高亮显示
+        # 样式调整：有改动或者是损坏状态，都高亮显示（配色取自主题，
+        # 保证深浅模式下都有足够对比度）
+        tm = ThemeManager()
         if has_changes or is_abnormal:
-            color = "#ff6b6b" if is_abnormal else "#ffb86c"
+            color = tm.color('danger') if is_abnormal else tm.color('warning')
             self.lbl_staged_status.setStyleSheet(
                 f"color: {color}; font-weight: bold; border: 1px solid {color}; padding: 5px;")
         else:
-            self.lbl_staged_status.setStyleSheet("color: #888; border: 1px dashed #444; padding: 10px;")
+            self.lbl_staged_status.setStyleSheet(
+                f"color: {tm.color('text_muted')}; "
+                f"border: 1px dashed {tm.color('border')}; padding: 10px;")
 
     def commit_changes(self):
         """Commit and apply all staged changes"""
