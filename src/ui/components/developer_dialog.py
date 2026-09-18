@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
 )
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.dialog import BaseDialog
 from src.ui.components.source_code_viewer import SourceCodeViewer
 
@@ -388,14 +388,14 @@ class DeveloperDialog(BaseDialog):
         tm = ThemeManager()
 
         self.title_lbl.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {tm.color('text_main')}; "
+            f"font-size: 18px; font-weight: {strong_weight_css()}; color: {tm.color('text_main')}; "
             f"font-family: {tm.font_family()};")
         self.subtitle_lbl.setStyleSheet(
             f"color: {tm.color('text_muted')}; font-size: 12px; "
             f"font-family: {tm.font_family()};")
 
         section_style = (
-            f"font-weight: bold; color: {tm.color('accent')}; margin-top: 8px; "
+            f"font-weight: {strong_weight_css()}; color: {tm.color('accent')}; margin-top: 8px; "
             f"border-bottom: 1px solid {tm.color('border')}; padding-bottom: 3px; "
             f"font-family: {tm.font_family()};")
         for lbl in self._section_labels:

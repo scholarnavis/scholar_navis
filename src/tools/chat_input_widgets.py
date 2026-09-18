@@ -19,7 +19,8 @@ from src.core.image_utils import IMAGE_EXTENSIONS
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
-from src.core.theme_manager import ThemeManager, hex_to_rgba
+from src.core.theme_manager import (ThemeManager, hex_to_rgba, strong_weight_css,
+                                    title_weight_css)
 from src.ui.components.toast import ToastManager
 
 
@@ -62,7 +63,8 @@ class _ImageChip(QWidget):
         self.btn_remove.setAlignment(Qt.AlignCenter)
         self.btn_remove.setStyleSheet(
             "QLabel { background-color: rgba(0, 0, 0, 0.55); color: white; "
-            "border-radius: 8px; font-size: 10px; font-weight: bold; }")
+            "border-radius: 8px; font-size: 10px; font-weight: "
+            + strong_weight_css() + "; }")
         self.btn_remove.setCursor(Qt.PointingHandCursor)
         self.btn_remove.setToolTip("Remove this image")
         self.btn_remove.mousePressEvent = self._on_remove
@@ -116,11 +118,11 @@ class ChatDropTargetWidget(QWidget):
 
         self.overlay = QLabel("Drop files here to attach", self)
         self.overlay.setAlignment(Qt.AlignCenter)
-        self.overlay.setStyleSheet("""
-            background-color: rgba(5, 184, 204, 0.85); 
-            color: white; 
-            font-size: 28px; 
-            font-weight: bold; 
+        self.overlay.setStyleSheet(f"""
+            background-color: rgba(5, 184, 204, 0.85);
+            color: white;
+            font-size: 28px;
+            font-weight: {title_weight_css()};
             border-radius: 12px;
             border: 4px dashed rgba(255, 255, 255, 0.5);
         """)
@@ -390,7 +392,7 @@ class ChatInputContainer(QFrame):
         # 三个 Agent 开关：原为硬编码青色（浅色主题下白底青字对比度不足），
         # 改为跟随 accent，并在主题切换时同步刷新。
         agent_chk_style = (
-            f"QCheckBox {{ color: {tm.color('accent')}; font-weight: bold; "
+            f"QCheckBox {{ color: {tm.color('accent')}; font-weight: {strong_weight_css()}; "
             f"font-family: {tm.font_family()}; }}"
             f"QCheckBox:disabled {{ color: {tm.color('text_muted')}; }}"
         )
@@ -459,7 +461,7 @@ class ChatInputContainer(QFrame):
 
         if hasattr(self, 'lbl_hardware_status'):
             self.lbl_hardware_status.setStyleSheet(
-                f"color: {tm.color('text_muted')}; font-size: 11px; font-weight: bold; padding-left: 4px;"
+                f"color: {tm.color('text_muted')}; font-size: 11px; font-weight: {strong_weight_css()}; padding-left: 4px;"
             )
 
         if hasattr(self, 'btn_ribbon_state'):
@@ -500,13 +502,13 @@ class ChatInputContainer(QFrame):
 
         self.btn_send.setIcon(tm.icon("send", "bg_main"))
         self.btn_send.setStyleSheet(f"""
-                            QPushButton {{ background-color: {tm.color('academic_blue')}; color: #ffffff; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
+                            QPushButton {{ background-color: {tm.color('academic_blue')}; color: #ffffff; border-radius: 6px; font-weight: {strong_weight_css()}; font-family: {tm.font_family()}; }}
                             QPushButton:hover {{ background-color: {tm.color('academic_blue_hover')}; }}
                         """)
 
         self.btn_stop.setIcon(tm.icon("close", "bg_main"))
         self.btn_stop.setStyleSheet(f"""
-                    QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: bold; font-family: {tm.font_family()}; }}
+                    QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; border-radius: 6px; font-weight: {strong_weight_css()}; font-family: {tm.font_family()}; }}
                     QPushButton:hover {{ background-color: rgba(255, 107, 107, 0.8); }}
                 """)
 

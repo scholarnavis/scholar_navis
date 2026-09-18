@@ -17,7 +17,7 @@ from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskState, TaskMode
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.rss_tasks import FetchRSSTask, SearchArticlesTask, ImportRssTask, ExportRssTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.RotatingSpinner import ModernSpinner
@@ -307,7 +307,7 @@ class ArticleWidget(QFrame):
             self.btn_download_oa.setIcon(tm.icon("download", "bg_main"))
             # Uses a solid green success background with main background color (usually white/black) for text
             self.btn_download_oa.setStyleSheet(
-                f"QPushButton {{ background-color: {tm.color('success')}; color: {tm.color('bg_main')}; border: none; border-radius: 4px; padding: 4px 10px; font-weight: bold; }}"
+                f"QPushButton {{ background-color: {tm.color('success')}; color: {tm.color('bg_main')}; border: none; border-radius: 4px; padding: 4px 10px; font-weight: {strong_weight_css()}; }}"
                 f"QPushButton:hover {{ opacity: 0.8; }}"
             )
 
@@ -335,7 +335,7 @@ class ArticleWidget(QFrame):
         if hasattr(self, 'lbl_title'):
             self.lbl_title.setText(
                 f"<a href='{self._title_link}' style='color:{tm.color('accent')}; "
-                f"text-decoration:none; font-size: 16px; font-weight:bold;'>"
+                f"text-decoration:none; font-size: 16px; font-weight:{strong_weight_css()};'>"
                 f"{self._title_text}</a>")
 
 
@@ -463,7 +463,7 @@ class RSSTool(BaseTool):
             self.feed_list.setStyleSheet(f"""
                 QListWidget {{ background-color: {bg_main}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 5px; }}
                 QListWidget::item {{ padding: 4px 0px; border-bottom: 1px dashed {border}; }}
-                QListWidget::item:selected {{ background-color: {tm.color('accent_hover')}; color: {tm.color('bg_card')}; font-weight: bold; }}
+                QListWidget::item:selected {{ background-color: {tm.color('accent_hover')}; color: {tm.color('bg_card')}; font-weight: {strong_weight_css()}; }}
             """)
 
         if hasattr(self, 'inp_search_feed'):
@@ -472,7 +472,7 @@ class RSSTool(BaseTool):
         # 顶部操作栏
         if hasattr(self, 'btn_manage'):
             self.btn_manage.setIcon(tm.icon("folder", "bg_main"))
-            self.btn_manage.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;")
+            self.btn_manage.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: {strong_weight_css()}; border: none;")
 
         if hasattr(self, 'btn_more_actions'):
             self.btn_more_actions.setIcon(tm.icon("settings", "text_main"))
@@ -488,7 +488,7 @@ class RSSTool(BaseTool):
 
         if hasattr(self, 'btn_refresh'):
             self.btn_refresh.setIcon(tm.icon("sync", "bg_main"))
-            self.btn_refresh.setStyleSheet(f"background-color: {tm.color('success')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;")
+            self.btn_refresh.setStyleSheet(f"background-color: {tm.color('success')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: {strong_weight_css()}; border: none;")
 
         # 小型选择按钮
         action_btn_style = f"QPushButton {{ background-color: {btn_bg}; color: {text_main}; border: 1px solid {border}; border-radius: 3px; padding: 4px 8px; font-size: 11px; }} QPushButton:hover {{ background-color: {btn_hover}; }}"
@@ -504,11 +504,11 @@ class RSSTool(BaseTool):
         # 右侧快捷操作按钮
         if hasattr(self, 'btn_batch_chat'):
             self.btn_batch_chat.setIcon(tm.icon("brain", "accent"))
-            self.btn_batch_chat.setStyleSheet(f"QPushButton {{ color: {tm.color('accent')}; background-color: transparent; border: 1px solid {tm.color('accent')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; }}")
+            self.btn_batch_chat.setStyleSheet(f"QPushButton {{ color: {tm.color('accent')}; background-color: transparent; border: 1px solid {tm.color('accent')}; padding: 4px 8px; border-radius: 4px; font-weight: {strong_weight_css()}; }} QPushButton:hover {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; }}")
 
         if hasattr(self, 'btn_export_pdf'):
             self.btn_export_pdf.setIcon(tm.icon("file-text", "warning"))
-            self.btn_export_pdf.setStyleSheet(f"QPushButton {{ color: {tm.color('warning')}; background-color: transparent; border: 1px solid {tm.color('warning')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; }}")
+            self.btn_export_pdf.setStyleSheet(f"QPushButton {{ color: {tm.color('warning')}; background-color: transparent; border: 1px solid {tm.color('warning')}; padding: 4px 8px; border-radius: 4px; font-weight: {strong_weight_css()}; }} QPushButton:hover {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; }}")
 
         if hasattr(self, 'inp_global_search'):
             self.inp_global_search.setStyleSheet(f"""
@@ -526,7 +526,7 @@ class RSSTool(BaseTool):
                     """)
 
         if hasattr(self, 'lbl_loading_anim'):
-            self.lbl_loading_anim.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: bold;")
+            self.lbl_loading_anim.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: {strong_weight_css()};")
 
     def trigger_global_search(self):
         query = self.inp_global_search.text().strip()
@@ -609,7 +609,8 @@ class RSSTool(BaseTool):
         toolbar = QHBoxLayout()
         self.btn_manage = QPushButton("Manage Subscriptions")
         self.btn_manage.setStyleSheet(
-            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; "
+            f"font-weight: {strong_weight_css()};")
         self.btn_manage.clicked.connect(self.open_subscription_manager)
 
         # 替换原有零散按钮，整合为下拉菜单
@@ -640,7 +641,8 @@ class RSSTool(BaseTool):
 
         self.btn_refresh = QPushButton("Sync Selected")
         self.btn_refresh.setStyleSheet(
-            "background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
+            "background-color: #28a745; color: white; padding: 6px 15px; border-radius: 4px; "
+            f"font-weight: {strong_weight_css()};")
         self.btn_refresh.clicked.connect(lambda: self._batch_action("fetch"))
 
         toolbar.addWidget(self.btn_manage)
@@ -737,15 +739,13 @@ class RSSTool(BaseTool):
 
         tm = ThemeManager()
         self.lbl_loading_text = QLabel("Searching...")
-        self.lbl_loading_text.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: bold;")
+        self.lbl_loading_text.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: {strong_weight_css()};")
 
         self.loading_layout.addWidget(self.spinner)
         self.loading_layout.addSpacing(10)
         self.loading_layout.addWidget(self.lbl_loading_text)
 
         self.loading_container.hide()
-        right_layout.insertWidget(2, self.loading_container)
-
 
         self.article_container = QWidget()
         self.article_container.setStyleSheet("background: transparent;")
@@ -755,6 +755,12 @@ class RSSTool(BaseTool):
         self.scroll_area.setWidget(self.article_container)
 
         right_layout.addWidget(self.scroll_area)
+        # 加载提示压在文章列表上方：按 scroll_area 的实际位置插入，而不是写死索引。
+        # 右栏元素数量会随版本增删，固定索引一旦越界，Qt 会打印
+        # "QBoxLayout::insert: index N out of range" 并退化成追加到列表末尾——
+        # 提示条位置就跑到了列表下方。
+        right_layout.insertWidget(right_layout.indexOf(self.scroll_area),
+                                 self.loading_container)
         splitter.addWidget(right_panel)
 
         splitter.setSizes([340, 860])

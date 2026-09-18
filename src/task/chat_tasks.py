@@ -13,6 +13,7 @@ from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
+from src.core.theme_manager import strong_weight_css
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
 
@@ -1746,8 +1747,8 @@ class ExportChatTask(BackgroundTask):
                     body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
                     h1, h2, h3 {{ color: {colors.get('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
                     .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
-                    .header-user {{ color: {colors.get('academic_blue')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
-                    .header-ai {{ color: {colors.get('success')}; font-weight: bold; font-size: 12pt; margin-bottom: 8px; }}
+                    .header-user {{ color: {colors.get('academic_blue')}; font-weight: {strong_weight_css()}; font-size: 12pt; margin-bottom: 8px; }}
+                    .header-ai {{ color: {colors.get('success')}; font-weight: {strong_weight_css()}; font-size: 12pt; margin-bottom: 8px; }}
                     .content {{ margin-top: 5px; }}
                     pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: {mono_font_family}; font-size: 9.5pt; }}
                     code {{ font-family: {mono_font_family}; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
@@ -1755,9 +1756,9 @@ class ExportChatTask(BackgroundTask):
                     blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
                     table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
                     th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
-                    th {{ background-color: #f6f8fa; font-weight: bold; }}
+                    th {{ background-color: #f6f8fa; font-weight: {strong_weight_css()}; }}
                     .doc-header {{ text-align: center; border-bottom: 2px solid {colors.get('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
-                    .doc-title {{ font-size: 22pt; font-weight: bold; color: {colors.get('title_blue')}; font-family: {font_family}; }}
+                    .doc-title {{ font-size: 22pt; font-weight: {strong_weight_css()}; color: {colors.get('title_blue')}; font-family: {font_family}; }}
                     .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
                 """)
 

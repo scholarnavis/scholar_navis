@@ -12,7 +12,7 @@ from PySide6.QtGui import QAction, QCursor, QColor, QIcon
 from PySide6.QtCore import Qt
 from src.core.core_task import TaskState, TaskManager
 from src.core.models_registry import get_model_conf, check_model_exists
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.tools.base_tool import BaseTool
 from src.core.kb_manager import KBManager
 from src.core.signals import GlobalSignals
@@ -164,7 +164,7 @@ class ImportTool(BaseTool):
         self.widget.setStyleSheet(f"""
             QWidget {{ background-color: {bg_main}; color: {text_main}; border: none; }}
             QGroupBox {{ border: 1px solid {border}; border-radius: 6px; margin-top: 12px; padding-top: 25px; background-color: {bg_card}; }}
-            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: {text_muted}; font-weight: bold; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: {text_muted}; font-weight: {strong_weight_css()}; }}
             QPushButton {{ background-color: {btn_bg}; border: 1px solid {border}; border-radius: 4px; padding: 6px 12px; color: {text_main}; }}
             QPushButton:hover {{ background-color: {btn_hover}; }}
             QPushButton:disabled {{ color: {text_muted}; background-color: {bg_main}; border: 1px dashed {border}; }}
@@ -207,7 +207,7 @@ class ImportTool(BaseTool):
         if hasattr(self, 'btn_save'):
             self.btn_save.setIcon(tm.icon("save", "bg_main"))
             self.btn_save.setStyleSheet(
-                f"QPushButton:enabled {{ background-color: {accent}; font-weight: bold; color: {bg_main}; height: 35px; border: none; }} QPushButton:hover:enabled {{ background-color: {accent_hover}; }}")
+                f"QPushButton:enabled {{ background-color: {accent}; font-weight: {strong_weight_css()}; color: {bg_main}; height: 35px; border: none; }} QPushButton:hover:enabled {{ background-color: {accent_hover}; }}")
 
         self.update_file_list()
 
@@ -443,10 +443,10 @@ class ImportTool(BaseTool):
 
             if m_conf:
                 is_downloaded = check_model_exists(m_conf.get('hf_repo_id'))
-                dl_tag = "" if is_downloaded else f" <span style='color:{warning}; font-weight:bold;'>(Not Downloaded)</span>"
+                dl_tag = "" if is_downloaded else f" <span style='color:{warning}; font-weight:{strong_weight_css()};'>(Not Downloaded)</span>"
                 m_ui = f"{m_conf['ui_name']}{dl_tag}"
             else:
-                m_ui = f"{display_data.get('model_id', 'Unknown')} <span style='color:{danger}; font-weight:bold;'>(Unknown/External)</span>"
+                m_ui = f"{display_data.get('model_id', 'Unknown')} <span style='color:{danger}; font-weight:{strong_weight_css()};'>(Unknown/External)</span>"
 
             status = display_data.get('status', 'ready')
             status_color = danger if status == "corrupted" else (
@@ -455,7 +455,7 @@ class ImportTool(BaseTool):
             info = (
                 f"<b>Project:</b> {display_data.get('name', 'Unknown')}<br>"
                 f"<b>Domain:</b> <span style='color:{accent}'>{display_data.get('domain', 'Gen')}</span><br>"
-                f"<b>Status:</b> <span style='color:{status_color}; font-weight:bold;'>{status.upper()}</span><br>"
+                f"<b>Status:</b> <span style='color:{status_color}; font-weight:{strong_weight_css()};'>{status.upper()}</span><br>"
                 f"<b>Model:</b> {m_ui}<br>"
                 f"<b>Storage:</b> {display_data.get('doc_count', 0)} files ({display_data.get('size_mb', 0)} MB)"
             )
@@ -568,7 +568,7 @@ class ImportTool(BaseTool):
         if has_changes or is_abnormal:
             color = tm.color('danger') if is_abnormal else tm.color('warning')
             self.lbl_staged_status.setStyleSheet(
-                f"color: {color}; font-weight: bold; border: 1px solid {color}; padding: 5px;")
+                f"color: {color}; font-weight: {strong_weight_css()}; border: 1px solid {color}; padding: 5px;")
         else:
             self.lbl_staged_status.setStyleSheet(
                 f"color: {tm.color('text_muted')}; "

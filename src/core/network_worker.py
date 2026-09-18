@@ -4,13 +4,16 @@ import random
 import re
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import requests
 import httpx
 from PySide6.QtCore import QObject, Signal
-from chromadb import EmbeddingFunction, Documents, Embeddings
 
 from src.core.config_manager import ConfigManager
+
+if TYPE_CHECKING:  # 仅用于类型注解：运行期不导入 chromadb（启动链上约 0.4 s）
+    from chromadb import Documents, Embeddings
 
 logger = logging.getLogger("NetworkWorker")
 
@@ -89,12 +92,71 @@ except ImportError:
     logger.warning("curl_cffi is not installed. Falling back to standard requests. Strict WAFs may block access.")
 
 
+# --------------------------------------------------------------------------- #
+#  curl_cffi 环境级故障熔断
+# --------------------------------------------------------------------------- #
+#: 判定"不是网络抖动，而是本机 curl_cffi 运行环境坏了"的错误特征。
+#: 实测样本（NixOS 上注入的 LD_LIBRARY_PATH 与应用自带的 OpenSSL 冲突）：
+#:   "curl: (35) TLS connect error: error:00000000:invalid library (0):OPENSSL_internal:invalid library (0)"
+#: 这类错误与目标站点无关，重试必然再失败——每个请求都尝试一次只会得到同样
+#: 的警告并白等一次 TLS 握手。
+_CFFI_FATAL_MARKERS = (
+    "invalid library",
+    "openssl_internal",
+    "undefined symbol",
+    "cannot open shared object",
+    "wrong elf class",
+)
+
+#: 强制禁用 curl_cffi（应急开关，例如某平台的 libcurl-impersonate 不可用）。
+_CFFI_DISABLE_ENV = "SCHOLAR_NAVIS_DISABLE_CURL_CFFI"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+#: 熔断状态：非空表示本进程内已确认 curl_cffi 不可用（含原因，供日志/UI 展示）。
+_cffi_broken_reason = ""
+_cffi_state_lock = threading.Lock()
+
+
+def cffi_fatal_error(error: BaseException | str) -> bool:
+    """该错误是否属于 curl_cffi 的环境级故障（应当熔断，而不是逐请求重试）。"""
+    err = str(error).lower()
+    return any(marker in err for marker in _CFFI_FATAL_MARKERS)
+
+
+def mark_cffi_broken(reason: str) -> None:
+    """把 curl_cffi 标记为"本进程内不可用"（幂等，只在首次记录日志）。
+
+    之后 :func:`create_robust_session` 直接返回标准 ``requests.Session``，
+    避免每个请求都重复触发同一个 TLS 库错误（既刷日志又浪费一次握手）。
+    """
+    global _cffi_broken_reason
+    with _cffi_state_lock:
+        if _cffi_broken_reason:
+            return
+        _cffi_broken_reason = reason or "unknown"
+    logger.warning(
+        "curl_cffi is unusable in this environment (%s). Standard requests will be used "
+        "for the rest of this session; strict WAFs may block some sources.", _cffi_broken_reason)
+
+
+def cffi_disabled() -> bool:
+    """curl_cffi 是否已不可用（或在环境变量里被强制停用）。"""
+    if os.environ.get(_CFFI_DISABLE_ENV, "").strip().lower() in _TRUTHY:
+        return True
+    with _cffi_state_lock:
+        return bool(_cffi_broken_reason)
+
+
 def create_robust_session():
     """
     创建一个真正强壮的 Session，
     自动挂载全局代理配置，并使用底层 TLS 指纹 + 严格匹配的 Header 伪装真实浏览器。
+
+    当 curl_cffi 在本机不可用（未安装 / TLS 库加载失败，见 :func:`cffi_disabled`）时，
+    退化为标准 ``requests.Session`` + 随机浏览器 Header，行为与"未安装 curl_cffi"
+    的既有分支完全一致。
     """
-    if HAS_CFFI:
+    if HAS_CFFI and not cffi_disabled():
         targets = ["chrome110", "chrome116", "chrome120"]
         target = random.choice(targets)
 
@@ -121,7 +183,10 @@ def create_robust_session():
             'Sec-Ch-Ua-Platform': '"Windows"'
         })
     else:
-        session = cffi_requests.Session()
+        # 这里必须显式用标准 requests：curl_cffi 已安装但熔断/被禁用时，
+        # cffi_requests.Session() 仍会走它自带的 libcurl（同一个 TLS 库故障），
+        # 等于没退避成功。
+        session = requests.Session()
         session.headers.update(get_random_browser_headers())
 
     proxy_cfg = _get_explicit_proxy_kwargs()
@@ -133,7 +198,56 @@ def create_robust_session():
     return session
 
 
+def _ensure_ca_bundle() -> None:
+    """让 stdlib 的 HTTPS（urllib/ssl）也能找到可用的 CA 根证书。
+
+    Linux 上 ``ssl.get_default_verify_paths()`` 依赖发行版把根证书装进
+    ``/etc/ssl/certs``；NixOS（以及本应用在 steam-run 的 FHS 环境里重启之后）
+    该路径常常不可用。实测：``cafile=None``、``/etc/ssl/certs`` 无法完成校验，
+    于是所有走 urllib 的请求都以
+    ``CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain``
+    失败。受影响的主要是 Bio.Entrez（PubMed）——它走 urllib，而 requests /
+    httpx / curl_cffi 自带 certifi 不受影响，症状就是"Crossref/OpenAlex 正常，
+    PubMed 却一条都搜不到"。
+
+    仅在系统未显式配置（``SSL_CERT_FILE`` 为空）且系统 cafile 缺失时，
+    把 SSL_CERT_FILE / REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE 指向 certifi 的
+    bundle。用户自带的企业 CA（已设置这些变量）会被尊重，不做覆盖。
+    """
+    if os.environ.get("SSL_CERT_FILE"):
+        return  # 用户/系统已显式指定，保持不动
+
+    try:
+        import ssl
+        default_cafile = ssl.get_default_verify_paths().cafile
+    except Exception:
+        default_cafile = None
+
+    if default_cafile and os.path.exists(default_cafile):
+        return  # 系统根证书可用
+
+    try:
+        import certifi
+        bundle = certifi.where()
+    except Exception as e:  # certifi 未安装：无从兜底，交由 OpenSSL 报错
+        logger.debug(f"certifi unavailable, cannot pin CA bundle: {e}")
+        return
+
+    if not os.path.exists(bundle):
+        return
+
+    applied = False
+    for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        if not os.environ.get(key):
+            os.environ[key] = bundle
+            applied = True
+
+    if applied:
+        logger.info(f"System CA store unavailable; pinned HTTPS CA bundle to certifi: {bundle}")
+
+
 def setup_global_network_env():
+    _ensure_ca_bundle()
     cfg = ConfigManager().user_settings
     proxy_mode = cfg.get("proxy_mode", "off")
     proxy_url = cfg.get("proxy_url", "").strip()
@@ -366,8 +480,16 @@ class LightNetworkWorker(QObject):
         self.download_image(getattr(self, 'img_url', ''), getattr(self, 'img_save_path', ''))
 
 
-class NetworkEmbeddingFunction(EmbeddingFunction):
-    """Network Embedding Caller (ChromaDB Compatible)"""
+class NetworkEmbeddingFunction:
+    """Network Embedding Caller (ChromaDB Compatible)。
+
+    刻意**不继承** ``chromadb.EmbeddingFunction``：chromadb 只做鸭子类型校验
+    （``chromadb.api.types.validate_embedding_function`` 比较 ``__call__`` 的
+    参数名，不做 isinstance 检查），而继承会让本模块在导入期拉起 chromadb——
+    本模块是启动链的一环（``setup_global_network_env``），代价约 0.4 s。
+    接口要求：``__call__(self, input: Documents) -> Embeddings``，参数名必须是
+    ``input``。
+    """
 
     def __init__(self, api_url, api_key, model_name):
         self.api_url = api_url.rstrip('/')
@@ -375,7 +497,7 @@ class NetworkEmbeddingFunction(EmbeddingFunction):
         self.model_name = model_name
         self.proxy_kwargs = _get_explicit_proxy_kwargs()
 
-    def __call__(self, input: Documents) -> Embeddings:
+    def __call__(self, input: "Documents") -> "Embeddings":
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -482,28 +604,40 @@ class GlobalRateLimiter:
         self.queue_lock = threading.Lock()
 
     def acquire(self, service, rps=None, rph=None):
+        """按服务限速；必要时阻塞到下一个可用时隙。
+
+        日志只在**真的发生等待**时记录：旧实现每次入队都打一条
+        ``[RateLimiter] X Queue: N request(s) waiting``，而这条信息在入队时打印、
+        并非等待结果，并发检索（一次会话可同时 4~8 路）时会刷出成片无意义的队列
+        深度，把真正的告警淹没。未发生等待的请求降为 DEBUG。
+        """
         limit_val = rps if rps else rph
         limit_type = "rps" if rps else "rph"
 
         with self.queue_lock:
             self.waiting_counts[service] += 1
             current_queue = self.waiting_counts[service]
+            # 每个服务固定一把锁：旧写法 locks.get(service, threading.Lock()) 在
+            # 服务名未登记时每次返回**新锁**，等于完全没有限流。
+            lock = self.locks.setdefault(service, threading.Lock())
 
-        logger.info(
-            f"[RateLimiter] {service.upper()} Queue: {current_queue} request(s) waiting. Limit: {limit_val} {limit_type}.")
-
-        with self.locks.get(service, threading.Lock()):
-            try:
+        try:
+            with lock:
                 min_interval = (1.0 / rps) if rps else (3600.0 / rph)
-                now = time.time()
-                elapsed = now - self.last_called[service]
-                if elapsed < min_interval:
-                    sleep_time = min_interval - elapsed
-                    time.sleep(sleep_time)
+                wait = min_interval - (time.time() - self.last_called.get(service, 0.0))
+                if wait > 0:
+                    logger.info(
+                        f"[RateLimiter] {service.upper()}: sleeping {wait:.2f}s "
+                        f"(queued={current_queue}, limit={limit_val} {limit_type}).")
+                    time.sleep(wait)
+                elif current_queue > 1:
+                    logger.debug(
+                        f"[RateLimiter] {service.upper()}: {current_queue} concurrent, "
+                        f"no wait needed (limit={limit_val} {limit_type}).")
                 self.last_called[service] = time.time()
-            finally:
-                with self.queue_lock:
-                    self.waiting_counts[service] -= 1
+        finally:
+            with self.queue_lock:
+                self.waiting_counts[service] -= 1
 
 
 global_rate_limiter = GlobalRateLimiter()

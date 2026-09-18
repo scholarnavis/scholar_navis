@@ -20,7 +20,7 @@ from Bio import Entrez
 from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.email_check import verify_email_robust
-from src.core.network_worker import setup_global_network_env, create_robust_session, GlobalRateLimiter, global_rate_limiter, record_auth_rejection, is_auth_blocked
+from src.core.network_worker import setup_global_network_env, create_robust_session, GlobalRateLimiter, global_rate_limiter, record_auth_rejection, is_auth_blocked, cffi_fatal_error, mark_cffi_broken
 
 __all__ = [
     "UdpJsonHandler", "logger", "ConfigManager", "BASE_DIR",
@@ -85,6 +85,12 @@ github_token = get_setting_or_env("github_token", "GITHUB_TOKEN")
 
 _EMAIL_VALID_CACHE = None
 def is_ncbi_email_valid():
+    """NCBI 邮箱是否可用（进程内缓存）。
+
+    校验与日志都只产出一次：旧实现每次调用都重打一行 ``NCBI email: ... is valid.``，
+    而 :func:`is_ncbi_enabled` 在每次检索取数时都会调用它——多源并发检索时这两行
+    日志会成对重复出现，纯粹是噪音。
+    """
     global _EMAIL_VALID_CACHE
     if _EMAIL_VALID_CACHE is None:
         if ncbi_email:
@@ -92,8 +98,11 @@ def is_ncbi_email_valid():
         else:
             _EMAIL_VALID_CACHE = False
 
-    if _EMAIL_VALID_CACHE:logger.info(f"NCBI email: {ncbi_email[0:5]}...{ncbi_email[-5:]} is valid.")
-    else: logger.error(f"NCBI email: {ncbi_email[0:5]}...{ncbi_email[-5:]} is invalid.")
+        masked = f"{ncbi_email[:5]}...{ncbi_email[-5:]}" if len(ncbi_email) > 10 else (ncbi_email or "unset")
+        if _EMAIL_VALID_CACHE:
+            logger.info(f"NCBI email: {masked} is valid.")
+        else:
+            logger.error(f"NCBI email: {masked} is invalid.")
 
     return _EMAIL_VALID_CACHE
 
@@ -145,15 +154,34 @@ def mcp_request(method: str, url: str, **kwargs):
         return response
     except Exception as e:
         err_str = str(e).lower()
+
+        # 环境级故障（如 curl_cffi 自带的 OpenSSL 加载失败）与目标站点无关，
+        # 重试必然再失败：熔断后 create_robust_session 直接返回标准 requests，
+        # 后续请求不再逐次触发同一个 TLS 错误（既不刷同样的警告，也省掉一次握手）。
+        if cffi_fatal_error(e):
+            mark_cffi_broken(str(e))
+
         if any(keyword in err_str for keyword in["tls", "closed abruptly", "empty reply", "certificate", "ssl", "time"]):
-            logger.warning(f"curl_cffi failed ({e}). Falling back to standard requests for {url}")
+            # 超时类错误单独处理：换库重试通常一样慢，沿用同一个 timeout 等于把等待
+            # 时间翻倍（实测 crossref 经代理：curl_cffi 15s 超时 + 回退 15s ≈ 30s 才
+            # 失败）。这里把回退请求的超时收敛到较小值，让上层重试/降级尽快接手。
             import requests
+
+            is_timeout = "time" in err_str or isinstance(e, requests.exceptions.Timeout)
+            fallback_kwargs = dict(kwargs)
+            if is_timeout:
+                original = fallback_kwargs.get("timeout", 15)
+                if isinstance(original, (int, float)):
+                    fallback_kwargs["timeout"] = max(3, min(8, original / 2))
+            logger.warning(
+                f"curl_cffi failed ({e}). Falling back to standard requests "
+                f"(timeout={fallback_kwargs.get('timeout')}) for {url}")
             req_session = requests.Session()
             http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
             if http_proxy:
                 req_session.proxies = {"http": http_proxy, "https": http_proxy}
             req_session.headers.update(custom_headers)
-            return req_session.request(method, url, **kwargs)
+            return req_session.request(method, url, **fallback_kwargs)
         raise e
     finally:
         session.close()

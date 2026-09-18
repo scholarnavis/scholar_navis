@@ -11,16 +11,40 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
-from src.tools.about_tool import AboutTool
-from src.tools.chat_tool import ChatTool
-from src.tools.import_tool import ImportTool
-from src.tools.log_tool import LogTool
-from src.tools.rss_tool import RSSTool
-from src.tools.settings_tool import SettingsTool
+from src.core.theme_manager import (ThemeManager, apply_native_titlebar_theme,
+                                    strong_weight_css, title_weight_css)
 from src.ui.components.dialog import StandardDialog, BaseDialog
 from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
+
+
+def _load_tool_class(module_path: str, class_name: str):
+    """按需导入工具面板类（惰性）。
+
+    各工具模块的导入链带 chromadb / onnxruntime / litellm / pygments 等重依赖，
+    启动期全部导入会把主窗口推迟数秒；改为实例化对应面板时才导入（Python 模块
+    缓存保证只真正导入一次）。
+
+    惰性导入发生在**运行期**，读的是磁盘上的当前文件，而依赖模块（如
+    ``core.theme_manager``）可能是进程启动时载入的旧版本。若应用运行期间更新过
+    代码，就会得到 ``cannot import name 'xxx' from '...'`` 这类裸 ImportError；
+    这里补上可操作的上下文，避免被误判为代码缺陷。
+    """
+    import importlib
+
+    try:
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+    except ImportError as e:
+        raise ImportError(
+            f"Failed to load panel '{module_path}.{class_name}': {e}. "
+            f"If the code was updated while the application was running, restart it "
+            f"(a running process keeps the old modules in memory while new files are "
+            f"read from disk)."
+        ) from e
+    except AttributeError as e:
+        raise AttributeError(
+            f"Panel module '{module_path}' has no class '{class_name}': {e}") from e
 
 
 def force_windows_taskbar_icon(hwnd, icon_path):
@@ -91,7 +115,7 @@ class MainWindow(QMainWindow):
         self.logo_widget.setFixedSize(36, 36)
 
         self.lbl_app_name = QLabel("Scholar Navis")
-        self.lbl_app_name.setStyleSheet("font-weight: bold; font-size: 16px;")
+        self.lbl_app_name.setStyleSheet(f"font-weight: {title_weight_css()}; font-size: 16px;")
 
         top_bar.addWidget(self.logo_widget)
         top_bar.addWidget(self.lbl_app_name, stretch=1)
@@ -141,18 +165,19 @@ class MainWindow(QMainWindow):
             "About": "info"
         }
 
+        # (显示名, 模块路径, 类名)：模块在首次实例化对应面板时才导入
         self.tool_classes = [
-            ("Library Manager", ImportTool),
-            ("Chat Assistant", ChatTool),
-            ("Literature Tracker", RSSTool),
-            ("Global Settings", SettingsTool),
-            ("System Logs", LogTool),
-            ("About", AboutTool)
+            ("Library Manager", "src.tools.import_tool", "ImportTool"),
+            ("Chat Assistant", "src.tools.chat_tool", "ChatTool"),
+            ("Literature Tracker", "src.tools.rss_tool", "RSSTool"),
+            ("Global Settings", "src.tools.settings_tool", "SettingsTool"),
+            ("System Logs", "src.tools.log_tool", "LogTool"),
+            ("About", "src.tools.about_tool", "AboutTool")
         ]
         self.tools = [None] * len(self.tool_classes)
 
         # 仅生成左侧边栏按钮和右侧占位符，不进行耗时的实例化
-        for name, _ in self.tool_classes:
+        for name, _, _ in self.tool_classes:
             icon_name = self.icon_map.get(name, "tag")
             item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {name}")
             self.sidebar.addItem(item)
@@ -205,12 +230,9 @@ class MainWindow(QMainWindow):
 
 
     def _lazy_load_tools(self):
-        tools_to_load = [
-            ImportTool, ChatTool, RSSTool, SettingsTool, LogTool, AboutTool
-        ]
-
-        for ToolClass in tools_to_load:
-            self.add_tool(ToolClass())
+        """预热全部工具面板（当前启动流程不调用，保留给需要提前加载的场景）。"""
+        for index in range(len(self.tool_classes)):
+            self._execute_tool_switch(index)
             QApplication.processEvents()
 
         self.sidebar.setCurrentRow(0)
@@ -274,14 +296,14 @@ class MainWindow(QMainWindow):
             QListWidget::item:selected {{ 
                 background-color: {tm.color('btn_bg')}; 
                 color: {tm.color('text_main')}; 
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
             }}
             QListWidget::item:hover:!selected {{ 
                 background-color: {tm.color('btn_hover')}; 
             }}
         """)
 
-        self.lbl_app_name.setStyleSheet(f"color: {tm.color('title_blue')}; font-weight: bold; font-size: 16px;")
+        self.lbl_app_name.setStyleSheet(f"color: {tm.color('title_blue')}; font-weight: {title_weight_css()}; font-size: 16px;")
 
         self.btn_quick_trans.setIcon(tm.icon("translate", "bg_main"))
         self.btn_quick_trans.setIconSize(QSize(22, 22))
@@ -381,7 +403,7 @@ class MainWindow(QMainWindow):
 
                                 <hr style="border: 0; border-top: 1px solid {tm.color('border')}; margin: 20px 0;">
 
-                                <p style="text-align: center; font-weight: bold; color: {tm.color('accent')};">
+                                <p style="text-align: center; font-weight: {strong_weight_css()}; color: {tm.color('accent')};">
                                     Accepting these terms is required to use the software.
                                 </p>
                             </div>
@@ -399,7 +421,7 @@ class MainWindow(QMainWindow):
 
             # 样式美化
             btn_accept.setStyleSheet(
-                f"background-color: {tm.color('accent')}; color: white; font-weight: bold; height: 36px;")
+                f"background-color: {tm.color('accent')}; color: white; font-weight: {strong_weight_css()}; height: 36px;")
             btn_reject.setStyleSheet(
                 f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_muted')}; height: 36px;")
 
@@ -554,8 +576,8 @@ class MainWindow(QMainWindow):
 
     def _execute_tool_switch(self, index):
         if self.tools[index] is None:
-            name, ToolClass = self.tool_classes[index]
-            tool_instance = ToolClass()
+            name, module_path, class_name = self.tool_classes[index]
+            tool_instance = _load_tool_class(module_path, class_name)()
             self.tools[index] = tool_instance
 
             widget = tool_instance.get_ui_widget()
@@ -600,7 +622,7 @@ class MainWindow(QMainWindow):
 
             welcome_html = f"""
                         <div style="font-family: {tm.font_family()}; font-size: 14px; color: {tm.color('text_main')}; line-height: 1.6;">
-                            <h2 style="color: {tm.color('title_blue')}; margin-top: 5px; margin-bottom: 12px; font-weight: bold; letter-spacing: 0.5px;">
+                            <h2 style="color: {tm.color('title_blue')}; margin-top: 5px; margin-bottom: 12px; font-weight: {title_weight_css()}; letter-spacing: 0.5px;">
                                 Your AI-Powered Research Assistant
                             </h2>
                             <p style="margin-top: 0; color: {tm.color('text_main')};">
@@ -647,7 +669,7 @@ class MainWindow(QMainWindow):
                     background-color: {tm.color('accent')}; 
                     color: {tm.color('bg_main')}; 
                     border-radius: 6px; 
-                    font-weight: bold; 
+                    font-weight: {strong_weight_css()}; 
                     font-size: 14px; 
                     border: none;
                 }} 

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from src.core.core_task import TaskManager, TaskMode
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.settings_tasks import TestMcpConnectionTask
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialogs.base import BaseDialog
@@ -206,7 +206,7 @@ class McpConfigDialog(BaseDialog):
         self.desc_hint_widget.setStyleSheet("background: transparent;")
 
         self.btn_add_auth.setStyleSheet(
-            f"color: {tm.color('warning')}; font-weight: bold; background: transparent; border: none;")
+            f"color: {tm.color('warning')}; font-weight: {strong_weight_css()}; background: transparent; border: none;")
         self.btn_add_env.setStyleSheet(f"color: {tm.color('text_main')}; background: transparent; border: none;")
         self.btn_test.setStyleSheet(
             f"QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('warning')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 5px 10px; }} QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}")

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QMainWindow, QToolBar, QApplication, QFileDialog,
                                QTextBrowser, QWidget, QHBoxLayout, QLineEdit, QPushButton, QLabel, QMenu)
 
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
+from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme, strong_weight_css
 
 
 def _apply_windows_dark_titlebar(window, tm):
@@ -74,7 +74,7 @@ class InternalPDFViewer(QMainWindow):
 
         tb_style = f"""
             QToolBar {{ background: {tm.color('bg_card')}; padding: 6px; border: none; border-bottom: 1px solid {tm.color('border')}; }} 
-            QToolButton, QPushButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; font-family: {tm.font_family()}; background: transparent; border: none; }} 
+            QToolButton, QPushButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: {strong_weight_css()}; font-family: {tm.font_family()}; background: transparent; border: none; }} 
             QToolButton:hover, QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
         """
         for tb in self.findChildren(QToolBar):
@@ -84,7 +84,7 @@ class InternalPDFViewer(QMainWindow):
             f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px 8px;")
 
         if hasattr(self, 'lbl_search_count'):
-            self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: bold; padding: 0 10px;")
+            self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; padding: 0 10px;")
 
         if hasattr(self, 'act_open_sys'):
             self.act_open_sys.setIcon(tm.icon("link", "text_main"))
@@ -125,7 +125,7 @@ class InternalPDFViewer(QMainWindow):
         self.btn_do_search.clicked.connect(self._find_next)
 
         self.lbl_search_count = QLabel(" 0 / 0 ")
-        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: bold; padding: 0 10px;")
+        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; padding: 0 10px;")
 
         self.btn_find_prev = QPushButton(" Prev")
         self.btn_find_prev.clicked.connect(self._find_prev)
@@ -320,7 +320,7 @@ class InternalTextViewer(QMainWindow):
                 color: {tm.color('text_main')}; 
                 padding: 5px 10px; 
                 border-radius: 4px; 
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 background: transparent; 
                 border: none;
             }} 
@@ -343,7 +343,7 @@ class InternalTextViewer(QMainWindow):
 
         # 4. 图标更新与文本颜色更新 (支持深色/浅色动态切换)
         if hasattr(self, 'lbl_search_count'):
-            self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: bold; padding: 0 10px;")
+            self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; padding: 0 10px;")
 
         if hasattr(self, 'act_zoom_in'):
             self.act_zoom_in.setIcon(tm.icon("add", "text_main"))
@@ -528,7 +528,7 @@ class InternalTextViewer(QMainWindow):
         self.btn_do_search.clicked.connect(self._find_next)
 
         self.lbl_search_count = QLabel(" 0 / 0 ")
-        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: bold; padding: 0 10px;")
+        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; padding: 0 10px;")
 
         self.btn_find_prev = QPushButton(" Prev")
         self.btn_find_prev.clicked.connect(self._find_prev)

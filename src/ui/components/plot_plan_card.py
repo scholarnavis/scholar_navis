@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -173,13 +173,13 @@ class PlotPlanCardWidget(QFrame):
                 color: #ffffff;
                 border-radius: 10px;
                 font-size: 12px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 font-family: {font_family};
             }}
             QLabel[cssClass="plotPlanTitle"] {{
                 color: {text_main};
                 font-size: 14px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 font-family: {font_family};
             }}
             QLabel[cssClass="plotPlanHint"] {{
@@ -239,7 +239,7 @@ class PlotPlanCardWidget(QFrame):
                 border-radius: 5px;
                 padding: 5px 14px;
                 font-size: 12px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 font-family: {font_family};
             }}
             QPushButton[cssClass="plotPlanConfirm"]:hover {{

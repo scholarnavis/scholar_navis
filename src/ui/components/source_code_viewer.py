@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.text_formatter import mono_font_family_css
 
 logger = logging.getLogger(__name__)
@@ -175,7 +175,7 @@ class SourceCodeViewer(QFrame):
             QLabel[scvRole="title"] {{
                 color: {text_muted};
                 font-size: 11px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 font-family: {font_family};
             }}
             QPushButton[scvRole="btn"] {{

@@ -24,7 +24,7 @@ from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.settings_tasks import HWDetectTask
 from src.tools.base_tool import BaseTool
 from src.tools.settings_sections import (ConfigTransferMixin, EnvSectionMixin,
@@ -409,7 +409,7 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         return f"""
             QPushButton {{
                 background-color: {bg}; color: {text};
-                border: {border}; border-radius: 4px; padding: 6px 12px; font-weight: bold;
+                border: {border}; border-radius: 4px; padding: 6px 12px; font-weight: {strong_weight_css()};
             }}
             QPushButton:hover:!disabled {{ background-color: {hover}; }}
             QPushButton:disabled {{

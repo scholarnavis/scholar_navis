@@ -691,7 +691,7 @@ class ThemeManager(QObject):
         QGroupBox {{ margin-top: 15px; }}
         QGroupBox::title {{
             color: {self.color('title_blue')} !important;
-            font-weight: bold !important; font-size: 14px;
+            font-weight: {strong_weight_css()} !important; font-size: 14px;
             subcontrol-origin: margin; left: 5px; 
         }}
 
@@ -754,15 +754,15 @@ class ThemeManager(QObject):
         }}
 
         QLabel[cssClass="hint"] {{ color: {self.color('text_muted')}; font-size: 11px; }}
-        QLabel[cssClass="warning"] {{ color: {self.color('warning')}; font-weight: bold; }}
-        QLabel[cssClass="status-success"] {{ color: {self.color('success')}; font-weight: bold; }}
-        QLabel[cssClass="status-error"] {{ color: {self.color('danger')}; font-weight: bold; }}
+        QLabel[cssClass="warning"] {{ color: {self.color('warning')}; font-weight: {strong_weight_css()}; }}
+        QLabel[cssClass="status-success"] {{ color: {self.color('success')}; font-weight: {strong_weight_css()}; }}
+        QLabel[cssClass="status-error"] {{ color: {self.color('danger')}; font-weight: {strong_weight_css()}; }}
         QLabel[cssClass="status-pending"] {{ color: {self.color('warning')}; }}
 
         QPushButton[cssClass="icon-btn"] {{ background: transparent; border: none; }}
         QPushButton[cssClass="link-btn"] {{
             background: transparent; color: {self.color('accent')};
-            text-align: left; border: none; font-weight: bold;
+            text-align: left; border: none; font-weight: {strong_weight_css()};
         }}
         """
 
@@ -770,3 +770,38 @@ class ThemeManager(QObject):
         widget.setProperty("cssClass", class_name)
         widget.style().unpolish(widget)
         widget.style().polish(widget)
+
+
+# --------------------------------------------------------------------------- #
+#  字重档位（QSS / 富文本共用，避免各处写死 font-weight: bold）
+# --------------------------------------------------------------------------- #
+
+def strong_weight_css() -> str:
+    """强调字重（比正文重一档）的 ``font-weight`` 值，可直接拼进样式表。
+
+    界面里大量 `font-weight: bold` 声明把控件文案（导航项、表头、状态标签、按钮）
+    渲染成标题级的 700，正文尺寸下笔画成倍加粗、整屏发黑。统一改用本函数后，字重
+    取自字体**实际具备**的中间字面：有中间字面的字体栈（如 Noto Sans CJK 可变字体）
+    取 500 档，只有 Regular/Bold 的字体栈自动退回 ``bold``——层级不会丢，只是不再
+    无差别地用标题字重。
+
+    解析细节与跨平台落点见
+    :func:`src.ui.components.text_formatter.emphasis_font_weight`；结果已缓存，
+    可放心在每次构建样式表时调用。
+    """
+    from src.ui.components.text_formatter import emphasis_font_weight
+
+    return emphasis_font_weight() or "bold"
+
+
+def title_weight_css() -> str:
+    """标题字重的 ``font-weight`` 值（比强调档再重一档，通常 600）。
+
+    用于页面/区块标题这类需要与正文拉开层级的场景：字号本身已提供主要层级，字重
+    只需再重一档即可，用 900/700 会显得笨重。字体栈不支持时自动退回强调档或原生
+    ``bold``。解析细节见
+    :func:`src.ui.components.text_formatter.title_font_weight`。
+    """
+    from src.ui.components.text_formatter import title_font_weight
+
+    return title_font_weight() or "bold"

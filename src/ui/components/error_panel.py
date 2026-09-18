@@ -20,7 +20,7 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (QLabel, QPlainTextEdit, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ class ErrorPanelWidget(QWidget):
             }}
         """)
         self.lbl_title.setStyleSheet(
-            f"color: {danger}; font-weight: bold; font-size: 14px; "
+            f"color: {danger}; font-weight: {strong_weight_css()}; font-size: 14px; "
             f"background: transparent; border: none; font-family: {font_family};")
         self.lbl_body.setStyleSheet(
             f"color: {tm.color('text_main')}; font-size: 13px; "
@@ -139,7 +139,7 @@ class ErrorPanelWidget(QWidget):
         self.btn_details.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; border: none; text-align: left;
-                color: {tm.color('text_muted')}; font-size: 11px; font-weight: bold;
+                color: {tm.color('text_muted')}; font-size: 11px; font-weight: {strong_weight_css()};
                 font-family: {font_family}; padding: 2px 0px;
             }}
             QPushButton:hover {{ color: {tm.color('accent')}; }}

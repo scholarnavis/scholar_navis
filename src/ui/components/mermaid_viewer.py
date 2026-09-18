@@ -7,7 +7,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar, QCheckBox,
                                QFileDialog, QComboBox, QSplitter)
 
-from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
+from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme, strong_weight_css
 # 🌟 引入你的自定义 Dialog
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.source_code_viewer import SourceCodeViewer
@@ -212,7 +212,7 @@ class MermaidViewer(QMainWindow):
         # 2. 更新工具栏
         tb_style = f"""
             QToolBar {{ background: {tm.color('bg_card')}; padding: 6px; border: none; border-bottom: 1px solid {tm.color('border')}; font-family: {tm.font_family()}; }} 
-            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; font-family: {tm.font_family()}; }} 
+            QToolButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: {strong_weight_css()}; font-family: {tm.font_family()}; }} 
             QToolButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
         """
         for tb in self.findChildren(QToolBar):

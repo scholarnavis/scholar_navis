@@ -4,14 +4,19 @@ import os
 import shutil
 import uuid
 import zipfile
+from typing import TYPE_CHECKING
+
 import onnxruntime as ort
-from chromadb import Documents, Embeddings, EmbeddingFunction
+
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.models_registry import get_model_conf, ensure_onnx_model, ModelMissingError
 from src.core.onnx_provider import resolve_provider
 from src.core.rerank_engine import RerankEngine
+
+if TYPE_CHECKING:  # 仅用于类型注解：运行期不导入 chromadb（启动链上约 0.4 s）
+    from chromadb import Documents, Embeddings
 
 logger = logging.getLogger("Task.kb")
 
@@ -73,7 +78,15 @@ def _worker_load_model(kb_id, config):
         raise RuntimeError(f"Model Load Failed: {str(e)}")
 
 
-class ONNXEmbeddingFunction(EmbeddingFunction):
+class ONNXEmbeddingFunction:
+    """本地 ONNX 嵌入函数（ChromaDB 兼容）。
+
+    刻意**不继承** ``chromadb.EmbeddingFunction``：chromadb 只做鸭子类型校验
+    （``chromadb.api.types.validate_embedding_function`` 比较 ``__call__`` 的
+    参数名是否与协议一致，不做 isinstance 检查），而继承就必须在导入期导入
+    chromadb——本模块位于启动链上，代价约 0.4 s。接口要求：
+    ``__call__(self, input: Documents) -> Embeddings``，参数名必须是 ``input``。
+    """
 
     def __init__(self, onnx_cache_dir, device="cpu"):
         from optimum.onnxruntime import ORTModelForFeatureExtraction
@@ -119,7 +132,7 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
                 "'CPUExecutionProvider'. Continuing on CPU; verify GPU runtime libraries "
                 "in Settings -> Hardware.", provider)
 
-    def __call__(self, input: Documents) -> Embeddings:
+    def __call__(self, input: "Documents") -> "Embeddings":
         import torch.nn.functional as F
         if not input:
             return []

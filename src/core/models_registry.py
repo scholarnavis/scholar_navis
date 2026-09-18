@@ -5,10 +5,13 @@ import shutil
 import sys
 import json
 import warnings
-import torch
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
-from src.core.kb_manager import KBManager
+
+# 说明：本模块位于启动导入链上（主窗口/工具面板 → models_registry），因此不在
+# 顶层导入 torch 与 KBManager：torch 自带 CUDA 运行库、KBManager 会拉起 chromadb，
+# 二者合计约 1.2 s，而实际都只在个别函数里用到（torch 见 unload_models，
+# KBManager 见 ModelManager.verify_chat_models），按需在函数内导入即可。
 
 
 
@@ -304,6 +307,8 @@ class ModelManager:
         dev = self.dev_mgr.parse_device_string(user_pref)
 
         # --- 校验 A: Embedding 模型 ---
+        from src.core.kb_manager import KBManager  # 惰性：避免启动链上拉起 chromadb
+
         kb_info = KBManager().get_kb_by_id(kb_id)
         embed_id = kb_info.get('model_id', 'embed_auto') if kb_info else 'embed_auto'
         if embed_id == "embed_auto":

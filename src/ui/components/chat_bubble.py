@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 
 from src.core.core_task import TaskManager, TaskMode
 # hex_to_rgba 由核心层统一实现（全应用唯一来源，避免各 UI 模块各自复制）
-from src.core.theme_manager import ThemeManager, hex_to_rgba
+from src.core.theme_manager import ThemeManager, hex_to_rgba, strong_weight_css
 from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import (TextFormatter, qt_font_family_css,
                                               resolve_qt_font_families,
@@ -842,7 +842,7 @@ class ChatBubbleWidget(QWidget):
             self.btn_bubble_retry.setStyleSheet(f"""
                 QPushButton {{ background-color: transparent; border: none;
                                color: {tm.color('warning')}; font-size: 12px;
-                               padding: 2px 4px; border-radius: 4px; font-weight: bold; }}
+                               padding: 2px 4px; border-radius: 4px; font-weight: {strong_weight_css()}; }}
                 QPushButton:hover {{ color: {tm.color('bg_main')}; background-color: {tm.color('warning')}; }}
             """)
         if hasattr(self, 'btn_confirm'):
@@ -850,7 +850,7 @@ class ChatBubbleWidget(QWidget):
             self.btn_confirm.setStyleSheet(f"""
                 QPushButton {{ background-color: {tm.color('academic_blue')}; border: none;
                                color: #ffffff; font-size: 12px; padding: 5px 12px;
-                               border-radius: 4px; font-weight: bold; }}
+                               border-radius: 4px; font-weight: {strong_weight_css()}; }}
                 QPushButton:hover {{ background-color: {tm.color('academic_blue_hover')}; }}
             """)
 
@@ -859,7 +859,7 @@ class ChatBubbleWidget(QWidget):
                 QFrame#ContextFrame {{ background-color: {hex_to_rgba(tm.color('bg_input'), 0.5)}; border-left: 3px solid {tm.color('accent')}; border-radius: 4px; }}
             """)
             self.ctx_header.setStyleSheet(
-                f"color: {tm.color('accent')}; font-size: 11px; font-weight: bold; border: none; background: transparent; font-family: {css_family};")
+                f"color: {tm.color('accent')}; font-size: 11px; font-weight: {strong_weight_css()}; border: none; background: transparent; font-family: {css_family};")
             self.ctx_content.setStyleSheet(
                 f"color: {tm.color('text_muted')}; font-size: 12px; border: none; background: transparent; font-family: {css_family}; margin: 0px; padding: 0px;")
 
@@ -1445,7 +1445,7 @@ class ChatBubbleWidget(QWidget):
                             f'<a href="{cite_url}" style="text-decoration:none;">'
                             f'<div style="display:inline-block; padding:14px 18px; border:2px dashed '
                             f'{_accent}; border-radius:8px; margin-top:5px; color:{_accent}; '
-                            f'font-weight:bold;">📄 View PDF (open in internal viewer)</div></a>'
+                            f'font-weight:{strong_weight_css()};">📄 View PDF (open in internal viewer)</div></a>'
                         )
 
                     # Convert SVG to PNG before inline display.
@@ -1712,7 +1712,7 @@ class ChatBubbleWidget(QWidget):
                 text-align: left;
                 color: {tm.color('text_muted')};
                 font-size: 11px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 font-family: {css_family};
                 padding: 2px 0px;
             }}

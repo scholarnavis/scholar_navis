@@ -1,6 +1,7 @@
 """Literature tools: unified search, citation graph, OA PDF and preprints."""
 import json
 import re
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
@@ -28,6 +29,43 @@ def _normalize_doi(doi):
     raw = str(doi).strip()
     raw = re.sub(r'^(https?://(dx\.)?doi\.org/|http://)', '', raw, flags=re.IGNORECASE)
     return raw
+
+
+def _get_json(url, source, timeout=15, retries=1):
+    """请求 JSON 接口并返回解析后的对象；瞬时故障短退避重试一次。
+
+    旧实现在调用处直接 ``res.json()``：OpenAlex / Crossref 经代理时偶发返回**空
+    body**，于是抛 ``JSONDecodeError: Expecting value: line 1 column 1 (char 0)``，
+    被上层记成 "{db} search failed"，整个来源的结果被丢弃——而日志里连状态码、响应
+    体积、内容类型都没有，事后无从判断是限流、代理故障还是真的没结果。这里统一：
+
+    1. 检查状态码、响应体长度与 Content-Type；
+    2. 空体 / 429 / 5xx 视为瞬时故障，退避 1s 重试一次（实测能挽回多数网络抖动）；
+    3. 仍失败时抛出带 status / content-type / body 前缀的异常，便于定位。
+    """
+    last_err = None
+    for attempt in range(retries + 1):
+        res = mcp_request("GET", url, timeout=timeout)
+        status = getattr(res, "status_code", 0)
+        body = res.content or b""
+        ctype = (res.headers.get("content-type") or "").lower() if res.headers else ""
+        if status in (429, 500, 502, 503, 504) or not body:
+            last_err = RuntimeError(
+                f"{source}: HTTP {status}, {len(body)} bytes, content-type={ctype or 'n/a'}"
+                + (f", body[:80]={body[:80]!r}" if body else " (empty body)"))
+        else:
+            try:
+                return res.json()
+            except ValueError as e:
+                last_err = RuntimeError(
+                    f"{source}: non-JSON response (HTTP {status}, "
+                    f"content-type={ctype or 'n/a'}, {len(body)} bytes, "
+                    f"body[:80]={body[:80]!r}): {e}")
+        res.close()
+        if attempt < retries:
+            logger.warning(f"{last_err} — retrying in {attempt + 1}s.")
+            time.sleep(1.0 * (attempt + 1))
+    raise last_err
 
 
 def _norm_title(title):
@@ -128,10 +166,16 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
         if openalex_api_key:
             url += f"&api_key={openalex_api_key}"
 
-        res = mcp_request("GET", url, timeout=15)
-        res.raise_for_status()
         parsed = []
-        for p in res.json().get("results", []):
+        payload = _get_json(url, "OpenAlex", timeout=15)
+        # OpenAlex 正常返回 dict；空 body / 代理错误页可能给出 null，
+        # 旧写法直接 .get() 会抛 AttributeError 并丢掉整库结果。
+        if not isinstance(payload, dict):
+            logger.warning(
+                f"Unexpected OpenAlex payload ({type(payload).__name__}); treating as empty result set.")
+            return parsed
+
+        for p in payload.get("results", []):
             if not isinstance(p, dict): continue
             abs_idx = p.get("abstract_inverted_index")
             abstract_text = "No abstract"
@@ -146,21 +190,28 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
             authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
                        isinstance(a, dict) and isinstance(a.get("author"), dict)]
 
+            # primary_location.source 允许为 null（无宿主期刊的预印本/数据集等）。
+            # 旧写法 (p["primary_location"] or {}).get("source", {}) 在 source 为 null 时
+            # 会拿到 None 再 .get()，抛 "'NoneType' object has no attribute 'get'"
+            # —— 实测该查询命中的唯一记录正是 source=null，整个 OpenAlex 来源因此被丢弃。
+            primary = p.get("primary_location")
+            primary = primary if isinstance(primary, dict) else {}
+            source = primary.get("source")
+            source = source if isinstance(source, dict) else {}
+
             parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
                            "authors": authors,
                            "citation_count": p.get("cited_by_count", 0), "abstract": abstract_text,
                            "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
                            "url": p.get("id", ""), "source_db": "OpenAlex",
-                           "journal": (p.get("primary_location") or {}).get("source", {}).get(
-                               "display_name", "") if isinstance(p.get("primary_location"), dict) else ""})
+                           "journal": source.get("display_name") or ""})
         return parsed
 
     def _parse_crossref():
         url = f"https://api.crossref.org/works?query={urllib.parse.quote(query)}&mailto={ncbi_email}&rows={max_results}&offset={offset}"
-        res = mcp_request("GET", url, timeout=15)
-        res.raise_for_status()
         parsed = []
-        msg_dict = res.json().get("message")
+        payload = _get_json(url, "Crossref", timeout=15)
+        msg_dict = payload.get("message") if isinstance(payload, dict) else None
         items = msg_dict.get("items", []) if isinstance(msg_dict, dict) else []
         for p in items:
             if not isinstance(p, dict): continue
@@ -359,6 +410,17 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
         return json.dumps({"status": "success", "results": all_records, "source_stats": source_stats,
                            "message": "No results found" if not all_records else ""}, ensure_ascii=False)
 
+    # 指定单库检索（source=openalex/crossref/pubmed/semantic_scholar 且 aggregate 默认 True）
+    # 此前会落到最后一行恒返回空列表：source_stats 里明明有记录，results 却是 []，
+    # 调用方只会看到 "No results found from any source"（实测 openalex 取到 1 条却丢失）。
+    # 这里按与其他分支一致的契约返回：合并去重 + 补 confidence/source_dbs。
+    merged = _merge_records(all_records)
+    if merged:
+        return json.dumps({"status": "success",
+                           "source": wanted[0] if len(wanted) == 1 else "aggregated",
+                           "source_stats": source_stats, "results": merged},
+                          ensure_ascii=False)
+
     return json.dumps({"status": "success", "results": [], "source_stats": source_stats,
                        "message": "No results found from any source"})
 
@@ -390,7 +452,10 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
                     return json.dumps({"status": "success", "results": [], "message": f"DOI '{clean_doi}' not found."})
                 work_res.raise_for_status()
 
-                ref_ids = work_res.json().get("referenced_works", [])[:max_results]
+                # referenced_works 可能为 null / 非列表，json() 也可能给出 null
+                work_payload = work_res.json()
+                ref_ids = work_payload.get("referenced_works") if isinstance(work_payload, dict) else None
+                ref_ids = ref_ids[:max_results] if isinstance(ref_ids, list) else []
 
                 if not ref_ids:
                     return json.dumps({"status": "success", "results": []})
@@ -409,7 +474,12 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
             res = mcp_request("GET", url, timeout=15)
             res.raise_for_status()
             parsed = []
-            for p in res.json().get("results", []):
+            payload = res.json()
+            if not isinstance(payload, dict):
+                logger.warning(
+                    f"Unexpected OpenAlex payload ({type(payload).__name__}); treating as empty result set.")
+                payload = {}
+            for p in payload.get("results") or []:
                 if not isinstance(p, dict): continue
 
                 abs_idx = p.get("abstract_inverted_index")

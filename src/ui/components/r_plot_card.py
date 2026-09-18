@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.source_code_viewer import SourceCodeViewer
 
 logger = logging.getLogger(__name__)
@@ -221,13 +221,13 @@ class RPlotCardWidget(QFrame):
                 color: #ffffff;
                 border-radius: 8px;
                 font-size: 18px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 font-family: "Georgia", {font_family};
             }}
             QLabel[cssClass="rTitle"] {{
                 color: {text_main};
                 font-size: 14px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 font-family: {font_family};
             }}
             QLabel[cssClass="rMeta"] {{

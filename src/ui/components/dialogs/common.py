@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QLabel, QFrame, QHBoxLayout, QLineEdit, QProgress
 
 from src.ui.components.dialogs.base import BaseDialog
 from src.ui.components.toast import ToastManager
+from src.core.theme_manager import strong_weight_css
 
 __all__ = [
     "StandardDialog", "ProgressDialog", "UnsavedChangesDialog",
@@ -120,7 +121,7 @@ class ProgressDialog(BaseDialog):
                 background-color: {tm.color('bg_input')};
                 border-radius: 4px;
                 color: {tm.color('text_main')};
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 font-size: 11px;
                 text-align: center;
             }}
@@ -132,7 +133,7 @@ class ProgressDialog(BaseDialog):
         self.lbl_warn_icon.setStyleSheet("border: none; background: transparent;")
 
         self.lbl_warn_text.setStyleSheet(
-            f"color: {tm.color('warning')}; font-size: 12px; font-weight: bold; border: none; background: transparent;")
+            f"color: {tm.color('warning')}; font-size: 12px; font-weight: {strong_weight_css()}; border: none; background: transparent;")
 
         self.stalled_warning_widget.setObjectName("StallWarningBox")
         self.stalled_warning_widget.setStyleSheet(
@@ -205,7 +206,7 @@ class ProgressDialog(BaseDialog):
 
         tm = self.tm
         self.btn_cancel.setStyleSheet(f"""
-            QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 4px; border: none; font-weight:bold;}}
+            QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 4px; border: none; font-weight:{strong_weight_css()};}}
             QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
         """)
 

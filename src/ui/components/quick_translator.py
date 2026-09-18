@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
 from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal, QSettings
 
 from src.core.config_manager import ConfigManager
-from src.core.theme_manager import ThemeManager, hex_to_rgba
+from src.core.theme_manager import ThemeManager, hex_to_rgba, strong_weight_css
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
@@ -549,7 +549,7 @@ class QuickTranslatorWindow(QWidget):
             f"QWidget {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 12px; }}")
 
         self.lbl_title.setStyleSheet(
-            f"color: {tm.color('accent')}; font-weight: bold; border: none; "
+            f"color: {tm.color('accent')}; font-weight: {strong_weight_css()}; border: none; "
             f"font-family: {tm.font_family()};")
         self.btn_close.setIcon(tm.icon("close", "text_muted"))
         self.btn_close.setStyleSheet(
@@ -579,7 +579,7 @@ class QuickTranslatorWindow(QWidget):
         self.btn_trans.setIcon(tm.icon("send", "bg_main"))
         self.btn_trans.setStyleSheet(f"""
             QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; 
-                         border-radius: 6px; padding: 6px; font-weight: bold; }}
+                         border-radius: 6px; padding: 6px; font-weight: {strong_weight_css()}; }}
             QPushButton:hover {{ background-color: {tm.color('title_blue')}; }}
         """)
 
@@ -587,7 +587,7 @@ class QuickTranslatorWindow(QWidget):
         self.btn_stop.setIcon(tm.icon("close", "bg_main"))
         self.btn_stop.setStyleSheet(f"""
             QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; 
-                         border-radius: 6px; padding: 6px; font-weight: bold; }}
+                         border-radius: 6px; padding: 6px; font-weight: {strong_weight_css()}; }}
             QPushButton:hover {{ background-color: #a32418; }}
         """)
 

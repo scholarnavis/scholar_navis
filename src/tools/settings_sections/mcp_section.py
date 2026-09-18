@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog,
 
 from src.core.mcp_manager import MCPManager
 from src.core.skill_manager import SkillManager
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.toast import ToastManager
 
 
@@ -95,7 +95,7 @@ class McpSectionMixin:
                     if tool_type == "SKILL":
                         if skill_mgr.is_skill_available(name):
                             status_lbl.setText("Ready (Native)")
-                            status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
+                            status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: {strong_weight_css()};")
                         else:
                             status_lbl.setText("Not Loaded")
                             status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
@@ -106,7 +106,7 @@ class McpSectionMixin:
                         status = mcp_mgr.get_server_status(name)
                         if status == "connected":
                             status_lbl.setText("Connected")
-                            status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: bold;")
+                            status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: {strong_weight_css()};")
                         elif "error" in status:
                             status_lbl.setText("Error")
                             status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
@@ -295,7 +295,7 @@ class McpSectionMixin:
             "<b>⚠️ Security Disclaimer for External MCP Servers</b><br><br>"
             "You are about to connect a third-party MCP server to Scholar Navis.<br>"
             "External servers are highly privileged and can execute code, read local files, or access the network on your behalf. "
-            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>Only connect to servers from trusted developers.</span><br><br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:{strong_weight_css()};'>Only connect to servers from trusted developers.</span><br><br>"
             "<i>The Scholar Navis developers are not responsible for any data loss, security breaches, or system damage caused by third-party MCP servers.</i><br><br>"
             "Do you understand the risks and wish to proceed?"
         )
@@ -326,8 +326,8 @@ class McpSectionMixin:
         warning_msg = (
             "<b>🚨 CRITICAL SECURITY WARNING: NATIVE SKILL IMPORT</b><br><br>"
             "You are attempting to import a Native Python Skill (`.py` script) directly into the main process of Scholar Navis.<br><br>"
-            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>1. ARBITRARY CODE EXECUTION:</span> These scripts run with the EXACT SAME privileges as the main application. Malicious scripts can steal your data, delete files, or compromise your system.<br>"
-            f"<span style='color:{tm.color('danger')}; font-weight:bold;'>2. STRICT SANDBOXING:</span> The script MUST ONLY import Python Standard Library modules (e.g., `os`, `json`, `urllib`). Importing third-party pip packages (like `requests`, `pandas`) that are not packaged with Navis will instantly crash the agent with a `ModuleNotFoundError`.<br><br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:{strong_weight_css()};'>1. ARBITRARY CODE EXECUTION:</span> These scripts run with the EXACT SAME privileges as the main application. Malicious scripts can steal your data, delete files, or compromise your system.<br>"
+            f"<span style='color:{tm.color('danger')}; font-weight:{strong_weight_css()};'>2. STRICT SANDBOXING:</span> The script MUST ONLY import Python Standard Library modules (e.g., `os`, `json`, `urllib`). Importing third-party pip packages (like `requests`, `pandas`) that are not packaged with Navis will instantly crash the agent with a `ModuleNotFoundError`.<br><br>"
             "<i>Only import scripts from absolutely trusted sources. Do you accept all risks and wish to proceed?</i>"
         )
 

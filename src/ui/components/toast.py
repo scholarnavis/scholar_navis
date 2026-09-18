@@ -3,7 +3,7 @@ import logging
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QGraphicsOpacityEffect
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, Signal
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 
 logger = logging.getLogger("UI.Toast")
 
@@ -114,7 +114,7 @@ class ToastWidget(QWidget):
         self.lbl.setStyleSheet(f"""
             QLabel {{
                 color: white; 
-                font-weight: bold; 
+                font-weight: {strong_weight_css()}; 
                 padding: 10px 20px;
                 background-color: {bg_color};
                 border-radius: 20px;

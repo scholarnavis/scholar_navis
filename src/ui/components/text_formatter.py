@@ -6,6 +6,7 @@ import sys
 import tempfile
 import shutil
 import hashlib
+from functools import lru_cache
 from urllib.parse import urlparse, parse_qs
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
@@ -133,6 +134,283 @@ def mono_font_family_css() -> str:
     return f"'{_mono_family_cache}'"
 
 
+#: 强调字重候选：(CSS 数值, QFont.Weight 成员名, 中间字重的独立族名后缀)。
+#: 按"由轻到重"试探，目标是让强调"只比正文重一档"，而不是直接跳到标题级的 Bold。
+#: 后缀用于把非 RIBBI 字重登记成独立族名的平台（Qt 在 Windows 上把 Semibold 记作
+#: "<族名> Semibold"，此时光改 font-weight 取不到该字面，族名也得一起换）。
+_EMPHASIS_WEIGHT_CANDIDATES = (
+    (500, "Medium", (" Medium",)),
+    (600, "DemiBold", (" SemiBold", " Semibold", " DemiBold")),
+)
+
+#: 字重实测样张：中英混排，覆盖主族（西文）与兜底族（CJK）的真实字形。
+#: 判据是墨迹密度（前景像素占比），字重越大笔画越粗、墨迹越多，与字体设计无关。
+_WEIGHT_PROBE_SAMPLE = "Hamburgefonstiv 强调"
+
+#: 探针渲染字号（像素）：贴近界面正文字号，避免"大字号才显现的字重差"被误判。
+_WEIGHT_PROBE_PIXEL_SIZE = 16
+
+#: 已安装字体族名缓存（None = 未查询）。
+_installed_families_cache = None
+
+#: 强调样式解析缓存：``(css_weight, css_family)``；两者皆空表示退回 Qt 原生粗体。
+_emphasis_style_cache = None
+
+
+@lru_cache(maxsize=128)
+def _family_ink(family: str, weight_attr=None) -> float:
+    """该族在指定字重下的**墨迹密度**（前景像素占比）；``<0`` 表示测不出来。
+
+    为什么判据是实测墨迹密度，而不是推进宽度或字重元数据：
+
+    1. 字重元数据不可信（``QFontInfo.weight`` / ``QRawFont.weight``）：静态字体
+       收到 Medium 请求时，部分平台会把请求值原样报回，实际匹配到的却仍是
+       Regular——"元数据说支持"与"渲染结果真的不同"是两件事；
+    2. 推进宽度同样不可靠，而且方向不固定：CJK 优先字体（Noto Sans CJK、思源
+       黑体等）的西文宽度随字重**反向**变化（实测 Noto Sans CJK SC，16px：
+       Thin 120.92 > Light 120.88 > Regular 120.83 > Medium 120.73 >
+       DemiBold/Bold 120.66 > Black 120.61）。旧实现以"强调必须比正文更宽"
+       判定，在这类字体上恒不成立，于是把实际可用的 Medium 误判为不可用，整体
+       退回 Qt 原生粗体(700)——用户看到的现象就是"强调文字依然很粗"；
+    3. 墨迹密度与字重单调正相关（实测同一字体 300/400/500/600/700/900 →
+       0.069/0.088/0.101/0.118/0.148/0.158），且不依赖字体设计意图。
+
+    ``weight_attr=None`` 表示该族的默认（正文）字重。测量退化（密度非正，如族名
+    不存在时落到替身字体或渲染失败）返回 -1，由调用方判定为不可用。
+
+    结果按 (族, 字重) 缓存：多族 × 多候选 × 三档基准合计只测十余次，单次为
+    毫秒级（灰度图越小越快）。
+    """
+    try:
+        from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter
+
+        font = QFont(str(family))
+        if weight_attr:
+            font.setWeight(getattr(QFont.Weight, weight_attr))
+        font.setPixelSize(_WEIGHT_PROBE_PIXEL_SIZE)
+
+        metrics = QFontMetricsF(font)
+        width = int(metrics.horizontalAdvance(_WEIGHT_PROBE_SAMPLE)) + 4
+        height = int(metrics.height()) + 4
+        if width <= 4 or height <= 4:
+            return -1.0
+
+        image = QImage(width, height, QImage.Format_Grayscale8)
+        image.fill(0xFF)
+        painter = QPainter(image)
+        try:
+            painter.setFont(font)
+            painter.setPen(QColor("black"))
+            painter.drawText(2, int(metrics.ascent()) + 2, _WEIGHT_PROBE_SAMPLE)
+        finally:
+            painter.end()
+
+        # 灰度 8 位：白 255、黑 0。阈值 200 忽略抗锯齿边缘，只统计笔画主体。
+        # 行末对齐填充为白，计入分母不影响单调性。
+        data = bytes(image.constBits())
+        if not data:
+            return -1.0
+        ink = sum(1 for value in data if value < 200) / len(data)
+        return ink if ink > 0 else -1.0
+    except Exception as e:
+        logger.debug("Weight probe failed (family=%r weight=%r): %s", family, weight_attr, e)
+        return -1.0
+
+
+def _installed_families() -> set:
+    """已安装字体族名集合（进程内缓存；查询失败返回空集合）。"""
+    global _installed_families_cache
+    if _installed_families_cache is None:
+        try:
+            from PySide6.QtGui import QFontDatabase
+            _installed_families_cache = set(installed_font_families(QFontDatabase))
+        except Exception as e:
+            logger.debug("Font family list unavailable: %s", e)
+            _installed_families_cache = set()
+    return _installed_families_cache
+
+
+@lru_cache(maxsize=64)
+def _suffixed_family(family: str, suffix: str) -> str:
+    """取"独立族名版"的中间字重族；查不到则原样返回 ``family``。
+
+    平台差异：fontconfig（Linux）/ CoreText（macOS）把字重当作族内属性，中间字面
+    只能靠 ``font-weight`` 取；Qt 的 Windows 字体库则把非 RIBBI 字重登记成独立
+    族名（``Segoe UI`` 的 Semibold 字面即族名 ``Segoe UI Semibold``），这类平台
+    必须连族名一起换。查不到该族名时是恒等映射，不会引入新字体。
+    """
+    if not suffix:
+        return family
+    candidate = f"{family}{suffix}"
+    return candidate if candidate in _installed_families() else family
+
+
+def _stack_accepts_weight(families: list, weight_attr: str, emphasis_families=None) -> bool:
+    """强调配置是否可用（跨平台安全边界）。
+
+    ``families`` 是正文字体栈；``emphasis_families`` 是准备落到强调文本上的族名栈
+    （等长；None 表示沿用原族名、只改字重）。判定基准（Regular/Bold）始终量
+    ``families``，被测对象量 ``emphasis_families``——独立族名版自身往往只有一个
+    字面，拿它自己比 Regular/Bold 会得出"三档全等"的假象。
+
+    判据是**墨迹密度**（见 :func:`_family_ink`；不用推进宽度，CJK 字体的宽度随
+    字重反向变化，会把可用的中间字重全部误杀）。规则（顺序即优先级）：
+
+    1. **主族必须真的变重一档**：强调密度严格落在正文主族的 Regular 与 Bold
+       密度之间。主族（``families[0]``）渲染绝大部分正文字形，它没变重这次调整
+       就没有收益；若平台把它匹配成比 Regular 更轻的字面（如 Light/Semilight，
+       Windows 上请求 500 时确实可能发生），强调会比正文还淡，直接否决。
+
+    2. **兜底族（栈尾 CJK 族）必须仍被加重**：强调密度要大于正文密度。
+       Windows 微软雅黑只有 Regular/Bold，请求 500/600 会落到哪一档取决于匹配
+       规则：落到 Bold（中文仍是粗体）可以接受，落到 Regular 就会"中文强调凭空
+       消失、只剩西文加粗"，中英观感不一致，必须否决——此时整体退回 Qt 原生
+       粗体，宁可都粗，也不要一半有一半没有。
+
+    任一密度测不出来（``<0``）时按"不可用"处理：主族不可用即否决；兜底族不可用
+    则跳过该族（不因测不到而误判可用性）。
+    """
+    if not families:
+        return False
+    emphasis = list(emphasis_families) if emphasis_families else list(families)
+    if len(emphasis) != len(families):
+        return False
+
+    regular = _family_ink(families[0])
+    bold = _family_ink(families[0], "Bold")
+    actual = _family_ink(emphasis[0], weight_attr)
+    details = [f"{families[0]}->{emphasis[0]}={regular:.4f}/{actual:.4f}/{bold:.4f}"]
+    if not (regular > 0 and actual > 0 and bold > 0):
+        logger.debug("Emphasis probe skipped: primary %r->%r unmeasurable for %s (%.4f/%.4f/%.4f)",
+                     families[0], emphasis[0], weight_attr, regular, actual, bold)
+        return False
+    accepted = regular < actual < bold
+
+    for body_family, emph_family in zip(families[1:], emphasis[1:]):
+        base = _family_ink(body_family)
+        cur = _family_ink(emph_family, weight_attr)
+        details.append(f"{body_family}->{emph_family}={base:.4f}>{cur:.4f}")
+        if base > 0 and 0 < cur <= base:
+            logger.debug("Emphasis probe rejected: fallback %r->%r is no heavier than body "
+                         "at %s (%.4f -> %.4f)", body_family, emph_family, weight_attr, base, cur)
+            accepted = False
+
+    logger.debug("Emphasis ink probe %s on %s -> %s (regular/actual/bold)",
+                 weight_attr, ", ".join(details), "accept" if accepted else "reject")
+    return accepted
+
+
+def _resolve_emphasis_style():
+    """解析强调样式，返回 ``(css_weight, css_family)``；都不可用时各为 ""。
+
+    每个候选字重内先试策略 1、再试策略 2：
+
+    1. 只改 ``font-weight``：Linux/fontconfig、macOS/CoreText 以及 Windows 的可变
+       字体（Segoe UI Variable）都能按字重取到中间字面；
+    2. 族名 + 字重一起换：平台把中间字重登记成独立族名时（Qt on Windows 的
+       ``Segoe UI Semibold``），只改字重只会落到最近的 Bold。
+
+    两种策略都要通过 :func:`_stack_accepts_weight` 的实测墨迹密度校验，因此"平台
+    到底怎么解析字重"不影响正确性：判定不过就退回 Qt 原生粗体（强调不消失、也不
+    比正文更淡）。各平台的实际落点见 :func:`emphasis_font_weight` 的说明；每次
+    解析还会打一条 INFO 日志（候选命中情况 + 最终字重/族名），便于在 Windows
+    机器上直接核对。
+    """
+    global _emphasis_style_cache
+    if _emphasis_style_cache is None:
+        resolved = ("", "")
+        try:
+            families = ThemeManager().font_families()
+            probes = []
+            for value, attr, suffixes in _EMPHASIS_WEIGHT_CANDIDATES:
+                if _stack_accepts_weight(families, attr):
+                    resolved = (str(value), "")
+                    probes.append(f"{attr}:weight")
+                    break
+                for suffix in suffixes:
+                    variants = [_suffixed_family(f, suffix) for f in families]
+                    if variants != families and _stack_accepts_weight(families, attr, variants):
+                        resolved = (str(value), ", ".join(f"'{f}'" for f in variants))
+                        probes.append(f"{attr}:family{suffix.strip()}")
+                        break
+                if resolved[0]:
+                    break
+                probes.append(f"{attr}:miss")
+            logger.info("Emphasis style resolved to weight=%r family=%r (families=%s, probes=%s)",
+                        resolved[0] or "native-bold(700)", resolved[1] or "inherit",
+                        families, ",".join(probes))
+        except Exception as e:
+            logger.warning("Emphasis style probe failed, fall back to native bold: %s", e)
+        _emphasis_style_cache = resolved
+    return _emphasis_style_cache
+
+
+def emphasis_font_weight() -> str:
+    """强调文本的 CSS ``font-weight`` 数值；"" = 退回 Qt 原生粗体。
+
+    背景：Qt 富文本把 ``<b>`` / ``<strong>`` / 标题 / 表头一律按 QFont::Bold(700)
+    渲染，而高质量字体的 Bold 是为标题级强调设计的：正文 14px 下笔画成倍加粗、
+    与正文对比突兀（中英文同理，因为西文也由同一字体的 Bold 承担）。
+
+    典型落点：Linux（Noto Sans CJK / 思源黑体，可变字体）→ 500 Medium；Windows
+    （Segoe UI 系 + 微软雅黑）→ 600，西文 Semibold、中文仍是雅黑 Bold（雅黑没有
+    中间字面，若被压回 Regular 会整体否决）；只有 Regular+Bold 的字体栈 → 返回
+    空串，调用方用原生粗体。
+
+    结果进程内缓存（系统字体运行期不变，流式渲染高频调用依赖此缓存）。
+    """
+    return _resolve_emphasis_style()[0]
+
+
+def emphasis_font_family() -> str:
+    """强调文本需要额外指定的 CSS ``font-family`` 栈；"" = 沿用正文字体栈。
+
+    只有平台把中间字重登记成独立族名时（Qt on Windows 的 ``Segoe UI Semibold``
+    等）才非空；非空时强调文本必须同时带上该族名栈，否则取不到中间字面。栈序与
+    正文字体栈一一对应（同族名的中间字重版，缺失的族保持原样），因此中文仍落到
+    原来的 CJK 族。
+    """
+    return _resolve_emphasis_style()[1]
+
+
+def _strong_css() -> str:
+    """内部用：强调档的 ``font-weight`` 值，取不到中间字面时退回 ``bold``。
+
+    与 :func:`src.core.theme_manager.strong_weight_css` 同义（后者是给 QSS 调用方
+    的公开入口，本函数供本模块内部的样式模板使用，避免自我导入）。
+    """
+    return emphasis_font_weight() or "bold"
+
+
+@lru_cache(maxsize=2)
+def title_font_weight() -> str:
+    """标题字重的 CSS ``font-weight`` 数值；"" = 无可用中间字面（调用方用原生粗体）。
+
+    界面里大量"加粗"其实是控件文案（导航项、表头、状态标签、按钮），旧实现一律写
+    死 ``font-weight: bold``(700)。700 是标题级字重，正文尺寸下笔画成倍加粗、整屏
+    观感发黑；这里把标题档收敛到 600（比强调档 500 再重一档），层级仍靠字号 +
+    字重共同体现。
+
+    候选不可用（字体栈只有 Regular/Bold，如 Windows 微软雅黑）时退回强调档
+    :func:`emphasis_font_weight`；强调档也不可用则返回 ""，调用方沿用 ``bold``——
+    与 :func:`emphasis_font_weight` 相同的"宁可粗、不要乱"的安全边界。
+    """
+    try:
+        families = ThemeManager().font_families()
+        for value, attr, suffixes in _EMPHASIS_WEIGHT_CANDIDATES:
+            if value < 600:
+                continue
+            if _stack_accepts_weight(families, attr):
+                return str(value)
+            for suffix in suffixes:
+                variants = [_suffixed_family(f, suffix) for f in families]
+                if variants != families and _stack_accepts_weight(families, attr, variants):
+                    return str(value)
+    except Exception as e:
+        logger.warning("Title weight probe failed, fall back to emphasis weight: %s", e)
+    return emphasis_font_weight()
+
+
 #: HTML 标签分词（属性值可含引号包裹的 ``>``，需按引号整体吞掉）。
 _TAG_TOKEN_RE = re.compile(
     r'<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|\'[^\']*\'|[^>"\'])*)>')
@@ -179,6 +457,47 @@ class TextFormatter:
     _OWNED_TAG_RE = re.compile(
         r'<(' + '|'.join(_STYLE_OWNED_TAGS) + r')\b((?:"[^"]*"|[^>"])*)>',
         re.IGNORECASE)
+
+    #: ``<b>`` / ``<strong>`` 开标签（属性段允许引号包裹的值，如 ``style="a: b;"``）。
+    _BOLD_OPEN_RE = re.compile(r'<(b|strong)((?:"[^"]*"|[^>"])*)>', re.IGNORECASE)
+    #: 对应的闭标签（``</b >`` 之类带空格的写法一并容忍）。
+    _BOLD_CLOSE_RE = re.compile(r'</(b|strong)\s*>', re.IGNORECASE)
+
+    @staticmethod
+    def apply_emphasis_weight(html: str) -> str:
+        """把 ``<b>`` / ``<strong>`` 改写成带显式强调样式的 ``<span>``。
+
+        Qt 的 ``<b>``/``<strong>`` 由富文本解析器直接钉死为 QFont::Bold，内联
+        ``font-weight`` 能否覆盖它属实现细节；改写成 ``<span>`` 后样式只由内联
+        声明决定，行为确定。字重取自 :func:`emphasis_font_weight`（无可用中间
+        字重时为空串，此时原样返回、退回 Qt 原生粗体）；平台把中间字重登记成
+        独立族名时（Qt on Windows），再带上 :func:`emphasis_font_family` 的族名栈。
+
+        幂等：改写结果里已无 ``<b>``/``<strong>``，重复渲染不会叠加样式；标签
+        属性（含 AI 自带的内联样式）原样保留，只把样式声明合并进去。
+        """
+        weight = emphasis_font_weight()
+        if not weight or '<' not in html:
+            return html
+
+        declarations = f"font-weight:{weight};"
+        family = emphasis_font_family()
+        if family:
+            declarations += f" font-family:{family};"
+
+        def _open(match):
+            attrs = match.group(2) or ""
+            existing = re.search(r'style="([^"]*)"', attrs, re.IGNORECASE)
+            if existing:
+                kept = existing.group(1).strip().rstrip(';')
+                merged = f"{kept}; {declarations}" if kept else declarations
+                attrs = f'{attrs[:existing.start()]}style="{merged}"{attrs[existing.end():]}'
+            else:
+                attrs = f' style="{declarations}"{attrs}'
+            return f"<span{attrs}>"
+
+        html = TextFormatter._BOLD_OPEN_RE.sub(_open, html)
+        return TextFormatter._BOLD_CLOSE_RE.sub('</span>', html)
 
     @classmethod
     def _reset_injected_styles(cls, text: str) -> str:
@@ -493,7 +812,9 @@ class TextFormatter:
             rendered_main_html = TextFormatter.markdown_to_html(main_text)
             final_html += f"\n\n{rendered_main_html}"
 
-        return final_html
+        # 折叠面板标题（🧠 Reasoning / 🛠️ Tool Execution）等旁路 HTML 不经过
+        # markdown_to_html，统一在此补一次强调字重；正文已处理过，是幂等的 no-op。
+        return TextFormatter.apply_emphasis_weight(final_html)
 
     @staticmethod
     def markdown_to_html(text, theme_key=None):
@@ -529,6 +850,19 @@ class TextFormatter:
 
         html = markdown.markdown(processed_text, extensions=['extra', 'nl2br', 'sane_lists', 'tables'])
 
+        # 强调字重：把 <b>/<strong> 换成显式强调样式的 <span>，避免 Qt 一律用
+        # Bold(700) 造成的"中英文粗体都过重"（见 emphasis_font_weight）。
+        _emph_weight = emphasis_font_weight()
+        _emph_family = emphasis_font_family() if _emph_weight else ""
+        # 无中间字重时退回 Qt 原生 bold，保持"强调仍是强调"。
+        _emph_css = f"font-weight:{_emph_weight}; " if _emph_weight else ""
+        # 平台把中间字重登记为独立族名时（Qt on Windows），族名也要一起下发，
+        # 否则标题/表头/链接仍会落回最近的原生 Bold。
+        _emph_family_decl = f"font-family:{_emph_family}; " if _emph_family else ""
+        _emph_css += _emph_family_decl
+        _emph_value = _emph_weight or 'bold'
+        html = TextFormatter.apply_emphasis_weight(html)
+
         # ================= 代码视觉区分（对齐主流商业聊天软件惯例） =================
         # QTextBrowser 无原生代码样式：为块级 <pre><code> 与行内 <code> 注入
         # 主题化底色/边框/等宽字体（深浅色主题各自适配），使代码与正文明显
@@ -562,10 +896,12 @@ class TextFormatter:
 
         # 3) 标题层级：显式主题正文色 + 递减字号；h1/h2 加下边框增强分区感。
         #    不依赖文档默认色渲染，保证深浅主题与任意容器底色下对比稳定。
+        #    font-weight 亦显式下发：标题的粗体默认来自 Qt 内置样式表，内联声明
+        #    优先级更高（与上面的 font-size 同理），可压掉过重的 Bold(700)。
         _text_main = _tm.color('text_main', theme_key)
         _border = _tm.color('border', theme_key)
         for _lvl, _size in ((1, 21), (2, 18), (3, 16), (4, 15), (5, 14), (6, 13)):
-            _h_style = (f"color:{_text_main}; font-size:{_size}px; "
+            _h_style = (f"color:{_text_main}; font-size:{_size}px; {_emph_css}"
                         f"margin-top:12px; margin-bottom:4px;")
             if _lvl <= 2:
                 _h_style += f" border-bottom:1px solid {_border}; padding-bottom:4px;"
@@ -605,7 +941,8 @@ class TextFormatter:
 
         html = re.sub(r'<th(?:\s+style="([^"]*)")?\s*>',
                       _merge_style('th', f"color:{_text_main}; background-color:{_th_bg}; "
-                                         f"font-weight:bold; border:{_cell_border}; "
+                                         f"font-weight:{_emph_value}; {_emph_family_decl}"
+                                         f"border:{_cell_border}; "
                                          f"padding:6px 10px; vertical-align:top;"), html)
         html = re.sub(r'<td(?:\s+style="([^"]*)")?\s*>',
                       _merge_style('td', f"color:{_text_main}; border:{_cell_border}; "
@@ -754,12 +1091,13 @@ class TextFormatter:
         # 链接主题化：跟随主题 accent 色（原硬编码 #4daafc 在浅色主题下
         # 对比度不足）。负向前瞻跳过已自带 style 的专用链接（如 AlphaFold
         # 下载绿色、think/mermaid 面板），避免产生重复 style 属性导致
-        # 专用样式被通用链接色覆盖。
+        # 专用样式被通用链接色覆盖。字重用强调字重：链接密度高（引用编号、
+        # 数据库 ID），Bold(700) 会让行内链接比正文"跳"得过头。
         _accent = _tm.color('accent', theme_key)
         html = re.sub(
             r'<a(?![^>]*style=)(\s+href=)',
             lambda m: (f'<a style="color:{_accent}; text-decoration:none; '
-                       f'font-weight:bold;"{m.group(1)}'),
+                       f'font-weight:{_emph_value}; {_emph_family_decl}"{m.group(1)}'),
             html)
         parts = re.split(r'(<[^>]+>)', html)
         for i in range(0, len(parts), 2):
@@ -1032,7 +1370,7 @@ class TextFormatter:
             return (
                 f"<br><div style='padding:12px; margin: 8px 0; border:1px solid {tm.color('accent')}; border-radius:6px; background-color: transparent;'>"
                 f"<div style='margin-bottom: 5px;'><b>Mermaid Diagram Generated</b></div>"
-                f"<a href='mermaid://view?hash={code_hash}' style='color:{tm.color('accent')}; text-decoration:none; font-weight:bold;'>"
+                f"<a href='mermaid://view?hash={code_hash}' style='color:{tm.color('accent')}; text-decoration:none; font-weight:{_strong_css()};'>"
                 f"Click here to view / edit interactive diagram</a></div><br>")
 
         processed_text = re.sub(pattern, repl_mermaid, text, flags=re.DOTALL | re.IGNORECASE)

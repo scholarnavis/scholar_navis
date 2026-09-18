@@ -1,20 +1,51 @@
 """Base dialog frame: themed container with anchored sizing and footer buttons."""
+import logging
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QWidget
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 
-__all__ = ["BaseDialog", "HAS_NVML"]
+logger = logging.getLogger(__name__)
+
+__all__ = ["BaseDialog", "HAS_NVML", "nvml_available"]
+
+#: NVML 可用性缓存（None = 尚未探测）。
+_nvml_available = None
 
 
-try:
-    import pynvml
+def nvml_available() -> bool:
+    """探测 NVML（NVIDIA 管理库）是否可用，结果进程内缓存。
 
-    pynvml.nvmlInit()
-    HAS_NVML = True
-except Exception:
-    HAS_NVML = False
+    旧实现在**模块导入期**直接调用 ``pynvml.nvmlInit()``，而本模块位于主窗口
+    导入链上（main_window → components.dialog → dialogs.base）：NVML 首次初始化
+    要唤醒管理库与 GPU，混显笔记本上实测 0.02~2.7 s 不等，且 ``HAS_NVML`` 在代码
+    里没有任何消费方——等于把启动时间白送给一次无用的副作用（并且只 init 不
+    shutdown）。改为首次显式查询时才初始化，失败即缓存 False（与旧语义一致）。
+    """
+    global _nvml_available
+    if _nvml_available is None:
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            _nvml_available = True
+        except Exception as e:  # ImportError / 驱动缺失 / NVML 初始化失败
+            logger.debug(f"NVML unavailable: {e}")
+            _nvml_available = False
+    return _nvml_available
+
+
+def __getattr__(name: str):
+    """PEP 562：``HAS_NVML`` 仍可按模块属性读取，但只在真正被读取时才探测。
+
+    维持 ``from src.ui.components.dialogs.base import HAS_NVML`` 的兼容性，
+    同时避免导入期触发 NVML 初始化。
+    """
+    if name == "HAS_NVML":
+        return nvml_available()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class BaseDialog(QDialog):
@@ -180,7 +211,7 @@ class BaseDialog(QDialog):
                 border-bottom: 1px solid {tm.color('border')};
                 border-right: 1px solid {tm.color('border')};
                 padding: 8px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
             }}
             QTableWidget::item:selected {{
                 background-color: {tm.color('btn_hover')};
@@ -225,7 +256,7 @@ class BaseDialog(QDialog):
         if b_type == "primary":
             style = f"""
                 QPushButton {{
-                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: 500;
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: {strong_weight_css()};
                     background-color: {tm.color('accent')};
                     color: {tm.color('bg_main')};
                     border: 1px solid {tm.color('accent')};
@@ -235,7 +266,7 @@ class BaseDialog(QDialog):
         elif b_type == "danger":
             style = f"""
                 QPushButton {{
-                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: 500;
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: {strong_weight_css()};
                     background-color: transparent;
                     color: {tm.color('danger')};
                     border: 1px solid {tm.color('danger')};
@@ -245,7 +276,7 @@ class BaseDialog(QDialog):
         else:
             style = f"""
                 QPushButton {{
-                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: 500;
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: {strong_weight_css()};
                     background-color: {tm.color('btn_bg')};
                     color: {tm.color('text_main')};
                     border: 1px solid {tm.color('border')};

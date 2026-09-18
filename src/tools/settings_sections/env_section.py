@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QFormLayout, QHBoxLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QVBoxLayout)
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
 
@@ -370,13 +370,13 @@ class EnvSectionMixin:
         tm = ThemeManager()
         self.lbl_api_hint.setText(
             f"<div style='line-height: 1.5;'>"
-            f"<span style='color:{tm.color('warning')}; font-weight:bold;'>⚠️ NCBI RATE LIMITS:</span> "
-            f"You MUST provide a valid email address to use NCBI tools. An API Key is <span style='color:{tm.color('success')}; font-weight:bold;'>optional but highly recommended</span>. Without a key, tools will still function but under strict rate limits, which may slow down massive literature retrieval.<br><br>"
-            f"<span style='color:{tm.color('accent')}; font-weight:bold;'>INFO & API Keys:</span><br>"
+            f"<span style='color:{tm.color('warning')}; font-weight:{strong_weight_css()};'>⚠️ NCBI RATE LIMITS:</span> "
+            f"You MUST provide a valid email address to use NCBI tools. An API Key is <span style='color:{tm.color('success')}; font-weight:{strong_weight_css()};'>optional but highly recommended</span>. Without a key, tools will still function but under strict rate limits, which may slow down massive literature retrieval.<br><br>"
+            f"<span style='color:{tm.color('accent')}; font-weight:{strong_weight_css()};'>INFO & API Keys:</span><br>"
             f"• <b>NCBI PubMed:</b> Email is mandatory. Adding an API key increases rate limits from 3 to 10 requests/sec. "
             f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for NCBI Key]</a><br>"
-            f"• <b>OpenAlex:</b> Can be used without a key, but <span style='color:{tm.color('warning')};'>highly prone to 429 Too Many Requests errors</span>. Premium API Key provides higher limits and faster responses. "
-            f"<a href='ttps://openalex.org/settings/api-key' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for OpenAlex Key]</a><br>"
+            f"• <b>OpenAlex:</b> Works without a key, but <span style='color:{tm.color('warning')};'>the daily quota is low and 429 Too Many Requests is common</span>. A <b>free</b> API key (sign in with an email, no payment) raises the daily quota 10&times;; paid plans raise it further. "
+            f"<a href='https://openalex.org/settings/api-key' style='color:{tm.color('accent')}; text-decoration:none;'>[Get OpenAlex API Key]</a><br>"
             f"• <b>Semantic Scholar:</b> An API Key severely prevents '429 Too Many Requests' errors during massive literature retrieval. "
             f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for S2 Key]</a><br>"
             f"• <b>GitHub Token:</b> Increases search limits from 10/min to 30/min. "

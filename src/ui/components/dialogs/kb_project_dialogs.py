@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QFormLayout, QHBoxLayout,
 from src.core.models_registry import EMBEDDING_MODELS
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialogs.base import BaseDialog
+from src.core.theme_manager import strong_weight_css
 
 
 class SelectKBFileDialog(BaseDialog):
@@ -116,7 +117,7 @@ class SelectKBFileDialog(BaseDialog):
         super()._apply_theme()
         tm = self.tm
         self.lbl_status.setStyleSheet(
-            f"color: {tm.color('text_muted')}; font-size: 12px; font-weight: bold;")
+            f"color: {tm.color('text_muted')}; font-size: 12px; font-weight: {strong_weight_css()};")
         if hasattr(self, 'combo_kb') and hasattr(self.combo_kb, 'setStyleSheet'):
             self.combo_kb.setStyleSheet(
                 f"QComboBox {{ border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px; background: {tm.color('bg_input')}; color: {tm.color('text_main')}; }}")
@@ -202,7 +203,7 @@ class ProjectEditorDialog(BaseDialog):
 
         if hasattr(self, 'model_warn'):
             self.model_warn.setStyleSheet(
-                f"color: {tm.color('warning')}; font-size: 11px; font-weight: bold; border: none;")
+                f"color: {tm.color('warning')}; font-size: 11px; font-weight: {strong_weight_css()}; border: none;")
 
         if hasattr(self, 'lbl_domain_hint'):
             self.lbl_domain_hint.setStyleSheet(f"color: {tm.color('text_muted')}; font-size: 11px; font-style: italic;")

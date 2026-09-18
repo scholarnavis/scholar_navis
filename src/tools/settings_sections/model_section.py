@@ -17,7 +17,7 @@ from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, resolve_auto_model, get_onnx_cache_dir)
 from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.hf_download_task import RealTimeHFDownloadTask
 from src.task.settings_tasks import TestDeviceTask
 from src.task.common_task import VerifyModelsTask
@@ -296,7 +296,7 @@ class ModelSectionMixin:
 
         return f"""
         <div style='margin-top:4px; font-family:{tm.mono_font_family()}; font-size:10px; color:{tm.color("text_muted")};'>
-           <span style='color:{prio_color}; font-weight:bold;'>[{prio}]</span> 
+           <span style='color:{prio_color}; font-weight:{strong_weight_css()};'>[{prio}]</span> 
            | VRAM: <span style='color:{tm.color("text_muted")}'>{vram}</span> 
            | RAM: <span style='color:{tm.color("text_muted")}'>{ram}</span>
         </div>

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -228,14 +228,14 @@ class DeepPlanCardWidget(QFrame):
                 background: {academic_blue};
                 color: #FFFFFF;
                 font-size: 10px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 border-radius: 4px;
                 letter-spacing: 0.5px;
             }}
             QLabel#deepPlanTitle {{
                 color: {text_main};
                 font-size: 13px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
             }}
             QLabel#deepPlanHint {{
                 color: {text_sub};
@@ -278,7 +278,7 @@ class DeepPlanCardWidget(QFrame):
                 background: transparent;
                 color: {academic_blue};
                 font-size: 12px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 border: 1px solid {academic_blue};
                 border-radius: 6px;
                 padding: 7px 14px;
@@ -290,7 +290,7 @@ class DeepPlanCardWidget(QFrame):
                 background: {academic_blue};
                 color: #FFFFFF;
                 font-size: 12px;
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 border: none;
                 border-radius: 6px;
                 padding: 7px 16px;

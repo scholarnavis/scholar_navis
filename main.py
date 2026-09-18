@@ -112,14 +112,27 @@ class StartupWorker(QThread):
         self.hw_task_mgr = TaskManager()
 
     def run(self):
+        # 分阶段耗时进日志：启动变慢时能一眼看出卡在哪一步（否则只能看到
+        # 相邻日志间的时间差，无从判断是导入、配置还是网络）。
+        phase = "startup"
+        phase_started = time.perf_counter()
+
+        def phase_done(next_phase: str):
+            nonlocal phase, phase_started
+            now = time.perf_counter()
+            self.logger.info(f"[startup] {phase}: {now - phase_started:.3f}s -> {next_phase}")
+            phase, phase_started = next_phase, now
+
         try:
             self.sig_progress.emit(5, "Detecting hardware info...")
             time.sleep(0.1)
+            phase_done("model registry import")
 
             self.sig_progress.emit(6, "Loading model registry framework...")
             time.sleep(0.1)
             from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, \
                 ensure_onnx_model
+            phase_done("config/network import")
 
             self.sig_progress.emit(7, "Loading user settings...")
             time.sleep(0.1)
@@ -132,25 +145,30 @@ class StartupWorker(QThread):
             cfg_mgr = ConfigManager()
             _ = cfg_mgr.user_settings
             setup_global_network_env()
+            phase_done("hardware warmup dispatch")
 
             self.sig_progress.emit(25, "Scanning local hardware & compute engines (Background)...")
             time.sleep(0.1)
             # 交给主线程发起（见 sig_start_hw_warmup 的说明）
             self.sig_start_hw_warmup.emit()
+            phase_done("theme assets")
 
             self.sig_progress.emit(40, "Mounting theme cache and UI assets...")
             time.sleep(0.1)
             tm = ThemeManager()
             _ = tm.color('bg_main')
+            phase_done("mcp metadata")
 
             self.sig_progress.emit(60, "Loading MCP Subsystem metadata...")
             time.sleep(0.1)
             cfg_mgr.load_mcp_servers()
+            phase_done("UI/ML import")
 
             self.sig_progress.emit(80, "Pre-loading UI components & ML libraries...")
             time.sleep(0.1)
             from src.ui.main_window import MainWindow
             from src.core.mcp_manager import MCPManager
+            phase_done("ready")
 
             self.sig_progress.emit(100, "Ready. Building workspace...")
             time.sleep(0.1)

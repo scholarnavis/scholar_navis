@@ -9,9 +9,11 @@ import uuid
 import datetime
 import zipfile
 
-from chromadb import Settings
-
 from src.core import BASE_DIR
+
+# 说明：chromadb 不在顶层导入。本模块位于启动导入链上（ImportTool / 主窗口 →
+# kb_manager），而 chromadb 导入约 0.4 s（含其 api/collection 配置等），只在
+# DatabaseManager 真正建客户端时才需要，届时在函数内 import 即可。
 from src.core.config_manager import ConfigManager
 from src.core.theme_manager import ThemeManager
 
@@ -347,7 +349,7 @@ class DatabaseManager:
 
             self.client = chromadb.PersistentClient(
                 path=db_path,
-                settings=Settings(anonymized_telemetry=False, allow_reset=True)
+                settings=chromadb.Settings(anonymized_telemetry=False, allow_reset=True)
             )
 
             self.collection = self.client.get_or_create_collection(

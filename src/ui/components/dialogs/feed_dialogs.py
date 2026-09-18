@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFormLayout,
 
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialogs.base import BaseDialog
+from src.core.theme_manager import strong_weight_css
 
 __all__ = ["FeedEditorDialog", "FeedLibraryDialog"]
 
@@ -136,7 +137,7 @@ class FeedLibraryDialog(BaseDialog):
         super()._apply_theme()
         tm = self.tm
         self.btn_add_custom.setIcon(tm.icon("add", "text_main"))  # Added SVG
-        self.lbl_status.setStyleSheet(f"color: {tm.color('text_muted')}; font-weight: bold;")
+        self.lbl_status.setStyleSheet(f"color: {tm.color('text_muted')}; font-weight: {strong_weight_css()};")
 
         self._render_table(self.combo_category.currentText())
 

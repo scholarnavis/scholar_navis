@@ -7,7 +7,7 @@ from PySide6.QtSvgWidgets import QSvgWidget
 
 from src.task.common_task import VersionCheckTask
 from src.tools.base_tool import BaseTool
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css, title_weight_css
 from src.core.core_task import TaskManager, TaskMode
 from src.ui.components.dialog import LicenseDialog, ApiProvidersDialog
 from src.ui.components.text_formatter import mono_font_family_css
@@ -233,13 +233,13 @@ class AboutTool(BaseTool):
         base_font = f"font-family: {tm.font_family()};"
 
         self.widget.setStyleSheet("background-color: transparent;")
-        self.lbl_title.setStyleSheet(f"{base_font} color: {tm.color('title_blue')}; font-size: 36px; font-weight: 900;")
+        self.lbl_title.setStyleSheet(f"{base_font} color: {tm.color('title_blue')}; font-size: 36px; font-weight: {title_weight_css()};")
         self.lbl_desc.setStyleSheet(f"{base_font} color: {tm.color('text_main')}; font-size: 15px; margin-bottom: 5px;")
 
         self.lbl_version.setStyleSheet(
             f"color: {tm.color('text_muted')}; font-size: 13px; "
             f"font-family: {mono_font_family_css()};")
-        self.lbl_update.setStyleSheet(f"{base_font} font-weight: bold; font-size: 13px;")
+        self.lbl_update.setStyleSheet(f"{base_font} font-weight: {strong_weight_css()}; font-size: 13px;")
         if hasattr(self, '_update_link_ui'):
             self._update_link_ui()
         self.lbl_copy.setStyleSheet(f"{base_font} color: {tm.color('text_muted')}; font-size: 11px; margin-top: 30px;")
@@ -257,7 +257,7 @@ class AboutTool(BaseTool):
                 border: 1px solid {tm.color('border')}; 
                 border-radius: 8px; 
                 padding: 8px 18px; 
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
             }}
             QPushButton:hover {{ 
                 background-color: {tm.color('btn_hover')}; 
