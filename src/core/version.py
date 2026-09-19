@@ -34,7 +34,8 @@ __github__ = "https://github.com/scholarnavis/scholar_navis"
 #: 本机版本所属通道（"dev" / "stable"），见模块文档。
 __channel__ = "dev" if "-dev" in __version__.lower() else "stable"
 
-#: 发布端点（全部由 Cloudflare Worker 提供，见 deploy/cloudflare/_worker.js）
+#: 发布端点：全部由部署在 Cloudflare 侧的发布 Worker 提供（Worker 与官网页不属于
+#: 本仓库，只共享这里的路径与产物命名契约，见 README「Packaging」一节）
 #: - /versions  一次性返回该平台两条通道的最新版本（JSON）
 #: - /latest    仅返回指定通道的最新版本（纯文本，保留给旧客户端）
 #: - /dl        指定通道的产物下载（浏览器直接下载 zip）

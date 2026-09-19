@@ -313,8 +313,17 @@ jobs:
       # 正文里的版本/通道/下载地址/更新日志全部由脚本生成（通道判定复用
       # src/core/version.py）。脚本同时校验产物命名与 tag 一致，并把
       # prerelease / make_latest 经 $GITHUB_OUTPUT 回传。
+      #
+      # LLM 双语摘要为**可选**：三项配置（Secrets: LLM_API_KEY；Variables 或
+      # Secrets: LLM_BASE_URL / LLM_MODEL）任一缺失，或接口报错/超时/输出结构
+      # 不合规，脚本都会自动退化为"只列原始提交"，绝不因此让发版失败。
+      # 只依赖标准库（urllib），因此这里不需要 uv sync。
       - name: Compose release notes
         id: notes
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL || vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL || vars.LLM_MODEL }}
         run: |
           set -euo pipefail
           python3 build_support/release_notes.py \

@@ -187,7 +187,38 @@ Release whose body carries the version, channel, download links and changelog.
 The in-app update check fetches both channels (`/versions`) but only compares the
 one the running build belongs to; `-dev` builds therefore never notify stable
 users. Release notes are fetched through the site (`/changelog`), which proxies
-the GitHub Release — see `deploy/cloudflare/_worker.js` for the routing contract.
+the GitHub Release.
+
+The Worker and the marketing page are deployed separately from this repository
+(Cloudflare + R2) and are intentionally not vendored here. What this repository
+owns is the **contract** between them:
+
+* object naming — `scholar_navis_{platform}_{channel}_v{version}.zip` at the R2
+  bucket root (`build_app.py` writes it, the Worker lists it by prefix);
+* the endpoint paths in `src/core/version.py` (`/versions`, `/latest`, `/dl`,
+  `/changelog`) and the `os` / `channel` query values the app sends;
+* the release flow that keeps both in sync (`.github/workflows/build-release.yml`).
+
+Release bodies are composed by `build_support/release_notes.py`. When
+`LLM_API_KEY`, `LLM_BASE_URL` (OpenAI-compatible, e.g. `https://.../v1`) and
+`LLM_MODEL` are configured (the workflow reads them from repository secrets /
+variables), the commit log is summarised into an English and a Chinese section by
+that model; the raw commit list is always kept in the body for verification. If
+any of the three is missing, or the call fails / returns an unusable shape, the
+body silently falls back to the plain commit list — an optional polish step must
+never block a release.
+
+The release workflow reads the following from repository **secrets** (and falls
+back to **variables** for the two non-sensitive ones):
+
+| Name | Required | Purpose |
+| :--- | :--- | :--- |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | yes | upload the artifacts (`build_support/r2_release.py`) |
+| `LLM_API_KEY` | no | bilingual release notes; absent → commit list only |
+| `LLM_BASE_URL`, `LLM_MODEL` | no | OpenAI-compatible endpoint + model for the above |
+
+Creating the GitHub Release itself needs `contents: write`, which the workflow
+requests on the `publish-release` job only.
 
 -----
 
