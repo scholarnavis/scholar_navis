@@ -41,8 +41,10 @@ __all__ = [
     "existing_directory",
 ]
 
+#: 与 ``main_window`` / ``quick_translator`` 保持同一 QSettings 作用域命名习惯，
+#: 避免本模块单独落在第三个作用域里（各平台落盘位置分别为注册表 / .conf / plist）。
 _SETTINGS_ORG = "ScholarNavis"
-_SETTINGS_APP = "ScholarNavis"
+_SETTINGS_APP = "MainApp"
 
 #: side bar 展示的标准目录，元组顺序即展示顺序
 _PLACE_LOCATIONS: Tuple = (

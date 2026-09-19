@@ -25,6 +25,7 @@ import logging
 import os
 import platform
 import re
+import stat
 import sys
 
 logger = logging.getLogger("Core.PlatformEnv")
@@ -549,17 +550,68 @@ _PORTAL_THEME = "xdgdesktopportal"
 
 
 def _portal_theme_plugin() -> str:
-    """返回 PySide6 自带的 xdgdesktopportal 平台主题插件路径，缺失时返回空串。"""
+    """返回 xdgdesktopportal 平台主题插件路径，缺失时返回空串。
+
+    不导入 PySide6（本模块必须在任何 PySide6 导入之前运行），因此按下列顺序
+    做纯文件系统探测：
+
+    1. ``<PySide6>/Qt/plugins/platformthemes``——官方 wheel 与 pip 安装的布局，
+       优先命中；
+    2. ``$QT_PLUGIN_PATH`` 各条目下的 ``platformthemes``——发行版打包、Nix /
+       Guix 包装脚本常导出该变量，且它确实位于 Qt 的插件搜索路径内。仅作兜底：
+       该变量未必与 PySide6 自带的 Qt 同版本，因此冻结运行时不采用。
+
+    刻意不猜 ``/usr/lib/*/qt6/plugins`` 之类的系统路径：那些路径只有在 Qt 由
+    发行版提供时才位于 Qt 的搜索路径内，误报会让 ``QT_QPA_PLATFORMTHEME`` 指向
+    找不到的主题，反而把原本可用的主题回退掉。
+    """
+    filename = f"libq{_PORTAL_THEME}.so"
+    candidates = []
     try:
         spec = importlib.util.find_spec("PySide6")      # 只探测路径，不导入 PySide6
+        origin = getattr(spec, "origin", None) if spec else None
     except (ImportError, ValueError):
-        return ""
-    origin = getattr(spec, "origin", None)
-    if not origin:
-        return ""
-    plugin = os.path.join(os.path.dirname(origin), "Qt", "plugins",
-                          "platformthemes", f"libq{_PORTAL_THEME}.so")
-    return plugin if os.path.exists(plugin) else ""
+        origin = None
+    if origin:
+        candidates.append(os.path.join(os.path.dirname(origin), "Qt", "plugins",
+                                       "platformthemes", filename))
+    # 冻结（PyInstaller）运行时不再看 QT_PLUGIN_PATH：此时它来自宿主机的 shell
+    # 配置，常指向另一份 Qt（例如 Nix 的 qtbase），版本与包内 PySide6 未必一致，
+    # 强制加载会引入跨版本的平台主题插件。冻结包内的插件走上面的包内布局。
+    if not getattr(sys, "frozen", False):
+        for root in (os.environ.get("QT_PLUGIN_PATH", "") or "").split(os.pathsep):
+            root = root.strip()
+            if root:
+                candidates.append(os.path.join(root, "platformthemes", filename))
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return ""
+
+
+def _session_bus_available() -> bool:
+    """判断当前会话是否可达 D-Bus 会话总线。
+
+    Qt 的 ``QDBusConnection::sessionBus()`` 在 ``DBUS_SESSION_BUS_ADDRESS``
+    缺失时会回落到 ``$XDG_RUNTIME_DIR/bus``（systemd 用户会话的默认套接字）。
+    这里做同样的兜底探测：只看环境变量会在"脚本拉起 i3/sway/精简 WM"这类
+    未导出该变量的会话上误判为无总线，从而白白放弃原生文件对话框。
+    """
+    if os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").strip():
+        return True
+    candidates = []
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if runtime_dir:
+        candidates.append(os.path.join(runtime_dir, "bus"))
+    if hasattr(os, "getuid"):
+        candidates.append(f"/run/user/{os.getuid()}/bus")
+    for path in candidates:
+        try:
+            if stat.S_ISSOCK(os.stat(path).st_mode):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def enable_native_file_dialogs() -> list:
@@ -581,7 +633,7 @@ def enable_native_file_dialogs() -> list:
     if current:
         logger.debug(f"QT_QPA_PLATFORMTHEME already set to {current!r}, keeping it")
         return applied                                  # 已显式指定，尊重原设置
-    if not os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").strip():
+    if not _session_bus_available():
         logger.debug("No session bus, skip xdg-desktop-portal platform theme")
         return applied                                  # 无会话总线，门户不可达
     if not _portal_theme_plugin():

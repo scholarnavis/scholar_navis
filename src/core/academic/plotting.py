@@ -315,11 +315,20 @@ def plot_chart(chart_type: str, data: str, x: str, y: str,
         # 3) On failure, surface the R error to the frontend.
         if not result.success:
             err = result.error_message or "Unknown error"
-            return json.dumps({
+            payload = {
                 "status": "error",
                 "message": f"R plotting failed: {err}",
                 "r_stderr": result.stderr[:2000],
-            }, ensure_ascii=False)
+            }
+            # 平台相关的修复指引随错误一起回传：运行时据此渲染统一错误面板，
+            # 用户不必依赖模型转述 R 的原始 stderr（模型会照抄 install.packages，
+            # 在 NixOS 上那是走不通的命令）。
+            try:
+                from src.core.r_engine import plot_failure_payload
+                payload["guidance"] = plot_failure_payload(err)
+            except Exception as e:
+                logger.warning(f"Plot failure guidance unavailable: {e}")
+            return json.dumps(payload, ensure_ascii=False)
 
         # 4) On success, return the structured payload for the runtime to display.
         return json.dumps(

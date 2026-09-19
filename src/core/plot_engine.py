@@ -955,10 +955,13 @@ class PlotEngine:
                 pkgs.append(p)
         lines = []
         for pkg in pkgs:
+            # 措辞必须保留 "Required R package 'X' is not installed" 前缀：
+            # r_engine.plot_failure_missing_packages 靠它反解出缺哪个包（含扩展包）。
+            # 但不再附带 install.packages 命令——NixOS 上该命令必然失败，装包指引
+            # 统一由 r_engine.package_install_guidance 按平台生成。
             lines.append(
                 f'if (!requireNamespace("{pkg}", quietly = TRUE)) '
-                f'stop("Required R package \'{pkg}\' is not installed. '
-                f"Install it with: install.packages('{pkg}')\")"
+                f'stop("Required R package \'{pkg}\' is not installed.")'
             )
             lines.append(f'suppressPackageStartupMessages(library("{pkg}"))')
         return "\n".join(lines)

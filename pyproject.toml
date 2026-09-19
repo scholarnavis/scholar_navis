@@ -17,12 +17,14 @@ dependencies = [
     "nvidia-ml-py>=13.590.48",
     "pymupdf4llm>=0.2.9",
     "langdetect>=1.0.9",
-    "mcp[cli]>=1.26.0",
+    # 安全下限见文件末尾 [tool.uv] 的说明；1.2x 系列修复了 3 条 High 告警，
+    # 上限 <2 是为避免顺带跳进 mcp 2.x 这个与安全无关的大版本。
+    "mcp[cli]>=1.28.1,<2",
     "biopython>=1.87",
     "optimum>=2.1.0",
-    "curl-cffi>=0.14.0",
-    "torch>=2.10.0",
-    "cryptography>=48.0.1",
+    "curl-cffi>=0.15.0",
+    "torch>=2.13.0",
+    "cryptography>=50.0.0",
     "keyring>=24.0.0",
     "chardet<6.0",
     "hf-xet>=1.2.0",
@@ -43,13 +45,19 @@ dependencies = [
     "fastapi>=0.135.1",
     "uvicorn>=0.41.0",
     "langchain-core>=1.3.3",
-    "onnx>=1.21.0",
-    "aiohttp>=3.14.1",
+    # ONNX 的 IR 版本必须落在 onnxruntime 能解析的范围内，否则**内存里新造的
+    # 模型**（提供者探针、硬件测试）会被 ORT 直接拒绝，表现为"CUDA 不可用"而被
+    # 静默降级到 CPU（与 CUDA 本身无关）。实测：onnx 1.22 -> IR 13、
+    # onnx 1.23 -> IR 14，而 onnxruntime 1.24.4 的上限是 IR 13
+    # （DirectML 版更新较慢，是三平台共同版本的上界，见下方 override-dependencies）。
+    # 解除条件：三个 onnxruntime 发行包都提供支持 IR 14 的版本。
+    "onnx>=1.22.0,<1.23",
+    "aiohttp>=3.14.3",
     "requests>=2.33.0",
     "pygments>=2.20.0",
     "lxml>=6.1.0",
     "python-multipart>=0.0.31",
-    "langsmith>=0.8.0",
+    "langsmith>=0.8.18",
     "urllib3>=2.7.0",
     "starlette>=1.3.1",
     "idna>=3.15",
@@ -62,7 +70,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "boto3>=1.42.62",
-    "nuitka==4.0.8",
     "pyinstaller>=6.19.0",
     "tuna>=0.5.11",
 ]
@@ -85,5 +92,27 @@ torchvision = { index = "pytorch-cpu" }
 # 幂等的、无害的；不一致时则会破坏环境。这里统一钉死版本，避免解析器为不同平台
 # 选出不同构建。
 override-dependencies = ["onnxruntime==1.24.4"]
+
+# ---- 安全下限（Dependabot 告警修复）----
+# 这些是传递依赖，没法在 [project.dependencies] 里写下限。用 constraint-dependencies
+# 集中声明全局最低版本，防止解析器把它们降回受影响区间而重新引入同一告警。
+# 每项注明对应公告；上游再发修复版时同步抬高。
+constraint-dependencies = [
+    "anyio>=4.14.2",       # GHSA-82r6-8w77-94w6(Critical) / GHSA-5p39-cfhj-2xmp
+    "click>=8.3.3",        # PYSEC-2026-2132
+    "setuptools>=83.0.0",  # GHSA-h35f-9h28-mq5c
+    "soupsieve>=2.9.0",    # GHSA-2wc2-fm75-p42x / -836r-79rf-4m37 / -gjv8-xp57-g29c / -j934-xhv5-fg8f
+]
+
+# ---- 已确认暂时无法修复，勿盲目升级 ----
+# 1) chromadb 4 条（2 Critical + 2 High）：上游最新版 1.5.9 仍落在受影响区间
+#    (>= 0.4.17, <= 1.5.9)，GitHub Advisory 的 first_patched_version 为 null。
+#    缓解：两条 Critical 攻击的是 Chroma **服务端**的 HTTP API
+#    (/api/v2/tenants/{tenant}/databases/{db}/collections + trust_remote_code)；
+#    本项目只用进程内嵌的 PersistentClient（src/core/kb_manager.py），
+#    不对外暴露 Chroma 服务端，因此实际暴露面很低。
+# 2) transformers 5 条（全 High）：修复需 transformers>=5.10.0，但 optimum-onnx
+#    0.1.0（PyPI 最新）硬性要求 transformers<4.58.0，无法同时满足。
+#    解除条件：optimum-onnx 发布支持 transformers 5.x 的版本，或移除 ONNX 导出链路。
 
 

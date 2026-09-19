@@ -175,8 +175,7 @@ Override the engine cache location with `SCHOLAR_NAVIS_TRT_CACHE` if needed.
 ### Packaging
 
 ```bash
-uv run build_app.py      # PyInstaller (Windows / Linux)
-uv run build_nuitka.py   # Nuitka (Windows / Linux)
+uv run build_app.py      # PyInstaller (Windows / Linux); publishes to R2 under CI
 ```
 
 Artifacts are named `scholar_navis_<platform>_v<version>.zip`; the release workflow
@@ -201,3 +200,35 @@ Scholar Navis deeply integrates with a consortium of international biological an
   * **KEGG:** Kanehisa, M., and Goto, S. (2000). KEGG: kyoto encyclopedia of genes and genomes. *Nucleic Acids Res* 28:27–30.
   * **ChEBI:** Degtyarenko, K., de Matos, P., Ennis, M., et al. (2007). ChEBI: a database and ontology for chemical entities of biological interest. *Nucleic Acids Research* 36:D344–D350.
   * **JASPAR:** Ovek Baydar, D., Rauluseviciute, I., Aronsen, D.R., et al. (2025). JASPAR 2026: expansion of transcription factor binding profiles and integration of deep learning models. *Nucleic Acids Research* 54:D184–D193.
+
+-----
+
+## 📄 License
+
+Copyright (C) 2026 Scholar Navis Studio.
+
+Scholar Navis is free software released under the **GNU Affero General Public License v3.0**;
+see [`LICENSE`](LICENSE) for the full text. You may use, study, modify and redistribute it.
+Derivative works must be distributed under the same license, and if you offer the program to
+users over a network, you must offer them the Corresponding Source.
+
+This project is distributed as a desktop application. The maintainers do not operate a hosted
+network service on top of it, so the additional network-source obligation of AGPL-3.0 §13 is
+not triggered by an official deployment. The bundled `--api-server` mode is a local
+convenience feature; it reports the source location at `GET /api/source`.
+
+### Third-party components
+
+The application bundles third-party open-source software, including copyleft components:
+**PyMuPDF** (AGPL-3.0, or an Artifex commercial license), **PySide6 / Qt** (LGPL-3.0-only),
+**chardet** (LGPL-2.1) and **certifi / orjson / tqdm** (MPL-2.0).
+
+* The in-application **About → Licenses** dialog lists the components with functional impact
+  together with their license identifiers.
+* Released binaries ship `THIRD_PARTY_NOTICES.md` plus the license texts collected from each
+  package under `_internal/THIRD_PARTY_LICENSES/`, and the official LGPL-3.0 / GPL-3.0 texts
+  under `_internal/LICENSES/`.
+* Components required at run time but **not** bundled are documented there as well — most
+  notably the **R runtime** (`Rscript`) and the R packages used for visualization (ggplot2,
+  dplyr, tidyr, scales, viridis, patchwork, ragg, RColorBrewer, pheatmap, ggpubr, ggrepel,
+  cowplot). They are detected on the user's machine and invoked as separate processes.

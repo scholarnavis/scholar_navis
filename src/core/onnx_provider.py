@@ -31,6 +31,7 @@ import contextlib
 import io
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from typing import Optional
@@ -73,6 +74,32 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _probe_cache: dict = {}
 _probe_lock = threading.Lock()
 _probe_model_cache: Optional[bytes] = None
+
+#: 探针模型固定的 IR 版本。
+#:
+#: 必须显式指定，**不能**沿用 ``onnx.helper.make_model`` 的默认值（= 所装 onnx
+#: 包的 ``IR_VERSION``）：``onnx`` 与 ``onnxruntime`` 是两个独立升级的包，前者
+#: 靠前时（实测 onnx 1.23 → IR 14，onnxruntime 1.24.4 → 最高 IR 13）内存里造出
+#: 的探针模型会直接被 ORT 拒绝，导致**所有**执行提供者一起探测失败——表现为
+#: "CUDA 不可用"（实则与 CUDA 毫无关系），用户被静默降级到 CPU。
+#:
+#: 取 IR 8：onnxruntime 1.12+ 均支持，且高于 opset 14 所需的最低 IR 7。
+_PROBE_IR_VERSION = 8
+
+#: "模型本身被拒绝"（格式 / IR 版本问题）的错误特征。这类错误对所有执行提供者
+#: 一视同仁，不能当作"该提供者不可用"的证据。
+_MODEL_LEVEL_ERROR_HINTS = (
+    "unsupported model ir version",
+    "unsupported model",
+    "protobuf parsing failed",
+    "unable to parse model",
+    "invalid model",
+)
+
+#: 用于向 onnxruntime 问出 IR 上限的"超高" IR 版本（远高于任何已发布 IR）。
+_MAX_IR_PROBE_IR_VERSION = 9999
+#: onnxruntime 支持的最高 IR 版本（进程内缓存；None = 尚未探测或探测失败）。
+_max_ir_cache: Optional[int] = None
 
 #: 静默窗口嵌套深度（见 :func:`_probe_log_quiet`）。
 _probe_quiet_depth = 0
@@ -206,8 +233,15 @@ def list_available_providers() -> list:
         return [PROVIDER_CPU]
 
 
-def _probe_model_bytes() -> Optional[bytes]:
-    """构造最小可推理 ONNX 模型（内存内），用于建会话探测提供者。"""
+def probe_model_bytes() -> Optional[bytes]:
+    """构造最小可推理 ONNX 模型（内存内），用于建会话探测提供者。
+
+    IR 版本被显式钉在 :data:`_PROBE_IR_VERSION`：探针的唯一目的是验证提供者，
+    绝不能因为 ``onnx`` 包比 ``onnxruntime`` 新而被拒（详见该常量的说明）。
+
+    公开导出：设置页的"Test Compute Device"必须复用同一份模型，不能自己再造
+    一份，否则同一个 IR 版本问题会在两处独立复现（历史上正是如此）。
+    """
     global _probe_model_cache
     if _probe_model_cache is not None:
         return _probe_model_cache
@@ -221,11 +255,108 @@ def _probe_model_bytes() -> Optional[bytes]:
         opset = helper.make_opsetid("", 14)
         model = helper.make_model(
             graph, producer_name="scholar-navis-probe", opset_imports=[opset])
+        # make_model 的 **kwargs 会直接写进 ModelProto，但老版本 onnx 不接受该
+        # 关键字，故再做一次显式赋值兜底。
+        model.ir_version = _PROBE_IR_VERSION
         _probe_model_cache = model.SerializeToString()
+        logger.debug(f"Provider probe model built (opset 14, IR {model.ir_version}).")
     except Exception as e:
         logger.warning(f"Failed to build provider probe model: {e}")
         _probe_model_cache = None
     return _probe_model_cache
+
+
+def _is_model_parse_error(exc: BaseException) -> bool:
+    """异常是否属于"模型本身无法解析"，而非"该提供者不可用"。
+
+    先用错误特征快速识别；特征不匹配时再实证一次：用 CPU-only 建同一个会话，
+    若 CPU 也同样失败，说明问题在模型/ORT 构建，而不是加速器。
+    """
+    text = str(exc).lower()
+    if any(hint in text for hint in _MODEL_LEVEL_ERROR_HINTS):
+        return True
+
+    model_bytes = probe_model_bytes()
+    if model_bytes is None:
+        return False
+    try:
+        import onnxruntime as ort
+
+        ort.InferenceSession(model_bytes, providers=[PROVIDER_CPU])
+        return False  # CPU 能跑 -> 问题确实出在该提供者
+    except Exception as cpu_err:
+        logger.debug(f"CPU-only probe also failed: {cpu_err}")
+        return True  # CPU 也跑不了 -> 模型级问题，与加速器无关
+
+
+def onnxruntime_max_ir_version() -> Optional[int]:
+    """向 onnxruntime 本身问出它支持的最高 IR 版本（不硬编码）。
+
+    做法：造一个 IR 版本故意超高（:data:`_MAX_IR_PROBE_IR_VERSION`）的最小模型去
+    建会话，ORT 会在报错文本里给出 ``max supported IR version: N``，解析该数字
+    即可。这样无需维护"ORT 版本 → IR 上限"的硬编码表，升级 ORT 后结论自动跟随。
+    """
+    global _max_ir_cache
+    if _max_ir_cache is not None:
+        return _max_ir_cache
+    try:
+        import onnxruntime as ort
+        from onnx import TensorProto, helper
+    except Exception as e:
+        logger.debug(f"Cannot probe onnxruntime max IR version: {e}")
+        return None
+
+    try:
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3])
+        node = helper.make_node("Identity", inputs=["X"], outputs=["Y"])
+        graph = helper.make_graph([node], "sn-ir-probe", [x], [y])
+        model = helper.make_model(
+            graph, producer_name="scholar-navis-ir-probe",
+            opset_imports=[helper.make_opsetid("", 14)])
+        model.ir_version = _MAX_IR_PROBE_IR_VERSION
+        with _probe_log_quiet():
+            # 这一步必然失败：失败信息里就带着我们要的上限。
+            ort.InferenceSession(model.SerializeToString(), providers=[PROVIDER_CPU])
+        logger.debug("onnxruntime accepted an absurdly high IR version; no limit detected.")
+        return None
+    except Exception as e:
+        m = re.search(r"max supported IR version:\s*(\d+)", str(e))
+        if not m:
+            logger.debug(f"Cannot parse max IR version from ORT error: {e}")
+            return None
+        _max_ir_cache = int(m.group(1))
+        logger.debug(f"onnxruntime reports max supported IR version {_max_ir_cache}.")
+        return _max_ir_cache
+
+
+def ir_version_mismatch() -> str:
+    """onnx 与 onnxruntime 的 IR 版本能力脱节时的说明（一致时返回空串）。
+
+    这正是"CUDA 被误判不可用"的根因类型：``onnx`` 与 ``onnxruntime`` 是两个独立
+    升级的包，前者先走一步时，任何由 onnx 在内存里新造的模型都会被 ORT 拒绝，
+    而提供者探针恰恰是这样造模型的（线上实例：onnx 1.23 出 IR 14，ORT 1.24.4
+    上限 IR 13）。把结论写进启动日志，避免同类问题再次隐形。
+    """
+    try:
+        import onnx
+    except Exception:
+        return ""
+    max_ir = onnxruntime_max_ir_version()
+    if max_ir is None:
+        return ""
+    try:
+        onnx_ir = int(onnx.IR_VERSION)
+    except Exception:
+        return ""
+    if onnx_ir <= max_ir:
+        return ""
+    return (
+        f"onnx {getattr(onnx, '__version__', '?')} emits IR {onnx_ir}, but the installed "
+        f"onnxruntime supports at most IR {max_ir}: models created in memory by the 'onnx' "
+        f"package can be rejected by onnxruntime (GPU probing / hardware test). Pin onnx to "
+        f"a version whose IR is <= {max_ir} (see pyproject.toml) or upgrade onnxruntime."
+    )
 
 
 def probe_provider(provider: str, provider_options: Optional[dict] = None) -> bool:
@@ -262,7 +393,7 @@ def _probe_impl(provider: str, provider_options: Optional[dict]) -> bool:
             logger.info(f"Provider probe skipped by env flag; trusting build list for '{provider}'.")
             return True
 
-        model_bytes = _probe_model_bytes()
+        model_bytes = probe_model_bytes()
         if model_bytes is None:
             # 无法构造探测模型（onnx 缺失）：不做判断，避免误杀可用加速。
             logger.warning(f"Cannot probe '{provider}'; assuming available.")
@@ -285,6 +416,16 @@ def _probe_impl(provider: str, provider_options: Optional[dict]) -> bool:
                     f"but onnxruntime activated {active}. Runtime libraries are likely missing.")
             return ok
         except Exception as e:
+            if _is_model_parse_error(e):
+                # 探针模型自己就被 ORT 拒了：CPU 也会以同样方式失败，因此这里
+                # **没有**任何关于加速器的证据。退回"信任构建期列表"，避免把
+                # 可用 GPU 静默降级成 CPU（用户要的正是 CUDA / 张量核心路线）。
+                logger.warning(
+                    f"Provider probe for '{provider}' could not run: onnxruntime "
+                    f"rejected the probe model itself ({e}). Trusting the build-time "
+                    f"provider list; align onnx / onnxruntime versions to restore a "
+                    f"real probe.")
+                return True
             logger.warning(f"Provider probe failed for '{provider}': {e}")
             return False
 

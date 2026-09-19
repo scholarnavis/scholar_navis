@@ -11,6 +11,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+out-linux/
 downloads/
 eggs/
 .eggs/
@@ -232,10 +233,6 @@ dist/
 /mcp_workspace/
 /tools
 
-nuitka-crash-report.xml
-.nuitka_cache
-
-
 scholar_navis_win*
 scholar_navis_linux*
 scholar_navis_mac*
@@ -248,5 +245,4 @@ _internal
 # 平台/开发环境残留产物
 *.lnk
 _tmp_*
-*.nuitka
 

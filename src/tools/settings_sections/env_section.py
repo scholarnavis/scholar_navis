@@ -213,11 +213,13 @@ class EnvSectionMixin:
         self._refresh_r_status()
 
     def _r_packages_html(self, engine) -> str:
-        """检查核心 R 绘图包并生成状态片段（缺失即给出安装命令）。
+        """检查核心 R 绘图包并生成状态片段（缺失即给出平台相关的安装指引）。
 
         可视化依赖 ggplot2 等包。Linux 发行版通常把 R 包拆成独立软件包
-        （r-cran-* 或需 install.packages），把缺失项提前显示出来可以避免
-        用户在出图阶段才遇到报错。
+        （r-cran-* 或需 install.packages），NixOS 上更是只能由 nix 提供
+        （store 只读，install.packages 无写权限）。指引统一由
+        :func:`src.core.r_engine.package_install_guidance` 按平台生成，
+        避免在 UI 里写死一条在部分平台走不通的命令。
         """
         from src.core.plot_engine import CORE_R_PACKAGES
 
@@ -233,11 +235,19 @@ class EnvSectionMixin:
             return (f"<br><b>R packages:</b> "
                     f"<span style='color:{tm.color('success')};'>all core packages available</span>")
 
-        install_cmd = "install.packages(c(" + ", ".join(f'"{p}"' for p in missing) + "))"
+        from src.core.r_engine import package_install_guidance
+
+        # 指引是纯文本：首行说明 + 缩进行表示要在终端执行的命令，
+        # 渲染时分别保持普通文本与等宽字体。
+        guidance_html = "<br>".join(
+            f"<code>{line.strip()}</code>" if line.startswith("  ") else line
+            for line in package_install_guidance(missing).splitlines()
+            if line.strip()
+        )
         return (
             f"<br><b>R packages missing:</b> "
             f"<span style='color:{tm.color('warning')};'>{', '.join(missing)}</span><br>"
-            f"In an R session run: <code>{install_cmd}</code>"
+            f"{guidance_html}"
         )
 
     def _on_browse_r_path(self):

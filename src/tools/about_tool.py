@@ -1,17 +1,33 @@
+import datetime
 import platform
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QSizePolicy
-from PySide6.QtCore import Qt, QUrl, QSize
+from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtSvgWidgets import QSvgWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
+from src.core.core_task import TaskManager, TaskMode
+from src.core.theme_manager import ThemeManager, strong_weight_css, title_weight_css
+from src.core.version import (
+    __app_name__,
+    __company__,
+    __description__,
+    __dl__,
+    __github__,
+    __version__,
+    __website__,
+)
 from src.task.common_task import VersionCheckTask
 from src.tools.base_tool import BaseTool
-from src.core.theme_manager import ThemeManager, strong_weight_css, title_weight_css
-from src.core.core_task import TaskManager, TaskMode
-from src.ui.components.dialog import LicenseDialog, ApiProvidersDialog
+from src.ui.components.dialog import ApiProvidersDialog, LicenseDialog
 from src.ui.components.text_formatter import mono_font_family_css
-from src.core.version import __version__, __app_name__, __description__, __website__, __github__, __dl__
 
 
 class AboutTool(BaseTool):
@@ -20,6 +36,7 @@ class AboutTool(BaseTool):
     lbl_title: QLabel
     lbl_desc: QLabel
     lbl_version: QLabel
+    lbl_third_party: QLabel
     _version_click_count: int
     _dev_dialog: QWidget
 
@@ -125,9 +142,19 @@ class AboutTool(BaseTool):
 
         layout.addLayout(btn_layout)
 
-        self.lbl_copy = QLabel("Licensed under AGPL v3 | © 2026 Scholar Navis Studio")
+        # 版权/许可行：公司名取自 version.py 的 __company__，年份取当前年份 ——
+        # 原先公司名与年份都硬编码在字符串里，改公司名或跨年后必须改代码。
+        self.lbl_copy = QLabel(
+            f"Licensed under AGPL-3.0 | © {datetime.date.today().year} {__company__}")
         self.lbl_copy.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_copy)
+
+        self.lbl_third_party = QLabel(
+            "Third-party components are listed under Licenses, "
+            "including the optional R runtime and its plotting packages.")
+        self.lbl_third_party.setAlignment(Qt.AlignCenter)
+        self.lbl_third_party.setWordWrap(True)
+        layout.addWidget(self.lbl_third_party)
 
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
@@ -243,6 +270,8 @@ class AboutTool(BaseTool):
         if hasattr(self, '_update_link_ui'):
             self._update_link_ui()
         self.lbl_copy.setStyleSheet(f"{base_font} color: {tm.color('text_muted')}; font-size: 11px; margin-top: 30px;")
+        self.lbl_third_party.setStyleSheet(
+            f"{base_font} color: {tm.color('text_muted')}; font-size: 11px;")
 
         self.btn_web.setIcon(tm.icon("link", "text_main"))
         self.btn_git.setIcon(tm.icon("github", "text_main"))

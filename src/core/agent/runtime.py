@@ -1116,6 +1116,59 @@ class AgentRuntime:
     # ------------------------------------------------------------------ #
     #  Plot result handling
     # ------------------------------------------------------------------ #
+    def _notify_plot_failure(self, payload, raw_result: str, emit_token) -> str:
+        """把绘图失败渲染成统一 ``<error_panel>``，并把提醒一并交给模型。
+
+        为什么不让模型转述：R 的原始 stderr 里写着 ``install.packages(...)``，
+        模型会原样复述，而 NixOS 上该命令必然失败（store 只读）。这里由 Python
+        侧按平台生成指引、以标记形式**确定性**上屏，同时明确告知模型"用户已经
+        看到修复面板"，避免它再编一套命令或把报错原文贴出来。
+
+        UI 侧（``chat_bubble._extract_error_panels``）按 ``title|details`` 去重，
+        因此模型对同一次失败重试多次时，用户只会看到一个面板。
+
+        :return: 回给模型的结果 JSON（失败时尽量保留原有字段）。
+        """
+        try:
+            from src.core.llm_errors import error_marker
+            from src.core.r_engine import plot_failure_payload
+        except Exception as e:  # 渲染指引失败不能反过来影响主流程
+            logger.warning(f"Plot failure panel unavailable: {e}")
+            return raw_result
+
+        out = dict(payload) if isinstance(payload, dict) else {
+            "status": "error", "message": raw_result}
+
+        detail = str(out.get("message", "") or "")
+        if out.get("r_stderr"):
+            detail = f"{detail}\n\n{out['r_stderr']}"
+
+        # 面板构建 + 上屏只允许"降级"，不允许"升级"：异常一律吞掉并退回原始
+        # 结果。提醒必须是**内联**的（气泡内卡片），绝不能因为这里出问题而冒泡
+        # 成任务级失败——那条路径会在聊天里弹 Toast 并中断本轮。
+        try:
+            # tool 层已按平台生成指引时直接复用，避免二次探测 R 环境（会拉起 R 进程）。
+            guide = out.get("guidance")
+            panel = guide if isinstance(guide, dict) else plot_failure_payload(detail)
+            if emit_token is not None:
+                emit_token(f"{error_marker(panel)}\n")
+            self.log_fn("WARN",
+                        f"Plotting failed; inline notice shown: {panel.get('title', '')}")
+        except Exception as e:
+            logger.warning(f"Plot failure notice skipped: {e}")
+            return raw_result
+
+        title = panel.get("title", "Chart Rendering Failed")
+        out["message"] = (
+            f"{detail}\n\n"
+            f"[Notice: the figure could not be rendered. A fix-it panel titled '{title}' has "
+            "already been shown to the user with platform-specific instructions. Do NOT output "
+            "your own installation commands, do NOT paste R's raw error text, and do NOT claim "
+            "the chart was drawn. Briefly tell the user the figure failed and what the panel "
+            "says to do; continue helping with the rest of their request.]"
+        )
+        return json.dumps(out, ensure_ascii=False)
+
     def _handle_plot_result(self, result: str, emit_token) -> str:
         """Handle a ``plot_chart`` skill result.
 
@@ -1125,6 +1178,11 @@ class AgentRuntime:
         preview + downloads — it must NOT depend on the LLM re-echoing it.
         A short confirmation is returned to the LLM so it can narrate the
         result without re-printing the chart.
+
+        On failure, a ``<error_panel>`` marker carries a platform-specific
+        fix-it reminder (see :func:`src.core.r_engine.plot_failure_payload`)
+        straight to the UI, so a broken R environment is reported to the user
+        deterministically instead of relying on the model to relay it.
         """
         try:
             payload = json.loads(result)
@@ -1132,7 +1190,7 @@ class AgentRuntime:
             return result
 
         if not isinstance(payload, dict) or payload.get("status") != "success":
-            return result
+            return self._notify_plot_failure(payload, result, emit_token)
 
         title = payload.get("chart_title", "Chart")
         total_rows = payload.get("total_rows", 0)
@@ -1404,10 +1462,13 @@ class AgentRuntime:
                 "extra_packages": info.get("extra_packages") or [],
             }
             return self._handle_plot_result(json.dumps(payload, ensure_ascii=False), emit_token)
-        return json.dumps({
+        # 重绘失败同样走统一提醒：与首次绘图共用同一条"平台相关修复指引"通道。
+        failed = json.dumps({
             "status": "error",
             "message": f"Re-render failed: {result.error_message}",
+            "r_stderr": (result.stderr or "")[:2000],
         }, ensure_ascii=False)
+        return self._notify_plot_failure(json.loads(failed), failed, emit_token)
 
     def _handle_propose_plot_plan(self, args: dict, emit_token) -> str:
         """Propose an English data-visualization plan to the user and wait for confirmation.

@@ -1,16 +1,15 @@
 import glob
 import os
-import sys
-import shutil
 import platform
-import subprocess
 import re
+import shutil
+import subprocess
+import sys
 import zipfile
 
-import boto3
-from botocore.exceptions import ClientError
-from dotenv import load_dotenv
-from src.core.version import __version__, __app_name__
+from build_support.notices import stage_notices
+from build_support.r2_release import ReleaseUploadError, publish_artifact
+from src.core.version import __app_name__, __github__, __version__
 
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -40,46 +39,8 @@ def sync_pyproject_version():
             f.write(new_content)
         print(f"[*] Synced pyproject.toml version to {__version__}")
 
-def get_r2_client():
-    load_dotenv()
-    account_id = os.getenv("R2_ACCOUNT_ID")
-    access_key = os.getenv("R2_ACCESS_KEY_ID")
-    secret_key = os.getenv("R2_SECRET_ACCESS_KEY")
-    if not all([account_id, access_key, secret_key]):
-        print("[-] R2 credentials missing. Skipping R2 operations.")
-        return None
-    return boto3.client(
-        service_name="s3",
-        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name="auto"
-    )
-
-def upload_to_r2(s3_client, bucket_name, file_path, object_name):
-    print(f"\n[*] Uploading {file_path} to R2 bucket '{bucket_name}'...")
-    try:
-        s3_client.upload_file(file_path, bucket_name, object_name)
-        print(f"[+] Upload complete: {object_name}")
-    except ClientError as e:
-        print(f"[-] Upload failed: {e}")
-
-def delete_old_r2_versions(s3_client, bucket_name, current_object_name):
-    match = re.match(r"^(.*?_v)", current_object_name)
-    if not match:
-        return
-    prefix = match.group(1)
-    print(f"\n[*] Scanning for old versions with prefix: '{prefix}'...")
-    try:
-        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-        if 'Contents' in response:
-            for obj in response['Contents']:
-                old_key = obj['Key']
-                if old_key != current_object_name:
-                    s3_client.delete_object(Bucket=bucket_name, Key=old_key)
-                    print(f"[+] Deleted old version: {old_key}")
-    except ClientError as e:
-        print(f"[-] Failed to delete old versions: {e}")
+# R2 发布逻辑抽在 build_support/r2_release.py（独立模块，便于注入客户端做测试）。
+# 这里只留调用点，见 build_app() 的 [4/4] 段。
 
 def build_app():
     sync_pyproject_version()
@@ -185,6 +146,16 @@ def build_app():
     # --add-data 的分隔符是平台相关的：Windows 为 ';'，POSIX 为 ':'。
     cmd.append(f"--add-data=Assets{os.pathsep}Assets")
 
+    # 许可合规：AGPL-3 §4/§6 与 LGPL-3 §4 要求随二进制向接收者提供许可文本与声明，
+    # 而 PyInstaller 默认不带任何许可文件（此前发布的产物里连 LICENSE 都没有）。
+    notices = stage_notices(os.path.join(build_dir, "notices"),
+                            app_name=__app_name__, version=__version__,
+                            source_url=__github__)
+    for src, dest in notices["add_data"]:
+        cmd.append(f"--add-data={src}{os.pathsep}{dest}")
+    print(f"[*] Bundled third-party notices: {notices['license_files']} license file(s) "
+          f"collected; {len(notices['missing_text'])} distribution(s) ship no text.")
+
     excludes = [
         "tkinter", "matplotlib", "seaborn", "jupyter", "notebook",
         "IPython", "plotly", "pygame",
@@ -202,8 +173,9 @@ def build_app():
 
     cmd.append(entry_point)
 
-    print(f"\n[2/4] Executing PyInstaller (Packaging PySide6 & ONNXRuntime)...")
-    result = subprocess.run(cmd)
+    print("\n[2/4] Executing PyInstaller (Packaging PySide6 & ONNXRuntime)...")
+    # check=False：失败由下面的 returncode 判定，以便区分"打包失败"与"异常退出"。
+    result = subprocess.run(cmd, check=False)
 
     # 无论打包成功失败，清理掉临时生成的 Hook 文件
     if os.path.exists(hook_file):
@@ -228,19 +200,19 @@ def build_app():
 
     print(f"[+] Packed to {archive_path}")
 
-    print(f"\n[4/4] Cloudflare R2 Operations...")
-    if os.getenv("GITHUB_ACTIONS") != "true":
-        print("[*] Local environment detected. Skipping R2 upload.")
-        return
+    print("\n[4/4] Cloudflare R2 Operations...")
+    try:
+        object_name = publish_artifact(archive_path)
+    except ReleaseUploadError as exc:
+        # 必须让流水线变红：静默失败会制造"发版绿色但产物没上传"的假象。
+        print(f"\n[-] R2 publish failed: {exc}")
+        sys.exit(1)
 
-    s3_client = get_r2_client()
-    bucket_name = os.getenv("R2_BUCKET_NAME")
-
-    if s3_client and bucket_name:
-        object_name = os.path.basename(archive_path)
-        upload_to_r2(s3_client, bucket_name, archive_path, object_name)
-        delete_old_r2_versions(s3_client, bucket_name, object_name)
-        print(f"\n[+] All GitHub Actions workflows completed successfully!")
+    if object_name:
+        print(f"\n[+] Release published: {object_name}")
+    else:
+        print(f"[*] R2 upload skipped (no credentials configured). "
+              f"Artifact kept at: {archive_path}")
 
 
 if __name__ == "__main__":

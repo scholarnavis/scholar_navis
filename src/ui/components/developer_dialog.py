@@ -528,11 +528,39 @@ class DeveloperDialog(BaseDialog):
             info = engine.detect()
             if info.get("available"):
                 self._log(f"R found: {info.get('executable')} (R {info.get('version')})", "OK")
+                self._check_r_packages(engine)
             else:
                 self._log("R not found.", "WARN")
                 self._log(engine.install_guidance().replace("\n", " | "), "WARN")
         except Exception as e:
             self._log(f"R engine test failed: {e}", "FAIL")
+
+    def _check_r_packages(self, engine):
+        """核心绘图包自检：解释器可用 ≠ 能出图。
+
+        NixOS / 精简发行版上的 R 常常只装了基础解释器（ggplot2 等需另装），
+        仅报 "R found" 会给开发者一个假绿灯——真实绘图会在 R 侧 stop() 退出，
+        前端只看到 plot_chart 返回 error，表现为"AI 不会画图"。
+        """
+        from src.core.plot_engine import CORE_R_PACKAGES
+        from src.core.r_engine import package_install_guidance
+
+        try:
+            status = engine.check_packages(CORE_R_PACKAGES)
+        except Exception as e:
+            self._log(f"R package check failed: {e}", "FAIL")
+            return
+
+        missing = [p for p in CORE_R_PACKAGES if not status.get(p)]
+        if not missing:
+            self._log(f"R packages OK: {', '.join(CORE_R_PACKAGES)}", "OK")
+            return
+
+        self._log(f"R packages missing: {', '.join(missing)} "
+                  f"(plot_chart will fail until installed)", "FAIL")
+        for line in package_install_guidance(missing).splitlines():
+            if line.strip():
+                self._log(f"  {line.strip()}", "WARN")
 
     def _test_provenance(self, clear: bool = True):
         if clear:

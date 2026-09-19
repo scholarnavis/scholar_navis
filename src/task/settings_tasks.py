@@ -69,8 +69,7 @@ class TestDeviceTask(BackgroundTask):
         try:
             import onnxruntime as ort
             import numpy as np
-            from onnx import helper, TensorProto
-            from src.core.onnx_provider import resolve_provider
+            from src.core.onnx_provider import probe_model_bytes, resolve_provider
 
             # 先做真实可用性解析：请求的加速设备不可用（如 Linux 缺 CUDA/cuDNN
             # 运行库）时给出明确结论，而不是等 ORT 静默回退后再报一句含糊失败。
@@ -103,15 +102,16 @@ class TestDeviceTask(BackgroundTask):
                 self.update_progress(20, "Compiling TensorRT engines (first run only)...")
 
             self.send_log("INFO", "Generating native dummy ONNX model in memory...")
-            X = helper.make_tensor_value_info('X', TensorProto.FLOAT, [1, 3])
-            Y = helper.make_tensor_value_info('Y', TensorProto.FLOAT, [1, 3])
-            node_def = helper.make_node('Identity', inputs=['X'], outputs=['Y'])
-            graph_def = helper.make_graph([node_def], 'test-model', [X], [Y])
-
-            opset_import = helper.make_opsetid("", 14)
-            model_def = helper.make_model(graph_def, producer_name='scholar-navis-test', opset_imports=[opset_import])
-
-            model_bytes = model_def.SerializeToString()
+            # 复用 onnx_provider 的探针模型（IR 版本已在那里钉住，见 _PROBE_IR_VERSION）。
+            # 历史上这里自己造了一份，于是"onnx 包比 onnxruntime 新 -> 模型被 ORT 拒绝"
+            # 会在硬件测试里独立复现，表现为"测试说 CUDA 不可用"，而 CUDA 实际是好的。
+            model_bytes = probe_model_bytes()
+            if model_bytes is None:
+                return {
+                    "success": False,
+                    "msg": ("Cannot build the in-memory test model: the installed 'onnx' "
+                            "package is unusable. Reinstall onnx / onnxruntime and retry."),
+                }
 
             self.send_log("INFO", f"Initializing ORT Session with provider: {provider}...")
 

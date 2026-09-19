@@ -4,8 +4,9 @@ import logging
 import sys
 
 from src.core.onnx_provider import (
-    AUTO_PRIORITY, HINT_ID_PREFIX, PROVIDER_CPU, list_available_providers,
-    probe_provider, resolve_provider, tensorrt_runtime_available,
+    AUTO_PRIORITY, HINT_ID_PREFIX, PROVIDER_CPU, ir_version_mismatch,
+    list_available_providers, probe_provider, resolve_provider,
+    tensorrt_runtime_available,
 )
 
 
@@ -407,4 +408,12 @@ class DeviceManager:
         self.logger.info(
             f"TensorRT: build={'yes' if 'TensorrtExecutionProvider' in info['ort_providers'] else 'no'} | "
             f"runtime libs={'yes' if tensorrt_runtime_available() else 'no'}")
+        # onnx 与 onnxruntime 独立升级：IR 版本能力脱节时 GPU 会被误判不可用
+        # （详见 onnx_provider.ir_version_mismatch）。这里把结论写进启动日志，
+        # 让同类问题一眼可见，而不是等到"CUDA 又炸了"才发现。
+        mismatch = ir_version_mismatch()
+        if mismatch:
+            self.logger.warning(f"ONNX IR version mismatch: {mismatch}")
+        else:
+            self.logger.info("ONNX IR version compatible (onnx <= onnxruntime capability).")
         self.logger.info(f"Optimal device resolved to: {self.get_optimal_device()}")

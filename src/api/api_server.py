@@ -20,7 +20,7 @@ from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import check_model_exists, get_model_conf, resolve_auto_model
-from src.core.version import __version__
+from src.core.version import __github__, __version__, __website__
 from src.task.chat_tasks import ChatGenerationTask
 
 app = FastAPI(
@@ -978,6 +978,26 @@ def list_knowledge_bases():
     return {"knowledge_bases": result}
 
 
+@app.get(
+    "/api/source",
+    tags=["System"],
+    summary="Where to obtain the Corresponding Source",
+    description=(
+        "If this instance is reachable over a network, AGPL-3.0 §13 requires that users be "
+        "offered the Corresponding Source. This endpoint reports where to obtain it."
+    ),
+)
+def corresponding_source():
+    return {
+        "program": "Scholar Navis",
+        "version": __version__,
+        "license": "AGPL-3.0",
+        "corresponding_source": __github__,
+        "website": __website__,
+        "third_party_notices": "THIRD_PARTY_NOTICES.md (bundled with the distribution)",
+    }
+
+
 # ==========================================
 # Thread Launcher
 # ==========================================
@@ -991,6 +1011,11 @@ def run_server():
     api_key = config_mgr.user_settings.get("api_server_key", "").strip()
 
     logger.info(f"Starting Standalone API Server on {host}:{port}")
+    # AGPL-3 §13：通过网络与本程序交互的用户必须获得获取 Corresponding Source 的
+    # 机会，因此把源码地址与声明位置一并打在启动日志里（另有 GET /api/source）。
+    logger.info(f"Corresponding Source (AGPL-3.0): {__github__}")
+    logger.info("Third-party license notices: THIRD_PARTY_NOTICES.md in the distribution "
+                "(also available via GET /api/source).")
     if api_key:
         logger.info("API Key authentication is ENABLED.")
     else:
