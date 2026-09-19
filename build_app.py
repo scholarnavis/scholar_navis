@@ -182,8 +182,11 @@ def build_app():
         os.remove(hook_file)
 
     if result.returncode != 0:
-        print("\n[-] PyInstaller build failed.")
-        return
+        # 必须非零退出。旧写法只 `return`，脚本仍以 0 结束，CI 会继续往下走，
+        # 于是真正的失败被后一句 "cp: cannot stat '/app/*.zip'" 掩盖；
+        # 这里直接终止，让日志第一条错误就是根因。
+        print("\n[-] PyInstaller build failed. Aborting before packaging/publishing.")
+        sys.exit(1)
 
     # 产物名里必须带发布通道（stable / dev）：Worker 以 `{平台}_{通道}_v` 为前缀
     # 列举 R2 对象，两条通道因此互不可见——上传 dev 产物时清理历史版本不会误删

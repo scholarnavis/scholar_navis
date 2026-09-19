@@ -161,6 +161,29 @@ def _prune(client, bucket: str, object_name: str) -> list:
     return _prune_prefix(client, bucket, prefix, object_name)
 
 
+def _connection_hint(exc: BaseException, bucket: str) -> str:
+    """连接级失败时补一句"该查什么"，返回空串表示"错误已足够自解释"。
+
+    为什么需要：CI 日志里的 URL 会被 GitHub 掩码成
+    ``https://***.cloudflarestorage.com/***/....zip``，看不出账号 ID 是哪一段，
+    而"连不上端点"与"凭证不对"是两类完全不同的问题（前者查 R2_ACCOUNT_ID，
+    后者查 Key/Secret），报错文案不区分时很容易查错方向。
+    """
+    if isinstance(exc, ClientError):
+        return ""                       # 服务端已明确回话（AccessDenied 等），无需提示
+    if not isinstance(exc, (BotoCoreError, OSError)):
+        return ""
+
+    account_id = (os.environ.get("R2_ACCOUNT_ID") or "").strip()
+    endpoint = (f"https://{account_id}.r2.cloudflarestorage.com"
+                if account_id else "<R2_ACCOUNT_ID missing>")
+    return (f" [endpoint={endpoint} bucket={bucket}] Connection-level failure: "
+            "check that R2_ACCOUNT_ID is the 32-char hex account id (not the account "
+            "name, not a full URL, no inner spaces) and that R2 is enabled on that "
+            "account. Wrong credentials fail differently "
+            "(InvalidAccessKeyId / SignatureDoesNotMatch), so do not look there first.")
+
+
 def publish_artifact(local_path: str, *, strict: bool | None = None, client=None,
                      legacy_prefixes: tuple = ()) -> str:
     """把 ``local_path`` 上传到 R2，并清理同平台同通道的历史版本。
@@ -212,6 +235,7 @@ def publish_artifact(local_path: str, *, strict: bool | None = None, client=None
         detail = getattr(exc, "response", None) or exc
         raise ReleaseUploadError(
             f"R2 publish failed for {object_name}: {detail}"
+            + _connection_hint(exc, bucket)
         ) from exc
 
     return object_name

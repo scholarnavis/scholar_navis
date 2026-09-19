@@ -127,7 +127,11 @@ jobs:
             "$LINUX_BUILD_IMAGE" bash -euc '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y -qq --no-install-recommends curl ca-certificates \
+              # binutils 是**构建期必需品**，不是可选项：PyInstaller 在 Linux 上靠
+              # objdump 解析动态依赖，缺失时直接以
+              # "On Linux, objdump is required ... 'binutils' package" 中止打包。
+              # 下面的可移植性体检脚本也依赖它提供的 readelf。
+              apt-get install -y -qq --no-install-recommends curl ca-certificates binutils \
                 libgl1 libegl1 libglib2.0-0 libdbus-1-3 \
                 libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 \
                 libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 \
