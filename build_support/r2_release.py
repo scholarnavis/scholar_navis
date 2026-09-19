@@ -40,8 +40,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import socket
+import time
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 # `dotenv` 由 python-dotenv 提供（模块名 ≠ 发行名），类型检查器解析不到这层映射，
@@ -59,6 +62,9 @@ REQUIRED_ENV = (
     "R2_SECRET_ACCESS_KEY",
     "R2_BUCKET_NAME",
 )
+
+#: Cloudflare 账户 ID：32 位十六进制。用于在连不上之前拦掉"粘错内容"的 secret。
+_ACCOUNT_ID_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 
 
 class ReleaseUploadError(RuntimeError):
@@ -83,15 +89,66 @@ def _missing_env() -> list:
     return [key for key in REQUIRED_ENV if not (os.environ.get(key) or "").strip()]
 
 
+def _configure_dns_family() -> None:
+    """``R2_FORCE_IPV4=1`` 时把 DNS 解析限制为 IPv4（默认不干预）。
+
+    背景：Cloudflare 的 R2 端点同时发布 A 与 AAAA 记录。Windows（以及不少 CI
+    容器）没有 IPv6 出口，而 Python 的 ``socket`` 不像浏览器那样做 Happy
+    Eyeballs——它会先在无法到达的 IPv6 地址上一直等到超时，整句报错只剩
+    "Could not connect to the endpoint URL"，与 DNS/凭证问题无法区分。
+    关掉 AAAA 之后连接会直接走 IPv4，失败也会立刻失败。
+    """
+    if (os.environ.get("R2_FORCE_IPV4") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+
+    original_getaddrinfo = socket.getaddrinfo
+
+    def ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = ipv4_only
+    logger.info("R2_FORCE_IPV4 is set: R2 endpoint resolution is restricted to IPv4.")
+
+
 def _build_client():
-    """按 R2 的 S3 兼容接口建客户端（endpoint 由 account_id 推导，region 固定 auto）。"""
+    """按 R2 的 S3 兼容接口建客户端（endpoint 由 account_id 推导，region 固定 auto）。
+
+    做了两件比"直接丢给 boto3"更值的事：
+
+    1. **校验 account id 的形状**。secret 里多带一对引号或一个换行是极常见的粘贴
+       事故，而症状是"Could not connect to the endpoint URL"——一句与根因毫无关系
+       的话。这里提前拦下并指出具体问题。
+    2. **显式指定 path-style**。boto3 对自定义 endpoint 默认走 virtual-hosted
+       style（``<bucket>.<account>.r2.cloudflarestorage.com``），而 R2 的 S3 端点
+       约定是 ``<account>.r2.cloudflarestorage.com/<bucket>``；不指定就等于把
+       bucket 名塞进主机名，结果同样是"连不上"。
+    """
+    _configure_dns_family()
+
     account_id = os.environ["R2_ACCOUNT_ID"].strip()
+    if not _ACCOUNT_ID_RE.match(account_id):
+        raise ReleaseUploadError(
+            "R2_ACCOUNT_ID is not a Cloudflare account id: expected 32 hex characters, "
+            f"got {len(account_id)} characters starting with {account_id[:2]!r} "
+            f"(non_hex={any(c not in '0123456789abcdefABCDEF' for c in account_id)}). "
+            "Re-set the secret by copying the Account ID from the dashboard URL or "
+            "R2 -> overview, without quotes, spaces or line breaks."
+        )
+
     return boto3.client(
         service_name="s3",
-        endpoint_url=f"https://{account_id}.cloudflarestorage.com",
+        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
         aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"].strip(),
         aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"].strip(),
         region_name="auto",
+        config=Config(
+            s3={"addressing_style": "path"},
+            # 连接层失败通常是瞬时的，而 botocore 默认连接超时是 60s：一个 run 会先
+            # 卡好几分钟才报错。收紧到 10s 并显式重试 5 次，失败得快、重试得多。
+            connect_timeout=10,
+            read_timeout=60,
+            retries={"max_attempts": 5, "mode": "standard"},
+        ),
     )
 
 
@@ -161,6 +218,30 @@ def _prune(client, bucket: str, object_name: str) -> list:
     return _prune_prefix(client, bucket, prefix, object_name)
 
 
+def _probe_endpoint(host: str, port: int = 443, timeout: float = 10.0) -> str:
+    """连接失败后补做一次 DNS + TCP 探测，把"连不上"拆成可行动的事实。
+
+    CI 里只有一句 "Could not connect to the endpoint URL"：DNS 不解析、TCP 被拒/
+    超时、TLS 握手失败都会长成同一句话，而三者的修法完全不同（改 secret、查网络
+    策略、查证书）。这里直接给出结论，省掉在 CI 上反复试错。
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        addresses = sorted({info[4][0] for info in infos})
+    except OSError as exc:
+        return f"DNS lookup of {host} failed ({type(exc).__name__}: {exc})."
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
+    except OSError as exc:
+        return (f"DNS resolved {host} -> {', '.join(addresses[:3])}, but TCP connect to "
+                f"port {port} failed ({type(exc).__name__}: {exc}).")
+
+    return (f"DNS and TCP to {host}:{port} are fine ({', '.join(addresses[:3])}), so the "
+            "failure sits above the socket layer (TLS / handshake / read timeout).")
+
+
 def _connection_hint(exc: BaseException, bucket: str) -> str:
     """连接级失败时补一句"该查什么"，返回空串表示"错误已足够自解释"。
 
@@ -175,13 +256,21 @@ def _connection_hint(exc: BaseException, bucket: str) -> str:
         return ""
 
     account_id = (os.environ.get("R2_ACCOUNT_ID") or "").strip()
-    endpoint = (f"https://{account_id}.r2.cloudflarestorage.com"
-                if account_id else "<R2_ACCOUNT_ID missing>")
-    return (f" [endpoint={endpoint} bucket={bucket}] Connection-level failure: "
-            "check that R2_ACCOUNT_ID is the 32-char hex account id (not the account "
-            "name, not a full URL, no inner spaces) and that R2 is enabled on that "
-            "account. Wrong credentials fail differently "
-            "(InvalidAccessKeyId / SignatureDoesNotMatch), so do not look there first.")
+    if account_id:
+        endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+        probe = _probe_endpoint(f"{account_id}.r2.cloudflarestorage.com")
+    else:
+        endpoint = "<R2_ACCOUNT_ID missing>"
+        probe = "R2_ACCOUNT_ID is empty, so there is no endpoint to probe."
+
+    return (f" [endpoint={endpoint} bucket={bucket}] Connection-level failure: {probe} "
+            "If the value looks right, re-check that the secret holds exactly the "
+            "32-char hex account id (no quotes/spaces/line breaks) and that R2 is "
+            "enabled on that account. Wrong credentials fail differently "
+            "(InvalidAccessKeyId / SignatureDoesNotMatch), so do not look there first. "
+            "On hosts without IPv6 connectivity (Windows CI runners, some containers) set "
+            "R2_FORCE_IPV4=1: the endpoint publishes AAAA records too, and Python waits "
+            "for the unreachable address instead of falling back.")
 
 
 def publish_artifact(local_path: str, *, strict: bool | None = None, client=None,
@@ -222,6 +311,7 @@ def publish_artifact(local_path: str, *, strict: bool | None = None, client=None
         client = _build_client()
 
     try:
+        started = time.time()
         _upload(client, bucket, local_path, object_name)
         _prune(client, bucket, object_name)
         # 迁移清理：旧命名下的对象不在任何"新前缀"里，只能按调用方给的前缀显式删。
@@ -233,8 +323,10 @@ def publish_artifact(local_path: str, *, strict: bool | None = None, client=None
         raise
     except (ClientError, BotoCoreError, OSError) as exc:
         detail = getattr(exc, "response", None) or exc
+        # 带上耗时：秒级失败 = 连接被拒/立即失败，几分钟才失败 = 超时（对定位
+        # 网络策略与 IPv6 之类的环境问题很关键）。
         raise ReleaseUploadError(
-            f"R2 publish failed for {object_name}: {detail}"
+            f"R2 publish failed for {object_name} after {time.time() - started:.1f}s: {detail}"
             + _connection_hint(exc, bucket)
         ) from exc
 

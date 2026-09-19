@@ -37,6 +37,11 @@ on:
 env:
   # 承载构建的发行版；改动它等于改动产物的 glibc 地板。
   LINUX_BUILD_IMAGE: ubuntu:22.04
+  # 把 R2 端点的 DNS 解析限制到 IPv4。R2 的 *.r2.cloudflarestorage.com 同时发布
+  # A 与 AAAA 记录，而 GitHub 的 Windows runner 没有 IPv6 出口；Python 的 socket
+  # 不做 Happy Eyeballs，会先在不可达的 IPv6 上等到超时，报错只剩
+  # "Could not connect to the endpoint URL"，与 DNS/凭证问题无法区分。
+  R2_FORCE_IPV4: "1"
 
 jobs:
   build:
@@ -123,6 +128,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/out-linux":/out \
             -e R2_ACCOUNT_ID -e R2_ACCESS_KEY_ID \
             -e R2_SECRET_ACCESS_KEY -e R2_BUCKET_NAME \
+            -e R2_FORCE_IPV4 \
             -e GITHUB_ACTIONS \
             "$LINUX_BUILD_IMAGE" bash -euc '
               export DEBIAN_FRONTEND=noninteractive
