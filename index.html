@@ -191,12 +191,12 @@
                         <div class="text-xs text-slate-500 dark:text-slate-400 mb-3" data-version-for="stable">
                             latest version: <span class="font-semibold">&mdash;</span>
                         </div>
-                        <!-- 静态兜底链接：即使脚本被拦，也能直接下载（默认通道即 stable） -->
+                        <!-- 静态兜底链接（绝对地址，页面被镜像托管时也能用）；JS 就绪后会附加版本号 -->
                         <div class="flex flex-wrap gap-3" data-buttons-for="stable">
-                            <a href="/dl?os=windows&amp;channel=stable" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-white font-semibold rounded-xl hover:scale-105 transition-transform">
+                            <a href="https://scholarnavis.com/dl?os=windows&amp;channel=stable" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-white font-semibold rounded-xl hover:scale-105 transition-transform">
                                 <i class="fa-brands fa-windows"></i> <span>Windows</span>
                             </a>
-                            <a href="/dl?os=linux&amp;channel=stable" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-white font-semibold rounded-xl hover:scale-105 transition-transform">
+                            <a href="https://scholarnavis.com/dl?os=linux&amp;channel=stable" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-white font-semibold rounded-xl hover:scale-105 transition-transform">
                                 <i class="fa-brands fa-linux"></i> <span>Linux</span>
                             </a>
                         </div>
@@ -220,10 +220,10 @@
                             latest version: <span class="font-semibold">&mdash;</span>
                         </div>
                         <div class="flex flex-wrap gap-3" data-buttons-for="dev">
-                            <a href="/dl?os=windows&amp;channel=dev" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 border border-primary text-primary font-semibold rounded-xl hover:bg-primary hover:text-white transition-all">
+                            <a href="https://scholarnavis.com/dl?os=windows&amp;channel=dev" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 border border-primary text-primary font-semibold rounded-xl hover:bg-primary hover:text-white transition-all">
                                 <i class="fa-brands fa-windows"></i> <span>Windows</span>
                             </a>
-                            <a href="/dl?os=linux&amp;channel=dev" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 border border-primary text-primary font-semibold rounded-xl hover:bg-primary hover:text-white transition-all">
+                            <a href="https://scholarnavis.com/dl?os=linux&amp;channel=dev" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 border border-primary text-primary font-semibold rounded-xl hover:bg-primary hover:text-white transition-all">
                                 <i class="fa-brands fa-linux"></i> <span>Linux</span>
                             </a>
                         </div>
