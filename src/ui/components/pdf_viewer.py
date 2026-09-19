@@ -12,11 +12,12 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtCore import Qt, QUrl, QEvent, QPoint
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeyEvent, QShortcut, QKeySequence, QTextCursor, \
     QTextDocument
-from PySide6.QtWidgets import (QMainWindow, QToolBar, QApplication, QFileDialog, QMessageBox,
+from PySide6.QtWidgets import (QMainWindow, QToolBar, QApplication, QMessageBox,
                                QTextBrowser, QWidget, QHBoxLayout, QLineEdit, QPushButton, QLabel, QMenu)
 
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme, strong_weight_css
+from src.ui.components.file_dialogs import save_file_name
 
 
 def _apply_windows_dark_titlebar(window, tm):
@@ -244,7 +245,7 @@ class InternalPDFViewer(QMainWindow):
         if not default_name.lower().endswith('.pdf'):
             default_name += ".pdf"
 
-        save_path, _ = QFileDialog.getSaveFileName(
+        save_path, _ = save_file_name(
             self, "Export Original PDF", default_name, "PDF Files (*.pdf)"
         )
 
@@ -619,7 +620,7 @@ class InternalTextViewer(QMainWindow):
     def export_file(self):
         if not self.original_file_path or not os.path.exists(self.original_file_path):
             return
-        save_path, _ = QFileDialog.getSaveFileName(self, "Export Original File", self.display_name, "All Files (*.*)")
+        save_path, _ = save_file_name(self, "Export Original File", self.display_name, "All Files (*.*)")
         if save_path:
             try:
                 shutil.copy2(self.original_file_path, save_path)

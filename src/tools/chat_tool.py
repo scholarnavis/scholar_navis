@@ -26,7 +26,7 @@ from src.core.kb_manager import DatabaseManager, KBManager
 from src.core.core_task import TaskManager, TaskMode
 from src.core.models_registry import get_model_conf
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, overlay_scrollbar_qss
 from src.tools.base_tool import BaseTool
 from src.tools.chat_input_widgets import (ChatDropTargetWidget,
                                           ChatInputContainer)
@@ -195,7 +195,10 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         # 3. 对话展示滚动区 (仅存放消息气泡)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        # 滚动条走 overlay 样式：不操作时完全不可见，鼠标移到滚动条上才显形
+        self.scroll_area.setStyleSheet(
+            "QScrollArea { border: none; background-color: transparent; }"
+            + overlay_scrollbar_qss())
 
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background-color: transparent;")

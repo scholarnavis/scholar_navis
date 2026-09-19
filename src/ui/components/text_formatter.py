@@ -6,7 +6,10 @@ import sys
 import tempfile
 import shutil
 import hashlib
+import json as _json
+from base64 import b64decode as _b64decode
 from functools import lru_cache
+from html.parser import HTMLParser
 from urllib.parse import urlparse, parse_qs
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
@@ -435,6 +438,344 @@ def naturalize_table_html(html: str) -> str:
     return _TABLE_TAG_RE.sub(_repl, html)
 
 
+#: 渲染管线注入的 Mermaid 交互提示块（HTML 形态），导出/复制 Markdown 时应整块移除
+_MERMAID_UI_HTML_RE = re.compile(
+    r"<br\s*/?>\s*<div[^>]*>\s*<div[^>]*>\s*<b>\s*Mermaid Diagram Generated\s*</b>\s*</div>"
+    r"\s*<a\b[^>]*>.*?</a>\s*</div>(?:\s*<br\s*/?>)?",
+    re.DOTALL | re.IGNORECASE)
+
+#: 同上，但文本已被转义或换行打散时的兜底匹配
+_MERMAID_UI_TEXT_RE = re.compile(
+    r"Mermaid Diagram Generated\s*(?:<br\s*/?>)?\s*(?:<a\b[^>]*>\s*)?"
+    r"Click here to view\s*/\s*edit interactive diagram\s*(?:</a>)?",
+    re.DOTALL | re.IGNORECASE)
+
+#: 非正文标签的整棵子树（用于纯文本导出时彻底丢弃样式/脚本内容）
+_DROP_SUBTREE_RE = re.compile(
+    r"<(script|style|noscript)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE)
+
+
+class _HtmlToMarkdown(HTMLParser):
+    """HTML → Markdown 提取器（导出/复制 Markdown 共用）。
+
+    取舍原则：**能用 Markdown 表达的一律用 Markdown**（表格、图片、加粗、斜体、
+    代码、列表、链接、标题、引用、分隔线）；Markdown 表达不了的（带显示尺寸的
+    图片、自定义卡片）保留精简 HTML 或转成等价可读文本；纯样式容器
+    （div/span/font）只丢属性、内容照旧。多余空行由 :func:`_tidy_markdown` 收敛。
+    """
+
+    #: 内联标记标签 → Markdown 包裹符
+    _MARKERS = {"b": "**", "strong": "**", "i": "*", "em": "*",
+                "s": "~~", "strike": "~~", "del": "~~", "ins": "__"}
+    #: 只保留内容、丢弃容器的标签
+    _TRANSPARENT = {"div", "span", "font", "u", "small", "label", "center",
+                    "section", "article", "header", "footer", "main", "tbody",
+                    "thead", "tfoot", "abbr", "mark", "sub", "sup", "time"}
+    #: 内部协议卡片标记（payload 为 base64 JSON）
+    _CARDS = {"rplot_card", "plot_plan", "ask_user", "deep_plan"}
+    _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+    #: 内容不属于正文、整棵子树丢弃的标签（否则样式/脚本会被当成正文写进 .md）
+    _DROP_SUBTREES = {"script", "style", "noscript"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._parts = []
+        self._pre = 0          # <pre> 嵌套深度：内部一律原样保留
+        self._skip = 0         # _DROP_SUBTREES 嵌套深度：内部一律丢弃
+        self._table = None     # 表格缓冲 {"rows": [], "row": ..., "cell": ...}
+        self._lists = []       # 列表栈 [(ordered, counter)]
+        self._links = []       # <a href> 栈
+        self._markers = []     # 已开启的内联标记栈
+
+    # ---------------- 缓冲 ----------------
+    def _emit(self, text):
+        if not text:
+            return
+        cell = self._table.get("cell") if self._table else None
+        if cell is not None:
+            cell.append(text)
+        else:
+            self._parts.append(text)
+
+    def _tail_char(self):
+        buf = (self._table.get("cell") if self._table else None) or self._parts
+        for part in reversed(buf):
+            if part:
+                return part[-1]
+        return ""
+
+    def result(self):
+        return "".join(self._parts)
+
+    # ---------------- 事件 ----------------
+    def handle_data(self, data):
+        if not data:
+            return
+        if self._skip:
+            return
+        if self._pre:
+            self._emit(data)
+            return
+        if data.strip():
+            self._emit(data)
+            return
+        # 纯空白：标签换行/缩进不进入正文；行内空白压缩为单个空格
+        if "\n" in data:
+            self._emit("\n")
+        elif self._tail_char() not in ("", " ", "\n"):
+            self._emit(" ")
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        data = dict(attrs)
+        # <script>/<style> 的内容是代码而非正文，整棵子树丢弃（含嵌套）
+        if tag in self._DROP_SUBTREES:
+            self._skip += 1
+            return
+        if self._skip:
+            return
+        if self._pre:
+            if tag == "br":
+                self._emit("\n")
+            elif tag == "code":
+                self._capture_code_language(data)
+            else:
+                self._emit(f"<{tag}>")
+            return
+        if tag == "br":
+            self._emit("\n")
+        elif tag == "hr":
+            self._emit("\n\n---\n\n")
+        elif tag == "img":
+            self._emit_image(data)
+        elif tag == "a":
+            self._links.append((data.get("href") or "").strip())
+            self._emit("[")
+        elif tag == "code":
+            self._emit("`")
+        elif tag == "pre":
+            self._pre += 1
+            self._emit("\n\n```\n")
+        elif tag in self._MARKERS:
+            self._markers.append(tag)
+            self._emit(self._MARKERS[tag])
+        elif tag in ("ul", "ol"):
+            self._lists.append([tag == "ol", 0])
+            self._emit("\n")
+        elif tag == "li":
+            ordered, idx = self._lists[-1] if self._lists else (False, 0)
+            if ordered:
+                self._lists[-1][1] = idx + 1
+                self._emit(f"{idx + 1}. ")
+            else:
+                self._emit("- ")
+        elif tag in self._HEADINGS:
+            self._emit("\n\n" + "#" * int(tag[1]) + " ")
+        elif tag == "blockquote":
+            self._emit("\n\n> ")
+        elif tag == "table":
+            self._table = {"rows": [], "row": None, "cell": None}
+        elif tag == "tr":
+            if self._table:
+                self._table["row"] = []
+        elif tag in ("td", "th"):
+            if self._table:
+                self._table["cell"] = []
+        elif tag in self._CARDS:
+            self._emit_card(tag, data)
+        elif tag in self._TRANSPARENT:
+            pass                                    # 纯样式容器透明化
+        elif tag in ("p", "title", "body", "html", "head"):
+            self._emit("\n\n")
+        else:
+            self._emit(f"<{tag}>")                  # 未知标签保守保留
+
+    def handle_startendtag(self, tag, attrs):
+        tag = tag.lower()
+        if tag == "br":
+            self._emit("\n")
+        elif tag == "hr":
+            self._emit("\n\n---\n\n")
+        elif tag == "img":
+            self._emit_image(dict(attrs))
+        else:
+            self.handle_starttag(tag, attrs)
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in self._DROP_SUBTREES:
+            self._skip = max(0, self._skip - 1)
+            return
+        if self._skip:
+            return
+        if tag == "pre":
+            self._pre = max(0, self._pre - 1)
+            self._emit("\n```\n\n")
+            return
+        if self._pre:
+            return
+        if tag == "code":
+            self._emit("`")
+        elif tag == "a":
+            href = self._links.pop() if self._links else ""
+            self._emit(f"]({href})" if href else "]")
+        elif tag in self._MARKERS:
+            if self._markers and self._markers[-1] == tag:
+                self._markers.pop()
+                self._emit(self._MARKERS[tag])
+        elif tag in ("ul", "ol"):
+            if self._lists:
+                self._lists.pop()
+            self._emit("\n")
+        elif tag == "li":
+            self._emit("\n")
+        elif tag in self._HEADINGS or tag == "blockquote":
+            self._emit("\n\n")
+        elif tag == "table":
+            self._finish_table()
+        elif tag == "tr":
+            if self._table and self._table["row"] is not None:
+                self._table["rows"].append(self._table["row"])
+                self._table["row"] = None
+        elif tag in ("td", "th"):
+            self._finish_cell()
+        elif tag in ("p", "title", "body", "html", "head"):
+            self._emit("\n\n")
+        elif tag in self._CARDS or tag in self._TRANSPARENT:
+            pass
+        else:
+            self._emit(f"</{tag}>")
+
+    # ---------------- 元素渲染 ----------------
+    def _capture_code_language(self, data):
+        """从 ``<pre><code class="language-python">`` 中提取围栏语言。
+
+        渲染管线会给代码块标注语言；Markdown 围栏带上语言才能被高亮，因此把
+        已经发出的空围栏（三反引号加换行）就地补成带语言的围栏。
+        """
+        match = re.search(r"(?:language|lang)-([\w#+.-]+)", data.get("class") or "")
+        if not match or not self._parts:
+            return
+        tail = self._parts[-1]
+        if tail.endswith("```\n"):
+            self._parts[-1] = tail[:-4] + f"```{match.group(1)}\n"
+
+    def _finish_cell(self):
+        if not self._table or self._table["cell"] is None:
+            return
+        # 单元格内不能出现换行与竖线（会破坏表格结构）
+        text = "".join(self._table["cell"]).strip()
+        text = text.replace("|", "\\|").replace("\n", " ")
+        if self._table["row"] is None:
+            self._table["row"] = []
+        self._table["row"].append(text)
+        self._table["cell"] = None
+
+    def _finish_table(self):
+        table, self._table = self._table, None
+        rows = [r for r in table["rows"] if r]
+        if not rows:
+            return
+        width = max(len(r) for r in rows)
+        rows = [r + [""] * (width - len(r)) for r in rows]
+        lines = ["| " + " | ".join(rows[0]) + " |",
+                 "| " + " | ".join(["---"] * width) + " |"]
+        lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+        self._parts.append("\n\n" + "\n".join(lines) + "\n\n")
+
+    def _emit_image(self, data):
+        """图片：Markdown 语法优先；带显示尺寸时改用精简 HTML（Markdown 表达不了）。"""
+        src = (data.get("src") or "").strip()
+        if not src:
+            return
+        alt = (data.get("alt") or "").strip()
+        width = (data.get("width") or "").strip()
+        height = (data.get("height") or "").strip()
+        if width or height:
+            size = (f' width="{width}"' if width else "") + (f' height="{height}"' if height else "")
+            self._emit(f'\n\n<img src="{src}" alt="{alt}"{size}>\n\n')
+        else:
+            self._emit(f"\n\n![{alt}]({src})\n\n")
+
+    def _emit_card(self, tag, data):
+        """内部卡片标记 → 可读 Markdown（图形转图片链接，方案/提问转引用块）。"""
+        payload = None
+        raw = data.get("data") or ""
+        if raw:
+            try:
+                payload = _json.loads(_b64decode(raw).decode("utf-8"))
+            except Exception:
+                payload = None
+        if not isinstance(payload, dict):
+            return
+        if tag == "rplot_card":
+            img = payload.get("png_path") or payload.get("svg_path") or ""
+            title = payload.get("chart_title") or payload.get("plot_label") or "chart"
+            self._emit(f"\n\n![{title}]({img})\n\n" if img else f"\n\n*{title}*\n\n")
+        elif tag in ("plot_plan", "deep_plan"):
+            text = str(payload.get("plan_text") or payload.get("plan")
+                       or payload.get("request") or "").strip()
+            if text:
+                self._emit("\n\n" + "\n".join("> " + ln for ln in text.splitlines()) + "\n\n")
+        elif tag == "ask_user":
+            question = str(payload.get("question") or "").strip()
+            if question:
+                options = [str(o).strip() for o in (payload.get("options") or []) if str(o).strip()]
+                lines = ["> " + question] + [f"> - {o}" for o in options]
+                self._emit("\n\n" + "\n".join(lines) + "\n\n")
+
+
+def _tidy_markdown(text: str) -> str:
+    """收敛转换副作用：行尾空白、连续空行、首尾空行。
+
+    刻意**不**压缩行内空格——``<pre>`` 内的缩进属于代码内容，压缩会破坏代码块。
+    """
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() + "\n"
+
+
+# 不同 provider 的"内联思考"包裹写法各异，但语义一致（都应折叠进 Reasoning
+# 面板）。只识别 ＜think＞ 一种写法时，其余变体会残留在正文——这正是"思考链
+# 泄漏进正文"的根因之一。以下正则把这些写法统一折叠为  thinking / 。
+# 覆盖：
+#   1) XML 变体：＜think＞ ＜thinking＞ ＜reasoning＞ ＜reasoning_content＞
+#   2) 管道变体：＜|thinking|＞ ＜|reasoning|＞（GPT-OSS、部分本地推理网关）
+#   3) 符号包裹：◁think▷（Kimi K1.5 系列）
+#   4) Harmony 频道：＜|channel|＞analysis＜|message|＞（思考信道起点）
+# 这些字面量在正常学术正文中几乎不会出现；即便误判，代价也只是内容被移入
+# 可折叠面板而非丢失，因此可安全用于兜底。
+_THINK_OPEN_RE = re.compile(
+    r"(?:"
+    r"<\s*\??\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
+    r"|<\|\s*(?:think|thinking|reasoning)\s*\|>"
+    r"|<\|\s*channel\s*\|>\s*analysis\s*<\|message\|>"
+    r"|◁\s*think\s*▷"
+    r")",
+    re.IGNORECASE,
+)
+
+_THINK_CLOSE_RE = re.compile(
+    r"(?:"
+    r"<\s*[/?]+\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
+    r"|<\|\s*/\s*(?:think|thinking|reasoning)\s*\|>"
+    r"|<\|\s*channel\s*\|>\s*final\s*<\|message\|>"
+    r"|◁\s*/\s*think\s*▷"
+    r")",
+    re.IGNORECASE,
+)
+
+#: 推理/Harmony 协议的孤立标记：自身不承载正文，正文抽取后一并清除。
+_THINK_NOISE_RE = re.compile(
+    r"<\|\s*(?:end|start|message|constrain)\s*\|>"
+    r"|<\|\s*channel\s*\|>\s*(?:analysis|final)?"
+    r"|<\s*[/?]*\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
+    r"|◁\s*/?\s*think\s*▷",
+    re.IGNORECASE,
+)
+
+
 class TextFormatter:
 
     #: 本管线"自有样式"的标签：每次渲染都会重新注入这些标签的样式，因此渲染
@@ -712,13 +1053,25 @@ class TextFormatter:
         mcp_contents = []
         is_closed = True
 
-        final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
-
         # 统一规范化标签
         text = re.sub(r'<\s*think\s*>', '<think>', text, flags=re.IGNORECASE)
         text = re.sub(r'<\s*/\s*think\s*>', '</think>', text, flags=re.IGNORECASE)
         text = re.sub(r'<\s*mcp_process\s*>', '<mcp_process>', text, flags=re.IGNORECASE)
         text = re.sub(r'<\s*/\s*mcp_process\s*>', '</mcp_process>', text, flags=re.IGNORECASE)
+
+        # 兜底规范化：把其余 provider 的内联思考写法（thinking / reasoning /
+        # 管道变体 / Harmony 频道 / Kimi 符号）也折叠为统一标签。只识别单一
+        # 写法会让这些模型把思考链直接写进正文。
+        text = _THINK_OPEN_RE.sub(' thinking', text)
+        # 关闭写法必须折叠为  response而非删除：删除会让  thinking 块失去配对的
+        # 结束标记，随后的正文会被当成"未闭合思考链"一并吞进 Reasoning 面板，
+        # 导致正文区变空（比原来的泄漏更严重）。
+        text = _THINK_CLOSE_RE.sub(' response', text)
+
+        # [FINAL_ANSWER] 的位置必须在规范化之后重算：规范化会改变其前缀长度
+        # （如角括号写法会多出字符），沿用规范化前的偏移切片会让标记前后的
+        # 内容错位，从而把思考链残留在正文。
+        final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
 
         if final_answer_match:
             raw_hidden = text[:final_answer_match.start()]
@@ -806,6 +1159,9 @@ class TextFormatter:
         if main_text:
             main_text = re.sub(r'\[FINAL_ANSWER\]\s*', '', main_text, flags=re.IGNORECASE)
             main_text = re.sub(r'\[\s*FOLLOW[_-]?\s*UPS?\s*\]\s*', '', main_text, flags=re.IGNORECASE)
+            # 兜底清除孤立的推理/Harmony 协议标记：它们不承载正文，若上游
+            # 传入了不配对的开闭标签，会以裸标记形式残留在正文里。
+            main_text = _THINK_NOISE_RE.sub('', main_text)
 
             main_text = re.sub(r'<br\s*/?>', '\n', main_text, flags=re.IGNORECASE)
 
@@ -1300,7 +1656,72 @@ class TextFormatter:
         return "".join(out).strip()
 
     @staticmethod
-    def clean_text_for_export(text, include_citations=True):
+    def html_to_markdown(html: str) -> str:
+        """把 HTML 片段转成 Markdown：能转的转，转不了的保留精简 HTML。
+
+        导出/复制 Markdown 时会混入渲染管线注入或模型自己输出的 HTML。旧实现两条路
+        都不对：复制 MD 原样返回（``.md`` 里塞满 ``<div style=...>``）；导出 MD 用
+        ``re.sub(r'<[^>]+>', '')`` 剥标签（表格塌成一行行文字、图片直接丢失）。这里
+        统一按"Markdown 优先"转换，规则见 :class:`_HtmlToMarkdown`。
+        """
+        if not html or "<" not in html:
+            return html or ""
+        parser = _HtmlToMarkdown()
+        try:
+            parser.feed(html)
+            parser.close()
+        except Exception as e:
+            logger.debug("html_to_markdown failed, keeping raw HTML: %s", e)
+            return html
+        return _tidy_markdown(parser.result())
+
+    @staticmethod
+    def strip_internal_links(text):
+        """把内部协议链接还原为纯文本，供导出/复制 Markdown 使用。
+
+        渲染管线会注入只在应用内可点击的路由链接：``cite://``（文献与 PDF 跳转）、
+        ``mermaid://``（图表查看/编辑）、``think://``（思考折叠）。它们写进 .md/.txt
+        毫无意义，这里统一还原为可见文字（``cite://`` 保留 ``[1]`` 编号），并清掉
+        裸露的协议 URL。Markdown 与 HTML 两种形态都处理，便于在转 Markdown 前后调用。
+        """
+        if not text:
+            return text
+        # Markdown 形态的内部链接 → 保留锚文本（锚文本本身可能含 []，如 [[1]](cite://…)）
+        text = re.sub(r"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\((?:cite|mermaid|think)://[^)]*\)",
+                      r"\1", text, flags=re.IGNORECASE)
+        # HTML 形态的内部链接 → 保留锚文本
+        text = re.sub(r"<a\b[^>]*?href=['\"](?:cite|mermaid|think)://[^'\"]*['\"][^>]*>(.*?)</a>",
+                      r"\1", text, flags=re.DOTALL | re.IGNORECASE)
+        # 裸露的内部协议 URL
+        text = re.sub(r"(?:cite|mermaid|think)://[^\s)\"'<>]+", "", text, flags=re.IGNORECASE)
+        return text
+
+    @staticmethod
+    def _strip_internal_markup(text):
+        """移除仅在应用内有效的交互提示块（导出/复制 Markdown 前调用）。"""
+        if not text:
+            return text
+        text = _MERMAID_UI_HTML_RE.sub("", text)
+        text = _MERMAID_UI_TEXT_RE.sub("", text)
+        text = _DROP_SUBTREE_RE.sub("", text)
+        return TextFormatter.strip_internal_links(text)
+
+    @staticmethod
+    def clean_text_for_export(text, include_citations=True, markdown_mode=False):
+        """清理待导出文本（剥离运行标识、可选保留引用区）。
+
+        ``markdown_mode=True`` 时残留 HTML 交给 :meth:`html_to_markdown` 转成 Markdown
+        语法（表格/图片/加粗/代码…）；``False`` 保持旧的"剥掉所有标签"行为，供 TXT
+        纯文本导出使用。
+        """
+        def _strip(value):
+            # 顺序要紧：先摘掉只在应用内有效的交互块/路由链接与样式脚本，再决定
+            # 转 Markdown 还是纯文本，否则 cite://、mermaid:// 会被写进导出文件。
+            cleaned = TextFormatter._strip_internal_markup(value)
+            if markdown_mode:
+                return TextFormatter.html_to_markdown(cleaned)
+            return re.sub(r"<[^>]+>", "", cleaned.replace("<br>", "\n")).strip()
+
         final_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
         if final_match:
             text = text[final_match.end():]
@@ -1315,7 +1736,7 @@ class TextFormatter:
 
         if include_citations and "<b>📚 Cited Sources:</b>" in text:
             parts = text.split("<b>📚 Cited Sources:</b><br>")
-            main_text = re.sub(r"<[^>]+>", "", parts[0].replace("<br>", "\n")).strip()
+            main_text = _strip(parts[0])
             citations_text = "\n\n📚 Reference:\n"
             if len(parts) > 1:
                 raw_cites = parts[1]
@@ -1325,7 +1746,7 @@ class TextFormatter:
                     citations_text += f"[{idx}] {name.strip()} (第 {page} 页)\n"
             text = main_text + citations_text
         else:
-            text = re.sub(r"<[^>]+>", "", text.replace("<br>", "\n")).strip()
+            text = _strip(text)
 
         # 兜底：剥离混入正文的工具调用 JSON/JSONL（reasoning fallback 常见泄漏），
         # 避免导出里出现"正文中断后跟一段工具 JSON"。

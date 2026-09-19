@@ -805,3 +805,42 @@ def title_weight_css() -> str:
     from src.ui.components.text_formatter import title_font_weight
 
     return title_font_weight() or "bold"
+
+
+def overlay_scrollbar_qss(thickness: int = 8, handle_color: str = None) -> str:
+    """Overlay 风格滚动条：不操作时不可见，鼠标移到滚动条上才显形。
+
+    常显滚动条会在图文流里留下一条贯穿整屏的竖线（对话区、代码块、长表格尤其
+    明显）。这里把滑块常态设为**完全透明**，鼠标进入滚动条区域或按住拖动时才上色，
+    轨道与箭头始终不占视觉空间——与 macOS / 现代 Web 的 overlay 滚动条一致。
+
+    :param thickness: 滚动条粗细（px），横竖一致。
+    :param handle_color: 滑块颜色，缺省取当前主题的 ``text_muted``。
+    """
+    tm = ThemeManager()
+    color = handle_color or tm.color('text_muted')
+    return f"""
+        QScrollBar:vertical, QScrollBar:horizontal {{
+            background: transparent; border: none; margin: 0px;
+        }}
+        QScrollBar:vertical {{ width: {thickness}px; }}
+        QScrollBar:horizontal {{ height: {thickness}px; }}
+        QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+            background: transparent; border: none; border-radius: {thickness // 2}px;
+        }}
+        QScrollBar::handle:vertical {{ min-height: 28px; }}
+        QScrollBar::handle:horizontal {{ min-width: 28px; }}
+        /* 鼠标进入滚动条区域 → 滑块显形（扩大命中范围；个别平台若不识别该组合，
+           仍有下面的标准 :hover 规则兜底） */
+        QScrollBar:hover::handle:vertical, QScrollBar:hover::handle:horizontal {{
+            background: {hex_to_rgba(color, 0.35)};
+        }}
+        QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+            background: {hex_to_rgba(color, 0.5)};
+        }}
+        QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed {{
+            background: {hex_to_rgba(color, 0.7)};
+        }}
+        QScrollBar::add-line, QScrollBar::sub-line {{ height: 0px; width: 0px; border: none; }}
+        QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+    """

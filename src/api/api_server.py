@@ -893,6 +893,12 @@ def semantic_filter_agent_tools(payload: SemanticFilterRequest):
                 mcp_added_count += 1
         logger.warning(f"-> Pulled {mcp_added_count} MCP Tools based on names.")
 
+    # R 可视化是默认内置能力（非可勾选技能）：不受 use_acad / tag 门控，始终暴露
+    plot_schema = skill_mgr.academic_schemas.get("plot_chart")
+    if plot_schema and not any(
+            (t.get("function") or {}).get("name") == "plot_chart" for t in raw_tools):
+        raw_tools.append(plot_schema)
+
     logger.warning(f"✅ Total Candidate Tools before Reranking: {len(raw_tools)}")
     if raw_tools:
         names = [t.get("function", {}).get("name", "Unknown") for t in raw_tools]

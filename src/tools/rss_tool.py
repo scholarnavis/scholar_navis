@@ -11,7 +11,7 @@ from PySide6.QtGui import QAction, QDesktopServices, QTextDocument, QPageLayout,
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QListWidget, QSplitter, QListWidgetItem, QLineEdit, QCheckBox, QScrollArea,
-                               QFileDialog, QFrame, QAbstractItemView, QMenu, QApplication)
+                               QFrame, QAbstractItemView, QMenu, QApplication)
 
 from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
@@ -22,6 +22,7 @@ from src.task.rss_tasks import FetchRSSTask, SearchArticlesTask, ImportRssTask, 
 from src.tools.base_tool import BaseTool
 from src.ui.components.RotatingSpinner import ModernSpinner
 from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog, StandardDialog
+from src.ui.components.file_dialogs import open_file_name, save_file_name
 from src.ui.components.toast import ToastManager
 
 DEFAULT_FEEDS_DICT = {
@@ -863,8 +864,8 @@ class RSSTool(BaseTool):
             item.setHidden(not match)
 
     def export_feeds(self):
-        path, _ = QFileDialog.getSaveFileName(self.widget, "Export RSS Feeds", "rss_feeds_export.json",
-                                              "JSON Files (*.json)")
+        path, _ = save_file_name(self.widget, "Export RSS Feeds", "rss_feeds_export.json",
+                                 "JSON Files (*.json)")
         if not path: return
 
         self.task_mgr.sig_result.connect(self._on_export_done)
@@ -882,7 +883,7 @@ class RSSTool(BaseTool):
             ToastManager().show(f"Export failed: {result.get('error') if result else 'Unknown error'}", "error")
 
     def import_feeds(self):
-        path, _ = QFileDialog.getOpenFileName(self.widget, "Import RSS Feeds", "", "JSON Files (*.json)")
+        path, _ = open_file_name(self.widget, "Import RSS Feeds", "", "JSON Files (*.json)")
         if not path: return
 
         self.task_mgr.sig_result.connect(self._on_import_done)
@@ -1141,8 +1142,8 @@ class RSSTool(BaseTool):
         safe_filename = re.sub(r'[\\/*?:"<>|]', "_", feed_name)
 
 
-        path, _ = QFileDialog.getSaveFileName(self.widget, "Export to PDF", f"{safe_filename}.pdf",
-                                              "PDF Files (*.pdf)")
+        path, _ = save_file_name(self.widget, "Export to PDF", f"{safe_filename}.pdf",
+                                 "PDF Files (*.pdf)")
         if not path: return
 
         # 1. 启动进度对话框

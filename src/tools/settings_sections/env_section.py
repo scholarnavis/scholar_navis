@@ -241,7 +241,7 @@ class EnvSectionMixin:
         )
 
     def _on_browse_r_path(self):
-        from PySide6.QtWidgets import QFileDialog
+        from src.ui.components.file_dialogs import open_file_name
 
         # 过滤器按平台给首选项：Windows 的可执行文件是 *.exe，POSIX 上
         # Rscript 无扩展名（旧的 *.exe 优先过滤在 Linux 上会让用户以为选不中）。
@@ -250,7 +250,7 @@ class EnvSectionMixin:
         else:
             filters = "Rscript executable (Rscript);;All Files (*)"
 
-        path, _ = QFileDialog.getOpenFileName(
+        path, _ = open_file_name(
             self.widget, "Select Rscript executable", "", filters)
         if path:
             self.edit_r_path.setText(path)

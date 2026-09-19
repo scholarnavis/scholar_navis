@@ -8,7 +8,10 @@
 2. QtWebEngine 在容器、无用户命名空间或 ``/dev/shm`` 过小的环境中启动即崩
    （Chromium 沙箱 / 共享内存限制），需要注入 Chromium 启动参数；
 3. 无图形会话（SSH、纯终端）时直接创建 QApplication 会让 Qt 以原生错误码
-   中断，用户看不到任何可操作提示。
+   中断，用户看不到任何可操作提示；
+4. Linux 上不指定 ``gtk3`` / ``xdgdesktopportal`` 平台主题时，``QFileDialog``
+   会退回 Qt 自绘窗口，导入/导出看不到系统文件选择器（见
+   :func:`enable_native_file_dialogs`）。
 
 所有函数都是幂等的，且只依赖标准库，保证调用点尽可能靠前。
 """
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import importlib.util
 import logging
 import os
 import platform
@@ -540,6 +544,54 @@ def _merge_chromium_flags(extra: list) -> list:
     return added
 
 
+#: xdg-desktop-portal 平台主题：Qt 6.3+ 通过它调用桌面门户的原生文件对话框
+_PORTAL_THEME = "xdgdesktopportal"
+
+
+def _portal_theme_plugin() -> str:
+    """返回 PySide6 自带的 xdgdesktopportal 平台主题插件路径，缺失时返回空串。"""
+    try:
+        spec = importlib.util.find_spec("PySide6")      # 只探测路径，不导入 PySide6
+    except (ImportError, ValueError):
+        return ""
+    origin = getattr(spec, "origin", None)
+    if not origin:
+        return ""
+    plugin = os.path.join(os.path.dirname(origin), "Qt", "plugins",
+                          "platformthemes", f"libq{_PORTAL_THEME}.so")
+    return plugin if os.path.exists(plugin) else ""
+
+
+def enable_native_file_dialogs() -> list:
+    """让 ``QFileDialog`` 弹系统原生文件选择器（Linux）。
+
+    Qt 在 Linux 上默认提供**自绘**的 QFileDialog：只有加载了 ``gtk3`` 或
+    ``xdgdesktopportal`` 平台主题，才会经由桌面门户调用 KDE/GNOME 各自的原生实现。
+    KDE 会话下 Qt 自动推断出的是 ``kde`` 主题，而它并不提供文件对话框实现，于是
+    导入/导出用的全是 Qt 自绘窗口——观感上就像自己写的一个文件选择器。
+
+    ``xdgdesktopportal`` 只接管门户类对话框（文件选择、打印…），不会像
+    ``kde`` / ``gtk3`` 平台主题那样接管控件样式与字体，与 qdarktheme 不冲突。
+    用户已显式指定主题、缺少插件或缺少会话总线时均保持原状（Qt 会自行回退）。
+    """
+    applied = []
+    if platform.system() != "Linux":
+        return applied
+    current = os.environ.get("QT_QPA_PLATFORMTHEME", "").strip()
+    if current:
+        logger.debug(f"QT_QPA_PLATFORMTHEME already set to {current!r}, keeping it")
+        return applied                                  # 已显式指定，尊重原设置
+    if not os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").strip():
+        logger.debug("No session bus, skip xdg-desktop-portal platform theme")
+        return applied                                  # 无会话总线，门户不可达
+    if not _portal_theme_plugin():
+        logger.debug("xdgdesktopportal plugin missing, keep Qt file dialogs")
+        return applied                                  # 无门户插件，保持 Qt 自绘
+    os.environ["QT_QPA_PLATFORMTHEME"] = _PORTAL_THEME
+    applied.append(f"QT_QPA_PLATFORMTHEME={_PORTAL_THEME} (native file dialogs)")
+    return applied
+
+
 def configure_qt_environment() -> list:
     """按运行环境修正 Qt 相关环境变量，返回本次实际生效的调整项（供日志）。
 
@@ -548,6 +600,12 @@ def configure_qt_environment() -> list:
     applied = []
     if platform.system() != "Linux":
         return applied
+
+    # 与沙箱分支无关，任何 Linux 会话都应启用系统原生文件对话框
+    new_theme = enable_native_file_dialogs()
+    if new_theme:
+        applied += new_theme
+        logger.info(f"Enabled native file dialogs via platform theme: {new_theme}")
 
     if _truthy_env("SCHOLAR_NAVIS_FORCE_SANDBOX"):
         # 显式要求保留沙箱：仅处理共享内存
@@ -584,6 +642,7 @@ def summarize_environment() -> dict:
         "container": in_container(),
         "userns_disabled": user_namespaces_disabled(),
         "shm_ok": not shm_too_small(),
+        "platform_theme": os.environ.get("QT_QPA_PLATFORMTHEME", "") or "default",
         "chromium_flags": os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", ""),
         "python": sys.version.split()[0],
     }

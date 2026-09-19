@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 
 from src.core.core_task import TaskManager, TaskMode
 # hex_to_rgba 由核心层统一实现（全应用唯一来源，避免各 UI 模块各自复制）
-from src.core.theme_manager import ThemeManager, hex_to_rgba, strong_weight_css
+from src.core.theme_manager import (ThemeManager, hex_to_rgba, overlay_scrollbar_qss,
+                                    strong_weight_css)
 from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import (TextFormatter, qt_font_family_css,
                                               resolve_qt_font_families,
@@ -36,8 +37,26 @@ _BLOCK_TOP_MARGIN = 4.0
 _THINK_MAX_HEIGHT = 340
 _CODE_MAX_HEIGHT = 420
 _QUOTE_MAX_HEIGHT = 300
+
+#: 正文浏览器高度相对文档高度的额外余量（px）。旧实现固定 +15 并叠加"预测会出现
+#: 横向滚动条"的预留，气泡会比内容高出一行以上且不回落。
+_BROWSER_HEIGHT_SLACK = 6
 #: 滚动条与内容之间的呼吸间距（避免滚动条紧贴表格边框/代码底色）。
 _BLOCK_SCROLL_GAP = 8
+
+#: 等待回复（尚无正文）时的动态提示词。任务下发到首个 token 之间可能间隔数秒
+#: 至数十秒（模型加载、翻译、知识库检索、连接 provider 等），一直显示静态文案
+#: 会让用户误以为卡死。这里轮换展示并叠加跳动圆点，持续表达"仍在推进"。
+_LOADING_PHRASES = (
+    "Thinking",
+    "Preparing context",
+    "Consulting sources",
+    "Analyzing the question",
+    "Working through it",
+    "Almost there",
+)
+#: 单个提示词的展示时长（单位：动画 tick；tick = 500ms）。
+_LOADING_PHRASE_TICKS = 6
 
 
 #: Qt 族名解析已统一由 text_formatter.resolve_qt_font_families 提供（含缓存），
@@ -174,9 +193,13 @@ class OverflowBlock(QScrollArea):
         self._natural_width = None
         self._resync(force=True)
 
-    def sync_layout(self):
-        """外部布局变化（窗口/气泡宽度改变）后重新测量并收敛高度。"""
-        self._resync(force=False)
+    def sync_layout(self, force: bool = False):
+        """外部布局变化（窗口/气泡宽度改变）后重新测量并收敛高度。
+
+        ``force=True`` 时忽略"高度未变就不写回"的幂等判断，用于流式结束后把高度
+        强制收敛到最终内容（中途态可能已把高度写成偏大值）。
+        """
+        self._resync(force=force)
 
     def _apply_html(self, html):
         if html != self._applied_html:
@@ -347,8 +370,8 @@ class _ImageThumb(QLabel):
         if not os.path.exists(self.image_path):
             ToastManager().show(f"Image file not found: {os.path.basename(self.image_path)}", "error")
             return
-        from PySide6.QtWidgets import QFileDialog
-        target, _ = QFileDialog.getSaveFileName(
+        from src.ui.components.file_dialogs import save_file_name
+        target, _ = save_file_name(
             self, "Save Image As", os.path.basename(self.image_path),
             "Image (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg)")
         if not target:
@@ -431,6 +454,11 @@ class ChatBubbleWidget(QWidget):
         self.loading_timer = QTimer(self)
         self.loading_timer.timeout.connect(self._animate_loading)
         self.loading_dots = 0
+        #: 动态加载提示的轮换状态：当前提示词下标、已累计 tick 数、外部阶段
+        #: 文案覆盖（由 response_flow 通过 set_loading_caption 注入）。
+        self._loading_phase = 0
+        self._loading_ticks = 0
+        self._loading_caption = None
         self.is_loading = False
 
         self.downloaded_images = {}
@@ -750,34 +778,12 @@ class ChatBubbleWidget(QWidget):
         """
 
     def _scrollbar_qss(self) -> str:
-        """统一滚动条外观：细圆角滑块、无箭头、悬停高亮，深浅主题自适应。
+        """气泡内滚动块（表格/引用/代码/思考链）的滚动条样式。
 
-        与系统/网页的默认体验保持一致（轨道极淡、滑块常显、悬停变色），
-        横向与纵向尺寸一致均为 8px。
+        与聊天滚动区共用一套 overlay 样式：滑块常态全透明，鼠标移到滚动条上或
+        拖动时才显形——正文与长表格里不再出现常显竖线。
         """
-        tm = ThemeManager()
-        handle = hex_to_rgba(tm.color('text_muted'), 0.4)
-        handle_hover = tm.color('accent')
-        return f"""
-            QScrollBar:vertical {{
-                background: transparent; width: 8px; margin: 0px; border: none;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {handle}; min-height: 24px; border-radius: 4px;
-            }}
-            QScrollBar::handle:vertical:hover {{ background: {handle_hover}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-            QScrollBar:horizontal {{
-                background: transparent; height: 8px; margin: 0px; border: none;
-            }}
-            QScrollBar::handle:horizontal {{
-                background: {handle}; min-width: 24px; border-radius: 4px;
-            }}
-            QScrollBar::handle:horizontal:hover {{ background: {handle_hover}; }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
-        """
+        return overlay_scrollbar_qss(thickness=8)
 
     def _style_block(self, block: "OverflowBlock"):
         """给独立滚动块套上当前主题的滚动条与浏览器样式。"""
@@ -902,17 +908,43 @@ class ChatBubbleWidget(QWidget):
         self.is_loading = loading
         if loading:
             self.loading_dots = 0
+            self._loading_phase = 0
+            self._loading_ticks = 0
+            self._loading_caption = None
             self.btn_widget.hide()
 
             if not self.original_text.strip():
-                self.lbl_text.setText("Thinking")
+                self.lbl_text.setText(self._loading_label())
                 self.loading_timer.start(500)
             else:
                 self.set_content(self.original_text)
         else:
             self.loading_timer.stop()
+            self._loading_caption = None
             self.btn_widget.show()
             self.set_content(self.original_text)
+
+    def set_loading_caption(self, caption: str):
+        """设置等待阶段的阶段名（如 "Contacting the model"），叠加在动态加载
+        指示器上；传空串则恢复提示词自动轮换。
+
+        相比直接把阶段文本写进正文，这样做有两个好处：一是等待期间始终保留
+        跳动圆点，不会出现"卡住的静态文字"；二是阶段切换只改一行提示，不污染
+        消息正文。若气泡当前已有正文，则本调用只更新状态，不打断正文渲染。
+        """
+        self._loading_caption = (caption or "").strip() or None
+        if self.is_loading and not self.original_text.strip():
+            self.lbl_text.setText(self._loading_label())
+            if not self.loading_timer.isActive():
+                self.loading_timer.start(500)
+
+    def _loading_label(self) -> str:
+        """构造当前加载提示文案（阶段名优先，否则按 tick 轮换提示词）。"""
+        caption = self._loading_caption
+        if not caption:
+            phase = self._loading_phase % len(_LOADING_PHRASES)
+            caption = _LOADING_PHRASES[phase]
+        return f"{caption}{'.' * self.loading_dots}"
 
     def _animate_loading(self):
         if self.original_text.strip():
@@ -920,8 +952,12 @@ class ChatBubbleWidget(QWidget):
             return
 
         self.loading_dots = (self.loading_dots + 1) % 4
-        self.lbl_text.setText("Thinking" + "." * self.loading_dots)
-
+        # 无外部阶段文案时，按固定 tick 轮换提示词，避免长时间停在同一句话。
+        if not self._loading_caption:
+            self._loading_ticks += 1
+            if self._loading_ticks % _LOADING_PHRASE_TICKS == 0:
+                self._loading_phase = (self._loading_phase + 1) % len(_LOADING_PHRASES)
+        self.lbl_text.setText(self._loading_label())
 
     # --- 4.5 R 绘图卡片提取（流式标记 → 固定 QWidget） ---
     def _extract_rplot_cards(self, text: str) -> str:
@@ -1195,12 +1231,13 @@ class ChatBubbleWidget(QWidget):
         self.blocks_host.setVisible(False)
 
     # --- Token 用量展示（AI 气泡） ---
-    def set_token_stats(self, prompt_tokens, completion_tokens, estimated=False):
-        """在气泡按钮行显示本次生成任务的 token 用量。
+    def set_token_stats(self, prompt_tokens, completion_tokens, estimated=False, elapsed_ms=None):
+        """在气泡按钮行显示本次生成任务的 token 用量与本轮耗时。
 
         数据来源：provider 返回的真实 usage（runtime 逐步累计）；provider
         未返回 usage 时为估算值（estimated=True，显示带 ~ 前缀）。用户
-        气泡或数据无效时不显示。
+        气泡或数据无效时不显示。``elapsed_ms`` 为本轮墙钟耗时（毫秒），
+        缺省则不显示耗时段。
         """
         if self.is_user:
             return
@@ -1216,9 +1253,34 @@ class ChatBubbleWidget(QWidget):
             # 插到按钮组最前（Copy 之前），不干扰既有按钮布局
             self.btn_layout.insertWidget(0, self.lbl_token_stats)
         prefix = "~" if estimated else ""
-        self.lbl_token_stats.setText(f"{prefix}Tokens: {p_txt} in / {c_txt} out")
+        text = f"{prefix}Tokens: {p_txt} in / {c_txt} out"
+        elapsed_txt = self._format_elapsed(elapsed_ms)
+        if elapsed_txt:
+            text += f"  ·  {elapsed_txt}"
+        self.lbl_token_stats.setText(text)
+        if elapsed_txt:
+            self.lbl_token_stats.setToolTip(f"This turn took {elapsed_txt} (wall clock).")
         self.lbl_token_stats.setVisible(True)
         self._apply_token_stats_style()
+
+    @staticmethod
+    def _format_elapsed(elapsed_ms) -> str:
+        """把毫秒格式化为可读耗时；无效或非正值返回空串。
+
+        ``< 60s`` 用秒（保留一位小数，便于比较不同模型的响应速度），
+        更长时用 ``分:秒``，避免出现 1234.5s 这种难读的数字。
+        """
+        try:
+            ms = float(elapsed_ms)
+        except (TypeError, ValueError):
+            return ""
+        if ms <= 0:
+            return ""
+        seconds = ms / 1000.0
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        minutes, sec = divmod(int(round(seconds)), 60)
+        return f"{minutes}m{sec:02d}s"
 
     def _apply_token_stats_style(self):
         """同步用量标签的 QSS 样式（由 _apply_theme 一并刷新）。"""
@@ -1338,7 +1400,7 @@ class ChatBubbleWidget(QWidget):
             if not text.strip():
                 if not self.loading_timer.isActive():
                     self.loading_dots = 0
-                    self.lbl_text.setText("Thinking")
+                    self.lbl_text.setText(self._loading_label())
                     self.loading_timer.start(500)
                 return
             else:
@@ -1746,27 +1808,38 @@ class ChatBubbleWidget(QWidget):
     def _adjust_browser_height(self):
         """把正文浏览器高度收敛到文档内容高度（幂等，变化时才写回）。
 
-        仅在目标高度真正变化时调用 ``setFixedHeight``：流式期间文档尺寸
-        会高频变化，反复写入相同高度会持续触发父布局失效，形成
-        「改高度 → 重排 → 再改高度」的抖动（视觉上表现为闪烁）。
+        仅在目标高度真正变化时调用 ``setFixedHeight``：流式期间文档尺寸会高频变化，
+        反复写入相同高度会持续触发父布局失效，形成「改高度 → 重排 → 再改高度」的
+        抖动（视觉上表现为闪烁）。
+
+        横向滚动条只在**实际可见**时计入高度。旧实现在它不可见时用 ``idealWidth()``
+        预测"将来会出现滚动条"并额外预留一行，再叠加固定 +15px：一旦文档短暂超过
+        视口宽度（固定宽度图片、超宽表格行），气泡就会长期高出一行且不回落——表现
+        即"气泡高度与内容量不匹配"。去掉预测后，滚动条真正出现时会触发一次
+        resize/重排，本函数会再算一次，形成闭环修正。
         """
         if not self.lbl_text.isVisible():
             return
         doc = self.lbl_text.document()
         doc_height = int(doc.size().height())
         sb = self.lbl_text.horizontalScrollBar()
-        sb_height = 0
-
-        if sb.isVisible():
-            sb_height = sb.height()
-        else:
-            if doc.idealWidth() > self.lbl_text.viewport().width():
-                sb_height = sb.sizeHint().height()
-
-        target = doc_height + sb_height + 15
+        sb_height = sb.height() if sb.isVisible() else 0
+        target = doc_height + sb_height + _BROWSER_HEIGHT_SLACK
         if target != self._lbl_last_height:
             self._lbl_last_height = target
             self.lbl_text.setFixedHeight(target)
+
+    def force_resync_height(self):
+        """忽略幂等缓存，强制把气泡高度收敛到最终内容。
+
+        流式输出的中间态（图片未加载完、宽表格未换行、横向滚动条闪现）会把高度写成
+        偏大值；幂等缓存命中同一目标值时不再写回，于是气泡"长高不缩回"。回答结束
+        （含报错、取消）时调用一次即可收敛，并连带重排拆分出的滚动块。
+        """
+        self._lbl_last_height = -1
+        self._adjust_browser_height()
+        for block in getattr(self, '_extra_blocks', ()):
+            block.sync_layout(force=True)
 
 
     def _start_image_download(self, url):
@@ -1888,9 +1961,9 @@ class ChatBubbleWidget(QWidget):
         text = re.sub(r"Mermaid Diagram Generated.*?Click here to view / edit interactive diagram", "", text,
                       flags=re.DOTALL | re.IGNORECASE)
 
-        # 3. Cite 处理：彻底剔除超链接，精准保留内部原本的文字（例如 [1] 或 Smith 等）
-        text = re.sub(r'\[([^\]]+)\]\(cite://[^\)]+\)', r'[\1]', text, flags=re.IGNORECASE)
-        text = re.sub(r'<a[^>]+href=[\'"]cite://[^\'"]+[\'"][^>]*>(.*?)</a>', r'\1', text, flags=re.IGNORECASE)
+        # 3. 内部协议链接统一还原为纯文本：cite:// 保留 [n] 编号，mermaid:// / think://
+        #    一并清理，避免把只在应用内可点击的路由链接复制进 .md/.txt。
+        text = TextFormatter.strip_internal_links(text)
 
         # 4. HTTP 与格式化处理
         # 提前用占位符保护好已经捞回来的 Mermaid 代码，防止下一步剥离 HTML 标签时误伤箭头符号
@@ -1913,6 +1986,9 @@ class ChatBubbleWidget(QWidget):
             # Markdown模式：HTTP 保持原状，但截断底部的引言区 UI
             if "<b>📚 Cited Sources:</b>" in text or "Reference:" in text:
                 text = re.split(r"<br><hr[^>]*>|📚 Reference:", text)[0]
+            # 残留 HTML 转成 Markdown（表格 / 图片 / 加粗 / 代码 / 卡片…）：复制出来的
+            # .md 应当尽量是 Markdown，只有 Markdown 表达不了的结构才保留精简 HTML。
+            text = TextFormatter.html_to_markdown(text)
 
         # 释放被保护的 Mermaid 代码
         for i, m in enumerate(mermaids):

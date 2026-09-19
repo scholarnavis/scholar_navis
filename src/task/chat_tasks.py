@@ -319,8 +319,21 @@ class ChatGenerationTask(BackgroundTask):
     def _emit_translated(self, text: str):
         self._emit_state(TaskState.PROCESSING, -1, "", payload={"event": "translated", "text": text})
 
+    def _turn_elapsed_ms(self) -> int:
+        """本轮对话已耗时（毫秒）；未开始计时时返回 0。
+
+        计时起点在 :meth:`_execute` 入口（``self._turn_t0``），随用量事件一并上报，
+        由 UI 显示在 token 标签旁；语义是"从任务开始到本次上报"的墙钟时间（含附件
+        处理、检索与模型生成）。
+        """
+        t0 = getattr(self, "_turn_t0", None)
+        return int((time.perf_counter() - t0) * 1000) if t0 else 0
+
     def _execute(self):
         from src.core.llm_impl import OpenAICompatibleLLM, get_cached_translation
+
+        # 本轮墙钟计时起点：用量事件里一并回传 elapsed_ms，UI 在 token 旁显示"本轮耗时"
+        self._turn_t0 = time.perf_counter()
 
         # 新对话发送：复位鉴权拒绝熔断计数（用户规格——熔断只在本轮对话内
         # 生效，"发送新对话"即重置点，而非清除聊天记录）。
@@ -816,6 +829,17 @@ class ChatGenerationTask(BackgroundTask):
         # 通用 human-in-the-loop 澄清工具：歧义影响科学正确性或高成本操作前，
         # 由模型主动提问并等待用户作答（下一轮以用户消息回灌）。
         combined_tools.append(dict(_ALWAYS_TOOLS)["ask_user"])
+        # 追问建议改为结构化产出（工具调用），不再依赖模型输出固定文本 + 正则解析
+        combined_tools.append(dict(_ALWAYS_TOOLS)["suggest_follow_ups"])
+
+        # R 可视化属于**默认能力**：不再作为可勾选的独立技能，也不受技能标签筛选
+        # 影响——始终把 plot_chart 交给模型，由它自行判断本次是否需要画图。
+        from src.core.skill_manager import SkillManager
+
+        plot_schema = SkillManager.get_instance().academic_schemas.get("plot_chart")
+        if plot_schema and not any(
+                (t.get("function") or {}).get("name") == "plot_chart" for t in combined_tools):
+            combined_tools.append(plot_schema)
 
         if combined_tools:
             self._emit_token("<mcp_process>⚙️ Query intent analyzed — the model selects tools natively...</mcp_process>")
@@ -825,11 +849,12 @@ class ChatGenerationTask(BackgroundTask):
             plot_guard = ""
             if any(name == "plot_chart" for name in tool_names):
                 plot_guard = (
-                    "\n### DATA VISUALIZATION RULE (plot_chart / propose_plot_plan):\n"
-                    "When the user requests any chart or plot (bubble, bar, scatter, volcano, heatmap, "
-                    "GO enrichment, volcano plot, etc.), you MUST call the plot_chart tool to render the "
-                    "figure. NEVER reply with chart parameters, the data table, or a chart specification "
-                    "as plain text.\n"
+                    "\n### DATA VISUALIZATION (plot_chart / propose_plot_plan):\n"
+                    "Chart rendering is a built-in capability that is always available — judge for yourself "
+                    "whether a figure serves the request (bubble, bar, scatter, volcano, heatmap, "
+                    "GO enrichment, etc.). When you do decide to draw one, you MUST render it by calling the "
+                    "plot_chart tool. NEVER reply with chart parameters, the data table, or a chart "
+                    "specification as plain text.\n"
                     "IMPORTANT: If the user asks to visualize/plot data but has NOT clearly specified the "
                     "chart type, the x/y columns, the title, or styling, call the propose_plot_plan tool "
                     "FIRST to show a confirmation card. Only call plot_chart after the user confirms the plan.\n"
@@ -890,17 +915,20 @@ class ChatGenerationTask(BackgroundTask):
             "   - When writing in Chinese: use FULL-WIDTH punctuation — Chinese commas（，）, periods（。）, semicolons（；）, colons（：）, question/exclamation marks（？！）, Chinese ellipsis（……）, and Chinese parentheses（）for parenthetical remarks. Use Chinese curly quotes（“” and ‘’）for quotations instead of straight or half-width quotes.\n"
             "   - When writing in English or other languages: follow that language's standard punctuation conventions (half-width punctuation and straight quotes for English).\n"
             "2. CRITICAL EXCEPTION — do NOT modify these machine-parsed ASCII tokens under any circumstance: in-text citation markers written as [1]/[101], the literal [FOLLOW_UPS] header, JSON blocks, code fences (```...```), mermaid code blocks, tool names, identifiers, and URLs. Keep those exactly half-width ASCII.\n\n"
-            "### FOLLOW-UP STRUCTURE (MANDATORY):\n"
-            "At the very end of your response — after ALL other content — you MUST output the literal string [FOLLOW_UPS] on its own dedicated line, immediately followed by exactly 6 follow-up questions in this EXACT format:\n"
-            "[FOLLOW_UPS]\n"
-            "💡 Suggested Follow-ups:\n"
-            "   - [Deep Dive] <Question about specific details or mechanisms>\n"
-            "   - [Critical] <Question about limitations, alternatives, or weaknesses>\n"
-            "   - [Broader] <Question about implications or future trends>\n"
-            "   - [Brainstorm] <A creative brainstorming question or hypothetical \"What if\" scenario>\n"
-            "   - [Similar] <Question connecting to a similar or parallel topic/concept>\n"
-            "   - [Application] <Question about real-world applications or cross-disciplinary use>\n"
-            "COMPLIANCE RULES (CRITICAL): (a) The string [FOLLOW_UPS] must appear EXACTLY once, alone on its own line — never inside a paragraph, heading, list item, or code block. (b) NEVER omit the follow-up section: even for short or negative answers, output at least 3 follow-ups. (c) The question list is the ABSOLUTE END of your response — output NOTHING after it. (d) Do NOT wrap this section in quotes or code fences.\n\n"
+            "### FOLLOW-UP SUGGESTIONS (MANDATORY):\n"
+            "At the very end of your response — after ALL other content — you MUST call the "
+            "suggest_follow_ups tool with exactly 6 follow-up questions, each carrying the tag of "
+            "the angle it explores:\n"
+            "   - [Deep Dive] question about specific details or mechanisms\n"
+            "   - [Critical] question about limitations, alternatives, or weaknesses\n"
+            "   - [Broader] question about implications or future trends\n"
+            "   - [Brainstorm] a creative brainstorming question or hypothetical \"what if\" scenario\n"
+            "   - [Similar] question connecting to a similar or parallel topic/concept\n"
+            "   - [Application] question about real-world applications or cross-disciplinary use\n"
+            "Write every question in the user's language. The suggestions travel through the tool "
+            "call ONLY: never print them as text and never emit a [FOLLOW_UPS] block or any other "
+            "marker — the question list must not appear anywhere in your answer body. Even for short "
+            "or negative answers, still register at least 3 follow-ups.\n\n"
             f"### CONTEXT:\n{context_str}"
         )
 
@@ -1007,6 +1035,15 @@ class ChatGenerationTask(BackgroundTask):
                     "data": ask_payload,
                 })
 
+            follow_ups = getattr(agent, "last_follow_ups", None)
+            if follow_ups:
+                agent.last_follow_ups = None
+                self.send_log("INFO", f"Follow-up suggestions dispatched: {len(follow_ups)} item(s)")
+                self._emit_state(TaskState.PROCESSING, -1, "", payload={
+                    "event": "follow_ups",
+                    "data": follow_ups,
+                })
+
             usage = getattr(agent, "last_usage", None) or {}
             # 纯协议轮（如 deep-plan 确认等待）未跑 agent 循环，用量为 0，
             # 不上报避免 UI 显示无意义的 "0 in / 0 out"。
@@ -1016,6 +1053,7 @@ class ChatGenerationTask(BackgroundTask):
                     "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
                     "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
                     "estimated": bool(usage.get("estimated", False)),
+                    "elapsed_ms": self._turn_elapsed_ms(),
                 })
         except Exception as e:
             self.logger.error(f"Agent runtime loop failed: {e}", exc_info=True)
@@ -1050,6 +1088,7 @@ class ChatGenerationTask(BackgroundTask):
                 "prompt_tokens": estimate_message_tokens(rag_messages),
                 "completion_tokens": estimate_tokens(self.full_response_cache),
                 "estimated": True,
+                "elapsed_ms": self._turn_elapsed_ms(),
             })
 
         # Phase 6: Dynamic Citation Mounting
@@ -1798,7 +1837,10 @@ class ExportChatTask(BackgroundTask):
                 ]
                 for msg in clean_history:
                     role = "🧑‍💻 User Inquiry" if msg['role'] == "user" else "🤖 AI Analysis"
-                    content = TextFormatter.clean_text_for_export(msg['content'])
+                    # markdown_mode：残留 HTML 转成 Markdown 语法（表格 / 图片 / 加粗…），
+                    # 而不是把标签直接剥掉——.md 文件里应当尽量是 Markdown，只有
+                    # Markdown 表达不了的结构才保留精简 HTML。
+                    content = TextFormatter.clean_text_for_export(msg['content'], markdown_mode=True)
                     note = _status_note(msg)
                     note_text = f"> {note}\n\n" if note else ""
                     md_lines.append(f"### {role}\n\n{note_text}{content}\n\n---\n\n")

@@ -1,4 +1,5 @@
 """Common dialogs: message, progress, unsaved-changes and password prompts."""
+import logging
 import os
 import re
 import time
@@ -11,6 +12,8 @@ from PySide6.QtWidgets import (QLabel, QFrame, QHBoxLayout, QLineEdit, QProgress
 from src.ui.components.dialogs.base import BaseDialog
 from src.ui.components.toast import ToastManager
 from src.core.theme_manager import strong_weight_css
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "StandardDialog", "ProgressDialog", "UnsavedChangesDialog",
@@ -91,6 +94,12 @@ class ProgressDialog(BaseDialog):
         self.lbl_warn_text.setMinimumHeight(32)
         warn_layout.addWidget(self.lbl_warn_icon, 0, Qt.AlignTop)
         warn_layout.addWidget(self.lbl_warn_text, 1)
+
+        # 该提示条此前只创建、未加入任何布局：一旦 setVisible(True) 就会脱离父窗口
+        # 变成独立浮窗。这里并入内容布局并显式默认隐藏，由 _check_stalled_progress
+        # 在检测到进度停滞时再显示。
+        self.stalled_warning_widget.setVisible(False)
+        self.content_layout.addWidget(self.stalled_warning_widget)
 
         self.content_layout.addStretch()
 
@@ -188,33 +197,72 @@ class ProgressDialog(BaseDialog):
             self.pbar.setValue(percent)
         if msg: self.lbl_message.setText(msg)
 
-    def show_success_state(self, title="Success", message="Task completed successfully."):
-        if hasattr(self, 'metric_timer'): self.metric_timer.stop()
-        if hasattr(self, 'stall_timer'): self.stall_timer.stop()
-        self.stalled_warning_widget.setVisible(False)
+    def _stop_monitors(self):
+        """停止进度/停滞监控定时器，供各结果状态复用。"""
+        if hasattr(self, 'metric_timer'):
+            self.metric_timer.stop()
+        if hasattr(self, 'stall_timer'):
+            self.stall_timer.stop()
 
+    def _enter_result_state(self, title, message, success=True, blocking=False):
+        """把进度对话框就地切换为"结果确认"状态。
+
+        不再新建窗口，而是复用当前对话框：把唯一的操作按钮从 "Cancel Task"
+        改为可见的主按钮 "OK"。这样做有两个原因：
+
+        1. 取消流程（``on_cancel_clicked``）会隐藏该按钮，旧实现只改了文字却未
+           恢复可见，任务随后成功时用户就看不到任何确认按钮；
+        2. 避免从已隐藏的父窗口弹出新的模态窗口，在 Wayland 上可能因置顶/焦点
+           问题表现为"没有弹窗、也没有确定按钮"。
+
+        ``blocking`` 为真时进入嵌套事件循环，等用户确认后再返回（与旧
+        ``show_finish_state`` 语义一致）。
+        """
+        self._stop_monitors()
+        self.stalled_warning_widget.setVisible(False)
         self.pbar.setVisible(False)
 
         self.setWindowTitle(title)
-
-        self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
-        self.show()
-
         self.lbl_message.setText(message)
-        self.btn_cancel.setText("OK")
-        self.btn_cancel.setEnabled(True)
+
+        btn = self.btn_cancel
+        try:
+            btn.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        btn.setText("OK")
+        btn.setEnabled(True)
+        # 关键：取消流程会隐藏按钮，这里必须显式恢复可见，否则"确定"会消失
+        btn.setVisible(True)
 
         tm = self.tm
-        self.btn_cancel.setStyleSheet(f"""
-            QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 4px; border: none; font-weight:{strong_weight_css()};}}
-            QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
-        """)
+        if success:
+            btn.setStyleSheet(f"""
+                QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; border-radius: 4px; border: none; font-weight:{strong_weight_css()};}}
+                QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
+            """)
+        else:
+            btn.setStyleSheet(f"""
+                QPushButton {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; border-radius: 4px; border: none; font-weight:{strong_weight_css()};}}
+                QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
+            """)
+        btn.clicked.connect(self.accept)
 
-        try:
-            self.btn_cancel.clicked.disconnect()
-        except:
-            pass
-        self.btn_cancel.clicked.connect(self.accept)
+        logger.debug("progress dialog -> result state (title=%r, success=%s, blocking=%s)",
+                     title, success, blocking)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if blocking:
+            self.exec()
+
+    def show_success_state(self, title="Success", message="Task completed successfully."):
+        """就地提示成功，不阻塞调用方（调用点后续逻辑继续执行）。"""
+        self._enter_result_state(title, message, success=True, blocking=False)
+
+    def show_finish_state(self, success: bool, title: str, message: str):
+        """就地提示最终结果，并阻塞到用户点击确认后再返回。"""
+        self._enter_result_state(title, message, success=bool(success), blocking=True)
 
     def on_cancel_clicked(self):
         # 1. 更新 UI 状态，隐藏取消按钮，提示用户等待

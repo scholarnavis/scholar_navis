@@ -9,13 +9,12 @@ import json
 import os
 import zlib
 
-from PySide6.QtWidgets import QFileDialog
-
 from src.core.core_task import TaskManager, TaskMode
 from src.core.encryption_service import SystemEncryptionService
 from src.task.config_task import ExportConfigTask, ImportConfigTask
 from src.ui.components.dialog import (ExportPasswordDialog, ImportPasswordDialog,
                                       ProgressDialog, StandardDialog)
+from src.ui.components.file_dialogs import open_file_name, save_file_name
 
 
 class ConfigTransferMixin:
@@ -37,9 +36,8 @@ class ConfigTransferMixin:
         password = pwd_dlg.password
 
         # 2. 选择保存路径
-        from PySide6.QtWidgets import QFileDialog
         import os
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self.widget, "Save Config", "scholar_navis_config.json", "JSON (*.json)"
         )
         if not path:
@@ -118,7 +116,7 @@ class ConfigTransferMixin:
         # Support retry flow without opening file dialog twice
         path = auto_path
         if not path:
-            path, _ = QFileDialog.getOpenFileName(self.widget, "Import Config Bundle", "", "JSON (*.json)")
+            path, _ = open_file_name(self.widget, "Import Config Bundle", "", "JSON (*.json)")
         if not path: return
 
         # Quick Format Check

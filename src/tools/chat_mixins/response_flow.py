@@ -16,6 +16,14 @@ from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
 
+#: 任务框架下发的通用引导文案（见 core_task.BackgroundTask.run）。它们只表示
+#: "任务已开始"，并非模型正文；若写进正文会把动态加载指示器顶成静态文字，
+#: 让人误以为卡死。这里直接忽略，交由气泡的动态加载指示器按阶段轮换提示词。
+_BOOTSTRAP_PLACEHOLDERS = {
+    "Initializing...",
+    "Initializing",
+}
+
 
 class ChatResponseFlowMixin:
     """流式输出：token -> bubble -> finish / error 状态机。"""
@@ -69,11 +77,17 @@ class ChatResponseFlowMixin:
                 self.scroll_to_bottom()
 
     def update_ai_bubble(self, token):
-        if not self.current_ai_bubble:
+        if not self.current_ai_bubble or token == "":
             return
         sb = self.scroll_area.verticalScrollBar()
         is_at_bottom = (sb.maximum() - sb.value()) <= 15
         idx = getattr(self.current_ai_bubble, 'index', -1)
+
+        # 0. 任务框架的通用引导文案（"Initializing..." 等）不是模型正文：写入
+        #    正文会把动态加载指示器顶成静态文字，而这句固定文案本身正是"看着
+        #    像卡死"的来源。直接忽略，让指示器继续按阶段轮换提示词。
+        if token.strip() in _BOOTSTRAP_PLACEHOLDERS:
+            return
 
         if token == "[CLEAR_SEARCH]":
             self.current_ai_text = re.sub(
@@ -95,12 +109,18 @@ class ChatResponseFlowMixin:
         # 2. Handle LLM connection start
         if token == "[START_LLM_NETWORK]":
             self._is_waiting_llm = True
-            base_html = self._format_response(self.current_ai_text.lstrip(), idx)
-            self.current_ai_bubble.set_content(
-                base_html +
-                f"<br><div style='color:{ThemeManager().color('accent')};'>"
-                f"<i>Connecting to LLM provider, please wait...</i></div>"
-            )
+            # 用动态指示器的阶段文案代替静态的"连接中"提示：等待 provider 建连
+            # 期间仍保留跳动圆点，不会出现"卡住的静态文字"；该文案在首个真实
+            # token 到达时随 set_loading(False) 自动清除，不污染正文。
+            setter = getattr(self.current_ai_bubble, "set_loading_caption", None)
+            if setter is not None:
+                setter("Contacting the model")
+            else:
+                self.current_ai_bubble.set_content(
+                    self._format_response(self.current_ai_text.lstrip(), idx) +
+                    f"<br><div style='color:{ThemeManager().color('accent')};'>"
+                    f"<i>Connecting to LLM provider, please wait...</i></div>"
+                )
             self.slow_conn_timer = QTimer(self)
             self.slow_conn_timer.setSingleShot(True)
             self.slow_conn_timer.timeout.connect(self._show_slow_connection_warning)
@@ -164,14 +184,19 @@ class ChatResponseFlowMixin:
         if isinstance(payload, dict) and payload.get("event") == "translated":
             self._on_query_translated(payload.get("text"))
         elif isinstance(payload, dict) and payload.get("event") == "usage":
-            # 本次生成任务的 token 用量：显示在当前 AI 气泡下方。
+            # 本次生成任务的 token 用量 + 本轮耗时：显示在当前 AI 气泡下方。
             bubble = getattr(self, "current_ai_bubble", None)
             if bubble is not None and hasattr(bubble, "set_token_stats"):
                 bubble.set_token_stats(
                     payload.get("prompt_tokens", 0),
                     payload.get("completion_tokens", 0),
                     estimated=bool(payload.get("estimated", False)),
+                    elapsed_ms=payload.get("elapsed_ms"),
                 )
+        elif isinstance(payload, dict) and payload.get("event") == "follow_ups":
+            # 结构化追问建议（suggest_follow_ups 工具产出）：缓存到收尾时统一渲染，
+            # 优先于 on_chat_finished 里的文本解析兜底。
+            self._structured_follow_ups = payload.get("data") or []
         elif isinstance(payload, dict) and payload.get("event") == "ask_user":
             # Human-in-the-loop 提问卡：结构化通道直达渲染，绕过文本管线。
             # 同时进入等待作答状态：锁定通用发送直到卡片提交或强制终止。
@@ -218,7 +243,7 @@ class ChatResponseFlowMixin:
 
             self.history.append({"role": "assistant", "content": self.current_ai_text, "status": "interrupted"})
             self.current_ai_bubble = None
-            self.scroll_to_bottom()
+            self.scroll_to_bottom(force=False)
             return
 
         if awaiting:
@@ -255,10 +280,17 @@ class ChatResponseFlowMixin:
             if self.current_ai_text else "No response."
         )
         self.current_ai_bubble.set_content(final_html)
+        # 流式已结束：强制收敛气泡高度（中途态可能把高度写成偏大值且因幂等缓存不回落）
+        if hasattr(self.current_ai_bubble, 'force_resync_height'):
+            self.current_ai_bubble.force_resync_height()
 
-        # 渲染追问按钮（识别失败时 questions 为空，正文保持原样）
-        if split.questions:
-            self.render_follow_up_buttons(split.questions)
+        # 追问建议：优先使用结构化产出（suggest_follow_ups 工具）；缺失时回退文本解析
+        # （历史消息重渲染、非 Agent 模式等兼容路径）。
+        structured_questions = getattr(self, '_structured_follow_ups', None)
+        self._structured_follow_ups = None
+        questions = structured_questions or split.questions
+        if questions:
+            self.render_follow_up_buttons(questions)
 
         self.history.append({"role": "assistant", "content": self.current_ai_text})
         self.current_ai_bubble = None
@@ -348,4 +380,5 @@ class ChatResponseFlowMixin:
         # 完整原始错误（含 JSON payload 中的 details）写入日志
         self.logger.error("Chat task failed.\n%s", msg)
         ToastManager().show("Generation failed due to an error.", "error")
-        self.scroll_to_bottom()
+        # 报错同样不强制拉回底部（错误已在气泡内呈现）
+        self.scroll_to_bottom(force=False)

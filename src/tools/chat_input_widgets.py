@@ -19,8 +19,8 @@ from src.core.image_utils import IMAGE_EXTENSIONS
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
-from src.core.theme_manager import (ThemeManager, hex_to_rgba, strong_weight_css,
-                                    title_weight_css)
+from src.core.theme_manager import (ThemeManager, hex_to_rgba, overlay_scrollbar_qss,
+                                    strong_weight_css, title_weight_css)
 from src.ui.components.toast import ToastManager
 
 
@@ -589,6 +589,10 @@ class ChatInputContainer(QFrame):
                 match = re.search(r"\[Tags:\s*(.*?)\]", desc)
                 if match:
                     for t in match.group(1).split(","):
+                        # R 可视化（Visualization）是默认内置能力、始终可用，不再作为
+                        # 可勾选的独立技能出现在筛选列表里（是否画图由模型自行判断）。
+                        if t.strip().lower() == "visualization":
+                            continue
                         tags.add(f"[ACADEMIC] {t.strip().title()}")
 
             # 2. Fetch External Skills with [External] prefix

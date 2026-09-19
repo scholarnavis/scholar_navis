@@ -459,7 +459,8 @@ class ChatSendFlowMixin:
             self.current_ai_bubble.set_loading(False)
 
         self.logger.info("AI generation cancellation requested by user. Task manager is gracefully terminating.")
-        self.scroll_to_bottom()
+        # 取消同样属于收尾动作：停在用户当前阅读位置，不强制拉到底部
+        self.scroll_to_bottom(force=False)
 
     def _trigger_follow_up(self, text):
         if getattr(self, 'is_locked', False):
@@ -486,7 +487,8 @@ class ChatSendFlowMixin:
                 "Warning: The connection is taking longer than expected. Please check your <b>Network Proxy</b> or <b>API Endpoint (URL)</b>."
                 "</div>"
             )
-            self.scroll_to_bottom()
+            # 提示同样只在用户已位于底部时跟随，避免打断上翻阅读
+            self.scroll_to_bottom(force=False)
 
     def handle_external_send_with_mcp(self, context_text, prompt_text, target_tag):
         self.get_ui_widget()

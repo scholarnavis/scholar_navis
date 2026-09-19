@@ -6,7 +6,6 @@ from PySide6.QtCore import Qt, QEvent, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -15,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.theme_manager import ThemeManager, strong_weight_css
+from src.ui.components.file_dialogs import save_file_name
 from src.ui.components.source_code_viewer import SourceCodeViewer
 
 logger = logging.getLogger(__name__)
@@ -322,7 +322,7 @@ class RPlotCardWidget(QFrame):
             logger.warning(f"Download '{kind}' skipped: missing file {src}")
             return
 
-        save_path, _ = QFileDialog.getSaveFileName(self, "Save", default, "All Files (*)")
+        save_path, _ = save_file_name(self, "Save", default, "All Files (*)")
         if not save_path:
             return
 

@@ -76,6 +76,9 @@ MAX_ITERATIONS = 12
 # 动态推导（见 AgentRuntime.__init__ 与 token_estimator.derive_context_budgets），
 # 使 GPT/Claude/Gemini/DeepSeek/Qwen/本地小模型等各按自身容量治理。
 _MAX_REASONING_CHARS = 4000
+#: 思考链展示截断标记：真流式路径与非流式回退路径共用同一文案，保证两条路径
+#: 的 Reasoning 面板观感一致。
+_REASONING_TRUNCATION_NOTE = "\n...[thinking truncated for display]\n"
 # 同一轮内并发执行的工具数量上限；避免一次性拉起过多线程挤占本地推理资源
 _MAX_PARALLEL_TOOLS = 6
 # ---- 上下文治理：单轮工具循环中的旧工具结果淘汰 ----
@@ -231,6 +234,45 @@ _ALWAYS_TOOLS = {
                     },
                 },
                 "required": ["question"],
+            },
+        },
+    },
+    "suggest_follow_ups": {
+        "type": "function",
+        "function": {
+            "name": "suggest_follow_ups",
+            "description": (
+                "Attach the clickable follow-up suggestions shown under your answer. Call it ONCE, "
+                "at the very end of a response that delivered substantive content, with 3-6 short "
+                "high-value follow-ups. Each item is an object with 'tag' (the angle it explores, "
+                "e.g. Deep Dive / Critical / Method / Data / Application) and 'text' (the question "
+                "itself). Write every question in the USER'S LANGUAGE. Passing the suggestions "
+                "through this tool is mandatory — do NOT print them as plain text, and do NOT emit "
+                "a [FOLLOW_UPS] block."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "description": "3-6 follow-up questions, each {'tag': ..., 'text': ...}, in the user's language.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tag": {
+                                    "type": "string",
+                                    "description": "Short angle label, e.g. Deep Dive / Critical / Method / Data / Application.",
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "The follow-up question shown on the chip.",
+                                },
+                            },
+                            "required": ["text"],
+                        },
+                    },
+                },
+                "required": ["questions"],
             },
         },
     },
@@ -552,6 +594,16 @@ class AgentRuntime:
                 logger.warning(f"Streamed LLM step failed; falling back to blocking chat: {e}")
         if response is None:
             response = self.main_llm.chat(**kwargs)
+            # 非流式回退路径：正文由主循环打字机回放（_stream_final_text），但思维链
+            # 若不在此补齐，该路径下 Reasoning 面板会整段缺失——与真流式路径的展示
+            # 口径不一致。此处一次性 emit 整块 reasoning（折叠格式与截断策略同流式）。
+            if emit_token is not None and isinstance(response, dict):
+                reasoning = response.get("reasoning_content") or ""
+                if self._emit_reasoning_block(reasoning, emit_token):
+                    logger.info(
+                        "Non-stream fallback: emitted reasoning block (%d chars) for display.",
+                        len(reasoning),
+                    )
         self._accumulate_usage(messages, response)
         return response
 
@@ -587,7 +639,7 @@ class AgentRuntime:
                         if sum(map(len, reasoning_parts)) <= _MAX_REASONING_CHARS:
                             emit_token(text)
                         else:
-                            emit_token("\n...[thinking truncated for display]\n")
+                            emit_token(_REASONING_TRUNCATION_NOTE)
                             truncated = True
                 elif ev_type == "text":
                     text = ev.get("text") or ""
@@ -628,6 +680,30 @@ class AgentRuntime:
         # 防止最终答案显示两遍。
         response["_live_streamed"] = live_text
         return response
+
+    @staticmethod
+    def _emit_reasoning_block(reasoning: str, emit_token: Callable[[str], None]) -> bool:
+        """把整段思维链以 `` thinking`` 折叠块一次性 emit 给 UI。
+
+        仅非流式回退路径使用：真流式路径逐 delta 实时透出，回退路径（provider
+        不支持流式工具调用）只能拿到整块 reasoning，此处补齐，避免该路径下
+        Reasoning 面板整段缺失。展示长度受 ``_MAX_REASONING_CHARS`` 约束，超限
+        截断，与真流式路径保持同一展示策略。
+
+        Returns:
+            是否实际 emit 了思考块（reasoning 为空时返回 ``False``）。
+        """
+        text = (reasoning or "").strip()
+        if not text:
+            return False
+        emit_token(" thinking\n")
+        if len(text) <= _MAX_REASONING_CHARS:
+            emit_token(text)
+        else:
+            emit_token(text[:_MAX_REASONING_CHARS])
+            emit_token(_REASONING_TRUNCATION_NOTE)
+        emit_token("\n\n\n")
+        return True
 
     @staticmethod
     def _has_tool(tools: List[Dict], name: str) -> bool:
@@ -916,6 +992,11 @@ class AgentRuntime:
         # 1d. Built-in human-in-the-loop clarification (pause for user input).
         if name == "ask_user":
             return self._handle_ask_user(args, emit_token)
+
+        # 1e. Structured follow-up suggestions (replaces the [FOLLOW_UPS] text block +
+        # regex parsing: the model passes chips through a real function call).
+        if name == "suggest_follow_ups":
+            return self._handle_suggest_follow_ups(args)
 
         # 2. Local Skills (academic + external) — zero latency.
         if self.skill_manager.is_skill_available(name):
@@ -1377,6 +1458,52 @@ class AgentRuntime:
                 "message; once they confirm the plan, follow their finalized requirements "
                 "and call plot_chart to render the figure."
             ),
+        }, ensure_ascii=False)
+
+    def _handle_suggest_follow_ups(self, args: dict) -> str:
+        """登记结构化追问建议，交由任务层随状态事件送到 UI 渲染胶囊按钮。
+
+        与 :meth:`_handle_ask_user` 共用同一条结构化通道：payload 暂存在 runtime 实例
+        上，任务层在 ``run()`` 返回后读取并转发。旧实现要求模型在文末输出
+        ``[FOLLOW_UPS]`` 固定文本、再由正则解析——格式一旦漂移（漏写标记、列表符号
+        不对、被 markdown 管线改写）整块建议就会丢失。改为函数调用后字段显式、
+        参数可校验，且不会在答案正文里留下任何机器标记。
+
+        结果写入 ``last_follow_ups``（``[{"tag": ..., "text": ...}]``）。
+        """
+        raw_items = (args or {}).get("questions") or []
+        questions = []
+        for item in raw_items:
+            if isinstance(item, dict):
+                text = str(item.get("text") or item.get("question") or "").strip()
+                tag = str(item.get("tag") or "General").strip() or "General"
+            else:
+                text, tag = str(item or "").strip(), "General"
+            if text:
+                questions.append({"tag": tag, "text": text})
+
+        # 去重后最多 8 条（与旧文本解析的 _MAX_QUESTIONS 上限一致）
+        seen, unique = set(), []
+        for q in questions[:12]:
+            key = q["text"].lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(q)
+
+        if not unique:
+            return json.dumps({
+                "status": "error",
+                "message": "No usable follow-up question was provided; pass a non-empty "
+                           "'questions' array of {tag, text} items.",
+            }, ensure_ascii=False)
+
+        self.last_follow_ups = unique[:8]
+        self.log_fn("INFO", f"Follow-up suggestions registered: {len(self.last_follow_ups)} item(s).")
+        return json.dumps({
+            "status": "success",
+            "message": (f"Registered {len(self.last_follow_ups)} follow-up suggestion(s); "
+                        f"they will be shown to the user as clickable chips. "
+                        f"Do not repeat them in your answer."),
         }, ensure_ascii=False)
 
     def _handle_ask_user(self, args: dict, emit_token) -> str:

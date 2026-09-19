@@ -75,7 +75,8 @@ class ChatBubblesMixin:
             if is_user:
                 QTimer.singleShot(50, lambda: self.scroll_to_user_message(bubble))
             else:
-                QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True))
+                # AI 气泡出现时只在用户本来就在底部时跟随，不打断上翻阅读
+                QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True, force=False))
         return bubble
 
     def show_dev_note(self, text):
@@ -93,7 +94,7 @@ class ChatBubblesMixin:
         )
         bubble.index = index
         self.chat_layout.addWidget(bubble)
-        QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True))
+        QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True, force=False))
         return bubble
 
     def inject_dev_demo(self, user_text, ai_text):
@@ -155,7 +156,26 @@ class ChatBubblesMixin:
         bubble.set_content(self._format_response(raw, idx))
         return True
 
-    def scroll_to_bottom(self, smooth=False):
+    def is_at_bottom(self, threshold: int = 50) -> bool:
+        """视口是否已停在（接近）底部。
+
+        用于"是否跟随新内容"的判断：只有用户本来就在底部时才自动滚到底，否则保持
+        其阅读位置——此前多处收尾动作无条件 ``setValue(maximum)``，会把正在上翻
+        查看历史的用户强行拽回底部。
+        """
+        sb = self.scroll_area.verticalScrollBar()
+        return (sb.maximum() - sb.value()) <= threshold
+
+    def scroll_to_bottom(self, smooth=False, force=True):
+        """滚到对话底部。
+
+        ``force=False`` 时仅在用户已处于底部才滚动（阈值见 :meth:`is_at_bottom`），
+        供 AI 输出结束、报错、取消、追问建议等**非用户主动**的收尾动作使用；用户
+        自己发送消息、点击"到底部"按钮等主动行为仍用 ``force=True``。
+        """
+        if not force and not self.is_at_bottom():
+            return
+
         sb = self.scroll_area.verticalScrollBar()
         target = sb.maximum()
 
@@ -203,7 +223,8 @@ class ChatBubblesMixin:
         self.chat_layout.addWidget(self.follow_up_group)
 
         if not getattr(self, '_is_editing', False):
-            QTimer.singleShot(50, self.scroll_to_bottom)
+            # 追问建议属于收尾动作：用户正在上翻时不强行拉到底部
+            QTimer.singleShot(50, lambda: self.scroll_to_bottom(force=False))
 
     def remove_old_follow_ups(self):
         """清理历史中的追问组件，避免重复堆叠"""

@@ -6,7 +6,7 @@ import tempfile
 
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                               QLabel, QFileDialog, QGroupBox, QTableWidget,
+                               QLabel, QGroupBox, QTableWidget,
                                QHeaderView, QAbstractItemView, QMenu, QLineEdit, QTableWidgetItem, QApplication)
 from PySide6.QtGui import QAction, QCursor, QColor, QIcon
 from PySide6.QtCore import Qt
@@ -20,6 +20,7 @@ from src.services.file_service import FileService
 from src.task.kb_tasks import ImportFilesTask, DeleteFilesTask, SwitchKBTask, RenameFilesTask
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import ProjectEditorDialog, ProgressDialog, StandardDialog, BaseDialog
+from src.ui.components.file_dialogs import open_file_name, open_file_names, save_file_name
 
 
 class ImportTool(BaseTool):
@@ -822,7 +823,7 @@ class ImportTool(BaseTool):
 
     def select_files(self):
         # 允许选择 PDF 和 Markdown
-        files, _ = QFileDialog.getOpenFileNames(self.widget, "Select Documents", "", "Documents (*.pdf *.md *.txt *.doc *.docx)")
+        files, _ = open_file_names(self.widget, "Select Documents", "", "Documents (*.pdf *.md *.txt *.doc *.docx)")
         if not files: return
 
         if any(f.lower().endswith('.doc') for f in files):
@@ -980,7 +981,7 @@ class ImportTool(BaseTool):
         # 默认名称为知识库名字，后缀为 .snp
         default_name = f"{data.get('name', 'Project')}.snp"
 
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self.widget,
             "Export Project",
             default_name,
@@ -1021,7 +1022,7 @@ class ImportTool(BaseTool):
 
 
     def import_external_kb(self):
-        path, _ = QFileDialog.getOpenFileName(
+        path, _ = open_file_name(
             self.widget,
             "Import Project",
             "",

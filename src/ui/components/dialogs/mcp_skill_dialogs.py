@@ -370,9 +370,9 @@ class SkillConfigDialog(BaseDialog):
         self.input_desc.setStyleSheet(input_style)
 
     def _browse_file(self):
-        from PySide6.QtWidgets import QFileDialog
+        from src.ui.components.file_dialogs import open_file_name
 
-        path, _ = QFileDialog.getOpenFileName(self, "Select Native Skill Script", "", "Python Scripts (*.py)")
+        path, _ = open_file_name(self, "Select Native Skill Script", "", "Python Scripts (*.py)")
         if path:
             self.input_path.setText(path)
             try:

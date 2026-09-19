@@ -9,7 +9,7 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel,
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog,
 from src.core.mcp_manager import MCPManager
 from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager, strong_weight_css
+from src.ui.components.file_dialogs import open_file_name
 from src.ui.components.toast import ToastManager
 
 
@@ -337,7 +338,7 @@ class McpSectionMixin:
         if not dlg.exec():
             return
 
-        path, _ = QFileDialog.getOpenFileName(self.widget, "Import Native Skill", "", "Python Files (*.py)")
+        path, _ = open_file_name(self.widget, "Import Native Skill", "", "Python Files (*.py)")
         if not path: return
 
         skill_name = os.path.basename(path).replace(".py", "")

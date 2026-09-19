@@ -10,10 +10,12 @@ from urllib.parse import quote
 
 from PySide6.QtGui import QCursor
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QFileDialog, QMenu
+from PySide6.QtWidgets import QMenu
 
 from src.core.core_task import TaskManager, TaskMode
 from src.core.theme_manager import ThemeManager
+from src.ui.components.file_dialogs import (open_file_name, open_file_names,
+                                          save_file_name)
 from src.ui.components.text_formatter import mono_font_family_css
 from src.ui.components.toast import ToastManager
 
@@ -28,7 +30,7 @@ class ChatAttachmentsMixin:
 
     def attach_from_local(self):
         """按钮点击触发的文件选择器"""
-        paths, _ = QFileDialog.getOpenFileNames(
+        paths, _ = open_file_names(
             self.widget, "Select File(s)", "",
             "Supported Files (*.pdf *.md *.txt *.docx *.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg);;"
             "Documents (*.pdf *.md *.txt *.docx);;"
@@ -400,7 +402,7 @@ class ChatAttachmentsMixin:
             filter_str, default_ext = "Text File (*.txt)", ".txt"
 
         # 弹出系统保存对话框
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self.widget, "Export Log", f"Scholar_Navis_Log{default_ext}", filter_str
         )
 
@@ -479,7 +481,7 @@ class ChatAttachmentsMixin:
         from src.ui.components.dialog import ProgressDialog
 
         # 空历史也允许导入（直接填充），因此不做前置判空
-        path, _ = QFileDialog.getOpenFileName(
+        path, _ = open_file_name(
             self.widget, "Import Chat History", "",
             "Chat History (*.schat *.json *.md *.txt *.csv);;"
             "Scholar Navis Lossless (*.schat *.json);;"

@@ -18,9 +18,10 @@ from PySide6.QtCore import Qt, QSize, QPointF, QPoint
 from PySide6.QtGui import QImageReader, QPainter, QPixmap, QDesktopServices
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                               QScrollArea, QPushButton, QFileDialog)
+                               QScrollArea, QPushButton)
 
 from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
+from src.ui.components.file_dialogs import save_file_name
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -322,7 +323,7 @@ class ImageViewerDialog(QDialog):
         if is_svg:
             image_filter = "SVG Vector (*.svg);;" + image_filter
 
-        target, _ = QFileDialog.getSaveFileName(self, "Save Image As", default_name, image_filter)
+        target, _ = save_file_name(self, "Save Image As", default_name, image_filter)
         if not target:
             return
 

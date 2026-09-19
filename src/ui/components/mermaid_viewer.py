@@ -5,11 +5,12 @@ import os
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar, QCheckBox,
-                               QFileDialog, QComboBox, QSplitter)
+                               QComboBox, QSplitter)
 
 from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme, strong_weight_css
 # 🌟 引入你的自定义 Dialog
 from src.ui.components.dialog import StandardDialog
+from src.ui.components.file_dialogs import save_file_name
 from src.ui.components.source_code_viewer import SourceCodeViewer
 
 
@@ -72,6 +73,10 @@ function __navisDrawToCanvas(scale) {
     } catch (e) { filledBg = null; }
 
     var c = svg.cloneNode(true);
+    // 预览时脚本会给 SVG 写入内联 style（width/height 适配容器宽度），克隆体若
+    // 带着这些样式，导出会按"预览尺寸"而不是矢量真实尺寸光栅化（画布尺寸与实际
+    // 内容不匹配 → 被裁切或糊）。这里先清掉尺寸类内联样式，再按真实尺寸设置属性。
+    try { c.style.width = ''; c.style.height = ''; c.style.maxWidth = ''; } catch (e) {}
     var hasViewBox = false;
     try { hasViewBox = !!(c.viewBox && c.viewBox.baseVal && c.viewBox.baseVal.width); } catch (e) {}
     if (!hasViewBox) { c.setAttribute('viewBox', '0 0 ' + size.w + ' ' + size.h); }
@@ -244,8 +249,8 @@ class MermaidViewer(QMainWindow):
 
         # 4. 工具栏图标随主题重新着色
         for attr, icon_name in (('act_source', 'edit'), ('act_zoom_in', 'add'),
-                                ('act_zoom_out', 'remove'), ('act_reset_zoom', 'refresh'),
-                                ('act_export', 'download')):
+                                ('act_zoom_out', 'remove'), ('act_fit', 'refresh'),
+                                ('act_actual', 'check'), ('act_export', 'download')):
             action = getattr(self, attr, None)
             if action is not None:
                 action.setIcon(tm.icon(icon_name, 'text_main'))
@@ -271,12 +276,16 @@ class MermaidViewer(QMainWindow):
         self.act_source = tb.addAction(tm.icon("edit", "text_main"), "Toggle Source")
         self.act_source.triggered.connect(self._toggle_source)
 
+        # 缩放/平移与 image_viewer 对齐：按钮缩放图形本身（1.25 步进），滚轮在页面内
+        # 以鼠标为锚点缩放（1.15 步进），Fit 为"整图缩入窗口"，1:1 回到矢量原始像素。
         self.act_zoom_in = tb.addAction(tm.icon("add", "text_main"), "Zoom In",
-                                        lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() + 0.2))
+                                        lambda: self._run_js("navisZoomIn();"))
         self.act_zoom_out = tb.addAction(tm.icon("remove", "text_main"), "Zoom Out",
-                                         lambda: self.web_view.setZoomFactor(self.web_view.zoomFactor() - 0.2))
-        self.act_reset_zoom = tb.addAction(tm.icon("refresh", "text_main"), "Reset Zoom",
-                                           lambda: self.web_view.setZoomFactor(1.0))
+                                         lambda: self._run_js("navisZoomOut();"))
+        self.act_fit = tb.addAction(tm.icon("refresh", "text_main"), "Fit to Window",
+                                    lambda: self._run_js("navisFitToWindow();"))
+        self.act_actual = tb.addAction(tm.icon("check", "text_main"), "Actual Size (1:1)",
+                                       lambda: self._run_js("navisSetScale(1.0);"))
         self.act_export = tb.addAction(tm.icon("download", "text_main"), "Export Image",
                                        self._export_image)
 
@@ -300,7 +309,7 @@ class MermaidViewer(QMainWindow):
     def _export_image(self):
         filters = ("PNG Images (*.png);;JPEG Images (*.jpg);;WebP Images (*.webp);;"
                    "SVG Vector Graphics (*.svg)")
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Export Diagram", "academic_diagram.png", filters
         )
 
@@ -404,6 +413,16 @@ class MermaidViewer(QMainWindow):
     def _toggle_source(self):
         self.source_editor.toggle_collapsed()
 
+    def _run_js(self, script: str):
+        """在预览页执行脚本（页面尚未创建时静默忽略）。
+
+        缩放/平移状态全部由页面内的 JS 持有（与 image_viewer 的交互一致），
+        Qt 侧只负责转发工具栏动作，避免两套缩放（zoomFactor 与图形缩放）叠加。
+        """
+        page = self.web_view.page()
+        if page is not None:
+            page.runJavaScript(script)
+
     def _live_update(self):
         self.mermaid_code = self.source_editor.code()
         self.render_diagram()
@@ -422,8 +441,10 @@ class MermaidViewer(QMainWindow):
         js_path = tm.get_resource_path("assets", "js", "mermaid.min.js")
         js_uri = QUrl.fromLocalFile(js_path).toString()
 
-        # SVG 只用于页内预览（等比缩入容器，避免超宽图产生横向滚动条）；
-        # 导出始终走矢量/真实尺寸光栅化，不受此处 max-width 影响。
+        # 预览交互对齐 image_viewer（图片查看器）：滚轮以鼠标为锚点缩放（步进 1.15）、
+        # 左键拖拽平移（抓手光标）、Shift+滚轮保留原生水平滚动、缩放区间 0.05~16x、
+        # "适应窗口"模式下窗口变化自动重适配。平移实现为改变滚动位置，因此滚动条与
+        # 拖动天然同步。导出始终走矢量/真实尺寸光栅化，不受预览缩放影响。
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -435,29 +456,142 @@ class MermaidViewer(QMainWindow):
                     background-color: {tm.color('bg_main')};
                 }}
                 body {{ overflow: auto; }}
-                .mermaid {{
-                    display: inline-block;
+                #graphDiv {{
                     padding: 12px;
-                    transform-origin: top left;
+                    box-sizing: border-box;
+                    cursor: grab;
                 }}
+                /* 拖动中整页维持抓手态，避免指针移出图形后变回箭头 */
+                body.navis-dragging, body.navis-dragging * {{ cursor: grabbing !important; }}
                 #graphDiv svg {{
-                    max-width: 100%;
-                    height: auto;
                     display: block;
+                    max-width: none;
+                    height: auto;
+                    user-select: none;
                 }}
             </style>
             <script src="{js_uri}"></script>
         </head>
         <body>
-            <div class="mermaid" id="graphDiv"></div>
+            <div id="graphDiv"></div>
             <script>
-                mermaid.initialize({{ startOnLoad: false, theme: '{mermaid_theme}', securityLevel: 'loose' }});
+                mermaid.initialize({{
+                    startOnLoad: false,
+                    theme: '{mermaid_theme}',
+                    securityLevel: 'loose',
+                    useMaxWidth: false,
+                    flowchart: {{ useMaxWidth: false, htmlLabels: true }},
+                    sequence: {{ useMaxWidth: false }},
+                    gantt: {{ useMaxWidth: false }},
+                    state: {{ useMaxWidth: false }},
+                    class: {{ useMaxWidth: false }},
+                    er: {{ useMaxWidth: false }}
+                }});
                 const code = {safe_code};
+
+                // ---- 缩放/平移参数，与 image_viewer 保持一致 ----
+                const NAVIS_MIN_SCALE = 0.05;          // 缩放区间 0.05 ~ 16x
+                const NAVIS_MAX_SCALE = 16.0;
+                const NAVIS_WHEEL_ZOOM_FACTOR = 1.15;  // 滚轮步进（比按钮更细腻）
+                const NAVIS_BUTTON_ZOOM_FACTOR = 1.25; // 工具栏按钮步进
+                const NAVIS_MARGIN = 24;               // 适应窗口时预留的边距
+
+                var navisNatural = {{ w: 0, h: 0 }};   // 矢量真实尺寸（1:1 像素）
+                var navisScale = 1.0;
+                var navisFitMode = true;               // 适应窗口模式：随窗口变化重适配
+
+                function navisSvg() {{ return document.querySelector('#graphDiv svg'); }}
+
+                function navisMeasure(svg) {{
+                    var w = 0, h = 0;
+                    try {{
+                        var vb = svg.viewBox && svg.viewBox.baseVal;
+                        if (vb && vb.width) {{ w = vb.width; h = vb.height; }}
+                    }} catch (e) {{ /* ignore */ }}
+                    if (!w || !h) {{
+                        var r = svg.getBoundingClientRect();
+                        w = w || r.width; h = h || r.height;
+                    }}
+                    return {{ w: w || 800, h: h || 600 }};
+                }}
+
+                function navisApplyScale(scale) {{
+                    var svg = navisSvg();
+                    if (!svg || !navisNatural.w) return;
+                    navisScale = Math.max(NAVIS_MIN_SCALE, Math.min(NAVIS_MAX_SCALE, scale));
+                    svg.style.width = Math.round(navisNatural.w * navisScale) + 'px';
+                    svg.style.height = Math.round(navisNatural.h * navisScale) + 'px';
+                }}
+
+                // ---- 供工具栏调用 ----
+                function navisSetScale(scale) {{ navisFitMode = false; navisApplyScale(scale); }}
+                function navisZoomBy(factor) {{ navisSetScale(navisScale * factor); }}
+                function navisZoomIn() {{ navisZoomBy(NAVIS_BUTTON_ZOOM_FACTOR); }}
+                function navisZoomOut() {{ navisZoomBy(1 / NAVIS_BUTTON_ZOOM_FACTOR); }}
+                function navisFitToWindow() {{
+                    var svg = navisSvg();
+                    if (!svg) return;
+                    if (!navisNatural.w) navisNatural = navisMeasure(svg);
+                    var availW = Math.max(120, document.documentElement.clientWidth - NAVIS_MARGIN);
+                    var availH = Math.max(120, document.documentElement.clientHeight - NAVIS_MARGIN);
+                    navisFitMode = true;
+                    navisApplyScale(Math.min(availW / navisNatural.w, availH / navisNatural.h));
+                }}
+
+                // 以鼠标位置为锚点缩放，并回写滚动位置（等价 image_viewer._zoom_anchored）
+                function navisZoomAnchored(clientX, clientY, factor) {{
+                    var oldScale = navisScale;
+                    var contentX = window.scrollX + clientX;
+                    var contentY = window.scrollY + clientY;
+                    navisSetScale(oldScale * factor);
+                    var ratio = navisScale / oldScale;
+                    if (ratio !== 1) {{
+                        void document.body.offsetWidth;   // 强制布局，避免 scrollTo 被旧滚动范围夹取
+                        window.scrollTo(Math.max(0, Math.round(contentX * ratio - clientX)),
+                                        Math.max(0, Math.round(contentY * ratio - clientY)));
+                    }}
+                }}
+
+                // ---- 滚轮缩放；Shift+滚轮保留原生水平滚动 ----
+                window.addEventListener('wheel', function (e) {{
+                    if (e.shiftKey || e.deltaY === 0) return;
+                    e.preventDefault();
+                    navisZoomAnchored(e.clientX, e.clientY,
+                                      e.deltaY < 0 ? NAVIS_WHEEL_ZOOM_FACTOR : 1 / NAVIS_WHEEL_ZOOM_FACTOR);
+                }}, {{ passive: false }});
+
+                // ---- 左键拖拽平移（改滚动位置 → 与滚动条同步）----
+                var navisDrag = {{ active: false, x: 0, y: 0 }};
+                window.addEventListener('mousedown', function (e) {{
+                    if (e.button !== 0 || !e.target.closest('#graphDiv') || !navisSvg()) return;
+                    navisDrag.active = true; navisDrag.x = e.clientX; navisDrag.y = e.clientY;
+                    document.body.classList.add('navis-dragging');
+                    e.preventDefault();   // 避免拖拽时选中 SVG 文本
+                }});
+                window.addEventListener('mousemove', function (e) {{
+                    if (!navisDrag.active) return;
+                    window.scrollBy(-(e.clientX - navisDrag.x), -(e.clientY - navisDrag.y));
+                    navisDrag.x = e.clientX; navisDrag.y = e.clientY;
+                    e.preventDefault();
+                }});
+                window.addEventListener('mouseup', function () {{
+                    if (!navisDrag.active) return;
+                    navisDrag.active = false;
+                    document.body.classList.remove('navis-dragging');
+                }});
+
+                // 窗口尺寸变化：仅"适应窗口"模式重算（手动缩放后尊重用户选择）
+                window.addEventListener('resize', function () {{ if (navisFitMode) navisFitToWindow(); }});
 
                 async function draw() {{
                     try {{
                         const {{ svg }} = await mermaid.render('mermaid-svg', code);
                         document.getElementById('graphDiv').innerHTML = svg;
+                        // 等容器完成布局，再取矢量真实尺寸并适应窗口
+                        requestAnimationFrame(function () {{
+                            navisNatural = navisMeasure(navisSvg());
+                            navisFitToWindow();
+                        }});
                     }} catch (e) {{
                         document.getElementById('graphDiv').innerHTML = `<pre style="color:{tm.color('danger')};">Error rendering graph:<br>${{e.message}}</pre>`;
                     }}

@@ -88,6 +88,68 @@ def _raw_error_text(e: Exception) -> str:
     return "\n".join(parts)
 
 
+#: provider 承载"思考链"的字段名。litellm 对多数 provider 归一化为
+#: ``reasoning_content``，但部分本地/兼容网关使用 ``reasoning`` /
+#: ``thinking`` / ``thinking_content``。只识别前者会导致思考链落入正文，
+#: 因此这里集中做跨字段兼容，避免各处重复判断而口径不一。
+_REASONING_FIELD_NAMES = ("reasoning_content", "reasoning", "thinking", "thinking_content")
+
+
+def _coerce_reasoning_value(value) -> str:
+    """把 provider 返回的推理字段值规整为纯文本（恒返回 ``str``）。
+
+    字段形态可能是 str、dict（``{"thinking"|"text"|"content": ...}``）、
+    或 list（Anthropic/Gemini 经 litellm 的 ``thinking_blocks``）。未知形态
+    一律返回空串，绝不抛出，避免流式过程中因单条脏数据中断整轮对话。
+    """
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("thinking", "text", "content", "reasoning_content", "reasoning"):
+            inner = value.get(key)
+            if isinstance(inner, str) and inner:
+                return inner
+        return ""
+    if isinstance(value, (list, tuple)):
+        parts: List[str] = []
+        for item in value:
+            text = _coerce_reasoning_value(item)
+            if text:
+                parts.append(text)
+        return "".join(parts)
+    for attr in ("thinking", "text", "content"):
+        inner = getattr(value, attr, None)
+        if isinstance(inner, str) and inner:
+            return inner
+    return ""
+
+
+def _extract_reasoning(holder) -> str:
+    """从 delta / message 对象提取思考链文本（跨 provider 字段名兼容）。
+
+    仅当对象确实携带推理内容时返回非空字符串；调用方据此把文本包进
+    `` thinking`` 折叠区，从而保证思考链不会作为正文渲染。
+    """
+    if holder is None:
+        return ""
+    for name in _REASONING_FIELD_NAMES:
+        text = _coerce_reasoning_value(getattr(holder, name, None))
+        if text:
+            return text
+    extra = getattr(holder, "model_extra", None)
+    if isinstance(extra, dict):
+        for name in _REASONING_FIELD_NAMES:
+            text = _coerce_reasoning_value(extra.get(name))
+            if text:
+                return text
+        text = _coerce_reasoning_value(extra.get("thinking_blocks"))
+        if text:
+            return text
+    return ""
+
+
 litellm.drop_params = True
 
 
@@ -307,9 +369,7 @@ class OpenAICompatibleLLM:
             response = completion(**litellm_kwargs)
             choice = response.choices[0]
 
-            reasoning = getattr(choice.message, 'reasoning_content', None)
-            if not reasoning and hasattr(choice.message, 'model_extra') and choice.message.model_extra:
-                reasoning = choice.message.model_extra.get('reasoning_content')
+            reasoning = _extract_reasoning(choice.message)
 
             if getattr(choice.message, 'tool_calls', None):
                 msg_dump = choice.message.model_dump(exclude_none=True)
@@ -368,10 +428,9 @@ class OpenAICompatibleLLM:
 
                 delta = chunk.choices[0].delta
 
-                # 提取思考内容
-                reasoning = getattr(delta, 'reasoning_content', None)
-                if not reasoning and hasattr(delta, 'model_extra') and delta.model_extra:
-                    reasoning = delta.model_extra.get('reasoning_content')
+                # 提取思考内容（跨 provider 字段名兼容，务必先于 content 判定，
+                # 避免思考链被当成正文输出）
+                reasoning = _extract_reasoning(delta)
 
                 if reasoning:
                     if not is_thinking:
@@ -532,9 +591,7 @@ class OpenAICompatibleLLM:
                     continue
                 delta = chunk.choices[0].delta
 
-                reasoning = getattr(delta, 'reasoning_content', None)
-                if not reasoning and hasattr(delta, 'model_extra') and delta.model_extra:
-                    reasoning = delta.model_extra.get('reasoning_content')
+                reasoning = _extract_reasoning(delta)
                 if reasoning:
                     reasoning_parts.append(reasoning)
                     yield {"type": "reasoning", "text": reasoning}
