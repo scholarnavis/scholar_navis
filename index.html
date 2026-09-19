@@ -1,4 +1,20 @@
 <!DOCTYPE html>
+<!--
+  Scholar Navis 官网首页（Cloudflare Pages 静态资源，与同目录的 _worker.js 一起部署）。
+
+  事实口径
+  --------
+  页面上所有技术性陈述都必须能从仓库代码验证（平台矩阵来自 CI workflow，
+  加速后端来自 src/core/onnx_provider.py::AUTO_PRIORITY，模型档位来自
+  src/core/models_registry.py::resolve_auto_model，绘图来自 src/core/plot_engine.py）。
+  验证不了的（内存/磁盘数字、第三方后端 MPS、全局划词翻译窗口等）一律不写。
+
+  版本号与下载地址
+  ----------------
+  页面**不硬编码任何版本号**：加载时向 Worker 的 /versions 取两条通道的真实版本
+  （stable / dev，按平台分别查询），再把按钮标签与文案填上；接口不可达时保留
+  静态下载链接并显示 "unavailable"，不会显示过期的假版本号。
+-->
 <html lang="en" class="scroll-smooth">
 <head>
     <meta charset="UTF-8">
@@ -10,7 +26,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 
-    <meta name="description" content="A high-performance PySide6 desktop application for academic research, featuring Local RAG, Academic Agent Tools (MCP & SKILLs), and structured evidence organization.">
+    <meta name="description" content="A PySide6 desktop application for academic research: local RAG, hardware-accelerated reranking, academic agent tools (MCP &amp; SKILLs), and R-rendered publication figures.">
 
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -49,6 +65,8 @@
         .logo-container { filter: drop-shadow(0 0 20px rgba(59, 130, 246, 0.3)); }
         .feature-card { transition: all 0.3s ease; }
         .feature-card:hover { transform: translateY(-5px); }
+        .dl-btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+        .chip { display: inline-flex; align-items: center; gap: .35rem; padding: .15rem .55rem; border-radius: 9999px; font-size: .7rem; font-weight: 600; }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-900 dark:bg-darkBg dark:text-slate-100 transition-colors duration-300 min-h-screen flex flex-col">
@@ -67,12 +85,22 @@
                     </svg>
                 </div>
                 <span class="font-bold text-xl tracking-tight hidden sm:block">Scholar Navis</span>
+                <!-- 实时版本徽标：由 /versions 填充，取不到就隐藏 -->
+                <span id="nav-version" class="chip hidden bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"></span>
             </div>
 
             <div class="flex items-center gap-6">
-                <a href="https://github.com/scholarnavis/scholar_navis/" target="_blank" class="text-slate-600 dark:text-slate-400 hover:text-primary transition-colors flex items-center gap-2">
+                <a href="#download" class="text-slate-600 dark:text-slate-400 hover:text-primary transition-colors flex items-center gap-2">
+                    <i class="fa-solid fa-download"></i>
+                    <span class="text-sm font-medium hidden sm:inline">Download</span>
+                </a>
+                <a href="https://github.com/scholarnavis/scholar_navis/releases" target="_blank" rel="noopener" class="text-slate-600 dark:text-slate-400 hover:text-primary transition-colors flex items-center gap-2">
+                    <i class="fa-solid fa-clock-rotate-left"></i>
+                    <span class="text-sm font-medium hidden sm:inline">Changelog</span>
+                </a>
+                <a href="https://github.com/scholarnavis/scholar_navis/" target="_blank" rel="noopener" class="text-slate-600 dark:text-slate-400 hover:text-primary transition-colors flex items-center gap-2">
                     <i class="fa-brands fa-github text-xl"></i>
-                    <span class="text-sm font-medium">GitHub</span>
+                    <span class="text-sm font-medium hidden sm:inline">GitHub</span>
                 </a>
                 <div class="flex bg-slate-200 dark:bg-slate-800 p-1 rounded-lg">
                     <button onclick="setTheme('light')" class="p-1.5 rounded-md hover:bg-white dark:hover:bg-slate-700 transition-all"><i class="fa-solid fa-sun text-xs"></i></button>
@@ -112,19 +140,118 @@
                 Scholar Navis
             </h1>
             <p class="text-lg md:text-xl text-slate-600 dark:text-slate-400 mb-10 max-w-3xl mx-auto leading-relaxed">
-                An intelligent <strong>Evidence Organizer</strong> designed for rigorous scientific literature review. Mitigating LLM hallucinations through a fusion of Local RAG, Hardware-Accelerated Reranking, and direct academic agent tools (Model Context Protocol [MCP] and customizable SKILLs).
+                An <strong>evidence organizer</strong> for rigorous literature review. It runs the retrieval
+                pipeline locally &mdash; chunking, ONNX embedding, reranking &mdash; and drives academic
+                agent tools (Model Context Protocol [MCP] and customizable SKILLs) to keep every claim
+                traceable to a source you can open.
             </p>
 
             <div class="flex flex-col sm:flex-row justify-center gap-4">
-                <a href="http://scholarnavis.com/dl" class="inline-flex items-center justify-center px-8 py-4 bg-primary text-white font-bold rounded-xl hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
-                    <i class="fa-solid fa-download mr-2"></i> Download Release
+                <a href="#download" class="inline-flex items-center justify-center px-8 py-4 bg-primary text-white font-bold rounded-xl hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
+                    <i class="fa-solid fa-download mr-2"></i> Download for Windows / Linux
                 </a>
                 <a href="#architecture" class="inline-flex items-center justify-center px-8 py-4 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 transition-all">
                     Explore Architecture
                 </a>
             </div>
+
+            <!-- 实时版本行：Latest stable: v… · dev: v…（由 /versions 填充） -->
+            <p id="version-line" class="mt-6 text-sm text-slate-500 dark:text-slate-400">
+                <i class="fa-solid fa-circle-notch fa-spin mr-1"></i> Checking the latest releases&hellip;
+            </p>
         </div>
     </header>
+
+    <section id="download" class="px-4 pb-16 scroll-mt-20">
+        <div class="max-w-5xl mx-auto">
+            <div class="text-center mb-10">
+                <h2 class="text-3xl font-bold mb-3">Downloads</h2>
+                <p class="text-slate-500 dark:text-slate-400 max-w-2xl mx-auto">
+                    Self-contained archives for 64-bit Windows and Linux. Two release channels are published:
+                    <strong>stable</strong> for research work, <strong>dev</strong> for early builds. The in-app
+                    updater only ever compares your own channel.
+                </p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
+                <!-- Stable -->
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border-2 border-primary shadow-xl flex flex-col">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-xl font-bold flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full bg-emerald-500"></span> Stable
+                        </h3>
+                        <span class="chip bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300">recommended</span>
+                    </div>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm mb-6">
+                        Tagged releases, QA'd on both platforms, and the channel the in-app updater follows
+                        for stable installations.
+                    </p>
+                    <div class="mt-auto">
+                        <!-- 版本占位：JS 会写成 "v2.0.6"，取不到则写 "unavailable" -->
+                        <div class="text-xs text-slate-500 dark:text-slate-400 mb-3" data-version-for="stable">
+                            latest version: <span class="font-semibold">&mdash;</span>
+                        </div>
+                        <!-- 静态兜底链接：即使脚本被拦，也能直接下载（默认通道即 stable） -->
+                        <div class="flex flex-wrap gap-3" data-buttons-for="stable">
+                            <a href="/dl?os=windows&amp;channel=stable" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-white font-semibold rounded-xl hover:scale-105 transition-transform">
+                                <i class="fa-brands fa-windows"></i> <span>Windows</span>
+                            </a>
+                            <a href="/dl?os=linux&amp;channel=stable" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-white font-semibold rounded-xl hover:scale-105 transition-transform">
+                                <i class="fa-brands fa-linux"></i> <span>Linux</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Dev -->
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border border-slate-200 dark:border-slate-800 flex flex-col">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-xl font-bold flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full bg-amber-500"></span> Dev
+                        </h3>
+                        <span class="chip bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">pre-release</span>
+                    </div>
+                    <p class="text-slate-600 dark:text-slate-400 text-sm mb-6">
+                        Built from the branch tip: newest features, rougher edges. Only installs whose own
+                        version contains <code class="text-xs">-dev</code> are notified about these builds.
+                    </p>
+                    <div class="mt-auto">
+                        <div class="text-xs text-slate-500 dark:text-slate-400 mb-3" data-version-for="dev">
+                            latest version: <span class="font-semibold">&mdash;</span>
+                        </div>
+                        <div class="flex flex-wrap gap-3" data-buttons-for="dev">
+                            <a href="/dl?os=windows&amp;channel=dev" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 border border-primary text-primary font-semibold rounded-xl hover:bg-primary hover:text-white transition-all">
+                                <i class="fa-brands fa-windows"></i> <span>Windows</span>
+                            </a>
+                            <a href="/dl?os=linux&amp;channel=dev" class="dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 border border-primary text-primary font-semibold rounded-xl hover:bg-primary hover:text-white transition-all">
+                                <i class="fa-brands fa-linux"></i> <span>Linux</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                <div class="bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex items-start gap-3">
+                    <i class="fa-brands fa-apple text-xl text-slate-400 mt-0.5"></i>
+                    <p class="text-slate-600 dark:text-slate-400">
+                        <strong class="text-slate-800 dark:text-slate-200">macOS:</strong> no packaged build is
+                        published &mdash; we have no native hardware for QA, so it stays source-only.
+                        <a class="text-primary underline" href="https://github.com/scholarnavis/scholar_navis#-platform-support-and-running-from-source" target="_blank" rel="noopener">Run from source</a>.
+                    </p>
+                </div>
+                <div class="bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex items-start gap-3">
+                    <i class="fa-solid fa-file-lines text-xl text-slate-400 mt-0.5"></i>
+                    <p class="text-slate-600 dark:text-slate-400">
+                        Every release ships its changelog: the in-app updater shows it in a dialog, and the
+                        same text is on the
+                        <a class="text-primary underline" href="https://github.com/scholarnavis/scholar_navis/releases" target="_blank" rel="noopener">GitHub Releases</a>
+                        page with full commit detail.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
 
     <section class="px-4 pb-12">
         <div class="max-w-4xl mx-auto bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 border-l-4 border-l-warning rounded-xl p-6 shadow-sm flex items-start gap-4">
@@ -132,7 +259,7 @@
                 <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
             </div>
             <div>
-                <h4 class="font-bold text-slate-900 dark:text-slate-100 mb-2">IMPORTANT DISCLAIMER: AI Usage & Accuracy</h4>
+                <h4 class="font-bold text-slate-900 dark:text-slate-100 mb-2">IMPORTANT DISCLAIMER: AI Usage &amp; Accuracy</h4>
                 <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
                     Scholar Navis utilizes Large Language Models (LLMs). While structurally augmented with Local RAG and MCP tools, AI-generated content may still contain <b>inaccuracies, fabricated references, or structural hallucinations</b>. Users are <b>strictly required</b> to manually verify all information via the provided citations, source links, or original manuscripts. The developers assume no liability for research errors, data misinterpretation, or academic misconduct arising from the use of this software.
                 </p>
@@ -140,7 +267,7 @@
         </div>
     </section>
 
-    <section id="architecture" class="py-20 px-4 bg-slate-100 dark:bg-slate-900/50">
+    <section id="architecture" class="py-20 px-4 bg-slate-100 dark:bg-slate-900/50 scroll-mt-16">
         <div class="max-w-7xl mx-auto">
             <div class="text-center mb-16 flex flex-col items-center mx-auto">
                 <h2 class="text-3xl font-bold mb-4">The Three-Layer Architecture</h2>
@@ -160,7 +287,10 @@
                     <div class="text-purple-500 mb-4"><i class="fa-solid fa-network-wired text-3xl"></i></div>
                     <h3 class="text-xl font-bold mb-3">Layer 2: Logical Orchestration</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed mb-4 flex-grow">
-                        Mitigates corpus bias through automated language detection and English pre-translation. Standardized queries traverse Vector Search, Reranker scoring, in-context prompting, and the execution of academic agent tools (MCP and SKILLs) before dispatch, enforcing objective factual constraints.
+                        Query language is detected locally (script-aware, with an ASCII fast path) so answers come
+                        back in the language you asked in. Retrieval then runs vector search, reranker scoring and
+                        in-context prompting, and academic agent tools (MCP and SKILLs) are dispatched before the
+                        answer is written &mdash; enforcing objective factual constraints.
                     </p>
                 </div>
 
@@ -168,7 +298,9 @@
                     <div class="text-emerald-500 mb-4"><i class="fa-solid fa-code text-3xl"></i></div>
                     <h3 class="text-xl font-bold mb-3">Layer 3: Output Rendering</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed flex-grow">
-                        Generated outputs undergo real-time parsing via regular expressions (regex) to drive a highly interactive UI. Native support for HTTP, Mermaid diagrams, and Cite protocols enables contextual citation verification and immediate database navigation.
+                        Generated outputs are parsed as they stream to drive a highly interactive UI: Markdown with
+                        tables and code blocks, Mermaid diagrams, clickable HTTP links, and citation links that
+                        resolve to the underlying record in your knowledge base.
                     </p>
                 </div>
             </div>
@@ -177,6 +309,10 @@
 
     <section id="features" class="py-20 px-4">
         <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-14">
+                <h2 class="text-3xl font-bold mb-4">Capabilities</h2>
+                <p class="text-slate-500 max-w-2xl mx-auto">Six areas where the local pipeline does work a plain chat window cannot: anchoring, retrieval, figures, feeds, hardware routing, and structured extraction.</p>
+            </div>
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
                     <div class="w-12 h-12 bg-blue-100 dark:bg-blue-900/30 rounded-lg flex items-center justify-center mb-6 text-blue-600 dark:text-blue-400">
@@ -184,7 +320,9 @@
                     </div>
                     <h3 class="text-xl font-bold mb-3">Anchored Local RAG</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Build your private knowledge base with granular data traceability. Acts as an effective anchoring framework, significantly reducing citation and entity extraction error rates compared to standalone LLMs.
+                        Build a private knowledge base with per-file traceability. PDFs are parsed, chunked and
+                        embedded on your machine (ChromaDB + ONNX), so every retrieved passage can be traced back
+                        to the page it came from instead of being recalled from model weights.
                     </p>
                 </div>
 
@@ -192,19 +330,25 @@
                     <div class="w-12 h-12 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center mb-6 text-purple-600 dark:text-purple-400">
                         <i class="fa-solid fa-microscope text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Academic Agent Tools (MCP & SKILLs)</h3>
+                    <h3 class="text-xl font-bold mb-3">Academic Agent Tools (MCP &amp; SKILLs)</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Deep integration with a consortium of international biological and chemical databases (NCBI, UniProt, PubChem, STRINGdb, AlphaFold, etc.) via dynamic academic agent architecture. Performs real-time fact-checking and empowers the AI to autonomously retrieve scholarly materials.
+                        Live lookups against a consortium of authoritative sources &mdash; NCBI Entrez/PubMed,
+                        UniProt, PDB, Ensembl, KEGG, STRING, PubChem, ChEMBL, ChEBI, Crossref, OpenAlex, Europe PMC,
+                        Semantic Scholar, QuickGO, g:Profiler, JASPAR, AlphaFold DB, MyGene.info/TAIR, GBIF,
+                        Unpaywall and web search &mdash; dispatched by the agent instead of guessed by the model.
                     </p>
                 </div>
 
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
-                    <div class="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg flex items-center justify-center mb-6 text-emerald-600 dark:text-emerald-400">
-                        <i class="fa-solid fa-chart-line text-xl"></i>
+                    <div class="w-12 h-12 bg-rose-100 dark:bg-rose-900/30 rounded-lg flex items-center justify-center mb-6 text-rose-600 dark:text-rose-400">
+                        <i class="fa-solid fa-chart-simple text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Benchmarked Extraction</h3>
+                    <h3 class="text-xl font-bold mb-3">Publication-Ready Figures (R)</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Rigorously tested against structured data extraction tasks for critical plant biology genes (e.g., <i>AMS</i>, <i>DYT1</i>). Enhances manual literature curation efficiency while maintaining strict factual accuracy.
+                        Ask for a volcano plot, heatmap or enrichment bar chart and a sandboxed local R process
+                        renders it with ggplot2, exporting vector SVG plus PNG and PDF. Journal themes, palettes
+                        and per-chart-type defaults come from one shared style registry, and the model only ever
+                        sees a preview of the data &mdash; never the full table.
                     </p>
                 </div>
 
@@ -212,9 +356,10 @@
                     <div class="w-12 h-12 bg-orange-100 dark:bg-orange-900/30 rounded-lg flex items-center justify-center mb-6 text-orange-600 dark:text-orange-400">
                         <i class="fa-solid fa-rss text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Transient Feed Processing</h3>
+                    <h3 class="text-xl font-bold mb-3">Live Journal Feeds</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Stay updated with real-time RSS subscriptions from top journals. The architecture seamlessly funnels transient texts into the primary data stream for immediate analysis without permanently polluting the local ChromaDB.
+                        Subscribe to journal RSS feeds and pull the newest articles straight into the current
+                        conversation, without loading them into your knowledge base first.
                     </p>
                 </div>
 
@@ -224,17 +369,24 @@
                     </div>
                     <h3 class="text-xl font-bold mb-3">Adaptive Model Routing</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        Designed to balance the trade-offs of base models. Mitigates the "knowledge conflict" inherent in massive pre-trained models, while accounting for the "latency penalty" associated with integrating high-accuracy native models into complex workflows.
+                        The compute device decides the model tier: a working accelerator selects BGE-M3 +
+                        BGE-Reranker-v2-M3, a CPU-only machine selects Snowflake Arctic XS + BGE-Reranker-Base.
+                        Acceleration order is CUDA &rarr; DirectML &rarr; ROCm &rarr; CoreML, with CPU as a
+                        never-failing fallback.
                     </p>
                 </div>
 
                 <div class="feature-card p-8 rounded-2xl bg-white dark:bg-darkSurface border border-slate-200 dark:border-slate-800 shadow-sm">
-                    <div class="w-12 h-12 bg-cyan-100 dark:bg-cyan-900/30 rounded-lg flex items-center justify-center mb-6 text-cyan-600 dark:text-cyan-400">
-                        <i class="fa-solid fa-language text-xl"></i>
+                    <div class="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg flex items-center justify-center mb-6 text-emerald-600 dark:text-emerald-400">
+                        <i class="fa-solid fa-list-check text-xl"></i>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Cross-Lingual UI Layer</h3>
+                    <h3 class="text-xl font-bold mb-3">Structured Extraction</h3>
                     <p class="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                        A floating window accessible globally across the OS. Facilitates multi-language translation and AI polishing on highlighted text, operating seamlessly over the core execution inference layer.
+                        Recipes for pulling canonical records rather than loose strings: reviewed UniProt entries
+                        with gene and organism constraints, exact sequence lengths, subcellular localisation and
+                        cross-referenced NCBI Gene IDs. Evaluation figures used for this benchmark are published in
+                        the repository
+                        (<a class="text-primary underline" href="https://github.com/scholarnavis/scholar_navis/tree/main/docs" target="_blank" rel="noopener">docs/</a>).
                     </p>
                 </div>
             </div>
@@ -244,65 +396,93 @@
     <section class="py-24 bg-slate-100 dark:bg-slate-900/50 border-t border-slate-200 dark:border-slate-800">
         <div class="max-w-5xl mx-auto px-4 flex flex-col items-center">
             <div class="text-center mb-16 max-w-2xl mx-auto">
-                <h2 class="text-3xl font-bold mb-4">Hardware Utilization & Built-in Matrix</h2>
-                <p class="text-slate-500">Scholar Navis maximizes local inference speeds dynamically routing tasks via CUDA, DirectML, or MPS.</p>
+                <h2 class="text-3xl font-bold mb-4">Platforms &amp; Hardware Acceleration</h2>
+                <p class="text-slate-500">Whatever the machine, the app picks the fastest execution provider that actually works on it &mdash; and tells you why when one doesn't.</p>
+            </div>
+
+            <div class="w-full overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-darkSurface mb-8">
+                <table class="w-full text-sm text-left">
+                    <thead class="bg-slate-50 dark:bg-slate-800/60 text-slate-500">
+                        <tr>
+                            <th class="px-5 py-3 font-semibold">Platform</th>
+                            <th class="px-5 py-3 font-semibold">Packaged build</th>
+                            <th class="px-5 py-3 font-semibold">Run from source</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                        <tr>
+                            <td class="px-5 py-4 font-medium">Windows 10/11 (x64)</td>
+                            <td class="px-5 py-4 text-emerald-600 dark:text-emerald-400"><i class="fa-solid fa-circle-check mr-1"></i> yes</td>
+                            <td class="px-5 py-4 text-emerald-600 dark:text-emerald-400"><i class="fa-solid fa-circle-check mr-1"></i> yes</td>
+                        </tr>
+                        <tr>
+                            <td class="px-5 py-4 font-medium">Linux (x86_64)</td>
+                            <td class="px-5 py-4 text-emerald-600 dark:text-emerald-400"><i class="fa-solid fa-circle-check mr-1"></i> yes <span class="text-slate-400">(built on Ubuntu 22.04, glibc 2.34+)</span></td>
+                            <td class="px-5 py-4 text-emerald-600 dark:text-emerald-400"><i class="fa-solid fa-circle-check mr-1"></i> yes</td>
+                        </tr>
+                        <tr>
+                            <td class="px-5 py-4 font-medium">macOS</td>
+                            <td class="px-5 py-4 text-slate-400"><i class="fa-solid fa-circle-minus mr-1"></i> not published</td>
+                            <td class="px-5 py-4 text-emerald-600 dark:text-emerald-400"><i class="fa-solid fa-circle-check mr-1"></i> yes</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-8 w-full items-stretch">
-                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border border-slate-200 dark:border-slate-800 flex flex-col justify-between">
-                    <div>
-                        <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
-                            <span class="w-2 h-2 rounded-full bg-yellow-500"></span> Minimum (Nano / Lite)
-                        </h4>
-                        <ul class="space-y-4">
-                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                                <span class="text-slate-500">Memory (RAM)</span>
-                                <span class="font-semibold">~2 GB+</span>
-                            </li>
-                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                                <span class="text-slate-500">Graphics (GPU)</span>
-                                <span class="font-semibold text-right text-sm">Not Required<br>(CPU-Execution Ready)</span>
-                            </li>
-                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                                <span class="text-slate-500">Disk Space</span>
-                                <span class="font-semibold">1.6 GB</span>
-                            </li>
-                        </ul>
-                    </div>
-                    <div class="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 flex justify-between items-start">
-                        <span class="text-slate-500 mt-1">Models</span>
-                        <span class="font-medium text-blue-500 text-sm text-right leading-relaxed">Embedding: Snowflake Arctic XS<br>Reranker: BGE-Reranker-Base</span>
-                    </div>
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border border-slate-200 dark:border-slate-800 flex flex-col">
+                    <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-yellow-500"></span> CPU-only (works anywhere)
+                    </h4>
+                    <ul class="space-y-4 text-sm">
+                        <li class="flex justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-3">
+                            <span class="text-slate-500">Compute device</span>
+                            <span class="font-semibold text-right">CPU &mdash; no GPU required</span>
+                        </li>
+                        <li class="flex justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-3">
+                            <span class="text-slate-500">Embedding</span>
+                            <span class="font-semibold text-right">Snowflake Arctic Embed XS</span>
+                        </li>
+                        <li class="flex justify-between gap-4">
+                            <span class="text-slate-500">Reranker</span>
+                            <span class="font-semibold text-right">BGE-Reranker-Base</span>
+                        </li>
+                    </ul>
+                    <p class="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+                        Both models are ONNX-compiled locally after download, so nothing is inferred off-device.
+                    </p>
                 </div>
 
-                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border-2 border-primary shadow-xl md:scale-105 flex flex-col justify-between">
-                    <div>
-                        <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
-                            <span class="w-2 h-2 rounded-full bg-emerald-500"></span> Pro (Scientific / M3)
-                        </h4>
-                        <ul class="space-y-4">
-                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                                <span class="text-slate-500">Memory (RAM)</span>
-                                <span class="font-semibold">8 GB+</span>
-                            </li>
-                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                                <span class="text-slate-500">Graphics (VRAM)</span>
-                                <span class="font-semibold text-right">GPU Recommended<br><span class="text-xs font-normal text-slate-400">4GB ~ 6GB VRAM</span></span>
-                            </li>
-                            <li class="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                                <span class="text-slate-500">Disk Space</span>
-                                <span class="font-semibold">5.0 GB</span>
-                            </li>
-                        </ul>
-                    </div>
-                    <div class="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 flex justify-between items-start">
-                        <span class="text-slate-500 mt-1">Models</span>
-                        <span class="font-medium text-emerald-500 text-sm text-right leading-relaxed">Embedding: BGE-M3<br>Reranker: BGE-Reranker-v2-M3</span>
-                    </div>
+                <div class="bg-white dark:bg-darkSurface rounded-3xl p-8 border-2 border-primary shadow-xl flex flex-col">
+                    <h4 class="text-lg font-bold mb-6 flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500"></span> Accelerated (recommended)
+                    </h4>
+                    <ul class="space-y-4 text-sm">
+                        <li class="flex justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-3">
+                            <span class="text-slate-500">Auto Detect order</span>
+                            <span class="font-semibold text-right">CUDA &rarr; DirectML &rarr; ROCm &rarr; CoreML &rarr; CPU</span>
+                        </li>
+                        <li class="flex justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-3">
+                            <span class="text-slate-500">Embedding</span>
+                            <span class="font-semibold text-right">BGE-M3</span>
+                        </li>
+                        <li class="flex justify-between gap-4">
+                            <span class="text-slate-500">Reranker</span>
+                            <span class="font-semibold text-right">BGE-Reranker-v2-M3</span>
+                        </li>
+                    </ul>
+                    <p class="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+                        NVIDIA users can additionally pick TensorRT (fastest; compiles engines on first run and
+                        caches them). It is never auto-selected, because that first-run compile looks like a hang.
+                    </p>
                 </div>
             </div>
+
             <p class="mt-12 text-center text-sm text-slate-600 dark:text-slate-400 max-w-3xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-darkSurface p-4 rounded-xl shadow-sm">
-                <strong>Beyond the Defaults:</strong> Scholar Navis supports seamless integration of custom HuggingFace repositories. External embedding and reranking models can be dynamically loaded and compiled to ONNX locally to build your personalized research pipeline.
+                <strong>Beyond the defaults:</strong> custom HuggingFace embedding and reranking repositories can
+                be registered and compiled to ONNX locally, so the retrieval stack is not limited to the two
+                built-in tiers. GPUs that exist but cannot be used (for example a missing CUDA runtime) are still
+                listed &mdash; greyed out, with the reason and the fix.
             </p>
         </div>
     </section>
@@ -315,12 +495,150 @@
                 </div>
                 <span class="font-bold">Scholar Navis</span>
             </div>
-            <p class="text-slate-500 text-sm">© 2026 Scholar Navis Studio</p>
+            <p class="text-slate-500 text-sm">© 2026 Scholar Navis Studio &middot; Free software under AGPL-3.0</p>
             <div class="flex gap-4">
-                <a href="https://github.com/scholarnavis/scholar_navis/" class="text-slate-400 hover:text-primary transition-colors"><i class="fa-brands fa-github text-xl"></i></a>
+                <a href="https://github.com/scholarnavis/scholar_navis/" target="_blank" rel="noopener" class="text-slate-400 hover:text-primary transition-colors"><i class="fa-brands fa-github text-xl"></i></a>
+                <a href="https://github.com/scholarnavis/scholar_navis/releases" target="_blank" rel="noopener" class="text-slate-400 hover:text-primary transition-colors"><i class="fa-solid fa-clock-rotate-left text-xl"></i></a>
+                <a href="https://github.com/scholarnavis/scholar_navis/blob/main/LICENSE" target="_blank" rel="noopener" class="text-slate-400 hover:text-primary transition-colors"><i class="fa-solid fa-scale-balanced text-xl"></i></a>
             </div>
         </div>
     </footer>
+
+    <script>
+        /*
+         * 实时版本与下载按钮。
+         *
+         * 数据来源：Worker 的 GET /versions?os=<windows|linux>，返回
+         *   { channels: { stable: "2.0.6", dev: "2.0.7-dev-1" } }
+         * 缺失的通道/平台返回 "0.0.0"（哨兵值），此时把该按钮置灰而不是给出死链。
+         * 接口不可达时保留 HTML 里的静态链接，并把版本位写成 unavailable——
+         * 宁可说"查不到"，也不显示一个会过期的硬编码版本号。
+         */
+        (function () {
+            // 同源优先（本页与 Worker 部署在一起）；被镜像/自建托管时回落到官网。
+            var API_BASE = /(^|\.)scholarnavis\.com$/.test(location.hostname)
+                ? location.origin
+                : 'https://scholarnavis.com';
+
+            var PLATFORMS = [
+                { os: 'windows', label: 'Windows', icon: 'fa-brands fa-windows' },
+                { os: 'linux', label: 'Linux', icon: 'fa-brands fa-linux' }
+            ];
+            var CHANNELS = ['stable', 'dev'];
+            var NOT_AVAILABLE = '0.0.0';
+
+            function isVersion(value) {
+                return typeof value === 'string' && value && value !== NOT_AVAILABLE;
+            }
+
+            async function fetchChannels(os) {
+                var response = await fetch(API_BASE + '/versions?os=' + encodeURIComponent(os), {
+                    headers: { Accept: 'application/json' }
+                });
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                return (await response.json()).channels || {};
+            }
+
+            function renderButtons(channel, versions) {
+                var host = document.querySelector('[data-buttons-for="' + channel + '"]');
+                if (!host) {
+                    return;
+                }
+                host.innerHTML = '';
+                PLATFORMS.forEach(function (platform) {
+                    var version = versions[platform.os];
+                    var available = isVersion(version);
+                    var link = document.createElement('a');
+                    link.className = channel === 'stable'
+                        ? 'dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-white font-semibold rounded-xl hover:scale-105 transition-transform'
+                        : 'dl-btn inline-flex items-center justify-center gap-2 px-5 py-3 border border-primary text-primary font-semibold rounded-xl hover:bg-primary hover:text-white transition-all';
+                    link.href = API_BASE + '/dl?os=' + platform.os + '&channel=' + channel;
+                    link.innerHTML = '<i class="' + platform.icon + '"></i> <span>' + platform.label
+                        + (available ? ' · v' + version : '') + '</span>';
+                    if (!available) {
+                        // 该平台在这个通道还没有产物：置灰并说明原因，避免点进 404。
+                        link.setAttribute('aria-disabled', 'true');
+                        link.title = 'No ' + channel + ' build published for ' + platform.label + ' yet.';
+                    }
+                    host.appendChild(link);
+                });
+            }
+
+            function renderChannel(channel, versions) {
+                var version = versions.windows && isVersion(versions.windows)
+                    ? versions.windows
+                    : versions.linux;
+                var label = document.querySelector('[data-version-for="' + channel + '"]');
+                if (label) {
+                    label.innerHTML = 'latest version: <span class="font-semibold">'
+                        + (isVersion(version) ? 'v' + version : 'unavailable') + '</span>';
+                }
+                renderButtons(channel, versions);
+            }
+
+            function renderVersionLine(byChannel) {
+                var line = document.getElementById('version-line');
+                if (!line) {
+                    return;
+                }
+                var parts = CHANNELS.map(function (channel) {
+                    var version = byChannel[channel].windows && isVersion(byChannel[channel].windows)
+                        ? byChannel[channel].windows
+                        : byChannel[channel].linux;
+                    var text = isVersion(version) ? 'v' + version : 'unavailable';
+                    return (channel === 'stable' ? 'Latest stable: ' : 'dev: ') + text;
+                });
+                line.textContent = parts.join(' · ');
+            }
+
+            function renderNavChip(byChannel) {
+                var chip = document.getElementById('nav-version');
+                if (!chip) {
+                    return;
+                }
+                var version = byChannel.stable.windows && isVersion(byChannel.stable.windows)
+                    ? byChannel.stable.windows
+                    : byChannel.stable.linux;
+                if (!isVersion(version)) {
+                    return;
+                }
+                chip.textContent = 'v' + version;
+                chip.title = 'Latest stable release';
+                chip.classList.remove('hidden');
+            }
+
+            function reportUnavailable(reason) {
+                console.warn('[scholar-navis] version lookup failed: ' + reason);
+                var line = document.getElementById('version-line');
+                if (line) {
+                    line.textContent = 'Latest release information is unavailable right now — downloads below always point at the newest published build.';
+                }
+                ['stable', 'dev'].forEach(function (channel) {
+                    var label = document.querySelector('[data-version-for="' + channel + '"]');
+                    if (label) {
+                        label.innerHTML = 'latest version: <span class="font-semibold">unavailable</span>';
+                    }
+                });
+            }
+
+            Promise.all([
+                fetchChannels('windows'),
+                fetchChannels('linux')
+            ]).then(function (results) {
+                var byChannel = {};
+                CHANNELS.forEach(function (channel) {
+                    byChannel[channel] = { windows: results[0][channel], linux: results[1][channel] };
+                });
+                renderVersionLine(byChannel);
+                renderNavChip(byChannel);
+                CHANNELS.forEach(function (channel) { renderChannel(channel, byChannel[channel]); });
+            }).catch(function (error) {
+                reportUnavailable(error && error.message ? error.message : error);
+            });
+        })();
+    </script>
 
 </body>
 </html>
