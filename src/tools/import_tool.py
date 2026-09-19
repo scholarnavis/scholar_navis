@@ -6,13 +6,13 @@ import tempfile
 
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                               QLabel, QFileDialog, QGroupBox, QTableWidget,
+                               QLabel, QGroupBox, QTableWidget,
                                QHeaderView, QAbstractItemView, QMenu, QLineEdit, QTableWidgetItem, QApplication)
 from PySide6.QtGui import QAction, QCursor, QColor, QIcon
 from PySide6.QtCore import Qt
 from src.core.core_task import TaskState, TaskManager
 from src.core.models_registry import get_model_conf, check_model_exists
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.tools.base_tool import BaseTool
 from src.core.kb_manager import KBManager
 from src.core.signals import GlobalSignals
@@ -20,9 +20,23 @@ from src.services.file_service import FileService
 from src.task.kb_tasks import ImportFilesTask, DeleteFilesTask, SwitchKBTask, RenameFilesTask
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import ProjectEditorDialog, ProgressDialog, StandardDialog, BaseDialog
+from src.ui.components.file_dialogs import open_file_name, open_file_names, save_file_name
 
 
 class ImportTool(BaseTool):
+    # 由 get_ui_widget 创建，仅作静态检查声明
+    combo_kb: BaseComboBox
+    btn_new: QPushButton
+    btn_snp: QPushButton
+    btn_edit: QPushButton
+    btn_del_kb: QPushButton
+    lbl_kb_info: QLabel
+    btn_add_files: QPushButton
+    btn_export: QPushButton
+    file_table: QTableWidget
+    lbl_staged_status: QLabel
+    btn_save: QPushButton
+
     def __init__(self):
         super().__init__("Library Manager")
         self.widget = None
@@ -151,7 +165,7 @@ class ImportTool(BaseTool):
         self.widget.setStyleSheet(f"""
             QWidget {{ background-color: {bg_main}; color: {text_main}; border: none; }}
             QGroupBox {{ border: 1px solid {border}; border-radius: 6px; margin-top: 12px; padding-top: 25px; background-color: {bg_card}; }}
-            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: {text_muted}; font-weight: bold; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: {text_muted}; font-weight: {strong_weight_css()}; }}
             QPushButton {{ background-color: {btn_bg}; border: 1px solid {border}; border-radius: 4px; padding: 6px 12px; color: {text_main}; }}
             QPushButton:hover {{ background-color: {btn_hover}; }}
             QPushButton:disabled {{ color: {text_muted}; background-color: {bg_main}; border: 1px dashed {border}; }}
@@ -194,7 +208,7 @@ class ImportTool(BaseTool):
         if hasattr(self, 'btn_save'):
             self.btn_save.setIcon(tm.icon("save", "bg_main"))
             self.btn_save.setStyleSheet(
-                f"QPushButton:enabled {{ background-color: {accent}; font-weight: bold; color: {bg_main}; height: 35px; border: none; }} QPushButton:hover:enabled {{ background-color: {accent_hover}; }}")
+                f"QPushButton:enabled {{ background-color: {accent}; font-weight: {strong_weight_css()}; color: {bg_main}; height: 35px; border: none; }} QPushButton:hover:enabled {{ background-color: {accent_hover}; }}")
 
         self.update_file_list()
 
@@ -420,20 +434,29 @@ class ImportTool(BaseTool):
 
             m_conf = get_model_conf(display_data.get('model_id'), "embedding")
 
+            # 状态色取自主题（原硬编码 #05B8CC / #f1c40f 在浅色底上对比不足）。
+            # 本方法在 _apply_theme -> update_file_list 链路中会被重跑，故可
+            # 直接读取当前主题色。
+            tm = ThemeManager()
+            accent = tm.color('accent')
+            warning = tm.color('warning')
+            danger = tm.color('danger')
+
             if m_conf:
                 is_downloaded = check_model_exists(m_conf.get('hf_repo_id'))
-                dl_tag = "" if is_downloaded else " <span style='color:#ffb86c; font-weight:bold;'>(Not Downloaded)</span>"
+                dl_tag = "" if is_downloaded else f" <span style='color:{warning}; font-weight:{strong_weight_css()};'>(Not Downloaded)</span>"
                 m_ui = f"{m_conf['ui_name']}{dl_tag}"
             else:
-                m_ui = f"{display_data.get('model_id', 'Unknown')} <span style='color:#ff6b6b; font-weight:bold;'>(Unknown/External)</span>"
+                m_ui = f"{display_data.get('model_id', 'Unknown')} <span style='color:{danger}; font-weight:{strong_weight_css()};'>(Unknown/External)</span>"
 
             status = display_data.get('status', 'ready')
-            status_color = "#ff6b6b" if status == "corrupted" else ("#f1c40f" if status == "building" else "#05B8CC")
+            status_color = danger if status == "corrupted" else (
+                warning if status == "building" else accent)
 
             info = (
                 f"<b>Project:</b> {display_data.get('name', 'Unknown')}<br>"
-                f"<b>Domain:</b> <span style='color:#05B8CC'>{display_data.get('domain', 'Gen')}</span><br>"
-                f"<b>Status:</b> <span style='color:{status_color}; font-weight:bold;'>{status.upper()}</span><br>"
+                f"<b>Domain:</b> <span style='color:{accent}'>{display_data.get('domain', 'Gen')}</span><br>"
+                f"<b>Status:</b> <span style='color:{status_color}; font-weight:{strong_weight_css()};'>{status.upper()}</span><br>"
                 f"<b>Model:</b> {m_ui}<br>"
                 f"<b>Storage:</b> {display_data.get('doc_count', 0)} files ({display_data.get('size_mb', 0)} MB)"
             )
@@ -540,13 +563,17 @@ class ImportTool(BaseTool):
 
         self.lbl_staged_status.setText(msg)
 
-        # 样式调整：有改动或者是损坏状态，都高亮显示
+        # 样式调整：有改动或者是损坏状态，都高亮显示（配色取自主题，
+        # 保证深浅模式下都有足够对比度）
+        tm = ThemeManager()
         if has_changes or is_abnormal:
-            color = "#ff6b6b" if is_abnormal else "#ffb86c"
+            color = tm.color('danger') if is_abnormal else tm.color('warning')
             self.lbl_staged_status.setStyleSheet(
-                f"color: {color}; font-weight: bold; border: 1px solid {color}; padding: 5px;")
+                f"color: {color}; font-weight: {strong_weight_css()}; border: 1px solid {color}; padding: 5px;")
         else:
-            self.lbl_staged_status.setStyleSheet("color: #888; border: 1px dashed #444; padding: 10px;")
+            self.lbl_staged_status.setStyleSheet(
+                f"color: {tm.color('text_muted')}; "
+                f"border: 1px dashed {tm.color('border')}; padding: 10px;")
 
     def commit_changes(self):
         """Commit and apply all staged changes"""
@@ -629,7 +656,7 @@ class ImportTool(BaseTool):
         if self.pd:
             self.pd.close_safe()
             try: self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-            except Exception: pass
+            except (TypeError, RuntimeError): pass
 
         self.staged_add, self.staged_del, self.staged_rename = [], [], {}
         self.staged_meta, self.rebuild_required = None, False
@@ -652,7 +679,7 @@ class ImportTool(BaseTool):
     def _on_rename_done(self, state, msg):
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_rename_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
 
         if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
@@ -668,7 +695,7 @@ class ImportTool(BaseTool):
     def _on_del_done(self, state, msg):
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_del_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
 
         if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
@@ -689,11 +716,11 @@ class ImportTool(BaseTool):
         # 1. Disconnect immediately to prevent duplicate triggers or warnings
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception:
+        except (AttributeError, TypeError, RuntimeError):
             pass
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_final_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
 
         if state == TaskState.SUCCESS.value:
@@ -791,12 +818,12 @@ class ImportTool(BaseTool):
                 while chunk := f.read(1024 * 1024):  # 每次读 1MB，防内存溢出
                     hasher.update(chunk)
             return hasher.hexdigest()
-        except:
+        except OSError:
             return None
 
     def select_files(self):
         # 允许选择 PDF 和 Markdown
-        files, _ = QFileDialog.getOpenFileNames(self.widget, "Select Documents", "", "Documents (*.pdf *.md *.txt *.doc *.docx)")
+        files, _ = open_file_names(self.widget, "Select Documents", "", "Documents (*.pdf *.md *.txt *.doc *.docx)")
         if not files: return
 
         if any(f.lower().endswith('.doc') for f in files):
@@ -954,7 +981,7 @@ class ImportTool(BaseTool):
         # 默认名称为知识库名字，后缀为 .snp
         default_name = f"{data.get('name', 'Project')}.snp"
 
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self.widget,
             "Export Project",
             default_name,
@@ -986,16 +1013,16 @@ class ImportTool(BaseTool):
 
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_export_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception:
+        except (AttributeError, TypeError, RuntimeError):
             pass
 
 
     def import_external_kb(self):
-        path, _ = QFileDialog.getOpenFileName(
+        path, _ = open_file_name(
             self.widget,
             "Import Project",
             "",
@@ -1028,11 +1055,11 @@ class ImportTool(BaseTool):
 
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_import_done)
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except Exception:
+        except (AttributeError, TypeError, RuntimeError):
             pass
         GlobalSignals().kb_list_changed.emit()
 
@@ -1049,7 +1076,7 @@ class ImportTool(BaseTool):
         def on_download_state_changed(state, msg):
             try:
                 self.task_mgr.sig_state_changed.disconnect(on_download_state_changed)
-            except Exception:
+            except (TypeError, RuntimeError):
                 pass
 
             if state == TaskState.SUCCESS.value:

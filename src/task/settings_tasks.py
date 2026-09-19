@@ -52,6 +52,16 @@ class FetchModelsTask(BackgroundTask):
 
 
 class TestDeviceTask(BackgroundTask):
+    #: 提供者 → 面向用户的加速器名称（日志与提示里不暴露 ORT 内部类名）
+    _PROVIDER_LABELS = {
+        "CPUExecutionProvider": "CPU",
+        "CUDAExecutionProvider": "CUDA",
+        "TensorrtExecutionProvider": "TensorRT",
+        "DmlExecutionProvider": "DirectML",
+        "ROCmExecutionProvider": "ROCm",
+        "CoreMLExecutionProvider": "CoreML",
+    }
+
     def _execute(self):
         device_id = self.kwargs.get("device_id")
         self.send_log("INFO", f"Testing device: {device_id}")
@@ -59,37 +69,49 @@ class TestDeviceTask(BackgroundTask):
         try:
             import onnxruntime as ort
             import numpy as np
-            from onnx import helper, TensorProto
+            from src.core.onnx_provider import probe_model_bytes, resolve_provider
 
+            # 先做真实可用性解析：请求的加速设备不可用（如 Linux 缺 CUDA/cuDNN
+            # 运行库）时给出明确结论，而不是等 ORT 静默回退后再报一句含糊失败。
+            resolved = resolve_provider(device_id, probe=True)
 
-            provider = "CPUExecutionProvider"
-            provider_options = None
+            if resolved.degraded:
+                self.send_log("WARNING", f"Device '{device_id}' unavailable: {resolved.reason}")
+                return {
+                    "success": False,
+                    "msg": (
+                        f"'{device_id}' cannot be used on this machine.\n\n"
+                        f"{resolved.reason}\n\n"
+                        "Indexing and search keep working on the CPU - only speed is affected. "
+                        "Select 'CPU' or 'Auto Detect' under Compute Device to make that "
+                        "explicit."
+                    )
+                }
 
-            if device_id.startswith("cuda"):
-                provider = "CUDAExecutionProvider"
-                if ":" in device_id:
-                    provider_options = {'device_id': int(device_id.split(":")[1])}
-            elif device_id.startswith("dml"):
-                provider = "DmlExecutionProvider"
-                if ":" in device_id:
-                    provider_options = {'device_id': int(device_id.split(":")[1])}
-            elif device_id.startswith("rocm"):
-                provider = "ROCmExecutionProvider"
-                if ":" in device_id:
-                    provider_options = {'device_id': int(device_id.split(":")[1])}
-            elif device_id == "coreml":
-                provider = "CoreMLExecutionProvider"
+            provider = resolved.provider
+            label = self._PROVIDER_LABELS.get(provider, provider)
+            provider_options = resolved.provider_options
+
+            if provider == "TensorrtExecutionProvider":
+                # TensorRT 首次运行要为每个（子）图编译引擎，耗时从数秒到数十秒，
+                # 之后走引擎缓存，因此必须提前告知，避免用户以为卡死。
+                self.send_log(
+                    "INFO",
+                    "TensorRT selected: engines are compiled on first use and cached "
+                    "afterwards; this first test may take a while.")
+                self.update_progress(20, "Compiling TensorRT engines (first run only)...")
 
             self.send_log("INFO", "Generating native dummy ONNX model in memory...")
-            X = helper.make_tensor_value_info('X', TensorProto.FLOAT, [1, 3])
-            Y = helper.make_tensor_value_info('Y', TensorProto.FLOAT, [1, 3])
-            node_def = helper.make_node('Identity', inputs=['X'], outputs=['Y'])
-            graph_def = helper.make_graph([node_def], 'test-model', [X], [Y])
-
-            opset_import = helper.make_opsetid("", 14)
-            model_def = helper.make_model(graph_def, producer_name='scholar-navis-test', opset_imports=[opset_import])
-
-            model_bytes = model_def.SerializeToString()
+            # 复用 onnx_provider 的探针模型（IR 版本已在那里钉住，见 _PROBE_IR_VERSION）。
+            # 历史上这里自己造了一份，于是"onnx 包比 onnxruntime 新 -> 模型被 ORT 拒绝"
+            # 会在硬件测试里独立复现，表现为"测试说 CUDA 不可用"，而 CUDA 实际是好的。
+            model_bytes = probe_model_bytes()
+            if model_bytes is None:
+                return {
+                    "success": False,
+                    "msg": ("Cannot build the in-memory test model: the installed 'onnx' "
+                            "package is unusable. Reinstall onnx / onnxruntime and retry."),
+                }
 
             self.send_log("INFO", f"Initializing ORT Session with provider: {provider}...")
 
@@ -104,16 +126,27 @@ class TestDeviceTask(BackgroundTask):
             if provider != "CPUExecutionProvider" and active_providers[0] == "CPUExecutionProvider":
                 return {
                     "success": False,
-                    "msg": f"Hardware acceleration failed!\n\nRequested '{provider}', but ONNX Runtime silently fell back to 'CPUExecutionProvider'.\n\nPlease check your GPU drivers or ONNX environment."
+                    "msg": f"Hardware acceleration failed!\n\nRequested {label}, but ONNX Runtime silently fell back to CPU.\n\nPlease check your GPU drivers or ONNX environment."
                 }
 
             self.send_log("INFO", "Running dummy inference tensor...")
             test_input = np.random.randn(1, 3).astype(np.float32)
             session.run(None, {"X": test_input})
 
+            extra = ""
+            if provider == "TensorrtExecutionProvider":
+                try:
+                    from src.core.onnx_provider import tensorrt_engine_cache_dir
+
+                    extra = (f"\n\nTensorRT engines are cached at:\n"
+                             f"{tensorrt_engine_cache_dir()}")
+                except Exception:
+                    extra = ""
+
             return {
                 "success": True,
-                "msg": f"Success! \n\nThe device '{device_id}' ({provider}) is fully functional and hardware acceleration is active."
+                "msg": (f"Success!\n\nThe device '{device_id}' works with {label} "
+                        f"acceleration.{extra}")
             }
 
         except Exception as e:

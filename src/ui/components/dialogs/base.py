@@ -1,0 +1,303 @@
+"""Base dialog frame: themed container with anchored sizing and footer buttons."""
+import logging
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QWidget
+
+from src.core.theme_manager import ThemeManager, strong_weight_css
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["BaseDialog", "HAS_NVML", "nvml_available"]
+
+#: NVML 可用性缓存（None = 尚未探测）。
+_nvml_available = None
+
+
+def nvml_available() -> bool:
+    """探测 NVML（NVIDIA 管理库）是否可用，结果进程内缓存。
+
+    旧实现在**模块导入期**直接调用 ``pynvml.nvmlInit()``，而本模块位于主窗口
+    导入链上（main_window → components.dialog → dialogs.base）：NVML 首次初始化
+    要唤醒管理库与 GPU，混显笔记本上实测 0.02~2.7 s 不等，且 ``HAS_NVML`` 在代码
+    里没有任何消费方——等于把启动时间白送给一次无用的副作用（并且只 init 不
+    shutdown）。改为首次显式查询时才初始化，失败即缓存 False（与旧语义一致）。
+    """
+    global _nvml_available
+    if _nvml_available is None:
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            _nvml_available = True
+        except Exception as e:  # ImportError / 驱动缺失 / NVML 初始化失败
+            logger.debug(f"NVML unavailable: {e}")
+            _nvml_available = False
+    return _nvml_available
+
+
+def __getattr__(name: str):
+    """PEP 562：``HAS_NVML`` 仍可按模块属性读取，但只在真正被读取时才探测。
+
+    维持 ``from src.ui.components.dialogs.base import HAS_NVML`` 的兼容性，
+    同时避免导入期触发 NVML 初始化。
+    """
+    if name == "HAS_NVML":
+        return nvml_available()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+class BaseDialog(QDialog):
+    def __init__(self, parent=None, title="Dialog", width=450):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.Dialog |
+            Qt.CustomizeWindowHint |
+            Qt.WindowTitleHint |
+            Qt.WindowCloseButtonHint
+        )
+        self.setWindowTitle(title)
+
+        self._target_width = width
+        self.setFixedWidth(width)
+
+        self._is_closing = False
+        self.tm = ThemeManager()
+        self._tracked_buttons = []
+
+        self.v_layout = QVBoxLayout(self)
+        self.v_layout.setContentsMargins(0, 0, 0, 0)
+        self.v_layout.setSpacing(0)
+
+        # --- 内容区 ---
+        self.content_widget = QWidget()
+        self.content_widget.setObjectName("ContentWidget")
+        self.content_widget.setAttribute(Qt.WA_StyledBackground, True)
+
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(24, 24, 24, 24)
+        self.content_layout.setSpacing(16)
+
+        self.v_layout.addWidget(self.content_widget, 1)
+
+        # --- 底部按钮区 ---
+        self.footer_widget = QWidget()
+        self.footer_widget.setAttribute(Qt.WA_StyledBackground, True)
+        self.footer_widget.setFixedHeight(55)
+
+        self.footer_layout = QHBoxLayout(self.footer_widget)
+        self.footer_layout.setContentsMargins(15, 0, 15, 0)
+        self.footer_layout.addStretch()
+        self.v_layout.addWidget(self.footer_widget)
+
+        self.tm.theme_changed.connect(self._apply_theme)
+
+        self._parent_ref = parent
+        QTimer.singleShot(0, self._adjust_and_anchor)
+        # 首次主题应用：对话框是独立顶层窗口，其原生标题栏不会继承主窗口的
+        # 深浅色状态，必须自己设一次。放到事件循环第一帧（而非 __init__ 内同步
+        # 调用），因为子类重写的 _apply_theme 会访问其 __init__ 后段才创建的控件。
+        QTimer.singleShot(0, self._apply_theme)
+
+    def _adjust_and_anchor(self):
+        """动态尺寸结算修复：去除套娃滚动条，利用原生 sizeHint 进行精准测量"""
+
+        self.content_widget.setFixedWidth(self._target_width)
+        self.layout().update()
+
+        # 获取 Qt 引擎根据所有子组件真实排版后算出的“理想高度”
+        ideal_height = self.layout().sizeHint().height()
+
+        min_allowed = self.minimumHeight()
+        ideal_height = max(ideal_height, min_allowed)
+
+        screen_geo = QGuiApplication.primaryScreen().availableGeometry()
+        max_allowed_height = int(screen_geo.height() * 0.85)
+
+        final_height = min(ideal_height, max_allowed_height)
+
+        self.setFixedSize(self._target_width, final_height)
+
+        self._anchor_to_center(self._parent_ref)
+
+    def _anchor_to_center(self, parent):
+        frame_geo = self.frameGeometry()
+
+        if parent and parent.window():
+            parent_geo = parent.window().geometry()
+            target_x = parent_geo.center().x() - (frame_geo.width() // 2)
+            target_y = parent_geo.center().y() - (frame_geo.height() // 2)
+        else:
+            screen_geo = QGuiApplication.primaryScreen().geometry()
+            target_x = screen_geo.center().x() - (frame_geo.width() // 2)
+            target_y = screen_geo.center().y() - (frame_geo.height() // 2)
+
+        self.move(target_x, target_y)
+
+    def _apply_theme(self):
+        from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
+        tm = ThemeManager()
+
+        # 原生标题栏跟随主题（统一由核心层实现，含 64 位句柄与 Win11 兜底）
+        apply_native_titlebar_theme(self, tm.current_theme == "dark")
+
+        self.setStyleSheet(f"""
+            QDialog, QWidget#ContentWidget {{
+                background-color: {tm.color('bg_main')};
+                color: {tm.color('text_main')};
+            }}
+
+            QLineEdit, QTextEdit, QComboBox, QSpinBox {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                border-radius: 4px;
+                padding: 6px;
+                selection-background-color: {tm.color('accent')};
+                selection-color: {tm.color('selection_fg')};
+            }}
+
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus {{
+                border: 1px solid {tm.color('accent')};
+            }}
+
+            QComboBox QAbstractItemView {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                selection-background-color: {tm.color('btn_hover')};
+                selection-color: {tm.color('text_main')};
+                outline: none;
+            }}
+
+            QScrollArea {{
+                background-color: transparent;
+                border: none;
+            }}
+            QScrollBar:vertical, QScrollBar:horizontal {{
+                background-color: transparent;
+                border: none;
+                width: 12px;
+                height: 12px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+                background-color: {tm.color('text_muted')};
+                border-radius: 4px;
+                min-height: 30px;
+                min-width: 30px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+                background-color: {tm.color('text_main')};
+            }}
+            QScrollBar::add-line, QScrollBar::sub-line,
+            QScrollBar::add-page, QScrollBar::sub-page {{
+                background: none; border: none; height: 0px; width: 0px;
+            }}
+
+            QTableWidget {{
+                background-color: {tm.color('bg_card')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                gridline-color: {tm.color('bg_main')};
+                outline: none;
+            }}
+            QHeaderView::section {{
+                background-color: {tm.color('bg_input')};
+                color: {tm.color('text_muted')};
+                border: none;
+                border-bottom: 1px solid {tm.color('border')};
+                border-right: 1px solid {tm.color('border')};
+                padding: 8px;
+                font-weight: {strong_weight_css()};
+            }}
+            QTableWidget::item:selected {{
+                background-color: {tm.color('btn_hover')};
+                color: {tm.color('text_main')};
+            }}
+            QTableCornerButton::section {{
+                background-color: {tm.color('bg_input')};
+                border: none;
+            }}
+
+            QListWidget {{
+                background-color: {tm.color('bg_card')};
+                color: {tm.color('text_main')};
+                border: 1px solid {tm.color('border')};
+                border-radius: 6px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                border-bottom: 1px solid {tm.color('bg_main')};
+                padding: 6px;
+            }}
+            QListWidget::item:hover {{
+                background-color: {tm.color('btn_hover')};
+            }}
+            QListWidget::item:selected {{
+                background-color: {tm.color('accent')};
+                color: {tm.color('selection_fg')};
+            }}
+        """)
+
+        self.footer_widget.setStyleSheet(f"""
+            background-color: {tm.color('bg_card')};
+            border-top: 1px solid {tm.color('border')};
+        """)
+
+        for btn, b_type in self._tracked_buttons:
+            self._update_button_style(btn, b_type)
+
+    def _update_button_style(self, btn, b_type):
+        tm = self.tm
+
+        if b_type == "primary":
+            style = f"""
+                QPushButton {{
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: {strong_weight_css()};
+                    background-color: {tm.color('accent')};
+                    color: {tm.color('bg_main')};
+                    border: 1px solid {tm.color('accent')};
+                }}
+                QPushButton:hover {{ background-color: {tm.color('accent_hover')}; }}
+            """
+        elif b_type == "danger":
+            style = f"""
+                QPushButton {{
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: {strong_weight_css()};
+                    background-color: transparent;
+                    color: {tm.color('danger')};
+                    border: 1px solid {tm.color('danger')};
+                }}
+                QPushButton:hover {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; }}
+            """
+        else:
+            style = f"""
+                QPushButton {{
+                    border-radius: 4px; font-family: {tm.font_family()}; font-size: 13px; font-weight: {strong_weight_css()};
+                    background-color: {tm.color('btn_bg')};
+                    color: {tm.color('text_main')};
+                    border: 1px solid {tm.color('border')};
+                }}
+                QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
+            """
+
+        btn.setStyleSheet(style)
+
+
+    def add_button(self, text, callback, is_primary=False, is_danger=False):
+        btn = QPushButton(text)
+        btn.setFixedSize(90, 32)
+        btn.setCursor(Qt.PointingHandCursor)
+
+        if callback:
+            btn.clicked.connect(lambda *args, cb=callback: cb())
+
+        b_type = "primary" if is_primary else ("danger" if is_danger else "default")
+        self._tracked_buttons.append((btn, b_type))
+        self._update_button_style(btn, b_type)
+
+        self.footer_layout.addWidget(btn)
+        return btn

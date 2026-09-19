@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
                                QHeaderView, QAbstractItemView, QComboBox, QPushButton, QPlainTextEdit)
 from PySide6.QtCore import Qt, Signal
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 
 
 class ScrollInterceptTableWidget(QTableWidget):
@@ -65,7 +65,7 @@ class ParamEditorWidget(QWidget):
                 background: transparent; 
                 color: {tm.color('danger')}; 
                 border: none; 
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
             }}
         """)
 

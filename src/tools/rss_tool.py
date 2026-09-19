@@ -6,22 +6,23 @@ import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QUrl, QEvent, QMarginsF, QTimer, QRectF, QByteArray, QBuffer, QIODevice
-from PySide6.QtGui import QDesktopServices, QTextDocument, QPageLayout, QAbstractTextDocumentLayout, QPainter, QFont, \
-    QColor
+from PySide6.QtGui import QAction, QDesktopServices, QTextDocument, QPageLayout, QAbstractTextDocumentLayout, \
+    QPainter, QFont, QColor
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QListWidget, QSplitter, QListWidgetItem, QLineEdit, QCheckBox, QScrollArea,
-                               QFileDialog, QFrame, QAbstractItemView, QMenu, QApplication)
+                               QFrame, QAbstractItemView, QMenu, QApplication)
 
 from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskState, TaskMode
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.rss_tasks import FetchRSSTask, SearchArticlesTask, ImportRssTask, ExportRssTask
 from src.tools.base_tool import BaseTool
 from src.ui.components.RotatingSpinner import ModernSpinner
 from src.ui.components.dialog import ProgressDialog, FeedEditorDialog, FeedLibraryDialog, StandardDialog
+from src.ui.components.file_dialogs import open_file_name, save_file_name
 from src.ui.components.toast import ToastManager
 
 DEFAULT_FEEDS_DICT = {
@@ -198,8 +199,11 @@ class ArticleWidget(QFrame):
             self.icon_oa.setToolTip("Open Access (OA)")
             header_layout.addWidget(self.icon_oa)
 
-        title_link = f"<a href='{article_data['link']}' style='color:#05B8CC; text-decoration:none; font-size: 16px; font-weight:bold;'>{article_data['title']}</a>"
-        self.lbl_title = QLabel(title_link)
+        # 标题链接色随主题刷新（见 _apply_theme）：原硬编码 #05B8CC 在浅色
+        # 主题下白底青光对比度不足。
+        self._title_link = article_data.get('link', '')
+        self._title_text = article_data.get('title', '')
+        self.lbl_title = QLabel()
         self.lbl_title.setOpenExternalLinks(True)
         self.lbl_title.setWordWrap(True)
 
@@ -304,7 +308,7 @@ class ArticleWidget(QFrame):
             self.btn_download_oa.setIcon(tm.icon("download", "bg_main"))
             # Uses a solid green success background with main background color (usually white/black) for text
             self.btn_download_oa.setStyleSheet(
-                f"QPushButton {{ background-color: {tm.color('success')}; color: {tm.color('bg_main')}; border: none; border-radius: 4px; padding: 4px 10px; font-weight: bold; }}"
+                f"QPushButton {{ background-color: {tm.color('success')}; color: {tm.color('bg_main')}; border: none; border-radius: 4px; padding: 4px 10px; font-weight: {strong_weight_css()}; }}"
                 f"QPushButton:hover {{ opacity: 0.8; }}"
             )
 
@@ -328,6 +332,12 @@ class ArticleWidget(QFrame):
 
         if hasattr(self, 'lbl_tag_icon'):
             self.lbl_tag_icon.setPixmap(tm.icon("tag", "accent").pixmap(14, 14))
+
+        if hasattr(self, 'lbl_title'):
+            self.lbl_title.setText(
+                f"<a href='{self._title_link}' style='color:{tm.color('accent')}; "
+                f"text-decoration:none; font-size: 16px; font-weight:{strong_weight_css()};'>"
+                f"{self._title_text}</a>")
 
 
     def _send_to_chat(self):
@@ -376,6 +386,41 @@ class ArticleWidget(QFrame):
 
 
 class RSSTool(BaseTool):
+    # 由 get_ui_widget 与刷新流程创建，仅作静态检查声明
+    search_task_mgr: TaskManager
+    widget: QWidget
+    btn_manage: QPushButton
+    btn_more_actions: QPushButton
+    more_menu: QMenu
+    action_add: QAction
+    action_edit: QAction
+    action_unsub: QAction
+    action_import: QAction
+    action_export: QAction
+    lbl_time: QLabel
+    btn_refresh: QPushButton
+    inp_search_feed: QLineEdit
+    btn_feed_sel_all: QPushButton
+    btn_feed_sel_inv: QPushButton
+    feed_list: QListWidget
+    btn_sel_all: QPushButton
+    btn_sel_inv: QPushButton
+    btn_batch_chat: QPushButton
+    btn_export_pdf: QPushButton
+    scroll_area: QScrollArea
+    loading_container: QWidget
+    loading_layout: QHBoxLayout
+    spinner: ModernSpinner
+    lbl_loading_text: QLabel
+    article_container: QWidget
+    article_layout: QVBoxLayout
+    render_timer: QTimer
+    render_queue: list
+    current_render_url: str
+    _is_cancelling: bool
+    pd: ProgressDialog
+    _cancel_export: bool
+
     def __init__(self):
         super().__init__("Literature Tracker")
 
@@ -419,7 +464,7 @@ class RSSTool(BaseTool):
             self.feed_list.setStyleSheet(f"""
                 QListWidget {{ background-color: {bg_main}; color: {text_main}; border: 1px solid {border}; border-radius: 4px; padding: 5px; }}
                 QListWidget::item {{ padding: 4px 0px; border-bottom: 1px dashed {border}; }}
-                QListWidget::item:selected {{ background-color: {tm.color('accent_hover')}; color: {tm.color('bg_card')}; font-weight: bold; }}
+                QListWidget::item:selected {{ background-color: {tm.color('accent_hover')}; color: {tm.color('bg_card')}; font-weight: {strong_weight_css()}; }}
             """)
 
         if hasattr(self, 'inp_search_feed'):
@@ -428,7 +473,7 @@ class RSSTool(BaseTool):
         # 顶部操作栏
         if hasattr(self, 'btn_manage'):
             self.btn_manage.setIcon(tm.icon("folder", "bg_main"))
-            self.btn_manage.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;")
+            self.btn_manage.setStyleSheet(f"background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: {strong_weight_css()}; border: none;")
 
         if hasattr(self, 'btn_more_actions'):
             self.btn_more_actions.setIcon(tm.icon("settings", "text_main"))
@@ -444,7 +489,7 @@ class RSSTool(BaseTool):
 
         if hasattr(self, 'btn_refresh'):
             self.btn_refresh.setIcon(tm.icon("sync", "bg_main"))
-            self.btn_refresh.setStyleSheet(f"background-color: {tm.color('success')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; border: none;")
+            self.btn_refresh.setStyleSheet(f"background-color: {tm.color('success')}; color: {tm.color('bg_main')}; padding: 6px 15px; border-radius: 4px; font-weight: {strong_weight_css()}; border: none;")
 
         # 小型选择按钮
         action_btn_style = f"QPushButton {{ background-color: {btn_bg}; color: {text_main}; border: 1px solid {border}; border-radius: 3px; padding: 4px 8px; font-size: 11px; }} QPushButton:hover {{ background-color: {btn_hover}; }}"
@@ -460,11 +505,11 @@ class RSSTool(BaseTool):
         # 右侧快捷操作按钮
         if hasattr(self, 'btn_batch_chat'):
             self.btn_batch_chat.setIcon(tm.icon("brain", "accent"))
-            self.btn_batch_chat.setStyleSheet(f"QPushButton {{ color: {tm.color('accent')}; background-color: transparent; border: 1px solid {tm.color('accent')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; }}")
+            self.btn_batch_chat.setStyleSheet(f"QPushButton {{ color: {tm.color('accent')}; background-color: transparent; border: 1px solid {tm.color('accent')}; padding: 4px 8px; border-radius: 4px; font-weight: {strong_weight_css()}; }} QPushButton:hover {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; }}")
 
         if hasattr(self, 'btn_export_pdf'):
             self.btn_export_pdf.setIcon(tm.icon("file-text", "warning"))
-            self.btn_export_pdf.setStyleSheet(f"QPushButton {{ color: {tm.color('warning')}; background-color: transparent; border: 1px solid {tm.color('warning')}; padding: 4px 8px; border-radius: 4px; font-weight: bold; }} QPushButton:hover {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; }}")
+            self.btn_export_pdf.setStyleSheet(f"QPushButton {{ color: {tm.color('warning')}; background-color: transparent; border: 1px solid {tm.color('warning')}; padding: 4px 8px; border-radius: 4px; font-weight: {strong_weight_css()}; }} QPushButton:hover {{ background-color: {tm.color('warning')}; color: {tm.color('bg_main')}; }}")
 
         if hasattr(self, 'inp_global_search'):
             self.inp_global_search.setStyleSheet(f"""
@@ -482,7 +527,7 @@ class RSSTool(BaseTool):
                     """)
 
         if hasattr(self, 'lbl_loading_anim'):
-            self.lbl_loading_anim.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: bold;")
+            self.lbl_loading_anim.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: {strong_weight_css()};")
 
     def trigger_global_search(self):
         query = self.inp_global_search.text().strip()
@@ -506,7 +551,7 @@ class RSSTool(BaseTool):
         try:
             self.search_task_mgr.sig_result.disconnect()
             self.search_task_mgr.sig_state_changed.disconnect()
-        except Exception:
+        except (TypeError, RuntimeError):
             pass
 
         self.search_task_mgr.sig_result.connect(self._on_search_result)
@@ -565,7 +610,8 @@ class RSSTool(BaseTool):
         toolbar = QHBoxLayout()
         self.btn_manage = QPushButton("Manage Subscriptions")
         self.btn_manage.setStyleSheet(
-            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; font-weight: bold;")
+            "background-color: #007acc; color: white; padding: 6px 15px; border-radius: 4px; "
+            f"font-weight: {strong_weight_css()};")
         self.btn_manage.clicked.connect(self.open_subscription_manager)
 
         # 替换原有零散按钮，整合为下拉菜单
@@ -596,7 +642,8 @@ class RSSTool(BaseTool):
 
         self.btn_refresh = QPushButton("Sync Selected")
         self.btn_refresh.setStyleSheet(
-            "background-color: #28a745; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px;")
+            "background-color: #28a745; color: white; padding: 6px 15px; border-radius: 4px; "
+            f"font-weight: {strong_weight_css()};")
         self.btn_refresh.clicked.connect(lambda: self._batch_action("fetch"))
 
         toolbar.addWidget(self.btn_manage)
@@ -693,15 +740,13 @@ class RSSTool(BaseTool):
 
         tm = ThemeManager()
         self.lbl_loading_text = QLabel("Searching...")
-        self.lbl_loading_text.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: bold;")
+        self.lbl_loading_text.setStyleSheet(f"color: {tm.color('accent')}; font-size: 16px; font-weight: {strong_weight_css()};")
 
         self.loading_layout.addWidget(self.spinner)
         self.loading_layout.addSpacing(10)
         self.loading_layout.addWidget(self.lbl_loading_text)
 
         self.loading_container.hide()
-        right_layout.insertWidget(2, self.loading_container)
-
 
         self.article_container = QWidget()
         self.article_container.setStyleSheet("background: transparent;")
@@ -711,6 +756,12 @@ class RSSTool(BaseTool):
         self.scroll_area.setWidget(self.article_container)
 
         right_layout.addWidget(self.scroll_area)
+        # 加载提示压在文章列表上方：按 scroll_area 的实际位置插入，而不是写死索引。
+        # 右栏元素数量会随版本增删，固定索引一旦越界，Qt 会打印
+        # "QBoxLayout::insert: index N out of range" 并退化成追加到列表末尾——
+        # 提示条位置就跑到了列表下方。
+        right_layout.insertWidget(right_layout.indexOf(self.scroll_area),
+                                 self.loading_container)
         splitter.addWidget(right_panel)
 
         splitter.setSizes([340, 860])
@@ -813,8 +864,8 @@ class RSSTool(BaseTool):
             item.setHidden(not match)
 
     def export_feeds(self):
-        path, _ = QFileDialog.getSaveFileName(self.widget, "Export RSS Feeds", "rss_feeds_export.json",
-                                              "JSON Files (*.json)")
+        path, _ = save_file_name(self.widget, "Export RSS Feeds", "rss_feeds_export.json",
+                                 "JSON Files (*.json)")
         if not path: return
 
         self.task_mgr.sig_result.connect(self._on_export_done)
@@ -823,7 +874,7 @@ class RSSTool(BaseTool):
     def _on_export_done(self, result):
         try:
             self.task_mgr.sig_result.disconnect(self._on_export_done)
-        except:
+        except (TypeError, RuntimeError):
             pass
 
         if result and result.get("success"):
@@ -832,7 +883,7 @@ class RSSTool(BaseTool):
             ToastManager().show(f"Export failed: {result.get('error') if result else 'Unknown error'}", "error")
 
     def import_feeds(self):
-        path, _ = QFileDialog.getOpenFileName(self.widget, "Import RSS Feeds", "", "JSON Files (*.json)")
+        path, _ = open_file_name(self.widget, "Import RSS Feeds", "", "JSON Files (*.json)")
         if not path: return
 
         self.task_mgr.sig_result.connect(self._on_import_done)
@@ -841,7 +892,7 @@ class RSSTool(BaseTool):
     def _on_import_done(self, result):
         try:
             self.task_mgr.sig_result.disconnect(self._on_import_done)
-        except:
+        except (TypeError, RuntimeError):
             pass
 
         if result and result.get("success"):
@@ -980,11 +1031,11 @@ class RSSTool(BaseTool):
     def _on_fetch_done(self, state, msg):
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_fetch_done)
-        except:
+        except (TypeError, RuntimeError):
             pass
         try:
             self.task_mgr.sig_progress.disconnect(self.pd.update_progress)
-        except:
+        except (TypeError, RuntimeError):
             pass
 
         # 统一替换为 show_finish_state 闭环强反馈
@@ -1091,8 +1142,8 @@ class RSSTool(BaseTool):
         safe_filename = re.sub(r'[\\/*?:"<>|]', "_", feed_name)
 
 
-        path, _ = QFileDialog.getSaveFileName(self.widget, "Export to PDF", f"{safe_filename}.pdf",
-                                              "PDF Files (*.pdf)")
+        path, _ = save_file_name(self.widget, "Export to PDF", f"{safe_filename}.pdf",
+                                 "PDF Files (*.pdf)")
         if not path: return
 
         # 1. 启动进度对话框

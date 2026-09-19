@@ -4,13 +4,19 @@ import os
 import shutil
 import uuid
 import zipfile
+from typing import TYPE_CHECKING
+
 import onnxruntime as ort
-from chromadb import Documents, Embeddings, EmbeddingFunction
+
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
-from src.core.models_registry import get_model_conf, ensure_onnx_model
+from src.core.models_registry import get_model_conf, ensure_onnx_model, ModelMissingError
+from src.core.onnx_provider import resolve_provider
 from src.core.rerank_engine import RerankEngine
+
+if TYPE_CHECKING:  # 仅用于类型注解：运行期不导入 chromadb（启动链上约 0.4 s）
+    from chromadb import Documents, Embeddings
 
 logger = logging.getLogger("Task.kb")
 
@@ -57,17 +63,30 @@ def _worker_load_model(kb_id, config):
     conf = get_model_conf(model_id, "embedding")
     repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
     try:
-        onnx_dir = ensure_onnx_model(repo_id, "embedding")
+        # allow_download=False：模型缺失不再自动联网拉取，而是抛 ModelMissingError，
+        # 由上层向用户提示去 "设置 → AI Models" 手动下载。
+        onnx_dir = ensure_onnx_model(repo_id, "embedding", allow_download=False)
 
         logger.info(f"Loading Embedding Model: {repo_id} on {device_str}")
 
         return ONNXEmbeddingFunction(onnx_dir, device=device_str)
+    except ModelMissingError as e:
+        # 模型未下载：原样上抛清晰提示，引导用户去设置手动下载，不自动联网拉取
+        raise e
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         raise RuntimeError(f"Model Load Failed: {str(e)}")
 
 
-class ONNXEmbeddingFunction(EmbeddingFunction):
+class ONNXEmbeddingFunction:
+    """本地 ONNX 嵌入函数（ChromaDB 兼容）。
+
+    刻意**不继承** ``chromadb.EmbeddingFunction``：chromadb 只做鸭子类型校验
+    （``chromadb.api.types.validate_embedding_function`` 比较 ``__call__`` 的
+    参数名是否与协议一致，不做 isinstance 检查），而继承就必须在导入期导入
+    chromadb——本模块位于启动链上，代价约 0.4 s。接口要求：
+    ``__call__(self, input: Documents) -> Embeddings``，参数名必须是 ``input``。
+    """
 
     def __init__(self, onnx_cache_dir, device="cpu"):
         from optimum.onnxruntime import ORTModelForFeatureExtraction
@@ -78,41 +97,19 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
         self.tokenizer = AutoTokenizer.from_pretrained(onnx_cache_dir, local_files_only=True)
         available_providers = ort.get_available_providers()
 
-        provider = "CPUExecutionProvider"
-        provider_options = None
         device_str = str(device).lower()
 
         logger.info(f"ONNX Init Requested Device: {device_str}")
         logger.info(f"Available ONNX Providers in Env: {available_providers}")
 
-        if device_str.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
-            provider = "CUDAExecutionProvider"
-            if ":" in device_str:
-                provider_options = {'device_id': int(device_str.split(":")[1])}
+        # 统一走 onnx_provider 的真实可用性解析：构建期支持 ≠ 运行期可用。
+        # 请求的加速设备不可用时降级到 CPU（只影响速度），绝不因此中断索引。
+        resolved = resolve_provider(device_str)
+        provider = resolved.provider
+        provider_options = resolved.provider_options
 
-        elif device_str.startswith("dml") and "DmlExecutionProvider" in available_providers:
-            provider = "DmlExecutionProvider"
-            if ":" in device_str:
-                provider_options = {'device_id': int(device_str.split(":")[1])}
-
-        elif device_str.startswith("rocm") and "ROCmExecutionProvider" in available_providers:
-            provider = "ROCmExecutionProvider"
-            if ":" in device_str:
-                provider_options = {'device_id': int(device_str.split(":")[1])}
-
-        elif device_str.startswith("coreml") and "CoreMLExecutionProvider" in available_providers:
-            provider = "CoreMLExecutionProvider"
-
-        elif device_str == "auto":
-            if "CUDAExecutionProvider" in available_providers:
-                provider = "CUDAExecutionProvider"
-            elif "DmlExecutionProvider" in available_providers:
-                provider = "DmlExecutionProvider"
-            elif "ROCmExecutionProvider" in available_providers:
-                provider = "ROCmExecutionProvider"
-            elif "CoreMLExecutionProvider" in available_providers:
-                provider = "CoreMLExecutionProvider"
-
+        if resolved.degraded:
+            logger.warning(f"Embedding device degraded to CPU: {resolved.reason}")
         logger.info(f"Final Selected ONNX Provider: {provider}")
         logger.info(f"Provider Options: {provider_options}")
 
@@ -129,11 +126,13 @@ class ONNXEmbeddingFunction(EmbeddingFunction):
 
         actual_providers = self.model.providers
         if provider != "CPUExecutionProvider" and actual_providers and actual_providers[0] == "CPUExecutionProvider":
-            fallback_msg = f"CRITICAL: Silent fallback detected! Requested '{provider}' but ONNX Runtime forced 'CPUExecutionProvider'. Hardware acceleration failed."
-            logger.error(fallback_msg)
-            raise RuntimeError(fallback_msg)
+            # 静默回退只降速不降质：记录告警后继续使用已加载的 CPU 模型。
+            logger.error(
+                "Silent fallback detected: requested '%s' but ONNX Runtime activated "
+                "'CPUExecutionProvider'. Continuing on CPU; verify GPU runtime libraries "
+                "in Settings -> Hardware.", provider)
 
-    def __call__(self, input: Documents) -> Embeddings:
+    def __call__(self, input: "Documents") -> "Embeddings":
         import torch.nn.functional as F
         if not input:
             return []
@@ -238,7 +237,7 @@ class ImportFilesTask(BackgroundTask):
                         embedding_function=embed_fn,
                         metadata={"kb_name": kb_info['name']}
                     )
-                except Exception:
+                except (ValueError, RuntimeError, OSError):
                     pass
 
                 all_docs = kb_mgr.get_kb_files(kb_id)
@@ -373,7 +372,7 @@ class ImportFilesTask(BackgroundTask):
             if getattr(db_mgr, 'client', None):
                 try:
                     db_mgr.client._system.stop()
-                except Exception:
+                except (RuntimeError, AttributeError, OSError):
                     pass
 
             if 'embed_fn' in locals() and embed_fn:
@@ -389,7 +388,7 @@ class ImportFilesTask(BackgroundTask):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     self.send_log("INFO", "CUDA cache cleared.")
-            except Exception:
+            except (ImportError, OSError, RuntimeError, AttributeError):
                 pass
 
 
@@ -429,7 +428,7 @@ class DeleteFilesTask(BackgroundTask):
                 if getattr(db_mgr, 'client', None):
                     try:
                         db_mgr.client._system.stop()
-                    except Exception:
+                    except (RuntimeError, AttributeError, OSError):
                         pass
 
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))
@@ -474,7 +473,7 @@ class RenameFilesTask(BackgroundTask):
                 if getattr(db_mgr, 'client', None):
                     try:
                         db_mgr.client._system.stop()
-                    except Exception:
+                    except (RuntimeError, AttributeError, OSError):
                         pass
 
         kb_mgr._touch_meta(os.path.join(kb_mgr.WORKSPACE_DIR, kb_id))

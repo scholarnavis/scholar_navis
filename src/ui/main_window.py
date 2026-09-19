@@ -1,4 +1,5 @@
 import ctypes
+import logging
 import os
 import sys
 
@@ -10,16 +11,40 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.theme_manager import ThemeManager
-from src.tools.about_tool import AboutTool
-from src.tools.chat_tool import ChatTool
-from src.tools.import_tool import ImportTool
-from src.tools.log_tool import LogTool
-from src.tools.rss_tool import RSSTool
-from src.tools.settings_tool import SettingsTool
+from src.core.theme_manager import (ThemeManager, apply_native_titlebar_theme,
+                                    strong_weight_css, title_weight_css)
 from src.ui.components.dialog import StandardDialog, BaseDialog
 from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
+
+
+def _load_tool_class(module_path: str, class_name: str):
+    """按需导入工具面板类（惰性）。
+
+    各工具模块的导入链带 chromadb / onnxruntime / litellm / pygments 等重依赖，
+    启动期全部导入会把主窗口推迟数秒；改为实例化对应面板时才导入（Python 模块
+    缓存保证只真正导入一次）。
+
+    惰性导入发生在**运行期**，读的是磁盘上的当前文件，而依赖模块（如
+    ``core.theme_manager``）可能是进程启动时载入的旧版本。若应用运行期间更新过
+    代码，就会得到 ``cannot import name 'xxx' from '...'`` 这类裸 ImportError；
+    这里补上可操作的上下文，避免被误判为代码缺陷。
+    """
+    import importlib
+
+    try:
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+    except ImportError as e:
+        raise ImportError(
+            f"Failed to load panel '{module_path}.{class_name}': {e}. "
+            f"If the code was updated while the application was running, restart it "
+            f"(a running process keeps the old modules in memory while new files are "
+            f"read from disk)."
+        ) from e
+    except AttributeError as e:
+        raise AttributeError(
+            f"Panel module '{module_path}' has no class '{class_name}': {e}") from e
 
 
 def force_windows_taskbar_icon(hwnd, icon_path):
@@ -50,27 +75,14 @@ def force_windows_taskbar_icon(hwnd, icon_path):
         if hIcon_big:
             ctypes.windll.user32.SendMessageW(int(hwnd), 0x0080, 1, hIcon_big)
 
-    except Exception:
-        pass
+    except Exception as e:
+        # 任务栏图标强制刷新属外观增强，失败仅记录
+        logging.getLogger("UI.MainWindow").debug(f"Taskbar icon patch failed: {e}")
 
 
-def set_window_titlebar_theme(hwnd, is_dark: bool):
-    if sys.platform == "win32":
-        try:
-            hwnd_int = int(hwnd)
-            value = ctypes.c_int(1 if is_dark else 0)
-
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd_int, 20, ctypes.byref(value), 4)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd_int, 19, ctypes.byref(value), 4)
-
-            ctypes.windll.user32.SetWindowPos(hwnd_int, 0, 0, 0, 0, 0, 0x0037)
-
-            ctypes.windll.user32.SendMessageW(hwnd_int, 0x0086, 0, 0)
-            ctypes.windll.user32.SendMessageW(hwnd_int, 0x0086, 1, 0)
-
-            ctypes.windll.user32.RedrawWindow(hwnd_int, None, None, 0x0400 | 0x0100 | 0x0001)
-        except Exception:
-            pass
+# 原生标题栏深浅色适配统一走 src.core.theme_manager.apply_native_titlebar_theme：
+# 原实现内联 ctypes 调用未声明 argtypes，64 位系统上句柄值较大时会抛
+# OverflowError 并被 except 静默吞掉，表现为"主题切换后标题栏颜色不变"。
 
 
 class MainWindow(QMainWindow):
@@ -103,7 +115,7 @@ class MainWindow(QMainWindow):
         self.logo_widget.setFixedSize(36, 36)
 
         self.lbl_app_name = QLabel("Scholar Navis")
-        self.lbl_app_name.setStyleSheet("font-weight: bold; font-size: 16px;")
+        self.lbl_app_name.setStyleSheet(f"font-weight: {title_weight_css()}; font-size: 16px;")
 
         top_bar.addWidget(self.logo_widget)
         top_bar.addWidget(self.lbl_app_name, stretch=1)
@@ -153,18 +165,19 @@ class MainWindow(QMainWindow):
             "About": "info"
         }
 
+        # (显示名, 模块路径, 类名)：模块在首次实例化对应面板时才导入
         self.tool_classes = [
-            ("Library Manager", ImportTool),
-            ("Chat Assistant", ChatTool),
-            ("Literature Tracker", RSSTool),
-            ("Global Settings", SettingsTool),
-            ("System Logs", LogTool),
-            ("About", AboutTool)
+            ("Library Manager", "src.tools.import_tool", "ImportTool"),
+            ("Chat Assistant", "src.tools.chat_tool", "ChatTool"),
+            ("Literature Tracker", "src.tools.rss_tool", "RSSTool"),
+            ("Global Settings", "src.tools.settings_tool", "SettingsTool"),
+            ("System Logs", "src.tools.log_tool", "LogTool"),
+            ("About", "src.tools.about_tool", "AboutTool")
         ]
         self.tools = [None] * len(self.tool_classes)
 
         # 仅生成左侧边栏按钮和右侧占位符，不进行耗时的实例化
-        for name, _ in self.tool_classes:
+        for name, _, _ in self.tool_classes:
             icon_name = self.icon_map.get(name, "tag")
             item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {name}")
             self.sidebar.addItem(item)
@@ -217,12 +230,9 @@ class MainWindow(QMainWindow):
 
 
     def _lazy_load_tools(self):
-        tools_to_load = [
-            ImportTool, ChatTool, RSSTool, SettingsTool, LogTool, AboutTool
-        ]
-
-        for ToolClass in tools_to_load:
-            self.add_tool(ToolClass())
+        """预热全部工具面板（当前启动流程不调用，保留给需要提前加载的场景）。"""
+        for index in range(len(self.tool_classes)):
+            self._execute_tool_switch(index)
             QApplication.processEvents()
 
         self.sidebar.setCurrentRow(0)
@@ -251,8 +261,12 @@ class MainWindow(QMainWindow):
         tm = self.tm
         is_dark = tm.current_theme == "dark"
 
-        hwnd = int(self.winId())
-        QTimer.singleShot(100, lambda: set_window_titlebar_theme(hwnd, is_dark))
+        # 原生标题栏立即同步一次，并在框架刷新完成后再兜底同步一次：
+        # DWM 在样式整体重建期间可能丢弃属性更新；延迟值与 qdarktheme 的
+        # 样式事件（changeEvent 中的同步）错开，保证最终状态以 ThemeManager
+        # 的当前主题为准。
+        self._sync_titlebar_theme()
+        self._sync_titlebar_theme(120)
 
         self._update_logo_theme()
         self.setStyleSheet(f"QMainWindow {{ background-color: {tm.color('bg_main')}; }}")
@@ -269,7 +283,7 @@ class MainWindow(QMainWindow):
             QListWidget {{ 
                 border: none; 
                 background-color: transparent; 
-                font-family: 'Segoe UI', sans-serif;
+                font-family: {tm.font_family()};
                 font-size: 14px; 
                 outline: none; 
             }}
@@ -282,14 +296,14 @@ class MainWindow(QMainWindow):
             QListWidget::item:selected {{ 
                 background-color: {tm.color('btn_bg')}; 
                 color: {tm.color('text_main')}; 
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
             }}
             QListWidget::item:hover:!selected {{ 
                 background-color: {tm.color('btn_hover')}; 
             }}
         """)
 
-        self.lbl_app_name.setStyleSheet(f"color: {tm.color('title_blue')}; font-weight: bold; font-size: 16px;")
+        self.lbl_app_name.setStyleSheet(f"color: {tm.color('title_blue')}; font-weight: {title_weight_css()}; font-size: 16px;")
 
         self.btn_quick_trans.setIcon(tm.icon("translate", "bg_main"))
         self.btn_quick_trans.setIconSize(QSize(22, 22))
@@ -307,6 +321,25 @@ class MainWindow(QMainWindow):
             }}
         """)
 
+    def _sync_titlebar_theme(self, delay_ms: int = 0):
+        """把主窗口原生标题栏同步为 ThemeManager 的当前主题。
+
+        ``delay_ms > 0`` 时延迟执行，用于等待 DWM/qdarktheme 的框架刷新完成。
+        取值始终来自 :attr:`ThemeManager.current_theme`（延迟回调里重新读取），
+        不使用调用时刻的快照——否则"先换调色板、后更新主题"的时序会让迟到的
+        定时器把标题栏刷回旧颜色。
+        """
+        def _apply():
+            tm = getattr(self, 'tm', None)
+            if tm is None:  # __init__ 早期的样式事件可能早于 tm 就绪
+                return
+            apply_native_titlebar_theme(self, tm.current_theme == "dark")
+
+        if delay_ms > 0:
+            QTimer.singleShot(delay_ms, _apply)
+        else:
+            _apply()
+
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
@@ -314,8 +347,10 @@ class MainWindow(QMainWindow):
             if ConfigManager().user_settings.get("theme", "Dark").lower() == "auto":
                 self.tm.set_theme("auto")
 
-            is_dark = self.tm.current_theme == "dark"
-            QTimer.singleShot(10, lambda: set_window_titlebar_theme(self.winId(), is_dark))
+            # 与 _apply_theme 同源：立即 + 延迟各同步一次，避免迟到的样式事件
+            # 用旧主题覆盖刚设好的标题栏。
+            self._sync_titlebar_theme()
+            self._sync_titlebar_theme(120)
 
     def clean_old_logs(self):
         base_dir = ThemeManager.get_resource_path()
@@ -336,7 +371,7 @@ class MainWindow(QMainWindow):
                 for old_log in logs[:-30]:
                     try:
                         os.remove(old_log)
-                    except Exception:
+                    except OSError:
                         pass
 
     def perform_startup_checks(self):
@@ -368,7 +403,7 @@ class MainWindow(QMainWindow):
 
                                 <hr style="border: 0; border-top: 1px solid {tm.color('border')}; margin: 20px 0;">
 
-                                <p style="text-align: center; font-weight: bold; color: {tm.color('accent')};">
+                                <p style="text-align: center; font-weight: {strong_weight_css()}; color: {tm.color('accent')};">
                                     Accepting these terms is required to use the software.
                                 </p>
                             </div>
@@ -386,7 +421,7 @@ class MainWindow(QMainWindow):
 
             # 样式美化
             btn_accept.setStyleSheet(
-                f"background-color: {tm.color('accent')}; color: white; font-weight: bold; height: 36px;")
+                f"background-color: {tm.color('accent')}; color: white; font-weight: {strong_weight_css()}; height: 36px;")
             btn_reject.setStyleSheet(
                 f"background-color: {tm.color('btn_bg')}; color: {tm.color('text_muted')}; height: 36px;")
 
@@ -415,6 +450,74 @@ class MainWindow(QMainWindow):
             chat_tool.handle_external_send(context_text, prompt_text)
 
         # 激活并前置主窗口
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def route_dev_test(self, prompt_text, note_text="", image_paths=None):
+        """Developer-mode AI test: switch to Chat, show a user-visible note
+        (NOT sent to the LLM), optionally mount image attachments, then send
+        the real prompt to the LLM."""
+        chat_index = 1
+        self.sidebar.setCurrentRow(chat_index)
+
+        def _send():
+            chat_tool = self.tools[chat_index]
+            if not chat_tool:
+                return
+            # 0) 确保 Chat UI 已构建（懒加载，等价于 handle_external_send 的前置调用）
+            if hasattr(chat_tool, 'get_ui_widget'):
+                chat_tool.get_ui_widget()
+            # 1) 展示测试说明（仅给用户看，不进 LLM 历史）
+            if note_text and hasattr(chat_tool, 'show_dev_note'):
+                chat_tool.show_dev_note(note_text)
+            # 2) 挂载图片附件（走标准 attachments 管线：校验 + SVG 栅格化 + 预览条）
+            for p in (image_paths or []):
+                if p and os.path.exists(p) and hasattr(chat_tool, 'process_attached_files'):
+                    chat_tool.process_attached_files([p])
+            # 3) 发送真实提示词给 LLM
+            if hasattr(chat_tool, 'process_send'):
+                chat_tool.process_send(prompt_text)
+
+        # 延迟一帧，确保 ChatTool 完成实例化（绕过 check_unsaved_changes 的异步时序）
+        QTimer.singleShot(50, _send)
+
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def route_dev_render_preview(self, note_text, user_text, ai_text):
+        """Developer-mode render preview: switch to Chat and inject a fake
+        conversation (one user bubble + one AI bubble) WITHOUT any AI call.
+
+        Unlike ``route_dev_test`` (which sends a real prompt to the LLM),
+        this only exercises the rendering pipeline: identifier auto-linking,
+        file links, advanced Markdown / LaTeX and Mermaid cards. The fake
+        bubbles never enter the chat history, so subsequent real turns are
+        not affected."""
+        chat_index = 1
+        self.sidebar.setCurrentRow(chat_index)
+
+        def _inject():
+            chat_tool = self.tools[chat_index]
+            if not chat_tool:
+                return
+            # 0) 确保 Chat UI 已构建（懒加载，与 route_dev_test 相同前置）
+            if hasattr(chat_tool, 'get_ui_widget'):
+                chat_tool.get_ui_widget()
+            # 1) 展示测试说明（仅给用户看，不进 LLM 历史）
+            if note_text and hasattr(chat_tool, 'show_dev_note'):
+                chat_tool.show_dev_note(note_text)
+            # 2) 注入假对话（不进 history，不触发生成管线）
+            if hasattr(chat_tool, 'inject_dev_demo'):
+                chat_tool.inject_dev_demo(user_text, ai_text)
+            else:
+                logging.getLogger(__name__).warning(
+                    "ChatTool.inject_dev_demo missing; render preview skipped.")
+
+        # 延迟一帧，确保 ChatTool 完成实例化（与 route_dev_test 相同时序绕行）
+        QTimer.singleShot(50, _inject)
+
         self.showNormal()
         self.raise_()
         self.activateWindow()
@@ -473,8 +576,8 @@ class MainWindow(QMainWindow):
 
     def _execute_tool_switch(self, index):
         if self.tools[index] is None:
-            name, ToolClass = self.tool_classes[index]
-            tool_instance = ToolClass()
+            name, module_path, class_name = self.tool_classes[index]
+            tool_instance = _load_tool_class(module_path, class_name)()
             self.tools[index] = tool_instance
 
             widget = tool_instance.get_ui_widget()
@@ -519,7 +622,7 @@ class MainWindow(QMainWindow):
 
             welcome_html = f"""
                         <div style="font-family: {tm.font_family()}; font-size: 14px; color: {tm.color('text_main')}; line-height: 1.6;">
-                            <h2 style="color: {tm.color('title_blue')}; margin-top: 5px; margin-bottom: 12px; font-weight: bold; letter-spacing: 0.5px;">
+                            <h2 style="color: {tm.color('title_blue')}; margin-top: 5px; margin-bottom: 12px; font-weight: {title_weight_css()}; letter-spacing: 0.5px;">
                                 Your AI-Powered Research Assistant
                             </h2>
                             <p style="margin-top: 0; color: {tm.color('text_main')};">
@@ -566,7 +669,7 @@ class MainWindow(QMainWindow):
                     background-color: {tm.color('accent')}; 
                     color: {tm.color('bg_main')}; 
                     border-radius: 6px; 
-                    font-weight: bold; 
+                    font-weight: {strong_weight_css()}; 
                     font-size: 14px; 
                     border: none;
                 }} 

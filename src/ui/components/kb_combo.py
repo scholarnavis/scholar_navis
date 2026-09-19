@@ -32,13 +32,16 @@ class KBDelegate(QStyledItemDelegate):
         rect = option.rect
         margin = 10
 
-        title_font = QFont("Segoe UI", 11, QFont.Bold)
+        # 字体统一取自 ThemeManager：硬编码 "Segoe UI"/"Consolas" 在 Linux 上
+        # 不存在，会静默回退并与其它控件字体不一致；同时用完整字体栈，
+        # 让英文命中西文族、中文回退到 CJK 族。
+        title_font = tm.qfont(11, QFont.Bold)
         painter.setFont(title_font)
         painter.setPen(QColor(tm.color('text_main')))
         title_rect = QRect(rect.left() + margin, rect.top() + 5, rect.width() - 100, 20)
         painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, name)
 
-        desc_font = QFont("Segoe UI", 9)
+        desc_font = tm.qfont(9)
         painter.setFont(desc_font)
         painter.setPen(QColor(tm.color('text_muted')))
         desc_rect = QRect(rect.left() + margin, rect.top() + 25, rect.width() - 100, 15)
@@ -46,7 +49,7 @@ class KBDelegate(QStyledItemDelegate):
         elided_desc = metrics.elidedText(desc, Qt.ElideRight, desc_rect.width())
         painter.drawText(desc_rect, Qt.AlignLeft | Qt.AlignVCenter, elided_desc)
 
-        model_font = QFont("Consolas", 8)
+        model_font = QFont(tm.mono_font_family(), 8)
         painter.setFont(model_font)
         model_width = painter.fontMetrics().horizontalAdvance(model) + 10
         model_rect = QRect(rect.right() - model_width - margin, rect.top() + 8, model_width, 16)

@@ -17,6 +17,9 @@ CONFIG_VERSION = "1.0"
 class ConfigManager:
     _instance = None
     _lock = threading.RLock()
+    # 由 load_settings/load_mcp_servers 填充，此处仅作类型声明
+    user_settings: dict
+    mcp_servers: dict
 
     def __new__(cls):
         with cls._lock:
@@ -146,7 +149,7 @@ class ConfigManager:
                                 plain_data = json.load(f)
                             self.save_json(path, plain_data, encrypt=True)
                             return plain_data
-                        except Exception:
+                        except (OSError, ValueError, InvalidToken, RuntimeError):
                             return None
                 else:
                     try:
@@ -162,7 +165,7 @@ class ConfigManager:
                             plain_data = json.loads(decrypted_text)
                             self.save_json(path, plain_data, encrypt=False)
                             return plain_data
-                        except Exception:
+                        except (OSError, ValueError, InvalidToken, RuntimeError):
                             return None
             except Exception as e:
                 self.logger.error(f"Critical error reading {path}: {e}")
@@ -198,10 +201,27 @@ class ConfigManager:
             "chat_trans_model_name": "",
             "chat_use_academic_agent": True,
             "chat_use_external_tools": False,
+            "agent_deep_mode": False,
             "chat_ribbon_state": "Pinned",
+            # Rerank 精排参数：top_k 为精排后进入上下文的文档数；min_score 为分数阈值（0 关闭）
+            "rerank_top_k": 5,
+            "rerank_min_score": 0.25,
+            "rerank_auto_load": True,
             "api_server_host": "127.0.0.1",
             "api_server_port": 8000,
             "api_server_key": "",
+            # R runtime path used by the visualization engine (empty = auto-detect)
+            "r_path": "",
+            # Internal tools disabled by default in the academic agent
+            # (edit this list to re-enable any of them).
+            "deselected_academic_skills": [
+                "search_web",
+                "fetch_webpage_content",
+                "fetch_wikipedia_summary",
+                "search_gbif_occurrences",
+                "search_chembl_target",
+                "fetch_taxonomy_info",
+            ],
         }
 
         current_settings = self.load_json(self.SETTINGS_PATH, encrypt=True)
@@ -371,6 +391,43 @@ class ConfigManager:
 
         self.mcp_servers["deselected_mcp_tags"] = tags
         self.save_mcp_servers()
+
+
+    def get_deselected_academic_skills(self) -> set:
+        """Return the set of currently disabled internal academic tool names."""
+        raw = self.user_settings.get("deselected_academic_skills", [])
+        if not isinstance(raw, list):
+            return set()
+        return {str(s) for s in raw}
+
+
+    def toggle_academic_skill(self, skill_name: str, enabled: bool):
+        """Enable/disable an internal academic tool. enabled=True removes it from the disabled list."""
+        deselected = self.user_settings.get("deselected_academic_skills", [])
+        if not isinstance(deselected, list):
+            deselected = []
+
+        if enabled and skill_name in deselected:
+            deselected.remove(skill_name)
+        elif not enabled and skill_name not in deselected:
+            deselected.append(skill_name)
+        else:
+            return
+
+        self.user_settings["deselected_academic_skills"] = deselected
+        self.save_settings()
+
+
+    def get_r_path(self) -> str:
+        """Return the user-configured R runtime path (empty when unset)."""
+        raw = self.user_settings.get("r_path", "")
+        return str(raw).strip() if raw else ""
+
+
+    def set_r_path(self, path: str):
+        """Persist the user-specified R runtime path."""
+        self.user_settings["r_path"] = (path or "").strip()
+        self.save_settings()
 
 
     def save_external_models(self, data):

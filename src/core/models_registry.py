@@ -5,14 +5,42 @@ import shutil
 import sys
 import json
 import warnings
-import torch
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
-from src.core.kb_manager import KBManager
+
+# 说明：本模块位于启动导入链上（主窗口/工具面板 → models_registry），因此不在
+# 顶层导入 torch 与 KBManager：torch 自带 CUDA 运行库、KBManager 会拉起 chromadb，
+# 二者合计约 1.2 s，而实际都只在个别函数里用到（torch 见 unload_models，
+# KBManager 见 ModelManager.verify_chat_models），按需在函数内导入即可。
 
 
 
 logger = logging.getLogger("ModelRegistry")
+
+
+class ModelMissingError(RuntimeError):
+    """本地模型缺失但禁止自动下载时抛出。
+
+    携带可读的展示名与仓库名，便于上层任务用一句话提示用户去
+    "设置 → AI Models" 手动下载，而不是悄悄联网拉取。
+    """
+
+    def __init__(self, repo_id, ui_name, model_type="model"):
+        self.repo_id = repo_id
+        self.ui_name = ui_name
+        self.model_type = model_type
+        super().__init__(
+            f"{ui_name} ({model_type}) is not downloaded yet. "
+            f"Please download it manually from Settings → AI Models."
+        )
+
+
+def _display_name_for(repo_id):
+    for m in EMBEDDING_MODELS + RERANKER_MODELS:
+        if m.get('hf_repo_id') == repo_id:
+            return m.get('ui_name', m.get('id', repo_id))
+    return repo_id
+
 
 EMBEDDING_MODELS = [
     {
@@ -91,7 +119,8 @@ def get_optimal_chunk_settings(embedding_model_id: str, reranker_model_id: str):
         from src.core.config_manager import ConfigManager
         from src.core.device_manager import DeviceManager
         dev = DeviceManager().parse_device_string(ConfigManager().user_settings.get("inference_device", "Auto"))
-    except:
+    except Exception as e:
+        logger.debug(f"Device probe failed, fallback to cpu: {e}")
         dev = "cpu"
 
     # 解析 AUTO 宏
@@ -121,8 +150,13 @@ def get_optimal_chunk_settings(embedding_model_id: str, reranker_model_id: str):
 
 
 def resolve_auto_model(model_type="embedding", device="cpu"):
-    # 加入 "dml" (DirectML) 的识别，以兼容未来的 DeviceManager 传参
-    has_gpu = device in ["cuda", "mps", "dml", "directml"]
+    # DeviceManager 返回的是带序号的设备串（"cuda:0" / "trt:0" / "dml:1" / "rocm:0"），
+    # 精确匹配会永远判定为"无 GPU"，导致 auto 永远落到最小模型。按前缀识别。
+    # TensorRT / CoreML 同属硬件加速：漏判会让选了 TRT 的用户反而拿到最小模型。
+    device_str = str(device or "").strip().lower()
+    has_gpu = device_str.startswith((
+        "cuda", "trt", "tensorrt", "dml", "directml", "rocm", "coreml", "mps",
+    ))
 
     if model_type == "embedding":
         if has_gpu:
@@ -221,7 +255,7 @@ def _is_file_valid(path):
     if not os.path.exists(path): return False
     try:
         if os.path.getsize(path) == 0: return False
-    except: return False
+    except OSError: return False
     return True
 
 def _official_check(repo_id):
@@ -230,7 +264,7 @@ def _official_check(repo_id):
         info = scan_cache_dir(_get_hf_home())
         for repo in info.repos:
             if repo.repo_id == repo_id and repo.revisions: return True
-    except: pass
+    except (ImportError, OSError, ValueError, RuntimeError): pass
     return False
 
 def _manual_check(repo_id):
@@ -254,7 +288,7 @@ def _repair_model_links(repo_id):
             if os.path.exists(p): shutil.rmtree(p, ignore_errors=True)
         snapshot_download(repo_id, resume_download=True)
         return True
-    except: return False
+    except (ImportError, OSError, ValueError, RuntimeError): return False
 
 
 class ModelManager:
@@ -273,6 +307,8 @@ class ModelManager:
         dev = self.dev_mgr.parse_device_string(user_pref)
 
         # --- 校验 A: Embedding 模型 ---
+        from src.core.kb_manager import KBManager  # 惰性：避免启动链上拉起 chromadb
+
         kb_info = KBManager().get_kb_by_id(kb_id)
         embed_id = kb_info.get('model_id', 'embed_auto') if kb_info else 'embed_auto'
         if embed_id == "embed_auto":
@@ -308,7 +344,7 @@ def get_model_type_by_repo(repo_id):
     return "embedding"
 
 
-def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False):
+def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False, allow_download=True):
     hf_home = _get_hf_home()
     onnx_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
     logger.info(f"Requesting model: {repo_id} | Target ONNX cache dir: {onnx_dir}")
@@ -318,6 +354,10 @@ def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False):
             if any(f.endswith('.onnx') for f in files):
                 logger.info("Local ONNX cache hit, skipping download and conversion.")
                 return onnx_dir
+    # 禁止自动下载（如仅在使用/加载时调用）：模型缺失直接抛清晰提示，
+    # 引导用户去设置里手动下载，避免后台悄悄联网拉取大模型。
+    if not allow_download:
+        raise ModelMissingError(repo_id, _display_name_for(repo_id), model_type or "model")
     logger.info("Local ONNX cache miss, preparing for download and conversion...")
     logger.info("Loading heavy AI frameworks (Transformers/Optimum) into memory...")
     from huggingface_hub import snapshot_download

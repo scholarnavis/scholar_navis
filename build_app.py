@@ -1,21 +1,27 @@
 import glob
 import os
-import sys
-import shutil
 import platform
-import subprocess
 import re
+import shutil
+import subprocess
+import sys
 import zipfile
 
-import boto3
-from botocore.exceptions import ClientError
-from dotenv import load_dotenv
-from src.core.version import __version__, __app_name__
+from build_support.notices import stage_notices
+from build_support.r2_release import ReleaseUploadError, publish_artifact
+from src.core.version import __app_name__, __github__, __version__, release_channel
 
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+def platform_tag() -> str:
+    """产物命名用的平台标记（win / mac / linux）。"""
+    return {"Windows": "win", "Darwin": "mac", "Linux": "linux"}.get(
+        platform.system(), "unknown")
+
 
 def sync_pyproject_version():
     toml_path = "pyproject.toml"
@@ -33,61 +39,22 @@ def sync_pyproject_version():
             f.write(new_content)
         print(f"[*] Synced pyproject.toml version to {__version__}")
 
-def get_r2_client():
-    load_dotenv()
-    account_id = os.getenv("R2_ACCOUNT_ID")
-    access_key = os.getenv("R2_ACCESS_KEY_ID")
-    secret_key = os.getenv("R2_SECRET_ACCESS_KEY")
-    if not all([account_id, access_key, secret_key]):
-        print("[-] R2 credentials missing. Skipping R2 operations.")
-        return None
-    return boto3.client(
-        service_name="s3",
-        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name="auto"
-    )
-
-def upload_to_r2(s3_client, bucket_name, file_path, object_name):
-    print(f"\n[*] Uploading {file_path} to R2 bucket '{bucket_name}'...")
-    try:
-        s3_client.upload_file(file_path, bucket_name, object_name)
-        print(f"[+] Upload complete: {object_name}")
-    except ClientError as e:
-        print(f"[-] Upload failed: {e}")
-
-def delete_old_r2_versions(s3_client, bucket_name, current_object_name):
-    match = re.match(r"^(.*?_v)", current_object_name)
-    if not match:
-        return
-    prefix = match.group(1)
-    print(f"\n[*] Scanning for old versions with prefix: '{prefix}'...")
-    try:
-        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-        if 'Contents' in response:
-            for obj in response['Contents']:
-                old_key = obj['Key']
-                if old_key != current_object_name:
-                    s3_client.delete_object(Bucket=bucket_name, Key=old_key)
-                    print(f"[+] Deleted old version: {old_key}")
-    except ClientError as e:
-        print(f"[-] Failed to delete old versions: {e}")
+# R2 发布逻辑抽在 build_support/r2_release.py（独立模块，便于注入客户端做测试）。
+# 这里只留调用点，见 build_app() 的 [4/4] 段。
 
 def build_app():
     sync_pyproject_version()
 
     sys_os = platform.system()
-    if sys_os != "Windows":
-        print(f"\n[-] Official packaging for {sys_os} is currently suspended. Please run from source.")
-        return
+    tag = platform_tag()
+    is_windows = sys_os == "Windows"
 
     dist_dir = "dist"
     build_dir = "build"
     app_name_safe = __app_name__.replace(" ", "_").lower()
     entry_point = "main.py"
 
-    print(f"\n[1/4] Preparing PyInstaller Build for {__app_name__} v{__version__} on Windows...")
+    print(f"\n[1/4] Preparing PyInstaller Build for {__app_name__} v{__version__} on {sys_os}...")
 
     if os.path.exists(dist_dir):
         shutil.rmtree(dist_dir)
@@ -103,10 +70,15 @@ def build_app():
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--onedir",
-        "--windowed",
         f"--name={app_name_safe}",
         f"--runtime-hook={hook_file}",
     ]
+
+    if sys_os in ("Windows", "Darwin"):
+        # Linux 下不加 --windowed：该选项在 Linux 上只是丢弃 stdout/stderr，
+        # 而桌面启动器本就无终端，日志改由 logs/ 目录承载（见 setup_logger）。
+        # 保留 stdout 便于从终端启动时直接观察启动期异常。
+        cmd.append("--windowed")
 
     packages_to_collect = [
         "optimum", "transformers", "onnxruntime", "onnx", "tokenizers",
@@ -126,29 +98,32 @@ def build_app():
         "tiktoken_ext"
     ]
 
-    ssl_search_paths = [
-        sys.prefix,  # venv 根目录
-        os.path.join(sys.prefix, "DLLs"),  # venv DLLs
-        os.path.join(sys.prefix, "Scripts"),  # venv Scripts
-        sys.base_prefix,  # uv 底层基础 Python 根目录
-        os.path.join(sys.base_prefix, "DLLs"),  # uv 底层基础 Python DLLs
-        os.path.join(sys.base_prefix, "Scripts"),  # uv 底层基础 Python Scripts
-    ]
+    if is_windows:
+        # Windows 需要显式附带 OpenSSL DLL（uv 环境的 Python 不一定带上）。
+        # Linux/macOS 的 CPython 由系统或自带的 .so 提供 ssl，无需额外收集。
+        ssl_search_paths = [
+            sys.prefix,  # venv 根目录
+            os.path.join(sys.prefix, "DLLs"),  # venv DLLs
+            os.path.join(sys.prefix, "Scripts"),  # venv Scripts
+            sys.base_prefix,  # uv 底层基础 Python 根目录
+            os.path.join(sys.base_prefix, "DLLs"),  # uv 底层基础 Python DLLs
+            os.path.join(sys.base_prefix, "Scripts"),  # uv 底层基础 Python Scripts
+        ]
 
-    ssl_dlls_found = False
-    for path in set(ssl_search_paths):  # 用 set 去重
-        if not os.path.exists(path):
-            continue
-        dlls = glob.glob(os.path.join(path, "libcrypto*.dll")) + \
-               glob.glob(os.path.join(path, "libssl*.dll"))
-        for dll in dlls:
-            cmd.append(f"--add-binary={dll};.")
-            ssl_dlls_found = True
+        ssl_dlls_found = False
+        for path in set(ssl_search_paths):  # 用 set 去重
+            if not os.path.exists(path):
+                continue
+            dlls = glob.glob(os.path.join(path, "libcrypto*.dll")) + \
+                   glob.glob(os.path.join(path, "libssl*.dll"))
+            for dll in dlls:
+                cmd.append(f"--add-binary={dll};.")
+                ssl_dlls_found = True
 
-    if not ssl_dlls_found:
-        print("\n[!] Warning: OpenSSL dynamic-link libraries (libcrypto/libssl) were not detected within the uv Python environment. Please verify the environment configuration should runtime errors occur.\n")
-    else:
-        print("\n[*] The OpenSSL DLLs have been successfully identified and integrated.")
+        if not ssl_dlls_found:
+            print("\n[!] Warning: OpenSSL dynamic-link libraries (libcrypto/libssl) were not detected within the uv Python environment. Please verify the environment configuration should runtime errors occur.\n")
+        else:
+            print("\n[*] The OpenSSL DLLs have been successfully identified and integrated.")
 
 
     for pkg in packages_to_collect:
@@ -168,7 +143,18 @@ def build_app():
     cmd.extend(["--copy-metadata", "onnxruntime"])
     cmd.extend(["--copy-metadata", "optimum"])
 
-    cmd.append("--add-data=Assets;Assets")
+    # --add-data 的分隔符是平台相关的：Windows 为 ';'，POSIX 为 ':'。
+    cmd.append(f"--add-data=Assets{os.pathsep}Assets")
+
+    # 许可合规：AGPL-3 §4/§6 与 LGPL-3 §4 要求随二进制向接收者提供许可文本与声明，
+    # 而 PyInstaller 默认不带任何许可文件（此前发布的产物里连 LICENSE 都没有）。
+    notices = stage_notices(os.path.join(build_dir, "notices"),
+                            app_name=__app_name__, version=__version__,
+                            source_url=__github__)
+    for src, dest in notices["add_data"]:
+        cmd.append(f"--add-data={src}{os.pathsep}{dest}")
+    print(f"[*] Bundled third-party notices: {notices['license_files']} license file(s) "
+          f"collected; {len(notices['missing_text'])} distribution(s) ship no text.")
 
     excludes = [
         "tkinter", "matplotlib", "seaborn", "jupyter", "notebook",
@@ -179,13 +165,17 @@ def build_app():
     for ex in excludes:
         cmd.append(f"--exclude-module={ex}")
 
-    if os.path.exists("Assets/icon.ico"):
+    if is_windows and os.path.exists("Assets/icon.ico"):
         cmd.append("--icon=Assets/icon.ico")
+    elif sys_os == "Darwin" and os.path.exists("Assets/icon.icns"):
+        cmd.append("--icon=Assets/icon.icns")
+    # Linux 的 .desktop 图标不由 PyInstaller 嵌入，运行时使用 Assets/icon.png。
 
     cmd.append(entry_point)
 
-    print(f"\n[2/4] Executing PyInstaller (Packaging PySide6 & ONNXRuntime)...")
-    result = subprocess.run(cmd)
+    print("\n[2/4] Executing PyInstaller (Packaging PySide6 & ONNXRuntime)...")
+    # check=False：失败由下面的 returncode 判定，以便区分"打包失败"与"异常退出"。
+    result = subprocess.run(cmd, check=False)
 
     # 无论打包成功失败，清理掉临时生成的 Hook 文件
     if os.path.exists(hook_file):
@@ -195,7 +185,11 @@ def build_app():
         print("\n[-] PyInstaller build failed.")
         return
 
-    output_archive_name = f"{app_name_safe}_win_v{__version__}"
+    # 产物名里必须带发布通道（stable / dev）：Worker 以 `{平台}_{通道}_v` 为前缀
+    # 列举 R2 对象，两条通道因此互不可见——上传 dev 产物时清理历史版本不会误删
+    # 稳定版产物（这也是旧命名 `..._{平台}_v...` 无法承载双通道的根因）。
+    channel = release_channel(__version__)
+    output_archive_name = f"{app_name_safe}_{tag}_{channel}_v{__version__}"
     target_folder = os.path.join(dist_dir, app_name_safe)
     archive_path = f"{output_archive_name}.zip"
 
@@ -210,19 +204,26 @@ def build_app():
 
     print(f"[+] Packed to {archive_path}")
 
-    print(f"\n[4/4] Cloudflare R2 Operations...")
-    if os.getenv("GITHUB_ACTIONS") != "true":
-        print("[*] Local environment detected. Skipping R2 upload.")
-        return
+    print("\n[4/4] Cloudflare R2 Operations...")
+    try:
+        # legacy_prefixes：单通道时代的对象名（`..._{平台}_v{版本}.zip`）不会
+        # 被新前缀清理到，留一次迁移清理把它带走；该前缀与"新命名"不可能碰撞
+        # （新名字符串里 `_{平台}_` 之后紧接通道名，不是 `v`）。
+        object_name = publish_artifact(
+            archive_path,
+            legacy_prefixes=(f"{app_name_safe}_{tag}_v",),
+        )
+    except ReleaseUploadError as exc:
+        # 必须让流水线变红：静默失败会制造"发版绿色但产物没上传"的假象。
+        print(f"\n[-] R2 publish failed: {exc}")
+        sys.exit(1)
 
-    s3_client = get_r2_client()
-    bucket_name = os.getenv("R2_BUCKET_NAME")
+    if object_name:
+        print(f"\n[+] Release published: {object_name}")
+    else:
+        print(f"[*] R2 upload skipped (no credentials configured). "
+              f"Artifact kept at: {archive_path}")
 
-    if s3_client and bucket_name:
-        object_name = os.path.basename(archive_path)
-        upload_to_r2(s3_client, bucket_name, archive_path, object_name)
-        delete_old_r2_versions(s3_client, bucket_name, object_name)
-        print(f"\n[+] All GitHub Actions workflows completed successfully!")
 
 if __name__ == "__main__":
     build_app()

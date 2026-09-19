@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
 from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal, QSettings
 
 from src.core.config_manager import ConfigManager
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, hex_to_rgba, strong_weight_css
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.mermaid_viewer import MermaidViewer
 from src.ui.components.model_selector import ModelSelectorWidget
@@ -48,6 +48,9 @@ class TranslatorInputEdit(QTextEdit):
 
 class QuickTranslatorWindow(QWidget):
     """快捷翻译窗口"""
+
+    # 淡入/淡出动画引用，防止被 GC 回收，仅作静态检查声明
+    anim: QPropertyAnimation
 
     def __init__(self, parent=None):
         super().__init__(None)
@@ -127,8 +130,6 @@ class QuickTranslatorWindow(QWidget):
     def _setup_ui(self):
         """设置UI布局"""
         self.main_frame = QWidget(self)
-        self.main_frame.setStyleSheet(
-            "QWidget { background-color: #252526; border: 1px solid #3e3e42; border-radius: 12px; }")
         self.main_frame.setMouseTracking(True)
 
         main_layout = QVBoxLayout(self)
@@ -138,26 +139,23 @@ class QuickTranslatorWindow(QWidget):
 
         # --- 顶部拖动栏 ---
         top_bar = QHBoxLayout()
-        title = QLabel("Scholar Translator")
-        title.setStyleSheet("color: #05B8CC; font-weight: bold; border: none;")
+        # 配色在 _apply_theme 中按主题注入（原硬编码深色底/青色标题在浅色
+        # 主题下与主界面割裂）
+        self.lbl_title = QLabel("Scholar Translator")
 
         self.btn_pin = QPushButton()
         self.btn_pin.setFixedSize(24, 24)
         self.btn_pin.clicked.connect(self._toggle_pin)
 
-        btn_close = QPushButton()
-        btn_close.setIcon(ThemeManager().icon("close", "text_muted"))
-        btn_close.setFixedSize(24, 24)
-        btn_close.setStyleSheet(
-            "QPushButton { background: transparent; border: none; } "
-            "QPushButton:hover { background: rgba(255, 85, 85, 0.2); border-radius: 4px; }"
-        )
-        btn_close.clicked.connect(self.hide_with_fade)
+        self.btn_close = QPushButton()
+        self.btn_close.setIcon(ThemeManager().icon("close", "text_muted"))
+        self.btn_close.setFixedSize(24, 24)
+        self.btn_close.clicked.connect(self.hide_with_fade)
 
-        top_bar.addWidget(title)
+        top_bar.addWidget(self.lbl_title)
         top_bar.addStretch()
         top_bar.addWidget(self.btn_pin)
-        top_bar.addWidget(btn_close)
+        top_bar.addWidget(self.btn_close)
         frame_layout.addLayout(top_bar)
 
         # --- 模型选择与语言配置 ---
@@ -209,8 +207,6 @@ class QuickTranslatorWindow(QWidget):
         self.input_box = TranslatorInputEdit()
         self.input_box.setPlaceholderText(
             "Paste text here... (Enter to translate, Shift+Enter for new line, Esc to hide)")
-        self.input_box.setStyleSheet(
-            "background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; border-radius: 6px; padding: 8px;")
         self.input_box.setFixedHeight(100)
         self.input_box.sig_send.connect(self._start_translation)
 
@@ -229,12 +225,7 @@ class QuickTranslatorWindow(QWidget):
         self.chk_markdown.toggled.connect(self._re_render_output)
         self.chk_markdown.toggled.connect(self._save_markdown_setting)
 
-        self.btn_trans.setStyleSheet(
-            "background-color: #007acc; color: white; border-radius: 6px; padding: 6px; font-weight: bold;")
-        self.btn_stop.setStyleSheet(
-            "background-color: #c42b1c; color: white; border-radius: 6px; padding: 6px; font-weight: bold;")
         self.btn_stop.setVisible(False)
-        self.btn_clear.setStyleSheet("background-color: #333; color: white; border-radius: 6px; padding: 6px;")
 
         self.btn_trans.clicked.connect(self._start_translation)
         self.btn_stop.clicked.connect(self._stop_translation)
@@ -252,8 +243,6 @@ class QuickTranslatorWindow(QWidget):
         self.output_box = QTextBrowser()
         self.output_box.setOpenLinks(False)
         self.output_box.anchorClicked.connect(self._on_link_clicked)
-        self.output_box.setStyleSheet(
-            "background-color: #1e1e1e; color: #fff; border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 14px;")
         frame_layout.addWidget(self.output_box)
 
         # 右下角拉伸手柄
@@ -287,7 +276,9 @@ class QuickTranslatorWindow(QWidget):
             self.translator_manager.cancel_translation()
 
         self.output_box.clear()
-        self.output_box.setHtml("<span style='color:#05B8CC;'><i>AI is preparing...</i></span>")
+        self.output_box.setHtml(
+            f"<span style='color:{ThemeManager().color('accent')};'>"
+            f"<i>AI is preparing...</i></span>")
 
         self.btn_trans.setVisible(False)
         self.btn_stop.setVisible(True)
@@ -372,7 +363,9 @@ class QuickTranslatorWindow(QWidget):
 
     def _on_error(self, error_msg: str):
         """错误回调"""
-        self.output_box.setHtml(f"<span style='color:#ff5555;'><b>Error:</b> {error_msg}</span>")
+        self.output_box.setHtml(
+            f"<span style='color:{ThemeManager().color('danger')};'>"
+            f"<b>Error:</b> {error_msg}</span>")
         self._reset_buttons()
 
     def _reset_buttons(self):
@@ -387,19 +380,24 @@ class QuickTranslatorWindow(QWidget):
         self.cfg_mgr.save_settings()
 
     def _update_pin_ui(self):
-        """更新置顶按钮图标"""
+        """更新置顶按钮图标与配色（跟随主题）"""
+        tm = ThemeManager()
         if self.is_pinned:
-            self.btn_pin.setIcon(ThemeManager().icon("keep", "accent"))
+            self.btn_pin.setIcon(tm.icon("keep", "accent"))
             self.btn_pin.setToolTip("Unpin Window")
             self.btn_pin.setStyleSheet(
-                "QPushButton { background: transparent; color: #05B8CC; border: none; font-size: 15px; } "
-                "QPushButton:hover { color: #fff; }")
+                f"QPushButton {{ background: transparent; border: none; "
+                f"font-size: 15px; }}"
+                f"QPushButton:hover {{ background: {tm.color('btn_hover')}; "
+                f"border-radius: 4px; }}")
         else:
-            self.btn_pin.setIcon(ThemeManager().icon("keep_off", "text_muted"))
+            self.btn_pin.setIcon(tm.icon("keep_off", "text_muted"))
             self.btn_pin.setToolTip("Pin to Top")
             self.btn_pin.setStyleSheet(
-                "QPushButton { background: transparent; color: #888; border: none; font-size: 15px; opacity: 0.6; } "
-                "QPushButton:hover { color: #ccc; }")
+                f"QPushButton {{ background: transparent; border: none; "
+                f"font-size: 15px; }}"
+                f"QPushButton:hover {{ background: {tm.color('btn_hover')}; "
+                f"border-radius: 4px; }}")
 
     def _re_render_output(self, checked):
         """重新渲染输出"""
@@ -550,6 +548,16 @@ class QuickTranslatorWindow(QWidget):
         self.main_frame.setStyleSheet(
             f"QWidget {{ background-color: {tm.color('bg_card')}; border: 1px solid {tm.color('border')}; border-radius: 12px; }}")
 
+        self.lbl_title.setStyleSheet(
+            f"color: {tm.color('accent')}; font-weight: {strong_weight_css()}; border: none; "
+            f"font-family: {tm.font_family()};")
+        self.btn_close.setIcon(tm.icon("close", "text_muted"))
+        self.btn_close.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; }}"
+            f"QPushButton:hover {{ background: {hex_to_rgba(tm.color('danger'), 0.2)}; "
+            f"border-radius: 4px; }}")
+        self._update_pin_ui()
+
         input_style = (f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; "
                        f"border: 1px solid {tm.color('border')}; border-radius: 6px; padding: 8px;")
         self.input_box.setStyleSheet(input_style)
@@ -571,7 +579,7 @@ class QuickTranslatorWindow(QWidget):
         self.btn_trans.setIcon(tm.icon("send", "bg_main"))
         self.btn_trans.setStyleSheet(f"""
             QPushButton {{ background-color: {tm.color('accent')}; color: {tm.color('bg_main')}; 
-                         border-radius: 6px; padding: 6px; font-weight: bold; }}
+                         border-radius: 6px; padding: 6px; font-weight: {strong_weight_css()}; }}
             QPushButton:hover {{ background-color: {tm.color('title_blue')}; }}
         """)
 
@@ -579,7 +587,7 @@ class QuickTranslatorWindow(QWidget):
         self.btn_stop.setIcon(tm.icon("close", "bg_main"))
         self.btn_stop.setStyleSheet(f"""
             QPushButton {{ background-color: {tm.color('danger')}; color: {tm.color('bg_main')}; 
-                         border-radius: 6px; padding: 6px; font-weight: bold; }}
+                         border-radius: 6px; padding: 6px; font-weight: {strong_weight_css()}; }}
             QPushButton:hover {{ background-color: #a32418; }}
         """)
 
@@ -594,10 +602,20 @@ class QuickTranslatorWindow(QWidget):
         self.btn_copy.setText(" Copy")
         self.btn_copy.setIcon(tm.icon("copy", "text_main"))
         self.btn_copy.setStyleSheet(f"""
-            QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; 
+            QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')};
                          border-radius: 6px; padding: 6px; }}
             QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
         """)
+
+        # 主题切换后重渲染输出区：Markdown 模式下代码块/链接等主题色以
+        # HTML 内联样式固化在文档里，仅刷 QSS 无法更新，必须重走渲染管线
+        # （与 ChatBubbleWidget._rerender_on_theme 同一策略）。
+        if getattr(self, 'current_out_text', '') and self.chk_markdown.isChecked():
+            try:
+                self.output_box.setHtml(self._format_response(self.current_out_text, index=0))
+                self.logger.info("Quick translator output re-rendered after theme change.")
+            except Exception as e:
+                self.logger.warning(f"Failed to re-render translator output on theme change: {e}")
 
 
     def _get_resize_dir(self, pos):

@@ -4,12 +4,32 @@ import sys
 import time
 import traceback
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot, QCoreApplication
-from PySide6.QtGui import QIcon
-from PySide6.QtSvgWidgets import QSvgWidget
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication, QMessageBox
-from src.core.logger import setup_logger
-from src.core.core_task import TaskManager, TaskMode
+# Qt 运行库预检必须发生在**任何 PySide6 导入之前**。Linux 上缺 X11/xkbcommon 等
+# 系统库时，import 抛出的原始 ImportError 无法指导用户修复；本模块把它整理成
+# 可照做的安装指引，并按运行环境注入 Chromium（QtWebEngine）启动参数。
+from src.core.platform_env import (
+    configure_qt_environment, format_qt_import_error, gui_display_available,
+    is_shared_library_error, log_environment, maybe_relaunch_in_fhs,
+    no_display_message, shared_library_hint,
+)
+
+configure_qt_environment()
+
+try:
+    from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, Slot, QCoreApplication
+    from PySide6.QtGui import QIcon
+    from PySide6.QtSvgWidgets import QSvgWidget
+    from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication, QMessageBox
+    from src.core.logger import setup_logger
+    from src.core.core_task import TaskManager, TaskMode
+except ImportError as e:
+    # NixOS：PyPI 的 PySide6 依赖标准路径下的系统库，先用 steam-run 自动接管；
+    # 接管成功时进程已被替换，下面不会执行。
+    if maybe_relaunch_in_fhs(e):
+        sys.exit(0)
+    # 退出码 3：环境不满足（区别于业务异常退出码 1）
+    print(format_qt_import_error(e), file=sys.stderr)
+    sys.exit(3)
 
 is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
@@ -36,8 +56,9 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     if 'global_logger' in globals():
         try:
             global_logger.error(f"Uncaught Exception:\n{tb_str}")
-        except Exception:
-            pass
+        except Exception as e:
+            # 崩溃处理器内日志失败时降级输出到 stderr
+            print(f"CRITICAL: Failed to log uncaught exception: {e}", file=sys.stderr)
 
     try:
         # 检查是否为 API 模式（非 GUI），如果是则只打印终端
@@ -55,19 +76,18 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
         msg.setWindowTitle("Application Crash")
         msg.setText("Scholar Navis encountered a fatal error and must close.")
 
-        # 针对 DLL 丢失的专门提示
-        if issubclass(exc_type, ImportError) and "DLL load failed" in str(exc_value):
+        # 针对动态库缺失的专门提示（Windows 为 DLL，Linux 为 .so，macOS 为 dyld）
+        if is_shared_library_error(exc_value):
             msg.setInformativeText(
-                f"A required system component (DLL) could not be loaded.\n"
-                f"This might be caused by missing dependencies or antivirus interference.\n\n"
-                f"Error: {exc_value}"
-            )
+                f"{shared_library_hint(exc_value)}\n\nError: {exc_value}")
         else:
             msg.setInformativeText(str(exc_value))
 
         msg.setDetailedText(tb_str)
         msg.exec()
-    except Exception:
+    except Exception as e:
+        # 崩溃弹窗失败时记录原因并回退到系统默认处理器
+        print(f"CRITICAL: Crash dialog failed: {e}", file=sys.stderr)
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
     sys.exit(1)
@@ -81,6 +101,10 @@ class StartupWorker(QThread):
     sig_progress = Signal(int, str)
     sig_finished = Signal()
     sig_error = Signal(str, str)
+    # 硬件预热任务必须由主线程发起：TaskManager 内部使用 QTimer，在工作线程里
+    # start_task 会触发 "QObject::startTimer: Timers cannot be started from
+    # another thread"，定时器不启动则任务结果无法回传。
+    sig_start_hw_warmup = Signal()
 
     def __init__(self, logger):
         super().__init__()
@@ -88,14 +112,27 @@ class StartupWorker(QThread):
         self.hw_task_mgr = TaskManager()
 
     def run(self):
+        # 分阶段耗时进日志：启动变慢时能一眼看出卡在哪一步（否则只能看到
+        # 相邻日志间的时间差，无从判断是导入、配置还是网络）。
+        phase = "startup"
+        phase_started = time.perf_counter()
+
+        def phase_done(next_phase: str):
+            nonlocal phase, phase_started
+            now = time.perf_counter()
+            self.logger.info(f"[startup] {phase}: {now - phase_started:.3f}s -> {next_phase}")
+            phase, phase_started = next_phase, now
+
         try:
             self.sig_progress.emit(5, "Detecting hardware info...")
             time.sleep(0.1)
+            phase_done("model registry import")
 
             self.sig_progress.emit(6, "Loading model registry framework...")
             time.sleep(0.1)
             from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, \
                 ensure_onnx_model
+            phase_done("config/network import")
 
             self.sig_progress.emit(7, "Loading user settings...")
             time.sleep(0.1)
@@ -108,25 +145,30 @@ class StartupWorker(QThread):
             cfg_mgr = ConfigManager()
             _ = cfg_mgr.user_settings
             setup_global_network_env()
+            phase_done("hardware warmup dispatch")
 
             self.sig_progress.emit(25, "Scanning local hardware & compute engines (Background)...")
             time.sleep(0.1)
-            from src.task.startup_tasks import HardwareInitTask
-            self.hw_task_mgr.start_task(HardwareInitTask, task_id="hw_warmup", mode=TaskMode.THREAD)
+            # 交给主线程发起（见 sig_start_hw_warmup 的说明）
+            self.sig_start_hw_warmup.emit()
+            phase_done("theme assets")
 
             self.sig_progress.emit(40, "Mounting theme cache and UI assets...")
             time.sleep(0.1)
             tm = ThemeManager()
             _ = tm.color('bg_main')
+            phase_done("mcp metadata")
 
             self.sig_progress.emit(60, "Loading MCP Subsystem metadata...")
             time.sleep(0.1)
             cfg_mgr.load_mcp_servers()
+            phase_done("UI/ML import")
 
             self.sig_progress.emit(80, "Pre-loading UI components & ML libraries...")
             time.sleep(0.1)
             from src.ui.main_window import MainWindow
             from src.core.mcp_manager import MCPManager
+            phase_done("ready")
 
             self.sig_progress.emit(100, "Ready. Building workspace...")
             time.sleep(0.1)
@@ -213,12 +255,11 @@ class AppController(QObject):
 
         from src.core.config_manager import ConfigManager
         from src.core.theme_manager import ThemeManager
-        import qdarktheme
 
         cfg = ConfigManager().user_settings
         theme_setting = cfg.get("theme", "Dark").lower()
-        qdarktheme.setup_theme(theme_setting)
-        ThemeManager().set_theme(theme_setting)
+        # 统一入口：基础样式(Fusion) + qdarktheme 样式表 + 同源调色板
+        ThemeManager().apply_application_theme(theme_setting)
 
         self.splash = SplashScreen()
         self.splash.show()
@@ -230,7 +271,16 @@ class AppController(QObject):
         self.worker.sig_progress.connect(self.update_splash)
         self.worker.sig_finished.connect(self.on_startup_finished)
         self.worker.sig_error.connect(self.on_startup_error)  # 绑定错误信号
+        self.worker.sig_start_hw_warmup.connect(self.start_hw_warmup)
         self.worker.start()
+
+    @Slot()
+    def start_hw_warmup(self):
+        """在主线程发起硬件预热任务（TaskManager 的 QTimer 有线程亲和性要求）。"""
+        from src.task.startup_tasks import HardwareInitTask
+
+        self.worker.hw_task_mgr.start_task(
+            HardwareInitTask, task_id="hw_warmup", mode=TaskMode.THREAD)
 
     @Slot(int, str)
     def update_splash(self, val, msg):
@@ -252,12 +302,12 @@ class AppController(QObject):
         msg.setIcon(QMessageBox.Critical)
         msg.setWindowTitle("Startup Error")
 
-        if "DLL load failed" in err_msg:
-            msg.setText("A required component is missing (DLL load failed).")
+        if is_shared_library_error(err_msg):
+            msg.setText("A required system library is missing.")
+            msg.setInformativeText(f"{shared_library_hint(err_msg)}\n\n{err_msg}")
         else:
             msg.setText("Application failed to initialize.")
-
-        msg.setInformativeText(err_msg)
+            msg.setInformativeText(err_msg)
         msg.setDetailedText(tb_str)
         msg.exec()
         sys.exit(1)
@@ -290,6 +340,34 @@ if __name__ == "__main__":
         pass
 
     # 1. 判断启动模式
+    is_api_mode = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
+
+    # 2. 图形会话预检（仅 GUI 模式）：无 X11/Wayland 会话时给出可操作提示，
+    #    而不是让 Qt 以原生错误码中断在用户读不到的位置（SSH、纯终端、容器）。
+    has_display = gui_display_available()
+    if not is_api_mode and not has_display:
+        print(no_display_message(), file=sys.stderr)
+        sys.exit(3)
+
+    def _fatal_message(title, text, detail=""):
+        """致命提示：可用界面则弹窗，否则写 stderr（API 模式/无显示会话）。"""
+        print(f"{title}: {text}" + (f"\n{detail}" if detail else ""), file=sys.stderr)
+        if is_api_mode or not has_display:
+            return
+        try:
+            QApplication.instance() or QApplication(sys.argv)
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Critical)
+            box.setWindowTitle(title)
+            box.setText(text)
+            if detail:
+                box.setInformativeText(detail)
+            box.setStandardButtons(QMessageBox.Ok)
+            box.exec()
+        except Exception as e:
+            print(f"CRITICAL: failed to display message box: {e}", file=sys.stderr)
+
+    # 3. 提权检测
     is_admin = False
     try:
         if os.name == 'nt':
@@ -298,33 +376,23 @@ if __name__ == "__main__":
             is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
         else:
             is_admin = os.geteuid() == 0
-    except Exception:
+    except (ImportError, OSError, AttributeError):
         pass
 
     if is_admin:
-        temp_app = QApplication(sys.argv)
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle("Security Alert: Elevated Privileges")
-        msg_box.setText("Scholar Navis cannot be run with Administrator / Root privileges.")
-        msg_box.setInformativeText(
-            "For security reasons and to prevent sandbox escapes, please restart the application as a standard user.")
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.exec()
+        _fatal_message(
+            "Security Alert: Elevated Privileges",
+            "Scholar Navis cannot be run with Administrator / Root privileges.",
+            "For security reasons and to prevent sandbox escapes, "
+            "please restart the application as a standard user.")
         sys.exit(1)
 
-    # 判断启动模式
-    is_api_mode = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
-
-    # 2. 统一在最开始创建 Qt 应用实例
-    if is_api_mode:
-        app = QCoreApplication(sys.argv)
-    else:
-        app = QApplication(sys.argv)
+    # 4. 统一在最开始创建 Qt 应用实例
+    app = QCoreApplication(sys.argv) if is_api_mode else QApplication(sys.argv)
 
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-    # 3. 全局单例锁检测
+    # 5. 全局单例锁检测
     unique_server_name = "ScholarNavis_SingleInstance_Lock"
     socket = QLocalSocket()
     socket.connectToServer(unique_server_name)
@@ -343,17 +411,18 @@ if __name__ == "__main__":
             msg_box.exec()
         sys.exit(0)
 
-    # 4. 当前无其他实例，抢占互斥锁
+    # 6. 当前无其他实例，抢占互斥锁
     local_server = QLocalServer()
     QLocalServer.removeServer(unique_server_name)
     local_server.listen(unique_server_name)
 
-    # 5. 根据模式进入相应的启动流程
+    # 7. 根据模式进入相应的启动流程
     if is_api_mode:
         os.environ["SCARF_NO_ANALYTICS"] = "true"
 
 
         global_logger = setup_logger()
+        log_environment()
 
         from src.core.config_manager import ConfigManager
         from src.core.network_worker import setup_global_network_env
@@ -378,14 +447,14 @@ if __name__ == "__main__":
             try:
                 myappid = ctypes.c_wchar_p("scholar.navis.app")
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            except Exception:
+            except (OSError, AttributeError):
                 pass
 
         global_logger = setup_logger()
+        log_environment()
 
         from src.core.theme_manager import ThemeManager
         from src.core.config_manager import ConfigManager
-        import qdarktheme
 
         tm = ThemeManager()
         global_icon = tm.get_app_icon()
@@ -394,7 +463,7 @@ if __name__ == "__main__":
         app.processEvents()
 
         saved_theme = ConfigManager().user_settings.get("theme", "dark").lower()
-        qdarktheme.setup_theme(saved_theme)
+        tm.apply_application_theme(saved_theme)
 
         controller = AppController(global_logger)
         controller.splash.setWindowIcon(global_icon)

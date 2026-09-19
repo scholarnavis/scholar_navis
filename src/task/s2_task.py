@@ -2,15 +2,21 @@ import os
 import time
 import threading
 import logging
-from src.core.network_worker import create_robust_session
+from src.core.network_worker import create_robust_session, auth_breaker, record_auth_rejection, is_auth_blocked
 from src.core.config_manager import ConfigManager
 
 logger = logging.getLogger("S2Task")
+
+# S2 在全局鉴权熔断器中的服务键（与其 API host 一致，
+# 与 mcp_request 侧的 host 键体系统一）
+_S2_AUTH_KEY = "api.semanticscholar.org"
 
 
 class S2TaskManager:
     _instance = None
     _lock = threading.Lock()
+    # 限流时间戳：延迟创建，reload_config 中可被删除，故仅作类型声明
+    _last_request_time: float
 
     def __new__(cls):
         with cls._lock:
@@ -22,8 +28,11 @@ class S2TaskManager:
         """
         Resets the internal rate limiter state.
         Ensures immediate adoption of updated configurations by clearing legacy timestamps.
+        Also clears S2's auth-rejection breaker count so an updated API key
+        takes effect immediately (only S2's own counter is reset).
         """
         with self._lock:
+            auth_breaker.reset_service(_S2_AUTH_KEY)
             if hasattr(self, '_last_request_time'):
                 delattr(self, '_last_request_time')
 
@@ -52,6 +61,8 @@ class S2TaskManager:
             return "", 1.0
 
     def is_enabled(self):
+        if is_auth_blocked(_S2_AUTH_KEY):
+            return False
         key, limit = self._get_current_config()
         return bool(key and limit > 0)
 
@@ -67,6 +78,12 @@ class S2TaskManager:
             return None
 
         min_interval = 1.0 / rate_limit
+
+        # 鉴权熔断前置拦截（防御性：正常路径已由 is_enabled 拦截）
+        if is_auth_blocked(_S2_AUTH_KEY):
+            raise RuntimeError(
+                "S2 request skipped: source blocked by auth-rejection breaker "
+                "for the current chat round.")
 
         session = create_robust_session()
         headers = kwargs.pop("headers", {})
@@ -85,6 +102,15 @@ class S2TaskManager:
                     self._last_request_time = time.time()
 
                 res = session.request(method, url, timeout=req_timeout, **kwargs)
+
+                if res.status_code == 403:
+                    # 403 = key 无效/被拒或 IP 被封，计入全局鉴权熔断器（阈值 2，
+                    # 本轮对话内生效）；达到阈值后后续请求零开销跳过，其他
+                    # 来源不受影响。429 属临时限流，仍走下方重试。
+                    # 熔断键统一按 URL host 归一（与 mcp_request 侧一致），
+                    # S2 的 host 即 _S2_AUTH_KEY。
+                    record_auth_rejection(url, context="HTTP 403 via S2 API.")
+                    res.raise_for_status()
 
                 if res.status_code == 429:
                     wait = 2 ** attempt

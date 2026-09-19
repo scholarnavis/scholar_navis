@@ -1,16 +1,17 @@
-import binascii
 import os
 import platform
 import logging
 import base64
+import subprocess
 import keyring
-import hashlib
 from typing import Optional, Tuple
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
+
+from src.core import BASE_DIR
 
 SYSTEM = platform.system()
 if SYSTEM == "Windows":
@@ -45,7 +46,7 @@ class SystemEncryptionService:
                 cmd = "ioreg -rd1 -c IOPlatformExpertDevice | grep -E '(UUID)'"
                 uuid = subprocess.check_output(cmd, shell=True).decode().split('"')[-2]
                 return uuid
-        except Exception:
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             return platform.node()
         return "fallback-id"
 
@@ -73,41 +74,142 @@ class SystemEncryptionService:
         """Decrypts data using the hardware-bound master key."""
         return self._get_master_fernet().decrypt(encrypted_data).decode()
 
-    def _get_master_key(self) -> bytes:
-        """Retrieves or creates a hardware/OS-bound master key via Keyring and DPAPI."""
+    # ------------------------------------------------------------------ #
+    #  Master key storage: system keyring (primary) + local file (fallback)
+    # ------------------------------------------------------------------ #
+
+    #: 覆盖回退密钥文件位置（自定义部署/测试用）
+    FALLBACK_KEY_ENV = "SCHOLAR_NAVIS_FALLBACK_KEY_FILE"
+    #: 置为 1/true 时禁止把密钥镜像到本地文件（仅依赖系统 keyring）
+    DISABLE_MIRROR_ENV = "SCHOLAR_NAVIS_DISABLE_KEY_MIRROR"
+
+    def _fallback_key_path(self) -> str:
+        custom = os.environ.get(self.FALLBACK_KEY_ENV, "").strip()
+        if custom:
+            return os.path.expanduser(custom)
+        return os.path.join(BASE_DIR, "config", ".secret_fallback.key")
+
+    @staticmethod
+    def _protect(raw: bytes) -> bytes:
+        """Windows 上用 DPAPI 再包一层；其他平台原样返回。"""
+        if SYSTEM == "Windows" and win32crypt:
+            return win32crypt.CryptProtectData(raw, "ScholarNavis Key", None, None, None, 0)
+        return raw
+
+    @staticmethod
+    def _unprotect(blob: bytes) -> bytes:
+        if SYSTEM == "Windows" and win32crypt:
+            return win32crypt.CryptUnprotectData(blob, None, None, None, 0)[1]
+        return blob
+
+    def _keyring_read(self) -> Optional[bytes]:
+        """读取 keyring 中的主密钥；不可用或已损坏时返回 None（不抛错）。"""
         try:
-            stored_key = keyring.get_password(self.service_name, self.account_name)
-
-            if stored_key:
-                try:
-                    encrypted_blob = base64.b64decode(stored_key)
-                    if SYSTEM == "Windows" and win32crypt:
-                        return win32crypt.CryptUnprotectData(encrypted_blob, None, None, None, 0)[1]
-                    return encrypted_blob
-                except (binascii.Error, Exception) as e:
-                    self.logger.warning(f"Stored master key is corrupted or invalid format, resetting: {e}")
-                    # 可选：尝试清除物理存储中的损坏数据
-                    try:
-                        keyring.delete_password(self.service_name, self.account_name)
-                    except:
-                        pass
-
-            # Generate new key if missing or corrupted
-            self.logger.info("Initializing new system-bound master key.")
-            new_key = os.urandom(32)
-
-            if SYSTEM == "Windows" and win32crypt:
-                final_blob = win32crypt.CryptProtectData(new_key, "ScholarNavis Key", None, None, None, 0)
-            elif SYSTEM == "Darwin":
-                final_blob = new_key
-            else:
-                final_blob = new_key
-
-            keyring.set_password(self.service_name, self.account_name, base64.b64encode(final_blob).decode())
-            return new_key
+            stored = keyring.get_password(self.service_name, self.account_name)
         except Exception as e:
-            self.logger.error(f"Security context establishment failed: {e}")
-            raise RuntimeError(f"Platform-bound security is unreachable: {e}")
+            self.logger.warning(f"Keyring unavailable (read): {e}")
+            return None
+
+        if not stored:
+            return None
+
+        try:
+            return self._unprotect(base64.b64decode(stored))
+        except Exception as e:
+            self.logger.warning(f"Stored master key is corrupted, discarding: {e}")
+            try:
+                keyring.delete_password(self.service_name, self.account_name)
+            except Exception:  # 删除失败不影响后续重建
+                pass
+            return None
+
+    def _keyring_write(self, raw: bytes) -> bool:
+        """把主密钥写入 keyring；失败返回 False（调用方转用本地密钥文件）。"""
+        try:
+            keyring.set_password(
+                self.service_name, self.account_name,
+                base64.b64encode(self._protect(raw)).decode())
+            return True
+        except Exception as e:
+            self.logger.warning(f"Keyring unavailable (write): {e}")
+            return False
+
+    def _read_fallback_key(self) -> Optional[bytes]:
+        path = self._fallback_key_path()
+        try:
+            with open(path, "rb") as f:
+                blob = f.read()
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            self.logger.warning(f"Cannot read fallback key file '{path}': {e}")
+            return None
+
+        try:
+            return self._unprotect(base64.b64decode(blob.strip()))
+        except Exception as e:
+            self.logger.error(f"Fallback key file is corrupted ('{path}'): {e}")
+            return None
+
+    def _write_fallback_key(self, raw: bytes) -> bool:
+        """原子写入本地密钥文件（权限 0o600）。"""
+        path = self._fallback_key_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp_path = f"{path}.tmp"
+            with open(tmp_path, "wb") as f:
+                f.write(base64.b64encode(self._protect(raw)))
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+            return True
+        except OSError as e:
+            self.logger.error(f"Failed to persist fallback key at '{path}': {e}")
+            return False
+
+    def _mirror_enabled(self) -> bool:
+        return os.environ.get(self.DISABLE_MIRROR_ENV, "").strip().lower() not in {
+            "1", "true", "yes", "on"}
+
+    def _get_master_key(self) -> bytes:
+        """获取或创建系统绑定的主密钥。
+
+        存储策略（按优先级）：
+
+        1. 系统 keyring（Windows 凭据管理器 / macOS Keychain / Linux Secret Service）；
+        2. 本地密钥文件 ``config/.secret_fallback.key``（0o600，Windows 上再经 DPAPI 保护）。
+
+        第 2 条是本应用在 Linux 上的关键保障：无桌面会话（SSH、容器、未配置
+        gnome-keyring/kwallet 的 KDE）时 keyring 必然不可用，此前会直接抛
+        RuntimeError 导致应用启动失败。现在降级到本地密钥文件，配置仍可正常
+        解密；keyring 可用时同时镜像一份，避免"桌面会话写、终端会话读不到"
+        而丢失配置。
+        """
+        key = self._keyring_read()
+        if key:
+            path = self._fallback_key_path()
+            if self._mirror_enabled() and not os.path.exists(path):
+                # 仅补齐缺失的镜像，绝不覆盖已有文件
+                self._write_fallback_key(key)
+            return key
+
+        key = self._read_fallback_key()
+        if key:
+            self.logger.warning(
+                f"System keyring unavailable; using local fallback key file "
+                f"'{self._fallback_key_path()}'. Configuration stays readable.")
+            self._keyring_write(key)  # 尝试回填 keyring，失败无妨
+            return key
+
+        self.logger.info("Initializing new system-bound master key.")
+        new_key = os.urandom(32)
+        stored = self._keyring_write(new_key)
+        mirrored = self._write_fallback_key(new_key) if self._mirror_enabled() else False
+
+        if not stored and not mirrored:
+            raise RuntimeError(
+                "Platform-bound security is unreachable: neither the system keyring "
+                f"nor a local key file at '{self._fallback_key_path()}' could be written.")
+        return new_key
 
 
     def derive_key_from_password(self, password: str, salt: bytes = None) -> Tuple[bytes, bytes]:

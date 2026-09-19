@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, Q
                                QPlainTextEdit)
 
 from src.core.logger import get_qt_log_handler
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.tools.base_tool import BaseTool
 
 
@@ -26,6 +26,21 @@ class LogReceiver(QObject):
 
 class LogTool(BaseTool):
     MAX_LOGS = 1000
+
+    # 由 UI 构建流程创建的控件与快捷键，仅作静态检查声明
+    lbl_title: QLabel
+    btn_toggle_search: QPushButton
+    search_widget: QWidget
+    search_input: QLineEdit
+    lbl_search_count: QLabel
+    btn_find_prev: QPushButton
+    btn_find_next: QPushButton
+    btn_close_search: QPushButton
+    btn_clear: QPushButton
+    shortcut_find: QShortcut
+    shortcut_find_prev: QShortcut
+    shortcut_find_prev_alt: QShortcut
+    _search_timer: QTimer
 
     def __init__(self):
         super().__init__("System Logs")
@@ -226,10 +241,10 @@ class LogTool(BaseTool):
         if not self.widget: return
 
         self.lbl_title.setStyleSheet(f"color: {tm.color('text_main')};")
-        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_muted')}; font-weight: bold; margin: 0 5px;")
+        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_muted')}; font-weight: {strong_weight_css()}; margin: 0 5px;")
 
         btn_style = f"""
-            QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px 15px; border-radius: 4px; font-weight: bold; }}
+            QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 6px 15px; border-radius: 4px; font-weight: {strong_weight_css()}; }}
             QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
         """
 
@@ -242,7 +257,7 @@ class LogTool(BaseTool):
         self.btn_clear.setStyleSheet(btn_style)
 
         small_btn_style = f"""
-            QPushButton {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 4px 8px; border-radius: 3px; font-weight: bold; }}
+            QPushButton {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 4px 8px; border-radius: 3px; font-weight: {strong_weight_css()}; }}
             QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
         """
         self.btn_find_prev.setStyleSheet(small_btn_style)
@@ -268,7 +283,7 @@ class LogTool(BaseTool):
                         color: {tm.color('text_main')};
                         selection-background-color: {tm.color('accent')};
                         selection-color: {tm.color('bg_base')};
-                        font-family: 'Consolas', monospace; font-size: 13px;
+                        font-family: {tm.mono_font_family()}; font-size: 13px;
                         border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 10px;
                     }}
                 """)

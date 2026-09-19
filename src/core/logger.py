@@ -21,6 +21,9 @@ class QtLogHandler(QObject, logging.Handler):
         self.log_history = []
 
     def emit(self, record):
+        # 日志管道不允许向调用方抛出异常（与 stdlib logging.Handler.emit 行为一致），
+        # format() 失败域不可穷举，此处豁免静态检查。
+        # noinspection PyBroadException
         try:
             msg = self.format(record)
             self.log_history.append((record.levelname, msg, record.pathname, record.lineno))
@@ -47,8 +50,9 @@ def setup_logger():
         config_mgr = ConfigManager()
         level_str = config_mgr.user_settings.get("log_level", "INFO")
         log_level = getattr(logging, level_str.upper(), logging.INFO)
-    except Exception:
-        pass
+    except Exception as e:
+        # 配置读取失败不得阻断日志初始化，回退 INFO 并记录原因
+        logging.getLogger().debug(f"Failed to load log level setting, fallback to INFO: {e}")
 
     root_logger.setLevel(log_level)
 

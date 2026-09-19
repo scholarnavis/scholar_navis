@@ -1,6 +1,7 @@
 # ====== 文件：pdf_viewer.py ======
 
 import html
+import logging
 import os
 import re
 import shutil
@@ -11,35 +12,21 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtCore import Qt, QUrl, QEvent, QPoint
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeyEvent, QShortcut, QKeySequence, QTextCursor, \
     QTextDocument
-from PySide6.QtWidgets import (QMainWindow, QToolBar, QApplication, QFileDialog, QMessageBox,
+from PySide6.QtWidgets import (QMainWindow, QToolBar, QApplication, QMessageBox,
                                QTextBrowser, QWidget, QHBoxLayout, QLineEdit, QPushButton, QLabel, QMenu)
 
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager
+from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme, strong_weight_css
+from src.ui.components.file_dialogs import save_file_name
 
 
 def _apply_windows_dark_titlebar(window, tm):
-    """底层 Hack：强制将 Windows 操作系统原生标题栏适配深色/浅色模式"""
-    import sys
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            import platform
-            bg = tm.color('bg_main')
-            is_dark = False
-            # 通过主背景色的亮度来判定是否为深色模式
-            if bg and bg.startswith('#') and len(bg) >= 7:
-                r, g, b = int(bg[1:3], 16), int(bg[3:5], 16), int(bg[5:7], 16)
-                is_dark = (0.299 * r + 0.587 * g + 0.114 * b) < 128
+    """强制将 Windows 操作系统原生标题栏适配深色/浅色模式。
 
-            hwnd = int(window.winId())
-            build = int(platform.version().split('.')[2])
-            # Windows 11 及部分 Windows 10 使用 20，较老版本使用 19
-            attr = 20 if build >= 22000 else 19
-            val = ctypes.c_int(1 if is_dark else 0)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
-        except Exception:
-            pass
+    原生标题栏适配已统一到核心层 :func:`apply_native_titlebar_theme`（修复了
+    原先内联 ctypes 调用未声明 argtypes 导致大句柄静默失败的问题）。
+    """
+    apply_native_titlebar_theme(window, tm.current_theme == "dark")
 
 
 class InternalPDFViewer(QMainWindow):
@@ -88,7 +75,7 @@ class InternalPDFViewer(QMainWindow):
 
         tb_style = f"""
             QToolBar {{ background: {tm.color('bg_card')}; padding: 6px; border: none; border-bottom: 1px solid {tm.color('border')}; }} 
-            QToolButton, QPushButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: bold; font-family: {tm.font_family()}; background: transparent; border: none; }} 
+            QToolButton, QPushButton {{ color: {tm.color('text_main')}; padding: 5px 10px; border-radius: 4px; font-weight: {strong_weight_css()}; font-family: {tm.font_family()}; background: transparent; border: none; }} 
             QToolButton:hover, QPushButton:hover {{ background: {tm.color('btn_hover')}; color: {tm.color('accent')}; }}
         """
         for tb in self.findChildren(QToolBar):
@@ -98,7 +85,7 @@ class InternalPDFViewer(QMainWindow):
             f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; border-radius: 4px; padding: 4px 8px;")
 
         if hasattr(self, 'lbl_search_count'):
-            self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: bold; padding: 0 10px;")
+            self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; padding: 0 10px;")
 
         if hasattr(self, 'act_open_sys'):
             self.act_open_sys.setIcon(tm.icon("link", "text_main"))
@@ -139,7 +126,7 @@ class InternalPDFViewer(QMainWindow):
         self.btn_do_search.clicked.connect(self._find_next)
 
         self.lbl_search_count = QLabel(" 0 / 0 ")
-        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: bold; padding: 0 10px;")
+        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; padding: 0 10px;")
 
         self.btn_find_prev = QPushButton(" Prev")
         self.btn_find_prev.clicked.connect(self._find_prev)
@@ -258,7 +245,7 @@ class InternalPDFViewer(QMainWindow):
         if not default_name.lower().endswith('.pdf'):
             default_name += ".pdf"
 
-        save_path, _ = QFileDialog.getSaveFileName(
+        save_path, _ = save_file_name(
             self, "Export Original PDF", default_name, "PDF Files (*.pdf)"
         )
 
@@ -334,7 +321,7 @@ class InternalTextViewer(QMainWindow):
                 color: {tm.color('text_main')}; 
                 padding: 5px 10px; 
                 border-radius: 4px; 
-                font-weight: bold;
+                font-weight: {strong_weight_css()};
                 background: transparent; 
                 border: none;
             }} 
@@ -357,7 +344,7 @@ class InternalTextViewer(QMainWindow):
 
         # 4. 图标更新与文本颜色更新 (支持深色/浅色动态切换)
         if hasattr(self, 'lbl_search_count'):
-            self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: bold; padding: 0 10px;")
+            self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; padding: 0 10px;")
 
         if hasattr(self, 'act_zoom_in'):
             self.act_zoom_in.setIcon(tm.icon("add", "text_main"))
@@ -542,7 +529,7 @@ class InternalTextViewer(QMainWindow):
         self.btn_do_search.clicked.connect(self._find_next)
 
         self.lbl_search_count = QLabel(" 0 / 0 ")
-        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: bold; padding: 0 10px;")
+        self.lbl_search_count.setStyleSheet(f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; padding: 0 10px;")
 
         self.btn_find_prev = QPushButton(" Prev")
         self.btn_find_prev.clicked.connect(self._find_prev)
@@ -633,7 +620,7 @@ class InternalTextViewer(QMainWindow):
     def export_file(self):
         if not self.original_file_path or not os.path.exists(self.original_file_path):
             return
-        save_path, _ = QFileDialog.getSaveFileName(self, "Export Original File", self.display_name, "All Files (*.*)")
+        save_path, _ = save_file_name(self, "Export Original File", self.display_name, "All Files (*.*)")
         if save_path:
             try:
                 shutil.copy2(self.original_file_path, save_path)

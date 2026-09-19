@@ -4,7 +4,10 @@ import re
 import logging
 
 from src.core.config_manager import ConfigManager
-from src.core.network_worker import create_robust_session, global_rate_limiter
+from src.core.network_worker import (
+    create_robust_session, global_rate_limiter,
+    is_auth_blocked, record_auth_rejection,
+)
 from src.task.s2_task import is_s2_enabled, s2_request
 
 
@@ -82,10 +85,24 @@ class OAFetcher:
             session = create_robust_session()
 
             def default_request(url, headers=None, timeout=15):
+                # 鉴权熔断：本轮内该 host 已累计 2 次 401/403 时零开销跳过
+                # （OpenAlex/Unpaywall/NCBI idconv/PMC 各 host 独立计数；
+                # NCBI 的 www host 与 Entrez 在熔断器内归一为同一服务键）。
+                if is_auth_blocked(url):
+                    raise RuntimeError(
+                        f"Request skipped: '{url}' blocked by the "
+                        f"auth-rejection breaker for the current chat round.")
                 req_headers = session.headers.copy()
                 if headers:
                     req_headers.update(headers)
-                return session.get(url, headers=req_headers, timeout=timeout)
+                res = session.get(url, headers=req_headers, timeout=timeout)
+                # 401/403 计入全局鉴权熔断器（阈值 2，本轮内生效）。
+                # 注：若调用方传入自定义 request_func（如 mcp_request），
+                # 计数由该底层实现负责，此处不重复计数。
+                if res.status_code in (401, 403):
+                    record_auth_rejection(
+                        url, context=f"HTTP {res.status_code} via OAFetcher.")
+                return res
 
             request_func = default_request
 

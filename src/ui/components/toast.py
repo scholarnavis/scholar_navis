@@ -3,11 +3,16 @@ import logging
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QGraphicsOpacityEffect
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, Signal
 
+from src.core.theme_manager import ThemeManager, strong_weight_css
+
 logger = logging.getLogger("UI.Toast")
 
 class ToastManager:
     """全局单例，用于管理 Toast 显示（支持多消息向上堆叠排队）"""
     _instance = None
+    # 由 __new__ 初始化，仅作静态检查声明
+    parent_widget = None
+    active_toasts: list
 
     def __new__(cls):
         if cls._instance is None:
@@ -109,11 +114,11 @@ class ToastWidget(QWidget):
         self.lbl.setStyleSheet(f"""
             QLabel {{
                 color: white; 
-                font-weight: bold; 
+                font-weight: {strong_weight_css()}; 
                 padding: 10px 20px;
                 background-color: {bg_color};
                 border-radius: 20px;
-                font-family: 'Segoe UI';
+                font-family: {ThemeManager().font_family()};
             }}
         """)
         layout.addWidget(self.lbl)

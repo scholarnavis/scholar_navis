@@ -11,6 +11,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+out-linux/
 downloads/
 eggs/
 .eggs/
@@ -226,23 +227,24 @@ dist/
 /logs/
 /downloads_staging/
 /config/
+# R 绘图产物（PNG/SVG/PDF/CSV/脚本 + plot_registry.json）
+/output/
 .idea
 /models/
 /scholar_workspace/
 /mcp_workspace/
 /tools
-/RSS
-
-nuitka-crash-report.xml
-.nuitka_cache
-
 
 scholar_navis_win*
 scholar_navis_linux*
 scholar_navis_mac*
-torch_runtime_hook.py
 
 scholar_navis.exe
 _internal
+/benchmark/
+/RSS/
 
-*.prof
+# 平台/开发环境残留产物
+*.lnk
+_tmp_*
+

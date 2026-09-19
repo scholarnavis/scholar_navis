@@ -43,10 +43,10 @@ def patched_display(self, msg=None, pos=None):
                 desc = str(self.desc) if self.desc else "Processing"
 
                 if "Fetching" in desc or "files" in desc.lower():
-                    display_msg = f"📦 {desc} ({self.n}/{self.total})"
+                    display_msg = f"- {desc} ({self.n}/{self.total})"
                 else:
                     clean_name = desc.replace("Downloading ", "")
-                    display_msg = f"⬇ {clean_name}"
+                    display_msg = f"- {clean_name}"
 
                 _global_callback(percent, display_msg)
 
@@ -97,7 +97,7 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 try:
                     os.remove(lock_file)
                     self.send_log("WARNING", f"Removed leftover lock file to prevent deadlock: {lock_file}")
-                except Exception as e:
+                except OSError:
                     pass
         hf_logger = hf_logging.get_logger()
         hf_logging.set_verbosity_info()
@@ -153,60 +153,18 @@ class RealTimeHFDownloadTask(BackgroundTask):
                 total_bytes = sum(f.size for f in target_files if f.size)
                 self.send_log("INFO",
                               f"[{repo_id}] Target files: {len(target_files)}, Size: {total_bytes / (1024 ** 2):.2f} MB")
-                completed_bytes = 0
-                _original_update = tqdm.tqdm.update
-                tqdm_lock = threading.Lock()
-                last_emit_time = [0.0]
-                start_time = time.time()
-                total_downloaded_this_session = [0]
                 for idx, f in enumerate(target_files):
                     file_name = f.rfilename
-                    file_size = f.size or 0
                     self.queue.put({
                         "state": TaskState.PROCESSING.value,
                         "progress": -1,
-                        "msg": f"🔍 Checking or Queuing: {file_name} ({idx + 1}/{len(target_files)})"
+                        "msg": f"Downloading: {file_name} ({idx + 1}/{len(target_files)})..."
                     })
-
-                    def patched_update(tqdm_instance, n=1):
-                        if self.is_cancelled():
-                            raise InterruptedError("Download task was manually cancelled by user.")
-                        res = _original_update(tqdm_instance, n)
-                        unit = getattr(tqdm_instance, 'unit', '').lower()
-                        if 'b' in unit:
-                            with tqdm_lock:
-                                total_downloaded_this_session[0] += n
-                                current_time = time.time()
-                                if current_time - last_emit_time[0] >= 0.1:
-                                    last_emit_time[0] = current_time
-                                    current_file_bytes = getattr(tqdm_instance, 'n', 0)
-                                    total_progress_bytes = completed_bytes + current_file_bytes
-                                    percent = int((total_progress_bytes / total_bytes) * 100) if total_bytes > 0 else 0
-                                    percent = min(100, max(0, percent))
-                                    if percent <= 0:
-                                        percent = -1
-                                    elapsed = current_time - start_time
-                                    speed_bps = total_downloaded_this_session[0] / elapsed if elapsed > 0 else 0
-                                    speed_mbps = speed_bps / (1024 * 1024)
-                                    desc = str(getattr(tqdm_instance, 'desc', file_name)).replace("Downloading ", "")
-                                    display_msg = f"⬇ {desc} ({idx + 1}/{len(target_files)}) | {speed_mbps:.1f} MB/s"
-                                    self.queue.put({
-                                        "state": TaskState.PROCESSING.value,
-                                        "progress": percent,
-                                        "msg": display_msg
-                                    })
-                        return res
-
-                    tqdm.tqdm.update = patched_update
-                    try:
-                        hf_hub_download(
-                            repo_id=repo_id,
-                            filename=file_name,
-                            resume_download=True,
-                        )
-                    finally:
-                        tqdm.tqdm.update = _original_update
-                    completed_bytes += file_size
+                    hf_hub_download(
+                        repo_id=repo_id,
+                        filename=file_name,
+                        resume_download=True,
+                    )
             # === 统一处理 ONNX 确保逻辑 ===
             self.send_log("INFO", f"Download Finished: {repo_id}. Checking ONNX status...")
             if self.is_cancelled():

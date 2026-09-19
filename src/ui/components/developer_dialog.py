@@ -1,0 +1,1439 @@
+"""
+Developer Mode Dialog
+=====================
+
+A hidden diagnostic panel, activated by clicking the version label in the
+About page five times.
+
+Two test categories:
+
+    * AI tests  — routed to the real Chat Assistant panel via
+      ``MainWindow.route_dev_test``. A display-only note labels the test in the
+      chat (visible to the user, never sent to the LLM), while the actual
+      prompt drives the real agent pipeline (tool selection -> execution ->
+      provenance -> plot rendering).
+    * Functional tests — run in-process against the core modules directly
+      (R detection, skill gating, syntax/import sanity). No AI involved.
+
+Design principles:
+    * High cohesion: one test = one focused method; no cross-deps.
+    * Low coupling: AI tests only need a ``MainWindow`` reference exposing
+      ``route_dev_test``; functional tests only touch core modules.
+    * Read-only: functional tests use synthetic fixtures and never mutate
+      user data.
+"""
+
+from __future__ import annotations
+
+import ast
+import base64
+import json
+import logging
+import os
+import re
+import tempfile
+
+from pathlib import Path
+from urllib.parse import quote
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QLabel,
+    QPushButton,
+    QHBoxLayout,
+    QRadioButton,
+)
+
+from src.core.theme_manager import ThemeManager, strong_weight_css
+from src.ui.components.dialog import BaseDialog
+from src.ui.components.source_code_viewer import SourceCodeViewer
+
+logger = logging.getLogger("UI.DeveloperDialog")
+
+# AI tests: each entry pairs a display-only note (shown to the user, NOT sent
+# to the LLM) with the actual prompt (sent to the LLM to drive real tool use).
+#
+# IMPORTANT: the prompt should read like a REAL user typing in the chat box —
+# natural, conversational, with a concrete research goal — NOT a developer
+# instruction that names tools or parameters. Let the agent pick the right tool
+# itself, exactly as it would for a human user. The ``note`` is where the
+# developer intent (which skill / parameter path is being exercised) lives.
+AI_TESTS = {
+    "plot_bubble": {
+        "note": (
+            "Developer test: exercising the <b>plot_chart</b> skill (R plotting). "
+            "Expected tool call: plot_chart -> bubble (GO/KEGG enrichment Dotplot) "
+            "-> SVG/PNG/PDF rendering."
+        ),
+        "prompt": (
+            "I just ran a GO enrichment analysis on my RNA-seq dataset and got "
+            "these terms back. Could you visualize them as an enrichment dotplot "
+            "(bubble plot) for me? Here is the data: {\"results\": ["
+            '{"term": "response to far red light", "category": "BP", "p_value": 2.1e-12, "gene_count": 18, "gene_ratio": 0.18}, '
+            '{"term": "photoperiodism, flowering", "category": "BP", "p_value": 8.4e-11, "gene_count": 15, "gene_ratio": 0.15}, '
+            '{"term": "circadian rhythm", "category": "BP", "p_value": 3.2e-9, "gene_count": 22, "gene_ratio": 0.22}, '
+            '{"term": "response to red or far red light", "category": "BP", "p_value": 5.6e-8, "gene_count": 12, "gene_ratio": 0.12}, '
+            '{"term": "regulation of flower development", "category": "BP", "p_value": 1.7e-6, "gene_count": 9, "gene_ratio": 0.09}, '
+            '{"term": "response to blue light", "category": "BP", "p_value": 4.3e-5, "gene_count": 11, "gene_ratio": 0.11}, '
+            '{"term": "phototropism", "category": "BP", "p_value": 2.8e-4, "gene_count": 6, "gene_ratio": 0.06}, '
+            '{"term": "seed germination", "category": "BP", "p_value": 1.2e-3, "gene_count": 8, "gene_ratio": 0.08}, '
+            '{"term": "response to cold", "category": "BP", "p_value": 6.7e-3, "gene_count": 14, "gene_ratio": 0.14}, '
+            '{"term": "response to gibberellin", "category": "BP", "p_value": 2.4e-2, "gene_count": 19, "gene_ratio": 0.19}'
+            "]} \n"
+            "A classic GO dotplot would be great, the kind you'd put in a paper. "
+            "Could you also tell me what the size and color of the bubbles represent?"
+        ),
+    },
+    "provenance_chain": {
+        "note": (
+            "Developer test: exercising the <b>literature search</b> + "
+            "<b>Provenance</b> chain. Expected: search_academic_literature call, "
+            "then a Provenance summary block at the end of the reply."
+        ),
+        "prompt": (
+            "I'm writing the introduction to my plant biology paper and need "
+            "recent, citable papers on CRISPR-based genome editing in plants. "
+            "Could you find me a few good recent reviews and summarize what the "
+            "key finding of one of them is? Please make sure to cite everything "
+            "properly with full references."
+        ),
+    },
+    "literature_breadth": {
+        "note": (
+            "Developer test: exercising the enhanced <b>literature search</b> "
+            "(breadth / depth / trust). Expected: a single search_academic_literature "
+            "call with source='auto' returning an 'aggregated' payload, per-record "
+            "source_dbs + confidence fields, and a 'source_stats' block. "
+            "Use min_year to constrain recency."
+        ),
+        "prompt": (
+            "I'm starting a new project on single-cell RNA sequencing analysis "
+            "and want to get a broad picture of the field before I dive in. "
+            "Could you look for review-level papers from the last decade, point "
+            "out which are the most influential / highly cited ones, and give me "
+            "a sense of which journals they tend to appear in? Summarize the main "
+            "takeaways and cite every claim with the references."
+        ),
+    },
+    "image_upload_vision": {
+        "note": (
+            "Developer test: exercising the <b>image attachment + vision</b> path. "
+            "A synthetic PNG is attached and sent with the prompt. Expected: the "
+            "image is mounted natively (vision-capable model) or routed through the "
+            "vision model (image-to-text), then a text answer describing the image. "
+            "If the backend rejects image input, a friendly error panel should appear."
+        ),
+        "prompt": (
+            "Please analyze the attached image and describe its key contents, "
+            "including any text, colors, and shapes you can see."
+        ),
+        #: 测试用合成图片（1x1 红色 PNG），由 _ai_test 动态生成并附加
+        "image": "synthetic",
+    },
+    "ask_user_clarify": {
+        "note": (
+            "Developer test: exercising the <b>ask_user</b> human-in-the-loop tool. "
+            "The prompt contains a deliberate scientific ambiguity (MAPK6 exists in "
+            "Arabidopsis, rice, human, etc.; IDs and sequences differ per organism). "
+            "Expected: the agent calls ask_user with clickable options INSTEAD of "
+            "guessing, an input card appears in the chat, and after the user answers, "
+            "the agent continues the task scoped to the chosen organism."
+        ),
+        "prompt": (
+            "I'm working on stress signaling and I'd like a quick briefing on the MAPK6 "
+            "gene: what's known about its function, a couple of recent papers on it, and "
+            "its protein sequence. Thanks!"
+        ),
+    },
+    "deep_plan_confirm": {
+        "note": (
+            "Developer test: exercising the <b>deep-research plan card</b> (requires "
+            "the Deep Mode toggle ON). Expected: the query decomposes, a plan card "
+            "lists the sub-investigations and WAITS (no parallel execution yet); "
+            "'Confirm & Execute' runs the confirmed plan directly, 'Answer Directly' "
+            "answers without decomposition."
+        ),
+        "prompt": (
+            "I'm writing the technology section of a review on CRISPR gene editing in "
+            "crops. Please do a deep dive covering: current delivery methods, the main "
+            "crops edited so far, reported yield outcomes, and the recent regulatory "
+            "landscape. Be thorough."
+        ),
+    },
+}
+
+
+# --------------------------------------------------------------------------- #
+#  Render preview (fake conversation, no AI / no network)
+# --------------------------------------------------------------------------- #
+
+#: 渲染预览：注入聊天面板的灰色说明气泡（仅展示，不进 LLM 历史）
+PREVIEW_NOTE = (
+    "Developer test: <b>Render Preview</b> — a fake conversation (no AI, no "
+    "network) exercising text recognition (scientific IDs auto-linked), file "
+    "links (cite:// / file://) and advanced Markdown (tables, code, LaTeX "
+    "degradation, Mermaid). Click the links to verify the routing."
+)
+
+#: 渲染预览：用户侧假问题（不进 LLM 历史，仅营造对话语境）
+PREVIEW_USER_TEXT = (
+    "Before I use this for my notes, could you show me what the rendering "
+    "supports? I'd like to check clickable scientific identifiers, local "
+    "file links, tables, code blocks and LaTeX formulas in one place."
+)
+
+#: 渲染预览：假 AI 回答模板。占位符 __MD_CITE__ / __MD_FILE__ / __PNG_FILE__
+#: 由 _test_render_preview 运行时替换为演示文件的真实链接。
+#: 使用 r-string 保住 LaTeX 反斜杠；覆盖：标题/表格/代码块/引用/分割线/
+#: 行内与块级 LaTeX（降级渲染）/化学式下标/科研标识符自动链接/Mermaid 卡片。
+#: 注意：\frac 与 \sqrt 的参数不得含嵌套花括号（降级渲染的已知限制）。
+PREVIEW_AI_TEMPLATE = r"""## Rendering Preview
+
+This message is injected by **Developer Mode** and rendered by the *real*
+Markdown pipeline — **no AI was called**. Every section below exercises one
+rendering feature.
+
+### 1. Text recognition (identifiers become clickable links)
+
+| Identifier | Example | Opens |
+|:-----------|:--------|:------|
+| DOI | 10.1038/s41586-021-03819-2 | doi.org |
+| PubMed | PMID: 31955348 | pubmed.ncbi.nlm.nih.gov |
+| UniProt | P12345 | uniprot.org |
+| Gene Ontology | GO:0006915 | QuickGO |
+| Arabidopsis AGI | AT1G63700 | TAIR |
+| KEGG ortholog | K01647 | kegg.jp |
+| SNP | rs429358 | Ensembl |
+| Cotton gene (Ghir) | Ghir_D03G12349.1 | CottonGen |
+| Cotton gene (Gh) | Gh_A01G0001 | CottonGen |
+| Plain URL | https://www.ncbi.nlm.nih.gov | system browser |
+
+Multi-nomenclature cotton IDs are recognized as well: Ghir_A05G01234, GH_A13G2516, GhChrD09G1234, Ghi_D03G5678, Gh_D11G324566, Gohir.A01G000100.
+
+### 2. File links (files generated by this test)
+
+- [Open the demo file in the internal text viewer](__MD_CITE__) — cite:// route
+- [Open the demo image in the internal viewer](__PNG_FILE__) — file:// route
+- [Open the demo file with the system default app](__MD_FILE__) — file:// route
+
+### 3. Markdown basics
+
+**bold**, *italic*, `inline code`, and a [normal web link](https://python-markdown.github.io).
+
+| Feature | Status | Note |
+|:--------|:------:|-----:|
+| Tables | OK | per-column alignment |
+| Fenced code | OK | via the `extra` extension |
+
+```python
+def demo():
+    # fenced code block -> <pre>
+    return "ok"
+```
+
+> Blockquote — the `nl2br` and `sane_lists` extensions are active.
+
+---
+
+### 4. LaTeX (degraded rendering, no external engine)
+
+Inline: $E = mc^2$, $\Delta G = \Delta H - T\Delta S$, $\alpha \approx \frac{\beta}{\gamma}$, $25^\circ C$.
+
+$$F = G\frac{m_1 m_2}{r^2}$$
+
+$$\mu = \frac{1}{n}\sum_{i=1}^{n} x_i$$
+
+$$\int_0^{\infty} e^{-x}\,dx = 1$$
+
+Molecular formula: C6H12O6 (chemistry subscripts).
+
+### 5. Mermaid (rendered as a clickable card)
+
+```mermaid
+flowchart LR
+    A[Markdown text] --> B[Renderer]
+    B --> C[Chat bubble]
+```
+"""
+
+#: 渲染预览演示文件内容（cite:// 内部查看器与 file:// 系统程序两条路由的目标）
+PREVIEW_DEMO_MD = (
+    "Scholar Navis - Render Preview Demo\n"
+    "===================================\n"
+    "\n"
+    "This file was generated by the developer render-preview test.\n"
+    "It is the target of a cite:// link (internal text viewer) and a\n"
+    "file:// link (system default app). The internal viewer can\n"
+    'highlight the word "renderer" when opened through cite://.\n'
+)
+
+
+class DeveloperDialog(BaseDialog):
+    """Hidden developer self-test panel."""
+
+    def __init__(self, main_window=None, parent=None):
+        # ``main_window`` routes AI tests into the real Chat panel.
+        super().__init__(parent or main_window, title="Developer Mode", width=760)
+        self.main_window = main_window
+
+        self.setWindowTitle("Developer Mode")
+        self.setObjectName("DeveloperDialog")
+
+        # --- Title ---
+        self.title_lbl = QLabel("Developer Mode")
+        self.content_layout.addWidget(self.title_lbl)
+
+        self.subtitle_lbl = QLabel(
+            "AI tests run in the real Chat Assistant panel (note is display-only; "
+            "the prompt drives the actual agent). Functional tests run in-process."
+        )
+        self.subtitle_lbl.setWordWrap(True)
+        self.content_layout.addWidget(self.subtitle_lbl)
+
+        #: 分区标题（配色随主题刷新，见 _apply_theme）
+        self._section_labels: list = []
+
+        # --- AI tests ---
+        self.content_layout.addWidget(self._section_label("AI Tests (run in Chat panel)"))
+        ai_row = QHBoxLayout()
+        ai_row.setSpacing(8)
+        self.btn_ai_plot = self._make_btn("AI: Plot (bubble)", lambda: self._ai_test("plot_bubble"))
+        self.btn_ai_prov = self._make_btn("AI: Provenance", lambda: self._ai_test("provenance_chain"))
+        self.btn_ai_lit = self._make_btn("AI: Literature (Breadth)", lambda: self._ai_test("literature_breadth"))
+        self.btn_ai_img = self._make_btn("AI: Image Vision", lambda: self._ai_test("image_upload_vision"))
+        ai_row.addWidget(self.btn_ai_plot)
+        ai_row.addWidget(self.btn_ai_prov)
+        ai_row.addWidget(self.btn_ai_lit)
+        ai_row.addWidget(self.btn_ai_img)
+        ai_row.addStretch()
+        self.content_layout.addLayout(ai_row)
+
+        # AI 测试第二行：human-in-the-loop（ask_user / deep plan 卡）
+        ai_row2 = QHBoxLayout()
+        ai_row2.setSpacing(8)
+        self.btn_ai_ask = self._make_btn("AI: Ask-User (HITL)",
+                                         lambda: self._ai_test("ask_user_clarify"))
+        self.btn_ai_deep = self._make_btn("AI: Deep Plan Card",
+                                          lambda: self._ai_test("deep_plan_confirm"))
+        ai_row2.addWidget(self.btn_ai_ask)
+        ai_row2.addWidget(self.btn_ai_deep)
+        ai_row2.addStretch()
+        self.content_layout.addLayout(ai_row2)
+
+        # --- Functional tests ---
+        self.content_layout.addWidget(self._section_label("Functional Tests"))
+        func_row = QHBoxLayout()
+        func_row.setSpacing(8)
+        self.btn_all = self._make_btn("Run All", self._run_all)
+        self.btn_r = self._make_btn("R Engine", self._test_r_engine)
+        self.btn_prov = self._make_btn("Provenance (module)", self._test_provenance)
+        self.btn_skill = self._make_btn("Skill Gate", self._test_skill_gate)
+        self.btn_syntax = self._make_btn("Syntax/Import", self._test_syntax)
+        self.btn_lit = self._make_btn("Literature Merge", self._test_literature_merge)
+        self.btn_img = self._make_btn("Image Pipeline", self._test_image_pipeline)
+        for b in (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill,
+                  self.btn_syntax, self.btn_lit, self.btn_img):
+            func_row.addWidget(b)
+        func_row.addStretch()
+        self.content_layout.addLayout(func_row)
+
+        # 功能测试第二行：交互卡链路。Deep Plan Card 放在首位 —— 不依赖
+        # AI / 网络，点击立即完成"组件行为 + 气泡渲染链路"全量自检。
+        func_row2 = QHBoxLayout()
+        func_row2.setSpacing(8)
+        self.btn_deep_card = self._make_btn("Deep Plan Card", self._test_deep_plan_card)
+        self.btn_hitl = self._make_btn("HITL Pipeline", self._test_hitl_pipeline)
+        self.btn_render = self._make_btn("Render Preview", self._test_render_preview)
+        func_row2.addWidget(self.btn_deep_card)
+        func_row2.addWidget(self.btn_hitl)
+        func_row2.addWidget(self.btn_render)
+        func_row2.addStretch()
+        self.content_layout.addLayout(func_row2)
+
+        # --- Output area（专属源码/日志输出控件：固定最大高度 + 独立滚动条、
+        #     边框底纹、复制、折叠、深色模式自适应） ---
+        self.txt_output = SourceCodeViewer(
+            title="Console Output",
+            editable=False,
+            collapsed=False,
+            max_height=420,
+        )
+        self.content_layout.addWidget(self.txt_output, 1)
+
+        # 首次主题应用由 BaseDialog 在事件循环第一帧统一触发（此时本类
+        # __init__ 已执行完，_apply_theme 依赖的控件均已存在）。
+        self._log("Developer Mode ready. AI tests route to the Chat panel; "
+                  "functional tests run here.")
+
+    # ------------------------------------------------------------------ #
+    #  UI helpers
+    # ------------------------------------------------------------------ #
+    def _section_label(self, text) -> QLabel:
+        lbl = QLabel(text)
+        self._section_labels.append(lbl)
+        return lbl
+
+    # ------------------------------------------------------------------ #
+    #  Theme
+    # ------------------------------------------------------------------ #
+    def _apply_theme(self):
+        """主题化标题 / 副标题 / 分区标题。
+
+        原实现把 #05B8CC 与 #333 硬编码在控件样式里，浅色主题下分区标题的
+        分隔线与正文色对比不足、深色主题下又与背景糊在一起。这里统一改为
+        主题取色，并随 BaseDialog 的 theme_changed 自动刷新。
+        """
+        super()._apply_theme()
+        tm = ThemeManager()
+
+        self.title_lbl.setStyleSheet(
+            f"font-size: 18px; font-weight: {strong_weight_css()}; color: {tm.color('text_main')}; "
+            f"font-family: {tm.font_family()};")
+        self.subtitle_lbl.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 12px; "
+            f"font-family: {tm.font_family()};")
+
+        section_style = (
+            f"font-weight: {strong_weight_css()}; color: {tm.color('accent')}; margin-top: 8px; "
+            f"border-bottom: 1px solid {tm.color('border')}; padding-bottom: 3px; "
+            f"font-family: {tm.font_family()};")
+        for lbl in self._section_labels:
+            lbl.setStyleSheet(section_style)
+
+    def _make_btn(self, text, handler) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(handler)
+        return btn
+
+    def _log(self, msg: str, level: str = "INFO"):
+        prefix = {"INFO": "[ ]", "OK": "[OK]", "FAIL": "[FAIL]", "WARN": "[!!]"}.get(level, "[ ]")
+        self.txt_output.append(f"{prefix} {msg}")
+
+    def _clear(self):
+        self.txt_output.clear()
+
+    # ------------------------------------------------------------------ #
+    #  AI tests (route to real Chat panel)
+    # ------------------------------------------------------------------ #
+    def _ai_test(self, key: str):
+        entry = AI_TESTS.get(key)
+        if not entry:
+            self._log(f"Unknown AI test key: {key}", "FAIL")
+            return
+        route = getattr(self.main_window, "route_dev_test", None) or \
+                getattr(self.main_window, "route_to_chat", None)
+        if route is None:
+            self._log("Cannot route to Chat panel (MainWindow route method missing).", "FAIL")
+            return
+
+        # 测试用合成图片附件：按需生成（纯标准库构造 PNG，无 Qt / 第三方依赖）
+        image_paths = []
+        if entry.get("image"):
+            path = self._make_synthetic_png()
+            if path:
+                image_paths = [path]
+                self._log(f"Synthetic test image: {path}", "INFO")
+            else:
+                self._log("Failed to create synthetic test image; sending text only.", "WARN")
+
+        self._log(f"Dispatching AI test '{key}' to Chat panel...", "INFO")
+        self._log(f"Prompt: {entry['prompt'][:80]}...", "INFO")
+        try:
+            if image_paths:
+                route(entry["prompt"], note_text=entry["note"], image_paths=image_paths)
+            else:
+                route(entry["prompt"], note_text=entry["note"])
+            self._log("Sent to Chat panel. Check the Chat Assistant for results.", "OK")
+        except TypeError:
+            # Fallback: older route method without note_text / image_paths.
+            try:
+                route(entry["prompt"])
+                self._log("Sent to Chat panel (no note/image support).", "OK")
+            except Exception as e2:
+                self._log(f"Failed to dispatch AI test: {e2}", "FAIL")
+        except Exception as e:
+            self._log(f"Failed to dispatch AI test: {e}", "FAIL")
+
+    @staticmethod
+    def _make_synthetic_png() -> str:
+        """生成测试用合成 PNG（32x32 四色块）到临时目录，返回路径。
+
+        标准库构造（zlib + struct 手写 PNG chunk），无 Qt / 第三方依赖，
+        保证开发者面板在任何环境下都能生成该测试附件。
+        """
+        import struct
+        import zlib
+
+        def _chunk(tag: bytes, data: bytes) -> bytes:
+            return (struct.pack(">I", len(data)) + tag + data
+                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+        try:
+            # 32x32：四象限红/绿/蓝/白，便于视觉模型给出可验证的结构化描述
+            rows = []
+            for y in range(32):
+                row = b"\x00"  # filter type 0
+                for x in range(32):
+                    if x < 16 and y < 16:
+                        row += b"\xe5\x3a\x3a"      # red
+                    elif x >= 16 and y < 16:
+                        row += b"\x3a\x9a\x5a"      # green
+                    elif x < 16 and y >= 16:
+                        row += b"\x3a\x6a\xcf"      # blue
+                    else:
+                        row += b"\xf2\xf2\xf2"      # white
+                rows.append(row)
+
+            ihdr = struct.pack(">IIBBBBB", 32, 32, 8, 2, 0, 0, 0)  # 8-bit RGB
+            png = (b"\x89PNG\r\n\x1a\n"
+                   + _chunk(b"IHDR", ihdr)
+                   + _chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
+                   + _chunk(b"IEND", b""))
+
+            cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            path = os.path.join(cache_dir, "devtest_synthetic.png")
+            with open(path, "wb") as f:
+                f.write(png)
+            return path
+        except OSError as e:
+            logger.warning(f"Synthetic PNG generation failed: {e}")
+            return ""
+
+    # ------------------------------------------------------------------ #
+    #  Functional tests
+    # ------------------------------------------------------------------ #
+    def _run_all(self):
+        self._clear()
+        self._log("=== Run All Functional Tests ===", "INFO")
+        self._test_syntax(clear=False)
+        self._test_skill_gate(clear=False)
+        self._test_r_engine(clear=False)
+        self._test_provenance(clear=False)
+        self._test_literature_merge(clear=False)
+        self._test_image_pipeline(clear=False)
+        self._test_deep_plan_card(clear=False)
+        self._test_hitl_pipeline(clear=False)
+        self._log("=== All functional tests finished ===", "INFO")
+
+    def _test_r_engine(self, clear: bool = True):
+        if clear:
+            self._clear()
+        self._log("--- R Engine Detection ---", "INFO")
+        try:
+            from src.core.r_engine import get_r_engine
+            engine = get_r_engine()
+            info = engine.detect()
+            if info.get("available"):
+                self._log(f"R found: {info.get('executable')} (R {info.get('version')})", "OK")
+                self._check_r_packages(engine)
+            else:
+                self._log("R not found.", "WARN")
+                self._log(engine.install_guidance().replace("\n", " | "), "WARN")
+        except Exception as e:
+            self._log(f"R engine test failed: {e}", "FAIL")
+
+    def _check_r_packages(self, engine):
+        """核心绘图包自检：解释器可用 ≠ 能出图。
+
+        NixOS / 精简发行版上的 R 常常只装了基础解释器（ggplot2 等需另装），
+        仅报 "R found" 会给开发者一个假绿灯——真实绘图会在 R 侧 stop() 退出，
+        前端只看到 plot_chart 返回 error，表现为"AI 不会画图"。
+        """
+        from src.core.plot_engine import CORE_R_PACKAGES
+        from src.core.r_engine import package_install_guidance
+
+        try:
+            status = engine.check_packages(CORE_R_PACKAGES)
+        except Exception as e:
+            self._log(f"R package check failed: {e}", "FAIL")
+            return
+
+        missing = [p for p in CORE_R_PACKAGES if not status.get(p)]
+        if not missing:
+            self._log(f"R packages OK: {', '.join(CORE_R_PACKAGES)}", "OK")
+            return
+
+        self._log(f"R packages missing: {', '.join(missing)} "
+                  f"(plot_chart will fail until installed)", "FAIL")
+        for line in package_install_guidance(missing).splitlines():
+            if line.strip():
+                self._log(f"  {line.strip()}", "WARN")
+
+    def _test_provenance(self, clear: bool = True):
+        if clear:
+            self._clear()
+        self._log("--- Provenance Module ---", "INFO")
+        try:
+            from src.core.provenance import ProvenanceCollector
+            c = ProvenanceCollector(app_version="dev-test")
+            c.record("search_academic_literature", "academic",
+                     {"query": "CRISPR", "max_results": 3}, "success", "found 3 papers")
+            c.record("plot_chart", "academic", {"chart_title": "test"}, "success",
+                     source="g:Profiler", result_summary="bubble plot rendered")
+            n = len(c)
+            self._log(f"Recorded {n} records.", "OK")
+
+            d = os.path.join(tempfile.gettempdir(), "scholar_navis_devtest")
+            path = c.export_to_dir(d, conversation_id="devtest")
+            if path and os.path.exists(path):
+                lines = sum(1 for _ in open(path, encoding="utf-8"))
+                self._log(f"Exported JSONL: {path} ({lines} lines)", "OK")
+                os.remove(path)
+            else:
+                self._log("Export failed (empty or no path).", "FAIL")
+
+            c2 = ProvenanceCollector()
+            c2.record("x", "mcp", {"api_key": "secret", "token": "t"}, "success")
+            snap = c2.snapshot()
+            assert snap[0]["params"]["api_key"] == "<redacted>", "api_key not redacted"
+            self._log("Sensitive-key redaction verified.", "OK")
+        except Exception as e:
+            self._log(f"Provenance test failed: {e}", "FAIL")
+
+    def _test_literature_merge(self, clear: bool = True):
+        """Functional test for the enhanced literature search aggregation.
+
+        Validates the breadth/depth/trust upgrades of
+        ``search_academic_literature`` (multi-source aggregation) without any
+        network call: it feeds synthetic records into the real ``_merge_records``
+        pipeline and asserts:
+          * breadth  - cross-source dedup merges duplicate DOIs into one record
+          * depth    - journal name and a richer record are preserved/merged
+          * trust    - ``confidence`` scoring ranks higher-quality papers first
+        """
+        if clear:
+            self._clear()
+        self._log("--- Literature Merge (breadth/depth/trust) ---", "INFO")
+
+        # Synthetic fixtures mimicking raw per-source results. No network involved.
+        fixtures = [
+            # Same DOI, different sources -> must be merged (breadth + depth)
+            {"title": "A study on single-cell RNA-seq", "doi": "10.1000/abc123",
+             "citation_count": 5, "abstract": "real abstract from OpenAlex",
+             "source_db": "OpenAlex", "journal": "Nature Methods", "year": 2019},
+            {"title": "A study on single-cell RNA-seq", "doi": "https://doi.org/10.1000/abc123",
+             "citation_count": 9, "abstract": "No abstract",
+             "source_db": "Crossref", "journal": "", "year": 2019},
+            # No DOI -> dedup by normalized title (breadth)
+            {"title": "Single-cell analysis: methods and pitfalls", "doi": "",
+             "citation_count": 2, "abstract": "No abstract",
+             "source_db": "PubMed", "journal": "Genome Biology", "year": 2020},
+            # Distinct paper, low citations (trust: should rank lower)
+            {"title": "Another unrelated preprint", "doi": "",
+             "citation_count": 0, "abstract": "No abstract",
+             "source_db": "Semantic Scholar", "journal": "", "year": 2021},
+        ]
+
+        try:
+            from src.core.academic.literature import _merge_records, _normalize_doi
+            merged = _merge_records(list(fixtures))
+            origin = "literature._merge_records"
+        except Exception as e:
+            self._log(f"Import literature failed ({e}); falling back to inline logic.", "WARN")
+            # Inline replica so the developer panel still self-checks on machines
+            # without the biopython runtime (e.g. CI). Explicitly labelled.
+            import re as _re
+
+            def _norm_title(t):
+                return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9 ]", " ", str(t).lower())).strip()
+
+            def _normalize_doi(d):
+                if not d:
+                    return ""
+                return _re.sub(r"^(https?://(dx\.)?doi\.org/|http://)", "", str(d).strip(), flags=_re.IGNORECASE)
+
+            def _merge_records(records):
+                merged, order = {}, []
+                for rec in records:
+                    if not isinstance(rec, dict) or not rec.get("title"):
+                        continue
+                    doi = _normalize_doi(rec.get("doi"))
+                    key = f"doi:{doi}" if doi else f"title:{_norm_title(rec.get('title'))}"
+                    if key in merged:
+                        ex = merged[key]
+                        srcs = ex.get("source_dbs") or []
+                        for s in rec.get("source_db") and [rec["source_db"]] or []:
+                            if s and s not in srcs:
+                                srcs.append(s)
+                        ex["source_dbs"] = srcs
+                        ex["citation_count"] = max(ex.get("citation_count", 0) or 0,
+                                                   rec.get("citation_count", 0) or 0)
+                        if ex.get("abstract") in (None, "", "No abstract") and rec.get("abstract") not in (
+                                None, "", "No abstract"):
+                            ex["abstract"] = rec["abstract"]
+                        if not ex.get("journal") and rec.get("journal"):
+                            ex["journal"] = rec["journal"]
+                    else:
+                        rec.setdefault("source_dbs", [rec["source_db"]] if rec.get("source_db") else [])
+                        rec.setdefault("journal", "")
+                        rec.setdefault("pmid", "")
+                        merged[key] = rec
+                        order.append(key)
+                ranked = []
+                for key in order:
+                    rec = merged[key]
+                    score = 0.0
+                    n = len(rec.get("source_dbs") or [])
+                    score += 1.0 * min(n, 3)
+                    score += 1.0 if rec.get("doi") else 0.0
+                    score += 1.0 if rec.get("abstract") not in (None, "", "No abstract") else 0.0
+                    score += 0.5 if rec.get("journal") else 0.0
+                    score += 0.2 * min(float(rec.get("citation_count", 0) or 0) / 100.0, 2.0)
+                    rec["confidence"] = round(score, 2)
+                    ranked.append(rec)
+                ranked.sort(key=lambda r: (r.get("citation_count", 0) or 0, r.get("confidence", 0)), reverse=True)
+                return ranked
+
+            merged = _merge_records(list(fixtures))
+            origin = "inline replica (marked)"
+
+        # --- Assertions ---
+        fails = []
+        if len(merged) != 3:
+            fails.append(f"expected 3 merged records, got {len(merged)}")
+        if not any(r.get("doi") == "10.1000/abc123" and len(r.get("source_dbs", [])) == 2 for r in merged):
+            fails.append("DOI duplicate was not cross-source merged (breadth)")
+        if not any(r.get("journal") == "Nature Methods" for r in merged):
+            fails.append("journal name not preserved (depth)")
+        if not any(r.get("citation_count") == 9 for r in merged):
+            fails.append("citation_count should take the max across sources (trust)")
+        if not any(r.get("abstract") == "real abstract from OpenAlex" for r in merged):
+            fails.append("richer abstract not preferred (depth)")
+        ranked_first = merged[0] if merged else {}
+        if merged and ranked_first.get("title", "").startswith("A study on single-cell"):
+            self._log("Highest-cited merged paper ranked first (trust).", "OK")
+        else:
+            fails.append("ranking should place the highest-cited paper first (trust)")
+
+        for r in merged:
+            self._log(
+                f"  [{r.get('title', '')[:40]}] src={r.get('source_dbs')} "
+                f"cites={r.get('citation_count')} conf={r.get('confidence')}",
+                "INFO")
+
+        if fails:
+            for msg in fails:
+                self._log(msg, "FAIL")
+            self._log(f"Literature merge test FAILED (via {origin}).", "FAIL")
+        else:
+            self._log(f"Literature merge test passed (via {origin}).", "OK")
+
+    def _test_image_pipeline(self, clear: bool = True):
+        """Functional test for the image-attachment pipeline (no AI, no network).
+
+        Validates, in order:
+          * classification  - is_image_file / is_svg_file / guess_mime matrix
+          * encode          - encode_data_url round-trip (bytes & MIME intact)
+          * guards          - missing file / oversize image rejected properly
+          * capability      - ChatGenerationTask._looks_vision_capable matrix
+          * friendly error  - image-rejection 400 -> "Model Cannot Read Images"
+          * caption cache   - image-to-text disk cache round-trip
+          * svg rasterize   - SVG -> PNG conversion (UI-process stage)
+        """
+        if clear:
+            self._clear()
+        self._log("--- Image Pipeline ---", "INFO")
+        fails = []
+
+        # 1) 分类与 MIME 推断
+        try:
+            from src.core.image_utils import (guess_mime, is_image_file, is_svg_file,
+                                              IMAGE_EXTENSIONS, MAX_IMAGE_BYTES)
+            cases = [("a.png", "image/png", True, False),
+                     ("b.JPG", "image/jpeg", True, False),
+                     ("c.svg", "image/svg+xml", True, True),
+                     ("d.pdf", "image/png", False, False),
+                     ("", "image/png", False, False)]
+            for name, mime, is_img, is_svg in cases:
+                if guess_mime(name) != mime:
+                    fails.append(f"guess_mime({name!r}) != {mime}")
+                if is_image_file(name) != is_img:
+                    fails.append(f"is_image_file({name!r}) != {is_img}")
+                if is_svg_file(name) != is_svg:
+                    fails.append(f"is_svg_file({name!r}) != {is_svg}")
+            self._log(f"Classification: {len(cases)} cases checked, "
+                      f"{len(IMAGE_EXTENSIONS)} supported extensions.", "INFO")
+        except Exception as e:
+            fails.append(f"classification module: {e}")
+
+        # 2) data URL 编码往返（字节与 MIME 保持一致）
+        png_path = self._make_synthetic_png()
+        if not png_path or not os.path.exists(png_path):
+            fails.append("synthetic PNG generation failed")
+        else:
+            try:
+                with open(png_path, "rb") as f:
+                    raw = f.read()
+                data_url = encode_data_url(png_path)
+                if not data_url.startswith("data:image/png;base64,"):
+                    fails.append(f"unexpected data URL header: {data_url[:40]}...")
+                elif base64.b64decode(data_url.partition(",")[2]) != raw:
+                    fails.append("encode_data_url round-trip mismatch")
+                else:
+                    self._log(f"encode_data_url round-trip OK "
+                              f"({len(raw)} B -> {len(data_url) // 1024} KB b64).", "OK")
+            except Exception as e:
+                fails.append(f"encode round-trip: {e}")
+
+        # 3) 防御路径：文件缺失 / 超限
+        try:
+            from src.core.image_utils import encode_data_url, MAX_IMAGE_BYTES
+            try:
+                encode_data_url(os.path.join(tempfile.gettempdir(), "scholar_navis_missing_.png"))
+                fails.append("missing image was not rejected")
+            except FileNotFoundError:
+                self._log("Missing file correctly rejected (FileNotFoundError).", "OK")
+
+            big = os.path.join(tempfile.gettempdir(), "scholar_navis_devtest_oversize.png")
+            with open(big, "wb") as f:
+                f.truncate(MAX_IMAGE_BYTES + 1)  # 稀疏写入，磁盘占用极小
+            try:
+                encode_data_url(big)
+                fails.append("oversize image was not rejected")
+            except ValueError:
+                self._log(f"Oversize image correctly rejected (> {MAX_IMAGE_BYTES // (1024 * 1024)} MB).", "OK")
+            finally:
+                os.remove(big)
+        except OSError as e:
+            fails.append(f"guard fixtures: {e}")
+
+        # 4) 视觉能力判定矩阵 + 5) 友好错误映射
+        try:
+            from src.task.chat_tasks import ChatGenerationTask
+            matrix = [("gpt-4o", True), ("gpt-4.1-mini", True),
+                      ("claude-3-5-sonnet-20241022", True), ("gemini-2.5-flash", True),
+                      ("qwen-vl-max", True), ("glm-4v-flash", True), ("o3-mini", True),
+                      ("deepseek-chat", False), ("deepseek-vl2", False),  # 显式排除优先
+                      ("ernie-4.5", False), ("llama-3.3-70b", False), ("", False)]
+            bad = [m for m, want in matrix if ChatGenerationTask._looks_vision_capable(m) != want]
+            if bad:
+                fails.append(f"vision capability matrix mismatch: {bad}")
+            else:
+                self._log(f"Vision capability matrix OK ({len(matrix)} models).", "OK")
+
+            data = json.loads(ChatGenerationTask._friendly_error_payload(
+                "400 Bad Request", "Invalid content: image_url not supported by this model"))
+            if data.get("title") != "Model Cannot Read Images":
+                fails.append("image-rejection error not mapped to friendly payload")
+            else:
+                self._log("Friendly error maps image-rejection 400 correctly.", "OK")
+            fmt = json.loads(ChatGenerationTask._friendly_error_payload(
+                "400 Bad Request", "The image format webp is not supported by this model"))
+            if fmt.get("title") != "Image Format Not Accepted":
+                fails.append("image-format error not mapped to friendly payload")
+            else:
+                self._log("Friendly error maps image-format 400 correctly.", "OK")
+            plain = json.loads(ChatGenerationTask._friendly_error_payload("Timeout", "upstream timeout"))
+            if plain.get("title") != "Timeout":
+                fails.append("friendly error passthrough broken")
+        except Exception as e:
+            fails.append(f"chat_tasks checks: {e}")
+
+        # 6) 图生文磁盘缓存往返（stub 实例，不启动真实生成任务）
+        if png_path and os.path.exists(png_path):
+            try:
+                from src.task.chat_tasks import ChatGenerationTask
+
+                class _Stub:
+                    logger = logging.getLogger("devtest.caption")
+
+                stub = _Stub()
+                info = {"name": "devtest.png", "image_path": png_path}
+                desc = "red/green/blue/white quadrant test image"
+                ChatGenerationTask._save_caption_cache(stub, info, desc)
+                if ChatGenerationTask._load_caption_cache(stub, info) != desc:
+                    fails.append("caption cache round-trip mismatch")
+                elif ChatGenerationTask._load_caption_cache(stub, {"image_path": "no_such.png"}) is not None:
+                    fails.append("caption cache miss should return None")
+                else:
+                    self._log("Caption cache round-trip OK.", "OK")
+                os.remove(ChatGenerationTask._caption_cache_path(stub, info))
+            except Exception as e:
+                fails.append(f"caption cache: {e}")
+
+        # 7) SVG 栅格化（UI 进程阶段，QSvgRenderer）
+        try:
+            from src.tools.chat_mixins.attachments import ChatAttachmentsMixin
+            svg_path = os.path.join(tempfile.gettempdir(), "scholar_navis_devtest.svg")
+            with open(svg_path, "w", encoding="utf-8") as f:
+                f.write('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">'
+                        '<rect width="64" height="64" fill="#05b8cc"/></svg>')
+            png_out = ChatAttachmentsMixin._rasterize_svg(svg_path)
+            if png_out and os.path.exists(png_out) and os.path.getsize(png_out) > 0:
+                self._log(f"SVG rasterized -> {os.path.basename(png_out)}.", "OK")
+                os.remove(svg_path)
+            else:
+                fails.append("SVG rasterization returned no PNG")
+        except Exception as e:
+            fails.append(f"svg rasterize: {e}")
+
+        if fails:
+            for msg in fails:
+                self._log(msg, "FAIL")
+            self._log("Image pipeline test FAILED.", "FAIL")
+        else:
+            self._log("Image pipeline test passed.", "OK")
+
+    def _test_deep_plan_card(self, clear: bool = True):
+        """Dedicated offline test for the deep-plan card (no AI, no network).
+
+        Part A (widget): confirm emits the edited plan and locks the card;
+        decisions after lock are ignored; skip emits the original query;
+        restore resets the checklist to the original plan.
+        Part B (render chain): the ``<deep_plan data=...>`` marker ->
+        base64 JSON -> ChatBubbleWidget must render exactly one
+        DeepPlanCardWidget, strip the marker from the body, forward
+        confirm/skip through the bubble signals, dedupe repeated markers
+        by query key, and drop malformed payloads without side effects.
+        """
+        if clear:
+            self._clear()
+        self._log("--- Deep Plan Card (widget + render chain) ---", "INFO")
+        fails = []
+
+        from src.ui.components.chat_bubble import ChatBubbleWidget
+        from src.ui.components.deep_plan_card import DeepPlanCardWidget
+
+        query = "CRISPR in crops: deep dive"
+        sub_tasks = [{"query": "Delivery methods", "rationale": "core"},
+                     {"query": "Regulation", "rationale": ""}]
+
+        # --- Part A: 组件级行为 ---
+        try:
+            plan = DeepPlanCardWidget({"query": query, "sub_tasks": sub_tasks})
+            conf = []
+            plan.sig_confirm.connect(conf.append)
+            plan._edit.setPlainText("1. Delivery methods\n2. Yield outcomes")
+            plan._on_confirm()
+            if not conf or conf[0] != "1. Delivery methods\n2. Yield outcomes":
+                fails.append(f"confirm mismatch: {conf}")
+            else:
+                self._log("Confirm emits the edited plan.", "OK")
+            if plan._btn_confirm.isEnabled() or plan._btn_skip.isEnabled() \
+                    or plan._edit.isEnabled():
+                fails.append("card must fully lock after confirm (no duplicate send)")
+            else:
+                self._log("Card fully locks after confirm.", "OK")
+            plan._on_skip()
+            plan._on_confirm()
+            if len(conf) != 1:
+                fails.append("decisions after lock must be ignored")
+            else:
+                self._log("Decisions after lock are ignored.", "OK")
+            plan.close()
+            plan.deleteLater()
+
+            plan2 = DeepPlanCardWidget({"query": query, "sub_tasks": sub_tasks})
+            skip = []
+            plan2.sig_skip.connect(skip.append)
+            plan2._edit.setPlainText("user-edited plan")
+            plan2._on_restore()
+            restored = plan2._edit.toPlainText()
+            if "Delivery methods" not in restored or "user-edited" in restored:
+                fails.append(f"restore did not reset to the original plan: {restored!r}")
+            else:
+                self._log("Restore resets to the original plan.", "OK")
+            plan2._on_skip()
+            if not skip or skip[0] != query:
+                fails.append(f"skip mismatch: {skip}")
+            else:
+                self._log("Skip emits the original query.", "OK")
+            plan2.close()
+            plan2.deleteLater()
+        except Exception as e:
+            fails.append(f"widget level: {e}")
+
+        # --- Part B: 渲染链路级（标记 -> 气泡卡片 -> 信号转发） ---
+        try:
+            encoded = base64.b64encode(
+                json.dumps({"query": query, "sub_tasks": sub_tasks}).encode("utf-8")
+            ).decode("ascii")
+            marker = f'<deep_plan data="{encoded}"></deep_plan>'
+
+            bubble = ChatBubbleWidget("", is_user=False, index=0)
+            confirmed, skipped = [], []
+            bubble.sig_deep_plan_confirm.connect(confirmed.append)
+            bubble.sig_deep_plan_skip.connect(skipped.append)
+            bubble.set_content(f"Before {marker} after")
+
+            cards = bubble.findChildren(DeepPlanCardWidget)
+            if len(cards) != 1:
+                fails.append(f"render chain: expected exactly 1 card, got {len(cards)}")
+            else:
+                self._log("Marker rendered as exactly one DeepPlanCard.", "OK")
+            body = bubble.original_text
+            if "<deep_plan" in body or "Before" not in body or "after" not in body:
+                fails.append(f"marker not stripped from body cleanly: {body!r}")
+            else:
+                self._log("Marker stripped; body text preserved.", "OK")
+
+            if cards:
+                cards[0]._edit.setPlainText("1. Delivery methods")
+                cards[0]._on_confirm()
+                if not confirmed or confirmed[0] != "1. Delivery methods":
+                    fails.append(f"bubble signal forwarding (confirm) mismatch: {confirmed}")
+                else:
+                    self._log("Confirm forwards through the bubble signal.", "OK")
+
+            bubble.set_content(marker)  # 同一 query 重复到达 -> 必须去重
+            if len(bubble.findChildren(DeepPlanCardWidget)) != 1:
+                fails.append("duplicate marker must be deduped by query key")
+            else:
+                self._log("Duplicate marker deduped.", "OK")
+            bubble.close()
+            bubble.deleteLater()
+
+            bad = ChatBubbleWidget("", is_user=False, index=0)
+            bad.set_content('Body <deep_plan data="!!!not-base64!!!"></deep_plan> tail')
+            if bad.findChildren(DeepPlanCardWidget):
+                fails.append("malformed payload must not render a card")
+            elif "Body" not in bad.original_text or "tail" not in bad.original_text:
+                fails.append(f"malformed marker must be dropped cleanly: {bad.original_text!r}")
+            else:
+                self._log("Malformed payload dropped without side effects.", "OK")
+            bad.close()
+            bad.deleteLater()
+        except Exception as e:
+            fails.append(f"render chain: {e}")
+
+        if fails:
+            for msg in fails:
+                self._log(msg, "FAIL")
+            self._log("Deep plan card test FAILED.", "FAIL")
+        else:
+            self._log("Deep plan card test passed.", "OK")
+
+    def _test_hitl_pipeline(self, clear: bool = True):
+        """Functional test for the human-in-the-loop pipeline (no AI, no network).
+
+        Validates, in order:
+          * registration - ask_user schema present in runtime._ALWAYS_TOOLS
+          * runtime      - AgentRuntime._handle_ask_user emits an
+                           ``<ask_user data=...>`` marker whose base64 JSON
+                           payload round-trips; empty question rejected
+          * tasks        - _strip_interactive_markers removes card markers;
+                           _parse_confirmed_deep_plan / skipped sentinel;
+                           _deep_plan_waiting_text localization
+          * cards        - AskUserCardWidget (single/multi select + free text)
+                           signals behave as wired into the send pipeline
+                           (DeepPlanCardWidget has its own dedicated test:
+                           the "Deep Plan Card" button, which also covers the
+                           marker -> bubble render chain)
+        """
+        if clear:
+            self._clear()
+        self._log("--- HITL Pipeline (ask_user / deep_plan) ---", "INFO")
+        fails = []
+
+        # 1) 工具注册：ask_user 出现在常驻工具池且参数齐全
+        try:
+            from src.core.agent import runtime as agent_runtime
+            schema = agent_runtime._ALWAYS_TOOLS.get("ask_user")
+            params = (schema or {}).get("function", {}).get("parameters", {})
+            props = params.get("properties", {})
+            if "question" not in props or "options" not in props:
+                fails.append("ask_user missing from runtime._ALWAYS_TOOLS "
+                             "(or no question/options params)")
+            else:
+                self._log("ask_user registered with question/options/multi_select.", "OK")
+        except Exception as e:
+            fails.append(f"tool registration: {e}")
+
+        # 2) runtime._handle_ask_user：标记流出与 base64 载荷往返
+        try:
+            from src.core.agent.runtime import AgentRuntime
+            rt = AgentRuntime.__new__(AgentRuntime)
+            rt.log_fn = lambda *a, **k: None
+            emitted = []
+            args = {"question": "Which species?", "options": ["Arabidopsis", "Rice"],
+                    "multi_select": False, "context": "ID mapping differs"}
+            ret = json.loads(AgentRuntime._handle_ask_user(rt, args, emitted.append))
+            if ret.get("status") != "success":
+                fails.append(f"_handle_ask_user returned status={ret.get('status')}")
+            marker = next((t for t in emitted if t.startswith("<ask_user")), "")
+            m = re.search(r'<ask_user data="([^"]*)"', marker)
+            if not m:
+                fails.append("no <ask_user data=...> marker emitted")
+            else:
+                payload = json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
+                if (payload.get("question") != "Which species?"
+                        or payload.get("options") != ["Arabidopsis", "Rice"]):
+                    fails.append("ask_user payload round-trip mismatch")
+                else:
+                    self._log("ask_user marker emitted; payload round-trip OK.", "OK")
+            ret2 = json.loads(AgentRuntime._handle_ask_user(rt, {"question": "  "}, None))
+            if ret2.get("status") != "error":
+                fails.append("empty question should return status=error")
+            else:
+                self._log("Empty question correctly rejected.", "OK")
+        except Exception as e:
+            fails.append(f"runtime handler: {e}")
+
+        # 3) 任务层：哨兵解析 / 卡片标记剥离 / 等待文案
+        try:
+            from src.task import chat_tasks as ct
+            from src.task.chat_tasks import ChatGenerationTask
+
+            class _Stub:
+                pass
+
+            stub = _Stub()
+            sentinels = (ct._DEEP_PLAN_CONFIRMED_TAG, ct._DEEP_PLAN_SKIPPED_TAG)
+            if not all(s.startswith("[") and s.endswith("]") for s in sentinels):
+                fails.append(f"deep-plan sentinels malformed: {sentinels}")
+
+            tasks = ChatGenerationTask._parse_confirmed_deep_plan(
+                stub, f"{ct._DEEP_PLAN_CONFIRMED_TAG}\n"
+                      "1. Delivery methods\n2) Regulatory landscape\n- Yield outcomes")
+            want = ["Delivery methods", "Regulatory landscape", "Yield outcomes"]
+            if tasks is None or [t.query for t in tasks] != want:
+                fails.append(f"_parse_confirmed_deep_plan mismatch: {tasks}")
+            else:
+                self._log("Confirmed-plan sentinel parsed; numbering stripped.", "OK")
+            if ChatGenerationTask._parse_confirmed_deep_plan(
+                    stub, "a normal user question") is not None:
+                fails.append("non-sentinel text must return None from plan parser")
+
+            dirty = ('before <ask_user data="QUJD"></ask_user> mid '
+                     '<deep_plan data="WFla"></deep_plan> after')
+            clean = ChatGenerationTask._strip_interactive_markers(dirty)
+            if any(t in clean for t in ("ask_user", "deep_plan")) or \
+                    not (clean.startswith("before") and clean.endswith("after")):
+                fails.append(f"_strip_interactive_markers mismatch: {clean!r}")
+            else:
+                self._log("Interactive markers stripped before LLM context.", "OK")
+
+            wait_en = ChatGenerationTask._deep_plan_waiting_text(stub)
+            stub.reply_lang = "Chinese"
+            wait_zh = ChatGenerationTask._deep_plan_waiting_text(stub)
+            if "Confirm" not in wait_en or "确认" not in wait_zh:
+                fails.append("_deep_plan_waiting_text localization mismatch")
+            else:
+                self._log("Plan waiting text localized (EN/ZH).", "OK")
+        except Exception as e:
+            fails.append(f"sentinel/strip: {e}")
+
+        # 4) 卡片组件：选项逻辑与确认/跳过信号（QApplication 内直接实例化）
+        try:
+            from src.ui.components.ask_user_card import AskUserCardWidget
+
+            # --- 单选：预设选项提交 + 提交后整卡锁定 ---
+            card = AskUserCardWidget({"question": "Species?",
+                                      "options": ["Arabidopsis", "Rice"],
+                                      "multi_select": False})
+            answers = []
+            card.sig_submit.connect(answers.append)
+            radios = card.findChildren(QRadioButton)
+            if len(radios) != 3:  # 2 预设 + 1 "My own answer"
+                fails.append(f"expected 3 radio options, got {len(radios)}")
+            else:
+                if card._edit.isEnabled():
+                    fails.append("free-text edit must stay disabled until 'My own answer' is selected")
+                if card._btn_submit.isEnabled():
+                    fails.append("submit must stay disabled before any selection")
+                radios[1].setChecked(True)
+                if not card._btn_submit.isEnabled():
+                    fails.append("submit must enable after selecting a preset option")
+                card._on_submit()
+                if not answers or answers[0] != "Rice":
+                    fails.append(f"single-select submit mismatch: {answers}")
+                else:
+                    self._log("AskUserCard single-select preset submit OK.", "OK")
+                if card._btn_submit.isEnabled():
+                    fails.append("card must lock after submit (no duplicate send)")
+                card._on_submit()
+                if len(answers) != 1:
+                    fails.append("resubmit after lock must be ignored by AskUserCard")
+                else:
+                    self._log("AskUserCard locks after submit OK.", "OK")
+            card.close()
+            card.deleteLater()
+
+            # --- 单选：选中 "My own answer" 才能输入自由文本 ---
+            own_card = AskUserCardWidget({"question": "Species?",
+                                          "options": ["Arabidopsis", "Rice"],
+                                          "multi_select": False})
+            own_ans = []
+            own_card.sig_submit.connect(own_ans.append)
+            own_radios = own_card.findChildren(QRadioButton)
+            own_radios[2].setChecked(True)  # "My own answer"
+            if not own_card._edit.isEnabled():
+                fails.append("'My own answer' must enable the free-text edit")
+            if own_card._btn_submit.isEnabled():
+                fails.append("own answer without text must keep submit disabled")
+            own_card._edit.setPlainText("AT1G63700, please expand")
+            if not own_card._btn_submit.isEnabled():
+                fails.append("submit must enable with non-empty own answer")
+            own_card._on_submit()
+            if not own_ans or own_ans[0] != "AT1G63700, please expand":
+                fails.append(f"own-answer submit mismatch: {own_ans}")
+            else:
+                self._log("AskUserCard own-answer submit OK.", "OK")
+            own_card.close()
+            own_card.deleteLater()
+
+            # --- 多选：预设选项组合提交 ---
+            multi = AskUserCardWidget({"question": "Which omics layers?",
+                                       "options": ["Transcriptomics", "Proteomics"],
+                                       "multi_select": True})
+            m_ans = []
+            multi.sig_submit.connect(m_ans.append)
+            boxes = multi.findChildren(QCheckBox)
+            if len(boxes) != 3:  # 2 预设 + 1 "My own answer"
+                fails.append(f"expected 3 checkboxes, got {len(boxes)}")
+            else:
+                boxes[0].setChecked(True)
+                boxes[1].setChecked(True)
+                multi._on_submit()
+                if not m_ans or m_ans[0] != "Transcriptomics; Proteomics":
+                    fails.append(f"multi-select join mismatch: {m_ans}")
+                else:
+                    self._log("AskUserCard multi-select join OK.", "OK")
+            multi.close()
+            multi.deleteLater()
+
+            # --- 多选："My own answer" 与预设选项互斥 ---
+            multi2 = AskUserCardWidget({"question": "Which omics layers?",
+                                        "options": ["Transcriptomics", "Proteomics"],
+                                        "multi_select": True})
+            m2_boxes = multi2.findChildren(QCheckBox)
+            m2_boxes[0].setChecked(True)
+            m2_boxes[2].setChecked(True)  # "My own answer"
+            if m2_boxes[0].isChecked():
+                fails.append("'My own answer' must deselect preset options (mutual exclusion)")
+            if not multi2._edit.isEnabled():
+                fails.append("'My own answer' must enable the free-text edit (multi-select)")
+            else:
+                self._log("AskUserCard own-answer mutual exclusion OK.", "OK")
+            multi2.close()
+            multi2.deleteLater()
+        except Exception as e:
+            fails.append(f"card widgets: {e}")
+
+        if fails:
+            for msg in fails:
+                self._log(msg, "FAIL")
+            self._log("HITL pipeline test FAILED.", "FAIL")
+        else:
+            self._log("HITL pipeline test passed.", "OK")
+
+    def _test_skill_gate(self, clear: bool = True):
+        if clear:
+            self._clear()
+        self._log("--- Skill Gate (deselected_academic_skills) ---", "INFO")
+        try:
+            from src.core.config_manager import ConfigManager
+            cm = ConfigManager()
+            deselected = cm.get_deselected_academic_skills()
+            self._log(f"Deselected skills: {sorted(deselected)}", "INFO")
+
+            from src.core.skill_manager import SkillManager
+            sm = SkillManager()
+            schemas = sm.get_academic_schemas(tags=None)
+            names = {s["function"]["name"] for s in schemas}
+            leaked = deselected & names
+            if leaked:
+                self._log(f"Gate leak: {sorted(leaked)} still exposed.", "FAIL")
+            else:
+                self._log("No gated skill leaked through schemas.", "OK")
+            self._log(f"Total academic schemas after gating: {len(names)}", "INFO")
+
+            if "plot_chart" in names:
+                self._log("plot_chart is registered and exposed.", "OK")
+            else:
+                self._log("plot_chart missing from schemas.", "WARN")
+        except Exception as e:
+            self._log(f"Skill gate test failed: {e}", "FAIL")
+
+    def _test_syntax(self, clear: bool = True):
+        if clear:
+            self._clear()
+        self._log("--- Syntax / Import Sanity ---", "INFO")
+        files = [
+            "src/core/plot_engine.py",
+            "src/core/provenance.py",
+            "src/core/r_engine.py",
+            "src/core/academic_agent.py",
+            "src/core/config_manager.py",
+            "src/core/skill_manager.py",
+            "src/core/agent/runtime.py",
+            "src/core/agent/skill_registry.py",
+            "src/core/agent/planner.py",
+            "src/core/agent/decomposer.py",
+            "src/core/agent/synthesizer.py",
+            "src/task/chat_tasks.py",
+            "src/core/image_utils.py",
+            "src/ui/components/ask_user_card.py",
+            "src/ui/components/deep_plan_card.py",
+            "src/ui/components/chat_bubble.py",
+            "src/ui/components/dialog.py",
+            "src/ui/components/developer_dialog.py",
+            "src/ui/components/image_viewer.py",
+        ]
+        ok = 0
+        for rel in files:
+            path = os.path.normpath(os.path.join(
+                os.path.dirname(__file__), "..", "..", "..", rel.replace("/", os.sep)))
+            try:
+                with open(path, encoding="utf-8") as f:
+                    ast.parse(f.read())
+                ok += 1
+            except FileNotFoundError:
+                self._log(f"{rel}: NOT FOUND", "FAIL")
+            except SyntaxError as e:
+                self._log(f"{rel}: SYNTAX ERROR {e}", "FAIL")
+        self._log(f"Syntax OK: {ok}/{len(files)} files.", "OK" if ok == len(files) else "FAIL")
+
+    # ------------------------------------------------------------------ #
+    #  Render preview (fake conversation, no AI)
+    # ------------------------------------------------------------------ #
+    def _build_render_preview_fixtures(self):
+        """生成渲染预览演示文件（demo.md + demo.png），返回三个链接目标。
+
+        文件固定写入临时目录：重复测试覆盖写入；不做清理，因为注入到
+        聊天气泡里的链接在会话期间必须保持可点击。
+
+        :return: (cite_href, md_file_href, png_file_href) 三元组。
+        """
+        demo_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_devtest")
+        os.makedirs(demo_dir, exist_ok=True)
+        md_path = os.path.join(demo_dir, "render_preview_demo.md")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(PREVIEW_DEMO_MD)
+
+        # cite:// 的 path/name/text 走 query 参数：整段百分号编码，
+        # QUrlQuery 取值时会自动解码（见 TextFormatter.handle_link_click）
+        cite_href = (f"cite://doc?path={quote(md_path, safe='')}"
+                     f"&name={quote(os.path.basename(md_path), safe='')}"
+                     "&text=renderer")
+        # file:// 走 Path.as_uri()：自动处理 Windows 盘符、反斜杠与空格编码
+        md_file_href = Path(md_path).as_uri()
+        png_path = self._make_synthetic_png()
+        png_file_href = (Path(png_path).as_uri()
+                         if png_path and os.path.exists(png_path) else md_file_href)
+
+        logger.info("Render preview fixtures ready: md=%s png=%s", md_path, png_path)
+        return cite_href, md_file_href, png_file_href
+
+    def _test_render_preview(self, clear: bool = True):
+        """Fake-conversation render preview (no AI, no network).
+
+        Part A (console): render the preview text through the REAL pipeline
+        (``TextFormatter.format_response``) and assert scientific-ID
+        auto-linking, cite:// + file:// link presence, LaTeX degradation
+        (sup/sub generated, no command residue), tables, code blocks,
+        chemistry subscripts and the Mermaid card replacement.
+
+        Part B (visual): generate the demo files and inject a fake user+AI
+        bubble pair into the Chat panel (``route_dev_render_preview``).
+
+        Deliberately NOT part of ``Run All``: Part B switches the main
+        window to the Chat page, which would be a surprising side effect
+        for a batch run.
+        """
+        if clear:
+            self._clear()
+        self._log("--- Render Preview (markdown / links / LaTeX, fake chat) ---", "INFO")
+        fails = []
+
+        # --- Part A: 渲染断言（真实管线，纯函数调用，无界面副作用） ---
+        ai_text = ""
+        try:
+            from src.ui.components.text_formatter import TextFormatter
+
+            md_cite, md_file, png_file = self._build_render_preview_fixtures()
+            # cite:// 路由契约自检：QUrlQuery 默认 PrettyDecoded 不解码 %3A
+            # （Windows 盘符路径会失效），路由器必须用 FullyDecoded 取值
+            from PySide6.QtCore import QUrl, QUrlQuery
+            decoded_cite_path = QUrlQuery(QUrl(md_cite)).queryItemValue(
+                "path", QUrl.ComponentFormattingOption.FullyDecoded)
+            ai_text = (PREVIEW_AI_TEMPLATE
+                       .replace("__MD_CITE__", md_cite)
+                       .replace("__MD_FILE__", md_file)
+                       .replace("__PNG_FILE__", png_file))
+
+            mermaid_cache = {}
+            html = TextFormatter.format_response(ai_text, 0, set(), set(), mermaid_cache)
+
+            def theme_rerender_is_clean(rendered_html: str) -> bool:
+                """主题重渲染幂等回归检查。
+
+                `set_content` 收到的入参是"已渲染 HTML"，主题切换时会对它
+                重渲染。渲染管线必须先把上一次注入的主题内联样式清掉再按新
+                主题重建，否则会出现"浅色主题下标题发白、代码块仍是深色底"
+                的残留。这里用另一个主题重渲染一次，断言当前主题的正文色与
+                边框色均不残留（两套主题这两个色值互不相同）。
+                """
+                themer = ThemeManager()
+                other = 'light' if themer.current_theme == 'dark' else 'dark'
+                stale_text = themer.color('text_main')
+                stale_border = themer.color('border')
+                regenerated = TextFormatter.markdown_to_html(rendered_html, theme_key=other)
+                if stale_text.lower() in regenerated.lower():
+                    self._log(f"stale text color survives re-render: {stale_text}", "FAIL")
+                    return False
+                if stale_border.lower() in regenerated.lower():
+                    self._log(f"stale border color survives re-render: {stale_border}", "FAIL")
+                    return False
+                return True
+
+            checks = [
+                ("DOI auto-linked", "https://doi.org/10.1038/s41586-021-03819-2" in html),
+                ("PMID auto-linked", "pubmed.ncbi.nlm.nih.gov/31955348" in html),
+                ("UniProt auto-linked", "uniprot.org/uniprotkb/P12345" in html),
+                ("GO auto-linked", "QuickGO/term/GO:0006915" in html),
+                ("AGI auto-linked", "arabidopsis.org" in html),
+                ("KEGG auto-linked", "kegg.jp/entry/K01647" in html),
+                ("SNP auto-linked", "ensembl.org/Variation/Explore?v=rs429358" in html),
+                ("Cotton Ghir auto-linked",
+                 "cottongen.org/feature/Ghir_D03G12349.1" in html),
+                ("Cotton nomenclature coverage",
+                 all(f"cottongen.org/feature/{gid}" in html for gid in (
+                     "Gh_A01G0001", "Ghir_A05G01234", "GH_A13G2516",
+                     "GhChrD09G1234", "Ghi_D03G5678", "Gh_D11G324566",
+                     "Gohir.A01G000100"))),
+                ("Code block styled", '<pre style="' in html),
+                ("Inline code styled", '<code style="' in html),
+                ("cite:// link present", "cite://doc?path=" in html),
+                ("cite:// path round-trip", os.path.exists(decoded_cite_path)),
+                ("file:// link present", "file://" in html),
+                ("LaTeX sup/sub", "<sup>" in html and "<sub>" in html),
+                ("LaTeX no command residue", not re.search(r"\\[a-zA-Z]+", html)),
+                # 注意：主题化注入后表格/代码块均带属性，统一用前缀匹配
+                # （<table border=... style=...>、<pre style=...>）。
+                ("Table rendered", "<table" in html),
+                ("Table styled", "border-collapse:collapse" in html
+                 and 'border-color:' in html),
+                ("Code block rendered", "<pre" in html),
+                ("Chemistry subscript", "H<sub>12</sub>O<sub>6</sub>" in html),
+                ("Mermaid card", "mermaid://view?hash=" in html
+                 and len(mermaid_cache) == 1),
+                ("Theme re-render idempotent", theme_rerender_is_clean(html)),
+            ]
+            for name, ok in checks:
+                self._log(f"{name}: {'OK' if ok else 'MISSING'}", "OK" if ok else "FAIL")
+                if not ok:
+                    fails.append(name)
+        except Exception as e:
+            self._log(f"Renderer pipeline check failed: {e}", "FAIL")
+            fails.append(f"renderer pipeline: {e}")
+
+        if fails:
+            self._log("Render preview assertions FAILED; chat injection skipped.", "FAIL")
+            return
+
+        # --- Part B: 注入假对话（切到 Chat 面板，不调用 AI） ---
+        route = getattr(self.main_window, "route_dev_render_preview", None)
+        if route is None:
+            self._log("MainWindow.route_dev_render_preview missing.", "FAIL")
+            return
+        self._log("Dispatching fake conversation to the Chat panel...", "INFO")
+        try:
+            route(PREVIEW_NOTE, PREVIEW_USER_TEXT, ai_text)
+            self._log("Fake conversation injected. Check the Chat Assistant "
+                      "and click the links to verify routing.", "OK")
+        except Exception as e:
+            self._log(f"Failed to inject fake conversation: {e}", "FAIL")

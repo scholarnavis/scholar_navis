@@ -9,9 +9,11 @@ import uuid
 import datetime
 import zipfile
 
-from chromadb import Settings
-
 from src.core import BASE_DIR
+
+# 说明：chromadb 不在顶层导入。本模块位于启动导入链上（ImportTool / 主窗口 →
+# kb_manager），而 chromadb 导入约 0.4 s（含其 api/collection 配置等），只在
+# DatabaseManager 真正建客户端时才需要，届时在函数内 import 即可。
 from src.core.config_manager import ConfigManager
 from src.core.theme_manager import ThemeManager
 
@@ -48,7 +50,7 @@ class KBManager:
                             data['size_mb'] = self._get_dir_size(doc_dir)
                             data['root_path'] = entry.path
                             kbs.append(data)
-                    except:
+                    except (OSError, ValueError):
                         pass
 
         return sorted(kbs, key=lambda x: x.get('created_at', ''), reverse=True)
@@ -66,7 +68,7 @@ class KBManager:
                     doc_dir = os.path.join(kb_root, "documents")
                     data['doc_count'] = len(os.listdir(doc_dir)) if os.path.exists(doc_dir) else 0
                     return data
-            except:
+            except (OSError, ValueError):
                 return None
         return None
 
@@ -223,7 +225,7 @@ class KBManager:
                 f.seek(0)
                 json.dump(data, f, indent=4)
                 f.truncate()
-        except:
+        except (OSError, ValueError):
             pass
 
     def export_kb(self, kb_id, dest_path):
@@ -288,6 +290,10 @@ class KBManager:
 
 class DatabaseManager:
     _instance = None
+    # Chroma 连接三件套：由 switch_kb/reload 管理，__new__ 中初始化为 None
+    client = None
+    collection = None
+    embed_fn = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -329,7 +335,7 @@ class DatabaseManager:
             if getattr(self, 'client', None) is not None:
                 try:
                     self.client._system.stop()
-                except:
+                except (RuntimeError, AttributeError, OSError):
                     pass
 
             self.client = None
@@ -338,12 +344,12 @@ class DatabaseManager:
             import chromadb
             try:
                 chromadb.api.client.SharedSystemClient.clear_system_cache()
-            except:
+            except (RuntimeError, AttributeError, OSError):
                 pass
 
             self.client = chromadb.PersistentClient(
                 path=db_path,
-                settings=Settings(anonymized_telemetry=False, allow_reset=True)
+                settings=chromadb.Settings(anonymized_telemetry=False, allow_reset=True)
             )
 
             self.collection = self.client.get_or_create_collection(

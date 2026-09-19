@@ -1,0 +1,299 @@
+"""Bubble flow mixin: bubble creation, scrolling, follow-ups, link routing.
+
+拆分自 src/tools/chat_tool.py：负责气泡生命周期、滚动定位与追问组件管理。
+"""
+import logging
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+
+from src.ui.components.chat_bubble import ChatBubbleWidget
+from src.ui.components.pill_button import FollowUpGroupWidget
+from src.ui.components.toast import ToastManager
+
+logger = logging.getLogger(__name__)
+
+
+class ChatBubblesMixin:
+    """气泡渲染与视图滚动。"""
+
+    def _ensure_chat_ui(self):
+        """确保聊天界面骨架已构建。
+
+        外部路由（如 main_window.route_dev_test）可能早于 UI 构建触发
+        气泡方法；此时先补建 UI，避免 chat_layout/scroll_area 未定义。
+        """
+        if getattr(self, 'chat_layout', None) is None:
+            logger.warning("Chat UI not built yet; building lazily before bubble ops.")
+            self.get_ui_widget()
+
+    def add_bubble(self, text, is_user, context_html=None, image_files=None):
+        self._ensure_chat_ui()
+        if is_user:
+            self.remove_old_follow_ups()
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget():
+                    w = item.widget()
+                    if hasattr(w, 'is_user') and w.is_user:
+                        w.disable_edit()
+
+        index = len(self.history)
+        bubble = ChatBubbleWidget(text, is_user, index, context_html=context_html)
+        bubble.index = index
+        # 反向引用：气泡在主题切换时需要回到"原始文本"重跑完整渲染管线
+        # （think 面板 / Mermaid 卡片等上游生成区块的主题色只能这样刷新）。
+        bubble._owner_tool = self
+
+        # 用户消息携带的图片附件：在气泡内渲染可点击的缩略图条
+        if image_files:
+            bubble.set_image_files(image_files)
+
+        # Inject the translator config so plot-plan cards can translate non-English
+        # user edits back to English before the plan is confirmed and re-sent.
+        if hasattr(self, 'trans_selector'):
+            bubble.translator_config = self.trans_selector.get_current_config()
+
+        # Plot-plan confirmation cards may appear in AI bubbles; forward the final
+        # English requirement to the chat tool so it re-sends it to the AI to render.
+        bubble.sig_plot_plan_confirm.connect(self.handle_plot_plan_confirm)
+        # Ask-user 澄清卡 / Deep-plan 计划卡：用户操作回灌到发送管线
+        bubble.sig_ask_user_submit.connect(self.handle_ask_user_submit)
+        bubble.sig_deep_plan_confirm.connect(self.handle_deep_plan_confirm)
+        bubble.sig_deep_plan_skip.connect(self.handle_deep_plan_skip)
+
+        # 链接路由统一走气泡的 sig_link_clicked：正文块（lbl_text）与拆分出的
+        # 滚动块（表格 / 引用 / 代码块 / 思考链）内部的 anchorClicked 都会转发到
+        # 该信号，避免只连接 lbl_text 导致其他块里的链接（cite://、think:// 等）失效。
+        bubble.sig_link_clicked.connect(self.handle_link_click)
+        if is_user:
+            bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
+
+        self.chat_layout.addWidget(bubble)
+
+        if not getattr(self, '_is_editing', False):
+            if is_user:
+                QTimer.singleShot(50, lambda: self.scroll_to_user_message(bubble))
+            else:
+                # AI 气泡出现时只在用户本来就在底部时跟随，不打断上翻阅读
+                QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True, force=False))
+        return bubble
+
+    def show_dev_note(self, text):
+        """Show a display-only note bubble (left-aligned, gray) to the user.
+
+        This bubble is NOT appended to ``self.history`` and therefore never
+        reaches the LLM — it is purely a user-visible annotation (used by the
+        developer-mode AI tests to label what is being exercised).
+        """
+        self._ensure_chat_ui()
+        index = len(self.history)
+        bubble = ChatBubbleWidget(
+            text, is_user=False, index=index,
+            context_html=None, msg_type=ChatBubbleWidget.MSG_ERROR,
+        )
+        bubble.index = index
+        self.chat_layout.addWidget(bubble)
+        QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True, force=False))
+        return bubble
+
+    def inject_dev_demo(self, user_text, ai_text):
+        """Inject a fake user+AI bubble pair (developer render preview).
+
+        Used by the Developer Mode "Render Preview" test to showcase the
+        rendering capabilities without any AI / network call:
+
+        * Neither bubble is appended to ``self.history``, so the demo text
+          never leaks into the LLM context of later real turns.
+        * The AI bubble goes through the same final rendering pipeline as a
+          real answer (``_format_response``: Markdown / LaTeX degradation /
+          identifier auto-linking / file links / Mermaid cards).
+        * The user bubble has editing disabled so the demo text cannot be
+          accidentally re-sent through the real generation pipeline.
+        """
+        self._ensure_chat_ui()
+        user_bubble = self.add_bubble(user_text, is_user=True)
+        user_bubble.disable_edit()
+        ai_bubble = self.add_bubble("", is_user=False)
+        # 记住原始文本：演示气泡不进 history，主题切换时只能靠这里回源重渲染
+        ai_bubble._raw_source = ai_text
+        ai_bubble.set_content(self._format_response(ai_text, ai_bubble.index))
+        logger.info("Dev render preview injected (2 bubbles, no history, no LLM call).")
+        return ai_bubble
+
+    def rerender_bubble_from_source(self, bubble) -> bool:
+        """用"原始文本"重跑完整渲染管线，刷新单个气泡的全部主题样式。
+
+        与 ``handle_link_click`` 的局部重绘同一思路，但可被气泡自身在
+        ``theme_changed`` 时调用。优先级：
+
+        1. 流式中的当前回答 -> ``current_ai_text``（最新累积文本）；
+        2. 气泡自带的 ``_raw_source``（如开发者模式的演示气泡）；
+        3. 会话历史 ``history[index]['content']``。
+
+        取不到原始文本时返回 False，由调用方回退为对已渲染内容重渲染。
+        """
+        idx = getattr(bubble, 'index', -1)
+        raw = ""
+        if bubble is getattr(self, 'current_ai_bubble', None):
+            # 流式中的回答与 _throttled_render 保持一致：先分离追问块，
+            # 避免重渲染瞬间把 suggestions 混进正文。
+            streaming = getattr(self, 'current_ai_text', "") or ""
+            if streaming.strip():
+                try:
+                    from src.core.follow_ups import split_follow_ups
+                    split = split_follow_ups(streaming.lstrip(), log_success=False)
+                    raw = split.main_text + split.cites_html
+                except Exception as e:
+                    logger.debug(f"split_follow_ups unavailable during re-render: {e}")
+                    raw = streaming
+        if not raw:
+            raw = getattr(bubble, '_raw_source', "") or ""
+        if not raw and 0 <= idx < len(self.history):
+            raw = self.history[idx].get('content', '') or ""
+        if not raw:
+            return False
+        bubble.set_content(self._format_response(raw, idx))
+        return True
+
+    def is_at_bottom(self, threshold: int = 50) -> bool:
+        """视口是否已停在（接近）底部。
+
+        用于"是否跟随新内容"的判断：只有用户本来就在底部时才自动滚到底，否则保持
+        其阅读位置——此前多处收尾动作无条件 ``setValue(maximum)``，会把正在上翻
+        查看历史的用户强行拽回底部。
+        """
+        sb = self.scroll_area.verticalScrollBar()
+        return (sb.maximum() - sb.value()) <= threshold
+
+    def scroll_to_bottom(self, smooth=False, force=True):
+        """滚到对话底部。
+
+        ``force=False`` 时仅在用户已处于底部才滚动（阈值见 :meth:`is_at_bottom`），
+        供 AI 输出结束、报错、取消、追问建议等**非用户主动**的收尾动作使用；用户
+        自己发送消息、点击"到底部"按钮等主动行为仍用 ``force=True``。
+        """
+        if not force and not self.is_at_bottom():
+            return
+
+        sb = self.scroll_area.verticalScrollBar()
+        target = sb.maximum()
+
+        if smooth and hasattr(self, 'scroll_anim') and sb.value() != target:
+            self.scroll_anim.stop()
+            self.scroll_anim.setDuration(250)  # 250毫秒的平滑过渡
+            self.scroll_anim.setStartValue(sb.value())
+            self.scroll_anim.setEndValue(target)
+            self.scroll_anim.start()
+        else:
+            sb.setValue(target)
+
+    def scroll_to_message_top(self, bubble_widget, smooth=True):
+        """滚动到指定气泡的顶部，使其顶端完整可见（留 10px 呼吸间距）。
+
+        供长回答导航按钮使用：点击后回到当前阅读的 AI 回答开头。
+        """
+        target_y = max(0, bubble_widget.y() - 10)
+        sb = self.scroll_area.verticalScrollBar()
+
+        if smooth and hasattr(self, 'scroll_anim') and sb.value() != target_y:
+            self.scroll_anim.stop()
+            self.scroll_anim.setDuration(300)
+            self.scroll_anim.setStartValue(sb.value())
+            self.scroll_anim.setEndValue(target_y)
+            self.scroll_anim.start()
+        else:
+            sb.setValue(target_y)
+
+    def scroll_to_user_message(self, bubble_widget):
+        QApplication.processEvents()
+        self.scroll_to_message_top(bubble_widget)
+
+    def render_follow_up_buttons(self, questions):
+        if not questions:
+            return
+
+        self.follow_up_group = FollowUpGroupWidget(
+            questions,
+            self._trigger_follow_up,
+            self._edit_follow_up
+        )
+
+        # 将其作为对话流的一个整体插入
+        self.chat_layout.addWidget(self.follow_up_group)
+
+        if not getattr(self, '_is_editing', False):
+            # 追问建议属于收尾动作：用户正在上翻时不强行拉到底部
+            QTimer.singleShot(50, lambda: self.scroll_to_bottom(force=False))
+
+    def remove_old_follow_ups(self):
+        """清理历史中的追问组件，避免重复堆叠"""
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if item and isinstance(item.widget(), FollowUpGroupWidget):
+                item.widget().deleteLater()
+
+    def clear_follow_up_shelf(self):
+        while self.follow_up_shelf_layout.count() > 0:
+            item = self.follow_up_shelf_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.follow_up_shelf.setVisible(False)
+
+    def clear_chat_history(self):
+        self.cancel_generation()
+        self.current_ai_bubble = None
+        self.history.clear()
+        self.clear_layout(self.chat_layout)
+
+        self.clear_follow_up_shelf()
+
+        self.input_container.unlock_input()
+
+        self.input_container.clear_text()
+        self.clear_attached_context()
+        self.is_locked = False
+        ToastManager().show("Chat history cleared.", "success")
+
+    def clear_layout(self, layout):
+        while layout.count() > 0:
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                if hasattr(widget, 'clean_up_images'):
+                    widget.clean_up_images()
+                widget.deleteLater()
+            elif item.spacerItem():
+                pass
+
+    def handle_link_click(self, url):
+        """统一代理链接路由"""
+        from src.ui.components.text_formatter import TextFormatter
+
+        def trigger_render(idx):
+            # 仅寻找被点击的那个气泡进行局部重绘
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget():
+                    w = item.widget()
+                    from src.ui.components.chat_bubble import ChatBubbleWidget
+                    if isinstance(w, ChatBubbleWidget) and getattr(w, 'index', -1) == idx:
+                        raw_text = self.current_ai_text if w == getattr(self, 'current_ai_bubble', None) else (
+                            self.history[idx]['content'] if idx < len(self.history) else "")
+                        if raw_text:
+                            w.set_content(self._format_response(raw_text, idx))
+                        break
+
+        if not hasattr(self, 'mermaid_codes'):
+            self.mermaid_codes = {}
+        if not hasattr(self, 'user_toggled_thinks'):
+            self.user_toggled_thinks = set()
+        if not hasattr(self, 'expanded_thinks'):
+            self.expanded_thinks = set()
+
+        TextFormatter.handle_link_click(
+            url=url, parent_widget=self, mermaid_cache=self.mermaid_codes,
+            user_toggled_thinks=self.user_toggled_thinks,
+            expanded_indices=self.expanded_thinks,
+            render_callback=trigger_render
+        )
