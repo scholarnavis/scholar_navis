@@ -738,7 +738,7 @@ def _tidy_markdown(text: str) -> str:
 
 # 不同 provider 的"内联思考"包裹写法各异，但语义一致（都应折叠进 Reasoning
 # 面板）。只识别 ＜think＞ 一种写法时，其余变体会残留在正文——这正是"思考链
-# 泄漏进正文"的根因之一。以下正则把这些写法统一折叠为  thinking / 。
+# 泄漏进正文"的根因之一。以下正则把这些写法统一折叠为 <think> / </think>。
 # 覆盖：
 #   1) XML 变体：＜think＞ ＜thinking＞ ＜reasoning＞ ＜reasoning_content＞
 #   2) 管道变体：＜|thinking|＞ ＜|reasoning|＞（GPT-OSS、部分本地推理网关）
@@ -1062,11 +1062,15 @@ class TextFormatter:
         # 兜底规范化：把其余 provider 的内联思考写法（thinking / reasoning /
         # 管道变体 / Harmony 频道 / Kimi 符号）也折叠为统一标签。只识别单一
         # 写法会让这些模型把思考链直接写进正文。
-        text = _THINK_OPEN_RE.sub(' thinking', text)
-        # 关闭写法必须折叠为  response而非删除：删除会让  thinking 块失去配对的
+        # 注意：替换结果必须是带尖括号的 <think>，后续正文抽取是按
+        # r'<think>(.*?)</think>' 匹配的；替换成裸文字（如 ' thinking'）会让
+        # 这些思考块匹配不到，从而原样漏进正文——这正是"思考链与正文掺和
+        # 在一起"的根因。
+        text = _THINK_OPEN_RE.sub('<think>', text)
+        # 关闭写法必须折叠为 </think> 而非删除：删除会让 <think> 块失去配对的
         # 结束标记，随后的正文会被当成"未闭合思考链"一并吞进 Reasoning 面板，
         # 导致正文区变空（比原来的泄漏更严重）。
-        text = _THINK_CLOSE_RE.sub(' response', text)
+        text = _THINK_CLOSE_RE.sub('</think>', text)
 
         # [FINAL_ANSWER] 的位置必须在规范化之后重算：规范化会改变其前缀长度
         # （如角括号写法会多出字符），沿用规范化前的偏移切片会让标记前后的
@@ -1123,7 +1127,14 @@ class TextFormatter:
             if index in user_toggled_thinks:
                 is_expanded = index in expanded_indices
             else:
-                is_expanded = not is_closed
+                # 默认展开：思考链作为独立的折叠区域呈现，但默认态为"展开"，
+                # 内容随流式实时可见。高度由 chat_bubble 的独立滚动块限制
+                # （_THINK_MAX_HEIGHT），超出后由该块自身的纵向滚动条承担，
+                # 因此不需要靠默认收起来控制篇幅。用户手动收起后（index 进入
+                # user_toggled_thinks）才沿用其选择。
+                is_expanded = True
+            logger.debug("Think panel state: index=%s expanded=%s closed=%s user_toggled=%s",
+                         index, is_expanded, is_closed, index in user_toggled_thinks)
 
             action = "collapse" if is_expanded else "expand"
             icon_name = "chevron-down" if is_expanded else "chevron-right"
@@ -1172,6 +1183,105 @@ class TextFormatter:
         # markdown_to_html，统一在此补一次强调字重；正文已处理过，是幂等的 no-op。
         return TextFormatter.apply_emphasis_weight(final_html)
 
+    # ------------------------------------------------------------------
+    # 残缺表格还原：分隔行漏写竖线 / 多行被压成一行
+    # ------------------------------------------------------------------
+    #: 表格分隔行：整行仅由竖线 / 连字符 / 冒号 / 空格组成，且至少含一个连字符。
+    #: 允许模型漏写首尾竖线（如 ``---``、``--- | :---``），与 python-markdown
+    #: tables 扩展对分隔行的字符集校验（``set ⊆ '|:- '``）保持一致的宽松度。
+    _TABLE_DELIM_LINE_RE = re.compile(r'^[\s|:-]*-[\s|:-]*$')
+
+    @staticmethod
+    def _split_table_cells(line: str) -> list:
+        """按未转义竖线切分一行表格，返回去掉首尾边框竖线后的单元格列表。
+
+        取值方式对齐 python-markdown 的 ``TableProcessor._split_row``（忽略
+        ``\\|`` 转义）；代码跨度内的竖线属罕见边界情况，这里不做处理。
+        """
+        text = line.strip()
+        if text.startswith('|'):
+            text = text[1:]
+        if text.endswith('|') and not text.endswith(r'\|'):
+            text = text[:-1]
+        if not text:
+            return []
+        return [cell.strip() for cell in re.split(r'(?<!\\)\|', text)]
+
+    @classmethod
+    def _is_table_delimiter(cls, line: str) -> bool:
+        """该行是否是 Markdown 表格分隔行（允许漏写首尾竖线）。
+
+        纯 ``---`` 也命中，因此调用方必须限定在"上一行确为表头"的上下文里用。
+        """
+        stripped = line.strip()
+        return bool(stripped) and bool(cls._TABLE_DELIM_LINE_RE.match(stripped))
+
+    @staticmethod
+    def _build_table_delimiter(columns: int) -> str:
+        """按列数生成标准分隔行 ``| --- | --- |``（列数至少为 1）。"""
+        return '|' + '|'.join([' --- '] * max(1, int(columns))) + '|'
+
+    @classmethod
+    def _repair_broken_tables(cls, text: str) -> str:
+        """把模型输出的残缺表格还原为 python-markdown 可解析的标准表格。
+
+        处理两类常见残缺（都会让 tables 扩展整体放弃解析、表格退化成"竖线原样
+        显示"的纯文本）：
+
+        1. **分隔行漏写竖线**：``|属性|内容|`` 之后跟 ``---``。``---`` 会被当成
+           setext 下划线，把表头变成 ``<h2>``；这里按表头列数重建分隔行。
+        2. **多行被压成一行**：``|A1|B1|A2|B2|``，单元格总数是表头列数的整数倍。
+           扩展只认表头列数，会把后半段数据静默丢弃；这里按列数重新切分成多行。
+
+        只在"上一行确为多列表头（至少 2 个竖线）、下一行确为分隔行"时触发，
+        其余情况一律原样返回，绝不把普通含竖线的文本误判成表格。
+        """
+        lines = text.split('\n')
+        result = []
+        i, total = 0, len(lines)
+        while i < total:
+            header = lines[i]
+            result.append(header)
+            # 表头须"有边框"（首或尾为竖线）且至少 2 个竖线：把"普通含竖线的
+            # 句子 + 一行 ---"这类误判挡在外面（无边框的规范表格本就解析正常，
+            # 无需在此修复）。
+            stripped_header = header.strip()
+            bordered = (stripped_header.startswith('|')
+                        or stripped_header.endswith('|'))
+            columns = (len(cls._split_table_cells(header))
+                       if bordered and header.count('|') >= 2 else 0)
+            if (columns >= 2 and i + 1 < total
+                    and cls._is_table_delimiter(lines[i + 1])):
+                result.append(cls._build_table_delimiter(columns))
+                i += 2
+                while (i < total and lines[i].strip() and '|' in lines[i]
+                       and not cls._is_table_delimiter(lines[i])):
+                    cells = cls._split_table_cells(lines[i])
+                    if len(cells) > columns and len(cells) % columns == 0:
+                        for start in range(0, len(cells), columns):
+                            chunk = cells[start:start + columns]
+                            result.append('| ' + ' | '.join(chunk) + ' |')
+                    else:
+                        result.append(lines[i])
+                    i += 1
+                continue
+            i += 1
+        return '\n'.join(result)
+
+    @staticmethod
+    def _repair_glued_horizontal_rules(text: str) -> str:
+        """修复被压成一行的水平分割线（``正文 --- 正文`` → 独立成块）。
+
+        逐行处理并跳过含竖线的行：表格分隔行 ``| --- | --- |`` 同样满足
+        "空白 + 连字符 + 空白"，若一并拆开会把整张表退化成纯文本。
+        """
+        lines = text.split('\n')
+        for idx, line in enumerate(lines):
+            if '|' in line:
+                continue
+            lines[idx] = re.sub(r'(?<=\S)\s+(--+)\s+(?=\S)', r'\n\n\1\n\n', line)
+        return '\n'.join(lines)
+
     @staticmethod
     def markdown_to_html(text, theme_key=None):
         """Markdown → Qt 富文本 HTML。
@@ -1186,8 +1296,14 @@ class TextFormatter:
         processed_text = TextFormatter._reset_injected_styles(text)
 
         # ================= 救砖：修复丢失换行符的极度压缩 Markdown =================
-        # 1. 修复连成一行的水平分割线
-        processed_text = re.sub(r'(?<=\S)\s+(--+)\s+(?=\S)', r'\n\n\1\n\n', processed_text)
+        # 0. 先把残缺表格还原成标准 Markdown 表格。表格一旦残缺（分隔行漏写竖线、
+        #    多行被压成一行），python-markdown 的 tables 扩展会整体放弃解析，表格
+        #    退化成"竖线原样显示"的纯文本；这一步必须先于其它救砖规则执行。
+        processed_text = TextFormatter._repair_broken_tables(processed_text)
+        # 1. 修复连成一行的水平分割线。逐行处理并跳过含竖线的行：表格分隔行
+        #    "| --- | --- |" 同样命中"空白 + 连字符 + 空白"，旧实现会把它拆成
+        #    "|"、"<hr>"，从而破坏整张表——这正是表格渲染异常的根因。
+        processed_text = TextFormatter._repair_glued_horizontal_rules(processed_text)
         # 2. 修复紧贴文本的标题，以及跟在表格后面的标题
         processed_text = re.sub(r'(\|\s*)(#{1,6}\s+)', r'\1\n\n\2', processed_text)
         processed_text = re.sub(r'(?<=\S)\s+(#{1,6}\s+)', r'\n\n\1', processed_text)

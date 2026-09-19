@@ -14,6 +14,19 @@ name: Build Scholar Navis (Windows / Linux)
 # 背景：ubuntu-22.04 运行器镜像自 2026-09-17 起进入弃用窗口，2027-04-17 完全
 # 停止支持，所以不能再依赖 runner 镜像本身来提供这套 glibc。
 # ---------------------------------------------------------------------------
+#
+# 发布链路（改动前同样先读）
+# ---------------------------------------------------------------------------
+# tag 推送 → 构建矩阵产出两个 zip（文件名自带发布通道，见 build_app.py）→
+# 分别上传到 Cloudflare R2（应用内更新检查读的就是 R2 的这份）→ 汇总到
+# publish-release 任务创建 GitHub Release（正文 = 版本/通道/下载地址/更新日志，
+# 附件 = 两个 zip）。
+#
+# 通道（stable / dev）只由版本号里是否含 `-dev` 决定，判定实现只有一处：
+# `src/core/version.py::release_channel`。本文件**不**重复写一遍判定逻辑，
+# 而是让 `build_support/release_notes.py` 把结果经 $GITHUB_OUTPUT 回传
+# （prerelease / make_latest 都用它），避免产物名与 Release 标记漂移。
+# ---------------------------------------------------------------------------
 
 on:
   push:
@@ -26,12 +39,13 @@ env:
   LINUX_BUILD_IMAGE: ubuntu:22.04
 
 jobs:
-  build-and-upload:
+  build:
     name: Build on ${{ matrix.os }}
     # ubuntu-24.04 仅作为宿主：真正的构建发生在 LINUX_BUILD_IMAGE 容器内。
     runs-on: ${{ matrix.os }}
+    # 构建任务不再需要写权限：Release 由下面的 publish-release 统一创建。
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +54,26 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      # 提前拦截"tag 与源码版本号不一致"：产物名里的版本/通道取自
+      # src/core/version.py，若与 tag 不同步，R2 上就会多出一个谁也查不到的
+      # 对象（或落到错误的通道里），而 20 分钟的构建白跑。
+      - name: Verify tag matches src/core/version.py
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC_VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/core/version.py)
+          if [ -z "$SRC_VERSION" ]; then
+            echo "::error::could not read __version__ from src/core/version.py"
+            exit 1
+          fi
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "tag=$TAG_VERSION src/core/version.py=$SRC_VERSION"
+          if [ "$TAG_VERSION" != "$SRC_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match src/core/version.py (${SRC_VERSION}); bump the version (or re-tag) before releasing."
+            exit 1
+          fi
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
@@ -246,12 +280,63 @@ jobs:
           name: Scholar-Navis-Build-${{ matrix.os }}
           path: |
             *.zip
+          # 产物名不匹配即视为构建失败：publish-release 会按命名契约校验，
+          # 这里先拦一层，避免"零文件也照样绿灯"。
+          if-no-files-found: error
           retention-days: 7
 
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: '*.zip'
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # 生成更新日志要遍历 tag 历史，浅克隆拿不到 `git describe`。
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Scholar-Navis-Build-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh release-assets
+
+      # 正文里的版本/通道/下载地址/更新日志全部由脚本生成（通道判定复用
+      # src/core/version.py）。脚本同时校验产物命名与 tag 一致，并把
+      # prerelease / make_latest 经 $GITHUB_OUTPUT 回传。
+      - name: Compose release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          python3 build_support/release_notes.py \
+            --tag "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --assets-dir release-assets \
+            --out release-body.md
+          echo "::group::release-body.md"
+          cat release-body.md
+          echo "::endgroup::"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Scholar Navis ${{ github.ref_name }}
+          body_path: release-body.md
+          # GitHub 自带的 PR/贡献者列表追加在正文之后。
           generate_release_notes: true
+          draft: false
+          # dev 版本标记为 pre-release，并且不抢占 "Latest release"。
+          prerelease: ${{ steps.notes.outputs.prerelease }}
+          make_latest: ${{ steps.notes.outputs.make_latest }}
+          files: release-assets/*.zip
+          fail_on_unmatched_files: true

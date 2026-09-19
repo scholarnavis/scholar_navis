@@ -13,6 +13,7 @@ from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
+from src.core import plot_styles
 from src.core.theme_manager import strong_weight_css
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
@@ -858,13 +859,19 @@ class ChatGenerationTask(BackgroundTask):
                     "IMPORTANT: If the user asks to visualize/plot data but has NOT clearly specified the "
                     "chart type, the x/y columns, the title, or styling, call the propose_plot_plan tool "
                     "FIRST to show a confirmation card. Only call plot_chart after the user confirms the plan.\n"
+                    "DEFAULT FIGURE STYLE: every chart is rendered in the built-in reference style "
+                    "documented in the plot_chart tool description (journal canvas size, theme, palette and "
+                    "layout rules). That style is a BASELINE, not a constraint: whenever the user requests a "
+                    "specific chart type, palette, theme, layout or annotation, follow the user's requirement "
+                    "instead and pass it through the style / palette / theme parameters. "
+                    f"({plot_styles.STYLE_REFERENCE})\n"
                     "ENRICHMENT DOTPLOT REFERENCE LAYOUT (KEGG / GO / GSEA / Reactome bubble plots): "
                     "chart_type='bubble', x=Gene Ratio plotted HORIZONTALLY at the bottom, y=Pathway/Term "
                     "name on the left ordered by Gene Ratio DESCENDING (largest ratio on TOP), size=Gene "
-                    "Count, color=FDR (BH-corrected p-value) with a blue-to-red continuous gradient; the "
-                    "right-side legend has a vertical color bar labeled 'FDR' plus a 'Count' size legend "
-                    "with discrete reference dots. Do NOT coord_flip; do NOT use -log10(FDR) for the "
-                    "color mapping (use the raw FDR column directly so the gradient matches the reference).\n"
+                    "Count, color=FDR (BH-corrected p-value) on the red-to-blue ramp (small FDR = red); "
+                    "the right-side legend shows a color bar labeled 'FDR' plus a 'Count' size legend. "
+                    "Do NOT coord_flip; do NOT use -log10(FDR) for the color mapping (use the raw FDR "
+                    "column directly so the gradient matches the reference).\n"
                     "If native function calling is unavailable, output exactly this JSON block and nothing else:\n"
                     "```json {\"name\": \"plot_chart\", \"arguments\": {\"chart_type\": \"bubble\", \"data\": \"[...]\", \"x\": \"...\", \"y\": \"...\"}} ```\n"
                 )

@@ -37,6 +37,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional
 
+from src.core import plot_styles
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
 
@@ -157,20 +158,16 @@ _ALWAYS_TOOLS = {
                 "rationale). After this tool runs, a suggestion card is shown to the user so they can "
                 "review, edit, translate, and confirm. You MUST NOT call plot_chart until the user "
                 "has confirmed the plan.\n\n"
-                "REFERENCE LAYOUT HINTS — pick the proposal that matches these standards:\n"
-                "  * Enrichment Dotplot (GO / KEGG / GSEA / Reactome / clusterProfiler style): "
-                "chart_type='bubble', x=Gene Ratio (numeric, e.g. gene_ratio / rich_factor) plotted "
-                "HORIZONTALLY at the bottom, y=Pathway/Term name on the LEFT, sorted by Gene Ratio "
-                "DESCENDING so the largest ratio sits at the TOP, size=Gene Count, color=FDR (BH-"
-                "corrected p_value) using a blue-white-red continuous gradient. Right-side legend: "
-                "vertical color bar 'FDR' + 'Count' size legend with discrete reference dots. Do NOT "
-                "coord_flip; do NOT use -log10(FDR) as the color column.\n"
-                "  * Volcano plot: x=log2(fold_change), y=-log10(p_value), color=regulation group "
-                "(Up/Down/NS) via set1.\n"
-                "  * Heatmap / corrplot / density / ridge: viridis sequential palette.\n"
-                "  * Boxplot / violin / dotplot: set2 categorical palette.\n"
-                "  * Pie / donut / alluvial / network: set1 high-contrast.\n"
-                "  * Line / area: nature colorblind-safe palette."
+                # Default look of every figure comes from the style registry
+                # (reference SCI-figure library), so the proposal the user sees
+                # already matches what plot_chart will render.
+                f"{plot_styles.describe_defaults()}\n"
+                f"{plot_styles.describe_overrides()}\n"
+                "Reference layout detail for enrichment Dotplots (GO / KEGG / GSEA / Reactome): "
+                "chart_type='bubble', x=Gene Ratio (numeric, e.g. gene_ratio / rich_factor), "
+                "y=Pathway/Term sorted by Gene Ratio DESCENDING (largest ratio on TOP), "
+                "size=Gene Count, color=FDR (BH-corrected p_value) on the red-to-blue ramp "
+                "(small FDR = red). Do NOT coord_flip; do NOT use -log10(FDR) for the colour mapping."
             ),
             "parameters": {
                 "type": "object",
@@ -1216,6 +1213,8 @@ class AgentRuntime:
             "preview": payload.get("preview", [])[:5],
             "total_rows": total_rows,
             "extra_packages": payload.get("extra_packages", []),
+            # 原图画布尺寸（英寸）：后续 modify_chart 重绘时沿用，保持期刊尺寸。
+            "figure_size": payload.get("figure_size") or None,
         }
         # 落盘持久化：runtime 每轮重建，但 registry 保留在磁盘上，后续轮次 /
         # 新会话仍可对这张图用自然语言继续修改。
@@ -1246,12 +1245,20 @@ class AgentRuntime:
         # Short confirmation for the LLM (do not re-print the whole chart).
         # 注入 plot_label 与已绘制的图目录，让 LLM 能清晰区分多图并支持后续修改。
         plot_list = self._plot_catalog_text()
+        # 版式说明（如条目截断、刻度字号调整）需要转达给用户：这些是"为了可读性
+        # 主动做过的取舍"，不能让用户以为图里就是全部数据。
+        notes = payload.get("notes") or []
+        note_text = ""
+        if notes:
+            note_text = ("Layout notes you MUST mention briefly and transparently: "
+                         + " ".join(str(n) for n in notes) + " ")
         return json.dumps({
             "status": "success",
             "message": (
                 f"Chart '{title}' rendered (SVG/PNG/PDF) and streamed to the user. "
                 f"Its plot_id is '{plot_id}' (semantic label: {plot_label}). "
                 f"Data has {total_rows} rows; full CSV saved locally. "
+                f"{note_text}"
                 f"Plots drawn so far in this conversation:\n{plot_list}\n"
                 "Briefly summarize the chart's key finding for the user; do not re-print the data. "
                 "If the user later asks to modify this chart, call the modify_chart tool with the "
@@ -1424,16 +1431,25 @@ class AgentRuntime:
             }, ensure_ascii=False)
 
         # 用同一份数据重新渲染（沿用原图的扩展包，避免 pheatmap 等包未加载）。
+        # 画布尺寸沿用原图，避免改一次配色就把期刊尺寸换成设备默认值。
         try:
             from src.core.plot_engine import PlotEngine
             engine = PlotEngine()
             plot_data = engine.load_plot_data(data_path)
             job_id = f"mod_{plot_id}_{int(time.time())}"
+            stored_size = info.get("figure_size") or None
+            figure_size = None
+            if isinstance(stored_size, (list, tuple)) and len(stored_size) == 2:
+                try:
+                    figure_size = (float(stored_size[0]), float(stored_size[1]))
+                except (TypeError, ValueError):
+                    figure_size = None
             result = engine.run_plot(
                 r_code=new_code,
                 plot_data=plot_data,
                 job_id=job_id,
                 extra_packages=info.get("extra_packages") or None,
+                figure_size=figure_size,
             )
         except Exception as e:
             logger.error(f"modify_chart re-render failed: {e}")
@@ -1460,6 +1476,7 @@ class AgentRuntime:
                 "preview": plot_data.preview[:5],
                 "total_rows": plot_data.total_rows,
                 "extra_packages": info.get("extra_packages") or [],
+                "figure_size": list(figure_size) if figure_size else None,
             }
             return self._handle_plot_result(json.dumps(payload, ensure_ascii=False), emit_token)
         # 重绘失败同样走统一提醒：与首次绘图共用同一条"平台相关修复指引"通道。
@@ -1632,7 +1649,11 @@ class AgentRuntime:
             "short rationale sentence.\n"
             "- Keep it actionable so the AI can later translate it into a plot_chart call.\n"
             "- If the user hinted a specific direction, honor it; otherwise pick the most "
-            "academically appropriate chart for the data.\n\n"
+            "academically appropriate chart for the data.\n"
+            "- Unless the user asks for another look, keep the project DEFAULT figure style "
+            "below (say 'default style' rather than inventing palettes):\n"
+            f"{plot_styles.describe_defaults()}\n"
+            f"{plot_styles.describe_overrides()}\n\n"
             f"User's visualization request: {request or '(not specified)'}\n\n"
             f"Data structure (columns, types, preview rows):\n{data_context or '(not provided)'}"
         )
@@ -1669,9 +1690,12 @@ class AgentRuntime:
             "Environment contract (MUST follow):\n"
             "- The dataset is ALREADY loaded as a data.frame named `.data`. Do NOT read "
             "any CSV file, do NOT change/load the data, do NOT write any file.\n"
-            "- The final plot object MUST be assigned to a variable named `p`; the "
-            "runtime prints `p` onto SVG/PNG/PDF devices for you, so do NOT open any "
-            "device, do NOT call `print()`, `dev.off()`, `svg()`, `png()`, `pdf()`.\n"
+            "- The final plot object MUST be assigned to a variable named `p`; for a "
+            "base-graphics chart (e.g. an igraph network) define a function named "
+            "`draw_plot` that draws the figure instead of assigning `p`. The runtime "
+            "prints `p` (or calls `draw_plot()`) onto the SVG/PNG/PDF devices for you, "
+            "so do NOT open any device, do NOT call `print()`, `dev.off()`, `svg()`, "
+            "`png()`, `pdf()`.\n"
             "- Use the existing column names exactly as shown below; coerce types if "
             "needed (e.g. `as.factor(...)`, `as.numeric(...)`) but never rename data.\n"
             "- Keep the overall data-to-geometry mapping unless the user asks otherwise.\n"
@@ -1680,6 +1704,9 @@ class AgentRuntime:
             "  `# CHART_TITLE: <new title>` and/or `# CHART_TYPE: <new chart type>` "
             "(e.g. bar, line, scatter, box, heatmap, histogram). These comment lines "
             "are optional; omit them if unchanged.\n"
+            "- Change ONLY what the user asked for and keep the rest of the figure as it "
+            "is, so the chart stays in the project's default publication style:\n"
+            f"{plot_styles.describe_defaults()}\n"
             "Output ONLY the R code, no markdown fences, no explanations.\n\n"
             f"Chart title: {info.get('chart_title', '')}\n"
             f"Chart type: {info.get('chart_type', '')}\n"

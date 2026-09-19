@@ -17,6 +17,7 @@ from src.core.core_task import TaskManager, TaskMode
 from src.core.theme_manager import ThemeManager, strong_weight_css, title_weight_css
 from src.core.version import (
     __app_name__,
+    __channel__,
     __company__,
     __description__,
     __dl__,
@@ -26,8 +27,15 @@ from src.core.version import (
 )
 from src.task.common_task import VersionCheckTask
 from src.tools.base_tool import BaseTool
-from src.ui.components.dialog import ApiProvidersDialog, LicenseDialog
+from src.ui.components.dialog import (
+    ApiProvidersDialog,
+    LicenseDialog,
+    ReleaseNotesDialog,
+)
 from src.ui.components.text_formatter import mono_font_family_css
+
+#: 更新提示行里"应用内查看更新日志"的伪协议地址（区别于 http(s) 外链）。
+_RELEASE_NOTES_URL = "navis://release-notes"
 
 
 class AboutTool(BaseTool):
@@ -39,6 +47,12 @@ class AboutTool(BaseTool):
     lbl_third_party: QLabel
     _version_click_count: int
     _dev_dialog: QWidget
+    # 更新检查结果（由 _on_version_checked 填充，_update_link_ui/_show_release_notes 读取）
+    _latest_version: str
+    _channel: str
+    _changelog: str
+    _release_url: str
+    _dl_url: str
 
     def __init__(self):
         super().__init__("About")
@@ -79,7 +93,10 @@ class AboutTool(BaseTool):
         self.lbl_update.setAlignment(Qt.AlignCenter)
         self.lbl_update.setCursor(Qt.PointingHandCursor)
         self.lbl_update.hide()
-        self.lbl_update.setOpenExternalLinks(True)
+        # 两类链接：伪协议（应用内更新日志）与外链（下载）。因此不能交给
+        # Qt 直接打开外链，必须自己分发，见 _on_update_link。
+        self.lbl_update.setOpenExternalLinks(False)
+        self.lbl_update.linkActivated.connect(self._on_update_link)
 
         layout.addWidget(self.lbl_version)
         layout.addWidget(self.lbl_update)
@@ -186,65 +203,67 @@ class AboutTool(BaseTool):
         self._dev_dialog.activateWindow()
 
     def _on_version_checked(self, payload):
+        """消费 :class:`VersionCheckTask` 的结果。
+
+        任务侧已经完成"通道归属 + 版本比较"，这里只负责展示：``latest_version``
+        为空即代表"无更新 / 通道无产物 / 检查失败"，一律不打扰用户。
+        """
         if not payload:
             return
 
         latest_version = payload.get("latest_version")
-        if latest_version and latest_version != "0.0.0" and self._is_newer_version(latest_version, __version__):
-            os_name = platform.system().lower()
+        if not latest_version:
+            self.lbl_update.hide()
+            return
 
-            self._dl_url = f"{__dl__}?os={os_name}"
-            self._latest_version = latest_version
+        self._latest_version = latest_version
+        self._channel = payload.get("channel") or __channel__
+        self._changelog = payload.get("changelog") or ""
+        self._release_url = payload.get("release_url") or ""
+        self._dl_url = (payload.get("download_url")
+                        or f"{__dl__}?os={platform.system().lower()}&channel={self._channel}")
 
-            self._update_link_ui()
-            self.lbl_update.show()
+        self._update_link_ui()
+        self.lbl_update.show()
 
-    def _is_newer_version(self, latest: str, current: str) -> bool:
-        """
-        处理格式：a.b.c-d-e (如 2.2.4-beta-2)
-        """
+    def _on_update_link(self, url: str):
+        """更新提示行的链接分发：伪协议走应用内，其余一律交给系统浏览器。"""
+        if url.startswith("navis://"):
+            self._show_release_notes()
+            return
+        QDesktopServices.openUrl(QUrl(url))
 
-        def parse_v(v_str):
-            parts = v_str.strip().split('-')
-            main_v = parts[0]
-            stage = 'final'  # 默认无后缀视为最高优先级的正式版
-            stage_num = 0
-
-            if len(parts) > 1:
-                stage = parts[1].lower()
-            if len(parts) > 2:
-                try:
-                    stage_num = int(parts[2])
-                except ValueError:
-                    stage_num = 0
-
-            # 解析 a.b.c
-            try:
-                abc = [int(x) for x in main_v.split('.')]
-                while len(abc) < 3:  # 补齐到3位，兼容 "2.0" 这种格式
-                    abc.append(0)
-            except ValueError:
-                abc = [0, 0, 0]
-
-            # 定义阶段的权重：alpha < beta < rc < final(正式版)
-            stage_weights = {'alpha': 1, 'beta': 2, 'rc': 3, 'final': 4}
-            weight = stage_weights.get(stage, 0)  # 未知标签权重垫底
-
-            # 组合成元组进行比较，例如：(2, 2, 4, 2, 2)
-            return tuple(abc + [weight, stage_num])
-
-        return parse_v(latest) > parse_v(current)
-
+    def _show_release_notes(self):
+        """在应用内展示更新日志（Markdown 渲染，见 ReleaseNotesDialog）。"""
+        dlg = ReleaseNotesDialog(
+            self.widget,
+            version=getattr(self, "_latest_version", ""),
+            markdown_text=getattr(self, "_changelog", ""),
+            current_version=__version__,
+            channel=getattr(self, "_channel", __channel__),
+            release_url=getattr(self, "_release_url", ""),
+            download_url=getattr(self, "_dl_url", ""),
+        )
+        dlg.exec()
 
     def _update_link_ui(self):
-        if hasattr(self, '_latest_version') and hasattr(self, '_dl_url'):
-            tm = ThemeManager()
-            base_color = tm.color('success')
-            link_color = tm.color('accent')
+        """渲染更新提示行：查看更新日志（应用内） + 下载（浏览器）。"""
+        if not (hasattr(self, '_latest_version') and hasattr(self, '_dl_url')):
+            return
 
-            html = (f'<span style="color: {base_color};">New version v{self._latest_version} available! </span>'
-                    f'<a href="{self._dl_url}" style="color: {link_color}; text-decoration: underline;">Click to download.</a>')
-            self.lbl_update.setText(html)
+        tm = ThemeManager()
+        base_color = tm.color('success')
+        link_color = tm.color('accent')
+        muted_color = tm.color('text_muted')
+        link_style = f"color: {link_color}; text-decoration: underline;"
+        channel_note = " (dev channel)" if getattr(self, '_channel', '') == 'dev' else ""
+
+        html = (f'<span style="color: {base_color};">New version v{self._latest_version}'
+                f'{channel_note} available!</span> '
+                f'<a href="{_RELEASE_NOTES_URL}" style="{link_style}">Release notes</a>'
+                f'<span style="color: {muted_color};"> · </span>'
+                f'<a href="{self._dl_url}" style="{link_style}">Download</a>')
+        self.lbl_update.setText(html)
 
 
     def _show_licenses(self):

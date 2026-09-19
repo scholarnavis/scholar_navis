@@ -34,6 +34,7 @@ _EXPORTS = {
     "SkillPreviewDialog": ("mcp_skill_dialogs", "SkillPreviewDialog"),
     "ApiProvidersDialog": ("about_dialogs", "ApiProvidersDialog"),
     "LicenseDialog": ("about_dialogs", "LicenseDialog"),
+    "ReleaseNotesDialog": ("about_dialogs", "ReleaseNotesDialog"),
 }
 
 __all__ = [
@@ -56,6 +57,7 @@ __all__ = [
     "SkillPreviewDialog",
     "ApiProvidersDialog",
     "LicenseDialog",
+    "ReleaseNotesDialog",
 ]
 
 

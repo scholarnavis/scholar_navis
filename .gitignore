@@ -227,6 +227,8 @@ dist/
 /logs/
 /downloads_staging/
 /config/
+# R 绘图产物（PNG/SVG/PDF/CSV/脚本 + plot_registry.json）
+/output/
 .idea
 /models/
 /scholar_workspace/

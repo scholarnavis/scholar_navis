@@ -42,6 +42,13 @@ from src.ui.components.text_formatter import mono_font_family_css
 
 logger = logging.getLogger(__name__)
 
+#: 标题栏固定高度：折叠后控件只剩这一条。
+_HEADER_HEIGHT = 30
+#: 折叠态最大高度（标题栏 + 上下各 1px 边框），保证"真的折叠"而不是留一块空白。
+_COLLAPSED_MAX_HEIGHT = _HEADER_HEIGHT + 2
+#: Qt 的 QWIDGETSIZE_MAX（PySide6 未导出该宏，这里等价定义 2^24 - 1）。
+_MAX_WIDGET_SIZE = (1 << 24) - 1
+
 
 def _hex_to_rgba(color: str, alpha: float) -> str:
     """将 #RRGGBB 颜色转为 rgba()，非 hex 值原样返回。"""
@@ -100,7 +107,7 @@ class SourceCodeViewer(QFrame):
         # --- 标题栏 ---
         self._header = QWidget(self)
         self._header.setObjectName("SCVHeader")
-        self._header.setFixedHeight(30)
+        self._header.setFixedHeight(_HEADER_HEIGHT)
         header_layout = QHBoxLayout(self._header)
         header_layout.setContentsMargins(8, 0, 6, 0)
         header_layout.setSpacing(4)
@@ -268,13 +275,26 @@ class SourceCodeViewer(QFrame):
         return self._collapsed
 
     def set_collapsed(self, collapsed: bool, emit: bool = True):
+        """折叠 / 展开源码区（真正隐藏编辑器，只保留标题栏）。
+
+        注意：这里**不能**因为"状态没变化"就提前返回。构造时
+        ``self._collapsed = collapsed`` 已先被赋值，``_build_ui()`` 末尾再调用
+        本方法，若按状态判等提前返回，编辑器的可见性就永远不会被应用——
+        表现为标题栏图标已经是折叠态、文本框却依然占位显示（用户看到的
+        "没有真实折叠"）。因此可见性每次都必须落实，只在状态**变化**时发信号。
+        """
         collapsed = bool(collapsed)
-        if collapsed == self._collapsed:
-            return
+        changed = collapsed != self._collapsed
         self._collapsed = collapsed
         self._editor.setVisible(not collapsed)
+        # 折叠后把控件高度锁成标题栏高度，展开时解除上限：
+        # 仅 setVisible(False) 在部分布局里仍会留下一条空白边框，用户观感上
+        # 就是"没有真实折叠"。
+        self.setMaximumHeight(_COLLAPSED_MAX_HEIGHT if collapsed else _MAX_WIDGET_SIZE)
+        self._layout.invalidate()
+        self.updateGeometry()
         self._update_collapse_icon()
-        if emit:
+        if emit and changed:
             self.collapsedChanged.emit(collapsed)
 
     def toggle_collapsed(self):

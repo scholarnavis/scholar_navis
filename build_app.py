@@ -9,7 +9,7 @@ import zipfile
 
 from build_support.notices import stage_notices
 from build_support.r2_release import ReleaseUploadError, publish_artifact
-from src.core.version import __app_name__, __github__, __version__
+from src.core.version import __app_name__, __github__, __version__, release_channel
 
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -185,7 +185,11 @@ def build_app():
         print("\n[-] PyInstaller build failed.")
         return
 
-    output_archive_name = f"{app_name_safe}_{tag}_v{__version__}"
+    # 产物名里必须带发布通道（stable / dev）：Worker 以 `{平台}_{通道}_v` 为前缀
+    # 列举 R2 对象，两条通道因此互不可见——上传 dev 产物时清理历史版本不会误删
+    # 稳定版产物（这也是旧命名 `..._{平台}_v...` 无法承载双通道的根因）。
+    channel = release_channel(__version__)
+    output_archive_name = f"{app_name_safe}_{tag}_{channel}_v{__version__}"
     target_folder = os.path.join(dist_dir, app_name_safe)
     archive_path = f"{output_archive_name}.zip"
 
@@ -202,7 +206,13 @@ def build_app():
 
     print("\n[4/4] Cloudflare R2 Operations...")
     try:
-        object_name = publish_artifact(archive_path)
+        # legacy_prefixes：单通道时代的对象名（`..._{平台}_v{版本}.zip`）不会
+        # 被新前缀清理到，留一次迁移清理把它带走；该前缀与"新命名"不可能碰撞
+        # （新名字符串里 `_{平台}_` 之后紧接通道名，不是 `v`）。
+        object_name = publish_artifact(
+            archive_path,
+            legacy_prefixes=(f"{app_name_safe}_{tag}_v",),
+        )
     except ReleaseUploadError as exc:
         # 必须让流水线变红：静默失败会制造"发版绿色但产物没上传"的假象。
         print(f"\n[-] R2 publish failed: {exc}")

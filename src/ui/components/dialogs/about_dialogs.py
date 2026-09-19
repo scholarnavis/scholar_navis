@@ -3,14 +3,16 @@
 拆分自 src/ui/components/dialog.py。
 """
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout,
                                QHeaderView, QLabel, QScrollArea, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+                               QTableWidgetItem, QTextBrowser, QVBoxLayout,
+                               QWidget)
 
 from src.ui.components.dialogs.base import BaseDialog
 from src.ui.components.dialogs.common import StandardDialog
+from src.ui.components.text_formatter import TextFormatter
 
 
 class ApiProvidersDialog(BaseDialog):
@@ -479,3 +481,75 @@ POSSIBILITY OF SUCH DAMAGE.
                 border: none;
             }}
         """)
+
+
+class ReleaseNotesDialog(BaseDialog):
+    """应用内查看更新日志（GitHub Release 的 Markdown 正文）。
+
+    渲染复用 :class:`TextFormatter` 的 Markdown→Qt 富文本管线（与对话气泡同一条
+    管线，表格/代码块/引用的观感一致）。主题色是**内联**写进 HTML 的，所以主题
+    切换时必须整体重渲染，见 :meth:`_render`。
+    """
+
+    def __init__(self, parent=None, version="", markdown_text="", current_version="",
+                 channel="", release_url="", download_url=""):
+        super().__init__(parent, title=f"Release Notes · v{version}", width=780)
+        self.setMinimumHeight(560)
+
+        self._markdown = markdown_text or ""
+        self._release_url = release_url or ""
+        self._download_url = download_url or ""
+
+        self.lbl_header = QLabel()
+        self.lbl_header.setWordWrap(True)
+        self.content_layout.addWidget(self.lbl_header)
+
+        self.browser = QTextBrowser()
+        # 日志正文里的 GitHub / PR 链接交给系统浏览器打开；此处不拦截链接，
+        # 也不做内嵌导航（setOpenExternalLinks 对 http(s) 生效）。
+        self.browser.setOpenExternalLinks(True)
+        self.browser.setOpenLinks(True)
+        self.browser.setFrameShape(QFrame.NoFrame)
+        self.content_layout.addWidget(self.browser, 1)
+
+        self._header_html = (
+            f"New release <b>v{version}</b>"
+            + (f" · {channel} channel" if channel else "")
+            + (f"<br>You are currently on v{current_version}." if current_version else "")
+        )
+
+        if self._download_url:
+            self.add_button("Download", self._open_download, is_primary=True)
+        if self._release_url:
+            self.add_button("Open on GitHub", self._open_release)
+        self.add_button("Close", self.accept)
+
+        self._apply_theme()
+
+    def _open_download(self):
+        QDesktopServices.openUrl(QUrl(self._download_url))
+
+    def _open_release(self):
+        QDesktopServices.openUrl(QUrl(self._release_url))
+
+    def _render(self):
+        """把 Markdown 渲染进浏览器控件；无内容时给出可操作的兜底文案。"""
+        if not self._markdown.strip():
+            self.browser.setHtml(
+                '<div style="color:%s; font-size:14px;">'
+                'Release notes are not available in-app right now.<br>'
+                'Use <b>Open on GitHub</b> to read them in your browser.'
+                '</div>' % self.tm.color('text_muted'))
+            return
+        self.browser.setHtml(TextFormatter.markdown_to_html(self._markdown))
+
+    def _apply_theme(self):
+        super()._apply_theme()
+        tm = self.tm
+        self.lbl_header.setText(
+            f'<span style="color:{tm.color("text_main")}; font-size:15px;">'
+            f'{self._header_html}</span>')
+        self.browser.setStyleSheet(
+            f"QTextBrowser {{ background-color: transparent; border: none; "
+            f"color: {tm.color('text_main')}; }}")
+        self._render()

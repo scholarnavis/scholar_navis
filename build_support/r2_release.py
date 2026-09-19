@@ -2,16 +2,26 @@
 
 命名契约
 --------
-对象名沿用 ``build_app.py`` 既有约定::
+对象名由 ``build_app.py`` 生成，形状为::
 
-    f"{app_name_safe}_{platform_tag}_v{version}.zip"
+    f"{app_name_safe}_{platform_tag}_{channel}_v{version}.zip"
+
+``channel`` 取 ``stable`` / ``dev``（``src.core.version.release_channel`` 按版本号
+里是否含 ``-dev`` 判定）。通道必须落在**文件名**里：历史版本清理依据"同前缀"
+（:func:`prune_prefix_of`），把通道并进前缀才能让两条通道的产物互不干涉——
+否则上传一个 dev 构建会把同平台的稳定版一并删掉。
+
+单通道时代的旧对象名 ``..._{platform_tag}_v{version}.zip`` 不会被任何前缀命中，
+交给 :func:`publish_artifact` 的 ``legacy_prefixes`` 参数做一次性迁移清理。
 
 应用侧的更新检查（``src/task/common_task.py::VersionCheckTask``）请求
-``{__website__}/latest?os=<platform.system().lower()>``，下载走
-``{__website__}/dl?os=...``。也就是说：**对象名里的 platform_tag 与请求里的 os
-字符串之间的映射由 Cloudflare 侧的 Worker 决定**，本模块只按既有命名把文件放上去，
-不参与映射。改动 platform_tag 前必须先确认 Worker 的映射表，否则线上更新会静默失效
-（例如构建侧用 ``win`` 而应用侧请求 ``os=windows``）。
+``{__website__}/versions?os=<platform.system().lower()>`` 取两条通道的最新版本
+（旧客户端仍可用 ``/latest?os=...&channel=...``），下载走
+``{__website__}/dl?os=...&channel=...``。也就是说：**对象名里的 platform_tag /
+channel 与请求里的 os / channel 字符串之间的映射由 Cloudflare 侧的 Worker 决定**，
+本模块只按既有命名把文件放上去，不参与映射。改动 platform_tag 前必须先确认 Worker
+的映射表，否则线上更新会静默失效（例如构建侧用 ``win`` 而应用侧请求
+``os=windows``）。
 
 失败语义
 --------
@@ -56,12 +66,13 @@ class ReleaseUploadError(RuntimeError):
 
 
 def prune_prefix_of(object_name: str) -> str:
-    """从对象名推出"同平台历史版本"的公共前缀。
+    """从对象名推出"同平台同通道历史版本"的公共前缀。
 
-    ``scholar_navis_linux_v2.0.6.zip`` -> ``scholar_navis_linux_v``
+    ``scholar_navis_linux_dev_v2.0.7-dev-1.zip`` -> ``scholar_navis_linux_dev_v``
 
     只认**版本号引导符** ``_v``（``_`` 紧接 ``v`` 才是），因此非贪婪匹配即可：
-    ``scholar_navis`` 中的 ``_n`` 不会误判，首个命中位置必定是 ``_<tag>_v``。
+    ``scholar_navis`` 中的 ``_n`` 与通道名后的 ``_v`` 之前的片段都不会误判，
+    首个 ``_v`` 命中位置必定是 ``_<平台>_<通道>_v``。
     无法识别时返回空串，调用方据此跳过清理而不是误删。
     """
     match = re.match(r"^(.*?_v)", object_name or "")
@@ -105,15 +116,14 @@ def _upload(client, bucket: str, local_path: str, object_name: str) -> None:
     logger.info("Upload verified: r2://%s/%s (%d bytes)", bucket, object_name, remote_size)
 
 
-def _prune(client, bucket: str, object_name: str) -> list:
-    """删除同平台历史版本，保留 ``object_name``。
+def _prune_prefix(client, bucket: str, prefix: str, keep: str) -> list:
+    """删除 ``prefix`` 下的历史版本，保留 ``keep``。
 
     手动翻页：``list_objects_v2`` 单次最多返回 1000 个键，只取首页会在版本堆积后
     静默留下陈旧对象。
     """
-    prefix = prune_prefix_of(object_name)
     if not prefix:
-        logger.warning("Cannot derive prune prefix from %r; skip pruning.", object_name)
+        logger.warning("Empty prune prefix; skip pruning (keep=%r).", keep)
         return []
 
     removed = []
@@ -125,7 +135,7 @@ def _prune(client, bucket: str, object_name: str) -> list:
         page = client.list_objects_v2(**kwargs)
         for obj in page.get("Contents") or []:
             key = obj.get("Key")
-            if not key or key == object_name:
+            if not key or key == keep:
                 continue
             client.delete_object(Bucket=bucket, Key=key)
             removed.append(key)
@@ -138,18 +148,31 @@ def _prune(client, bucket: str, object_name: str) -> list:
                            "token; pruning may be incomplete.")
             break
     logger.info("Prune done under prefix %r: removed %d, kept %r",
-                prefix, len(removed), object_name)
+                prefix, len(removed), keep)
     return removed
 
 
-def publish_artifact(local_path: str, *, strict: bool | None = None, client=None) -> str:
-    """把 ``local_path`` 上传到 R2，并清理同平台历史版本。
+def _prune(client, bucket: str, object_name: str) -> list:
+    """按对象名推导同通道前缀并清理历史版本（保留 ``object_name``）。"""
+    prefix = prune_prefix_of(object_name)
+    if not prefix:
+        logger.warning("Cannot derive prune prefix from %r; skip pruning.", object_name)
+        return []
+    return _prune_prefix(client, bucket, prefix, object_name)
+
+
+def publish_artifact(local_path: str, *, strict: bool | None = None, client=None,
+                     legacy_prefixes: tuple = ()) -> str:
+    """把 ``local_path`` 上传到 R2，并清理同平台同通道的历史版本。
 
     Args:
         local_path: 待上传的本地文件（通常是一次打包产出的 zip）。
         strict: 配置缺失时是否报错。``None``（默认）表示按环境判断：
                 ``GITHUB_ACTIONS=true`` 即为 True。上传失败在任何取值下都会报错。
         client: 可注入的 S3 客户端，便于测试时替换。
+        legacy_prefixes: 需要**额外**清理的历史命名前缀（如双通道改造前的
+                ``scholar_navis_win_v``）。默认不清理：只有调用方明确知道自己
+                在迁移时才传入，避免误删仍在服务的对象。
 
     Returns:
         上传成功后的对象名；本地运行且未配置凭证而跳过时返回空字符串。
@@ -178,6 +201,11 @@ def publish_artifact(local_path: str, *, strict: bool | None = None, client=None
     try:
         _upload(client, bucket, local_path, object_name)
         _prune(client, bucket, object_name)
+        # 迁移清理：旧命名下的对象不在任何"新前缀"里，只能按调用方给的前缀显式删。
+        for legacy in legacy_prefixes:
+            if legacy and legacy == prune_prefix_of(object_name):
+                continue                   # 与新前缀相同则上面已经清过，别重复列举
+            _prune_prefix(client, bucket, legacy, object_name)
     except ReleaseUploadError:
         raise
     except (ClientError, BotoCoreError, OSError) as exc:

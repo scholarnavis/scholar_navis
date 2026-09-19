@@ -22,7 +22,12 @@ Security model (sandbox):
 Design principles:
     * High cohesion: data marshalling + R execution + output collection live
       here; the LLM-facing skill is a thin wrapper in ``academic_agent``.
-    * Low coupling: only depends on ``r_engine`` and stdlib + subprocess.
+    * Low coupling: only depends on ``r_engine``, ``plot_styles`` and
+      stdlib + subprocess.
+    * Single source of truth for looks: themes, journal palettes, per-chart-type
+      defaults and canvas sizes come from :mod:`src.core.plot_styles` (distilled
+      from a reference SCI-figure library), so the LLM-facing descriptions and
+      the generated R code can never drift apart.
     * Performance: single Rscript invocation per plot; no per-row Python I/O.
 """
 
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -37,7 +43,11 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+# 默认样式（主题 / 配色 / 画布尺寸 / 各图型风格契约）集中在本模块之外的单一样式
+# 注册表里，本引擎只负责把它翻译成安全的 ggplot2 代码，避免样式知识散落多处。
+from src.core import plot_styles
 
 logger = logging.getLogger("Core.PlotEngine")
 
@@ -45,6 +55,18 @@ logger = logging.getLogger("Core.PlotEngine")
 # turns / sessions (registry survives runtime object recreation).
 PLOT_REGISTRY_FILENAME = "plot_registry.json"
 _registry_lock = threading.Lock()
+
+# ---------------------------------------------------------------------- #
+#  Output location
+# ---------------------------------------------------------------------- #
+#: 绘图产物（PNG/SVG/PDF/CSV/脚本 + plot_registry.json）默认落在项目目录下，
+#: **不能**用系统临时目录：
+#:   * NixOS 上本应用会通过 ``steam-run`` 重启自身（见 platform_env），
+#:     steam-run 的 /tmp 是私有的、随进程退出即消失；
+#:   * 其余平台上 /tmp 也会被 systemd-tmpfiles 定期清理、或随重启清空。
+#: 一旦产物消失，历史对话里的图卡片就只剩一个失效路径——预览加载不出来、
+#: 双击也打不开（表现为"双击浏览图片突然不工作了"）。目录解析见
+#: :mod:`src.core.output_paths`。
 
 # ---------------------------------------------------------------------- #
 #  R package allow-list
@@ -172,6 +194,9 @@ class PlotResult:
     stderr: str = ""
     error_message: str = ""
     duration_ms: int = 0
+    #: Canvas actually used (inches); persisted so a later ``modify_chart``
+    #: re-render keeps the figure size of the original chart.
+    figure_size: Optional[Tuple[float, float]] = None
 
 
 # ---------------------------------------------------------------------- #
@@ -182,16 +207,30 @@ class PlotEngine:
 
     def __init__(self, output_dir: Optional[str] = None):
         self._output_dir = output_dir
+        # 解析结果缓存：目录探测（含写权限自检）只在首个图渲染时做一次。
+        self._resolved_dir: Optional[str] = None
 
     # -- output directory ----------------------------------------------- #
     def _ensure_output_dir(self) -> str:
         if self._output_dir:
             os.makedirs(self._output_dir, exist_ok=True)
             return self._output_dir
-        base = tempfile.gettempdir()
-        d = os.path.join(base, "scholar_navis_plots")
-        os.makedirs(d, exist_ok=True)
-        return d
+        if self._resolved_dir:
+            return self._resolved_dir
+        self._resolved_dir = self._default_output_dir()
+        return self._resolved_dir
+
+    @staticmethod
+    def _default_output_dir() -> str:
+        """持久化的绘图输出目录（不可写时退回系统临时目录）。
+
+        默认 ``<BASE_DIR>/output/r_plots``：绘图产物必须持久保存，否则重启或
+        系统清理临时目录后，历史对话里的图卡片就只剩一个失效路径（预览加载
+        失败、双击打不开）。目录解析与兜底逻辑统一在
+        :mod:`src.core.output_paths` 中实现。
+        """
+        from src.core.output_paths import plot_output_dir
+        return plot_output_dir()
 
     # -- plot registry persistence -------------------------------------- #
     # The registry maps ``plot_id -> {script_path, code_path, data_path, ...}``
@@ -344,11 +383,17 @@ class PlotEngine:
 
     # -- R execution ---------------------------------------------------- #
     def run_plot(self, r_code: str, plot_data: PlotData, job_id: str,
-                 extra_packages: Optional[List[str]] = None) -> PlotResult:
+                 extra_packages: Optional[List[str]] = None,
+                 figure_size: Optional[Tuple[float, float]] = None) -> PlotResult:
         """Execute ``r_code`` (plotting only) against ``plot_data`` in a sandbox.
 
         ``extra_packages`` are loaded on demand for chart types that need them
         (e.g. pheatmap, ggpubr, ggridges).
+
+        ``figure_size`` is the ``(width, height)`` in inches for the three
+        output devices; ``None`` falls back to the chart-style default from
+        :mod:`src.core.plot_styles` (journal sizes taken from the reference
+        R figure library).
 
         Returns a :class:`PlotResult` carrying the three output paths on
         success, or a human-readable error on failure.
@@ -373,9 +418,12 @@ class PlotEngine:
         png_path = base + ".png"
         pdf_path = base + ".pdf"
 
+        # 画布尺寸：显式传入优先（例如修改图时沿用原图尺寸），否则用图型默认值。
+        canvas = tuple(figure_size) if figure_size else plot_styles.DEFAULT_CANVAS
+
         script = self._compose_script(
             r_code, plot_data, svg_path, png_path, pdf_path,
-            extra_packages=extra_packages)
+            extra_packages=extra_packages, figure_size=canvas)
 
         # Write script to the isolated dir.
         script_path = base + ".R"
@@ -401,7 +449,8 @@ class PlotEngine:
         start = time.time()
         logger.info(
             f"[plot {job_id}] Executing R script: {script_path} | "
-            f"executable={info.get('executable')} | data={plot_data.data_path}"
+            f"executable={info.get('executable')} | data={plot_data.data_path} | "
+            f"canvas={PlotEngine._inch(canvas[0])}x{PlotEngine._inch(canvas[1])} in"
         )
         try:
             proc = subprocess.run(
@@ -454,6 +503,7 @@ class PlotEngine:
                 stdout=stdout,
                 stderr=stderr,
                 duration_ms=duration_ms,
+                figure_size=canvas,
             )
 
         # Failure: surface the R error to the UI and log the full output.
@@ -501,65 +551,81 @@ class PlotEngine:
         "pie": ["scales"],
         "boxplot": ["ggpubr"],
         "violin": ["ggpubr"],
+        # Point labels use repel-able text (ggrepel) so labels never overlap:
+        # it must be loaded in the sandbox before geom_text_repel() is evaluated.
+        "bubble": ["ggrepel"],
+        "scatter": ["ggrepel"],
+        "volcano": ["ggrepel"],
     }
 
-    # Journal style presets: each maps to a base theme + palette. The LLM may
-    # also declare an explicit ``theme`` / ``palette`` to override the preset,
-    # so the user's special requirements can be honored. All presets follow
-    # international journal publication conventions.
-    _STYLE_PRESETS = {
-        "publication": {"theme": "bw", "palette": "set2"},
-        "nature": {"theme": "classic", "palette": "nature"},
-        "cell": {"theme": "bw", "palette": "cell"},
-        "minimal": {"theme": "minimal", "palette": "set2"},
-        "clusterprofiler": {"theme": "minimal", "palette": "rdbu"},
-        "custom": {"theme": "", "palette": ""},
-    }
-
+    # Journal style presets, per-chart-type defaults, palettes and base themes
+    # all live in ``src.core.plot_styles`` — the single source of truth distilled
+    # from the reference library of 50 SCI figures. An explicit ``theme`` /
+    # ``palette`` argument (the user's requirement) always wins over a default.
     @staticmethod
     def _academic_theme_block(theme: str = "") -> str:
-        """Return an R theme expression following journal publication standards.
-
-        Uses a clean base theme (default ``theme_bw``) plus explicit typography
-        and layout rules: bold centered title, bold axis titles, minimal minor
-        grid, and a black panel border — the look expected by most journals.
-        """
-        t = (theme or "").strip().lower()
-        if t == "minimal":
-            base = "theme_minimal(base_size = 12)"
-        elif t == "classic":
-            base = "theme_classic(base_size = 12)"
-        elif t == "pubr":
-            base = "ggpubr::theme_pubr(base_size = 12)"
-        else:
-            base = "theme_bw(base_size = 12)"
-        return (
-            f"{base} +\n"
-            f"  theme(\n"
-            f"    plot.title = element_text(face = 'bold', size = 14, hjust = 0.5),\n"
-            f"    axis.title = element_text(face = 'bold', size = 12),\n"
-            f"    axis.text = element_text(size = 10),\n"
-            f"    legend.title = element_text(face = 'bold', size = 10),\n"
-            f"    legend.text = element_text(size = 9),\n"
-            f"    panel.grid.minor = element_blank(),\n"
-            f"    panel.border = element_rect(color = 'black', linewidth = 0.8)\n"
-            f"  )"
-        )
+        """R theme expression for a base-theme id (see plot_styles.THEME_BASE)."""
+        return plot_styles.theme_block(theme)
 
     @staticmethod
     def _academic_palette(palette: str = "") -> str:
-        """Return an R color vector for a discrete journal palette."""
-        p = (palette or "").strip().lower()
-        palettes = {
-            "set2": "c('#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f')",
-            "set1": "c('#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33')",
-            "nature": "c('#e64b35', '#4dbae5', '#3c5488', '#f39b7b', '#00a087', '#8491b4')",
-            "cell": "c('#e64b35', '#4dbae5', '#3c5488', '#f39b7b', '#00a087', '#8491b4')",
-            "viridis": "c('#440154', '#3b528b', '#21918c', '#5ec962', '#fde725')",
-            "magma": "c('#000004', '#51127c', '#b63679', '#fb8861', '#fcfdbf')",
-        }
-        return palettes.get(
-            p, "c('#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f')")
+        """R colour vector for a discrete journal palette."""
+        return plot_styles.palette_vector(palette)
+
+    @staticmethod
+    def _inch(value: float) -> str:
+        """Format inches for an R device call (7.0 -> '7', 5.5 -> '5.5')."""
+        f = float(value)
+        return str(int(f)) if f.is_integer() else f"{f:g}"
+
+    @staticmethod
+    def _chain(head: str, layers: List[str]) -> str:
+        """Append ggplot2 layers with ``+`` while dropping empty ones.
+
+        An empty layer would leave a dangling ``+`` and R would parse the next
+        line as a *unary* plus, which fails with "invalid argument to unary
+        operator" as soon as the operand is not numeric (e.g. ``labs(...)``).
+        """
+        parts = [p.strip() for p in layers if p and p.strip()]
+        return head + "".join(f" +\n  {p}" for p in parts)
+
+    @staticmethod
+    def _manual_scale(aesthetic: str, palette: str, column: str,
+                      n_levels: int = 0) -> str:
+        """Discrete colour scale bound to a data column (plot_styles helper).
+
+        ``n_levels`` lets the unified academic palette be generated with the
+        exact number of colours the figure needs (low-chroma HCL wheel beyond
+        10 categories); the R side still guards the length with
+        ``rep(..., length.out = ...)`` so a miscount can never abort the render
+        with "Insufficient values in manual scale".
+        """
+        return plot_styles.manual_scale_expr(aesthetic, palette, column, n_levels)
+
+    @staticmethod
+    def top_n_r_block(order_by: str, n: int) -> str:
+        """R block keeping only the ``n`` highest rows of a numeric column.
+
+        Used on term-style figures (enrichment bars / bubbles) where charting
+        every term would make the axis labels unreadable — the same idea as the
+        reference scripts' ``showNum = 30``.
+        """
+        col = (order_by or "").replace('"', "").replace("\\", "")
+        if not col or n <= 0:
+            return ""
+        return (
+            "# --- keep only the top N terms so axis labels stay readable ---\n"
+            f".data <- .data[order(-.data[[\"{col}\"]]), , drop = FALSE]\n"
+            f".data <- utils::head(.data, {int(n)})\n"
+        )
+
+    @staticmethod
+    def _color_label(column: str) -> str:
+        """Legend title of a colour gradient (FDR family -> 'FDR')."""
+        c = (column or "").strip()
+        if c.lower() in ("fdr", "padj", "adj_p", "adjp", "qvalue", "q_value"):
+            return "FDR"
+        return c
 
     @staticmethod
     def spec_to_r_code(chart_type: str, x: str, y: str, size: str = "",
@@ -570,7 +636,9 @@ class PlotEngine:
                        sort_desc: bool = False, color_col: str = "",
                        signif_col: str = "",
                        compute_fdr: bool = False,
-                       fdr_source_col: str = "") -> str:
+                       fdr_source_col: str = "",
+                       n_levels: int = 0,
+                       axis_text_size: int = 0) -> str:
         """Translate a declarative chart spec into safe, academic ggplot2 code.
 
         ``x``/``y``/``size``/``label`` are column names; the data frame is
@@ -581,17 +649,26 @@ class PlotEngine:
         (typically for p-values / volcano plots).
 
         ``style`` selects a journal preset (publication / nature / cell /
-        minimal / custom); ``theme`` and ``palette`` override the individual
-        pieces so the user's special requirements can be honored.
+        minimal / clusterprofiler / custom); ``theme`` and ``palette`` override
+        the individual pieces so the user's special requirements are honored.
+        Left empty, they fall back to the per-chart-type default in
+        :mod:`src.core.plot_styles` (the unified low-saturation academic style).
 
         Enrichment-aware options (auto-inferred by the agent from the data):
         ``sort_col``   — column used to order the categorical axis (e.g. pvalue
                          so the most significant term is on top).
         ``sort_desc``  — sort ``sort_col`` in descending order.
-        ``color_col``  — continuous column mapped to a color gradient (e.g.
-                         -log10(pvalue) for bubble/bar enrichment plots).
+        ``color_col``  — column mapped to a colour: a continuous column becomes
+                         a gradient, a categorical column a discrete palette.
         ``signif_col`` — p-value column used to draw significance stars
                          (* / ** / ***) on bar charts.
+
+        Layout guards against label overlap:
+        ``n_levels``       — number of categories in the discrete column, so the
+                             unified palette can be generated for exactly that
+                             many levels (>10 -> same-family HCL hues).
+        ``axis_text_size`` — tick label size override for dense axes (0 = theme
+                             default 10 pt).
         """
         ct = (chart_type or "").strip().lower()
         if ct not in PlotEngine.SUPPORTED_CHART_TYPES:
@@ -603,23 +680,21 @@ class PlotEngine:
             # Backtick-quote a column name for safe use inside ggplot2 aes.
             return f"`{name.replace('`', '')}`"
 
-        # Resolve style preset -> theme + palette (explicit args win).
-        style = (style or "publication").strip().lower()
-        preset = PlotEngine._STYLE_PRESETS.get(
-            style, PlotEngine._STYLE_PRESETS["publication"])
-        theme = (theme or preset["theme"]).strip()
-        palette = (palette or preset["palette"]).strip()
+        # 样式解析：显式参数（用户需求）> 图型默认风格 > 期刊预设。
+        resolved = plot_styles.resolve_style(
+            ct, style=style, palette=palette, theme=theme)
+        chart = plot_styles.chart_style(ct)
+        ramp = resolved["ramp"]
+        pal_name = resolved["palette"]
+        pal_first = plot_styles.first_color(pal_name)
+        # 刻度字号按分类密度自动下调，避免标签互相挤压。
+        theme_block = plot_styles.theme_block(resolved["theme"], axis_text_size)
 
         # Y expression: optionally apply -log10 for p-value style charts.
         y_expr = f"-log10({q(y)})" if log_transform_y else q(y)
 
         # Escape the title for an R string literal.
         title_r = title.replace("\\", "\\\\").replace('"', '\\"')
-
-        theme_block = PlotEngine._academic_theme_block(theme)
-        pal_vec = PlotEngine._academic_palette(palette)
-        # First color of the palette (used for single-color geoms).
-        pal_first = pal_vec.split("'")[1]
 
         # FDR (Benjamini-Hochberg) is computed in R via stats::p.adjust() so
         # that all statistics live on the R side, never in Python. When
@@ -636,28 +711,47 @@ class PlotEngine:
                 f"rm(.fdr_src, .fdr_ok)\n"
             )
 
-        # Categorical-axis ordering expression (e.g. reorder(Term, pvalue)).
+        # Categorical-axis ordering. A data-driven ``sort_col`` (e.g. pvalue)
+        # wins; otherwise the chart-type default applies — horizontal bars and
+        # enrichment dotplots list the most significant / largest term on TOP,
+        # which is what the reference figures do.
         if sort_col:
             sort_expr = (
                 f"reorder({q(y)}, {q(sort_col)})"
                 if not sort_desc
                 else f"reorder({q(y)}, -{q(sort_col)})"
             )
+        elif ct == "dotplot":
+            sort_expr = f"reorder({q(y)}, -{q(x)})"
         else:
             sort_expr = q(y)
 
-        # Continuous color mapping (enrichment significance gradient).
-        color_aes = f", color = {q(color_col)}" if color_col else ""
+        # Bar charts are drawn horizontally but WITHOUT coord_flip: the category
+        # goes straight onto the (discrete) Y axis and the value onto X. That
+        # makes the reading order unambiguous — on a discrete ggplot axis the
+        # first level sits at the BOTTOM, so the largest / most significant bar
+        # must be the LAST level to end up on TOP (reference bioR03/bioR02 keep
+        # the biggest term on top).
+        if ct == "bar":
+            bar_cat_expr = (
+                f"reorder({q(x)}, -{q(sort_col)})" if sort_col
+                else f"reorder({q(x)}, {y_expr})"
+            )
+        else:
+            bar_cat_expr = q(x)
+
+        # Continuous colour mapping (enrichment significance gradient).
         color_scale = (
-            f"scale_color_gradient(low = '#377eb8', high = '#e41a1c', "
-            f"name = '{color_col}')" if color_col else ""
+            plot_styles.gradient_scale(
+                ramp, "color", PlotEngine._color_label(color_col))
+            if color_col else ""
         )
 
         # Significance stars (bar charts): * p<0.05, ** p<0.01, *** p<0.001.
         signif_geom = ""
         if signif_col:
             signif_geom = (
-                f" +\n  geom_text(aes(label = ifelse({q(signif_col)} < 0.001, '***', "
+                f"geom_text(aes(label = ifelse({q(signif_col)} < 0.001, '***', "
                 f"ifelse({q(signif_col)} < 0.01, '**', "
                 f"ifelse({q(signif_col)} < 0.05, '*', '')))), "
                 f"hjust = -0.2, size = 3.5)"
@@ -665,274 +759,364 @@ class PlotEngine:
 
         # ---- scatter / point-based ------------------------------------ #
         if ct == "bubble":
-            # NOTE on comma handling for the aes() mapping list:
-            # The position aesthetics ``x`` and ``y`` always come first; any
-            # subsequent mapping (size / color) MUST be preceded by a comma.
-            # Both ``size_a`` and ``color_aes`` below are emitted WITHOUT a
-            # leading comma, so the join code prepends one when needed.
+            # Enrichment Dotplot (reference bioR29): X = gene ratio, Y = term,
+            # size = gene count, colour = FDR on a red -> blue gradient (a small
+            # FDR is significant, hence red). Size / colour mappings must live
+            # inside aes() for the scales to take effect. The Y axis is ordered
+            # by gene ratio DESCENDING so the largest ratio sits on TOP, like
+            # clusterProfiler::dotplot.
             size_a = f"size = {q(size)}" if size else ""
-            # Enrichment bubble plots typically label each term on the Y axis;
-            # adding on-point text would only clutter the figure. The caller
-            # can still pass ``label`` to opt back in.
-            label_geom = (
-                f" +\n  geom_text_repel(aes(label = {q(label)}), size = 3, "
-                f"max.overlaps = 20)" if label else ""
+            bubble_color_aes = f"color = {q(color_col)}" if color_col else ""
+            label_layer = (
+                f"geom_text_repel(aes(label = {q(label)}), size = 3, max.overlaps = 20)"
+                if label else ""
             )
-            # Enrichment-style bubble plot: X = gene ratio, Y = term,
-            # color = -log10(FDR) gradient (smaller FDR -> more significant ->
-            # hotter color), size = gene count. The color column MUST be mapped
-            # inside aes() for the gradient to take effect. By convention in
-            # enrichment Dotplots the Y axis lists pathway/term names ordered
-            # from largest to smallest ratio, so the most significant term sits
-            # on TOP of the figure (matches clusterProfiler::dotplot default).
-            if color_col:
-                color_aes = f"color = {q(color_col)}"
-                # clusterProfiler / enrichplot Dotplot uses the blue->red
-                # reverse-viridis ramp (``viridis::plasma`` reversed is the
-                # closest built-in match). The continuous color bar in the
-                # right-side legend is the canonical enrichment look; without
-                # ``breaks`` we let ggplot pick ~4-5 ticks automatically.
-                color_scale = (
-                    f"scale_color_gradientn(\n"
-                    f"    colors = c('#67001f', '#b2182b', '#d6604d', '#f4a582',\n"
-                    f"              '#fddbc7', '#ffffff', '#d1e5f0', '#92c5de',\n"
-                    f"              '#4393c3', '#2166ac', '#053061'),\n"
-                    f"    name = '{color_col}'\n"
-                    f"  )"
-                )
-            else:
-                color_aes = ""
-                color_scale = ""
-            # Enrichment Dotplot reference style (clusterProfiler):
-            #   * the size legend shows three discrete size reference dots
-            #     (e.g. 10 / 20 / 30), like enrichplot::dotplot;
-            #   * the size range is generous (2..10) since Gene Count often
-            #     varies by an order of magnitude across pathways.
+            size_lo, size_hi = chart.get("size_range", (2, 10))
             size_scale = (
-                f"scale_size_continuous(range = c(2, 10), name = 'Count')"
-                if size else
-                f"scale_size_continuous(range = c(2, 8))"
+                f"scale_size_continuous(range = c({size_lo}, {size_hi}), "
+                f"name = '{chart.get('size_label', 'Count')}')"
             )
-            # FDR block (if any) must run before ggplot so the ``fdr`` column
-            # exists in .data when the color mapping references it. We sort
-            # the Y axis by the X column (gene_ratio) in DESCENDING order so
-            # the largest ratio is at the TOP — the standard clusterProfiler
-            # enrichment Dotplot convention.
-            fdr_prefix = f"{fdr_block}\n" if fdr_block else ""
-            sort_for_dotplot = (
-                f"reorder({q(y)}, -{q(x)})"
-                if not sort_col
-                else sort_expr
+            extras = "".join(f", {a}" for a in (size_a, bubble_color_aes) if a)
+            sort_for_bubble = (
+                f"reorder({q(y)}, -{q(x)})" if not sort_col else sort_expr
             )
-            # Compose the extra aes(...) mappings (size / color) with proper
-            # comma separators. Neither ``size_a`` nor ``color_aes`` carries
-            # a leading comma; we always prepend one comma when at least one
-            # mapping follows the position aesthetics. ``sort_for_dotplot``
-            # ends with a closing paren, so the leading comma is what glues
-            # the join together.
-            extras = ""
-            if size_a and color_aes:
-                extras = f", {size_a}, {color_aes}"
-            elif size_a:
-                extras = f", {size_a}"
-            elif color_aes:
-                extras = f", {color_aes}"
-            # Only emit the + chains for the color / size scales when those
-            # mappings actually exist; otherwise the generated script ends
-            # with a dangling "+" which is a syntax error in R / ggplot2.
-            color_chain = f" +\n  {color_scale}" if color_scale else ""
-            size_chain = f" +\n  {size_scale}" if size_scale else ""
-            return (
-                f"{fdr_prefix}"
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {sort_for_dotplot}{extras})) +\n"
-                f"  geom_point(alpha = 0.95){label_geom}{color_chain}{size_chain} +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
-            )
+            # A computed ``fdr`` column must exist before ggplot builds the plot.
+            head = f"{fdr_block}\n" if fdr_block else ""
+            head += f"p <- ggplot(.data, aes(x = {q(x)}, y = {sort_for_bubble}{extras}))"
+            return PlotEngine._chain(head, [
+                "geom_point(alpha = 0.95)",
+                label_layer,
+                color_scale,
+                size_scale,
+                f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                theme_block,
+            ])
 
         if ct == "scatter":
-            label_geom = (
-                f"\n  geom_text(aes(label = {q(label)}), vjust = -0.8, size = 3)" if label else ""
+            # 散点标签用 ggrepel：高密度点云里普通 geom_text 必然互相压字。
+            label_layer = (
+                f"geom_text_repel(aes(label = {q(label)}), size = 3, "
+                f"max.overlaps = 15)" if label else ""
             )
-            # Default to the first palette color when no continuous color column
-            # is mapped, so the plot is never black-and-white.
-            point_color = f"color = '{pal_first}', " if not color_col else ""
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}{color_aes})) +\n"
-                f"  geom_point({point_color}alpha = 0.7){label_geom} +\n"
-                f"  {color_scale} +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
+            # Colour by the mapped column when present, otherwise use the first
+            # palette colour so the figure is never black-and-white.
+            point_layer = (
+                f"geom_point(aes(color = {q(color_col)}), alpha = 0.75)"
+                if color_col else f"geom_point(color = '{pal_first}', alpha = 0.75)"
+            )
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}))",
+                [
+                    point_layer,
+                    label_layer,
+                    color_scale,
+                    f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                    theme_block,
+                ],
             )
 
         if ct == "line":
             group_aes = f", group = {q(label)}" if label else ""
-            color_aes_line = f", color = {q(color_col)}" if color_col else ""
+            series_aes = f", color = {q(color_col)}" if color_col else ""
             line_color = f"color = '{pal_first}', " if not color_col else ""
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}{group_aes}{color_aes_line})) +\n"
-                f"  geom_line({line_color}alpha = 0.8) +\n"
-                f"  geom_point({line_color}size = 1.5) +\n"
-                f"  {color_scale} +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}{group_aes}{series_aes}))",
+                [
+                    # ``size`` (not ``linewidth``) keeps the script working on
+                    # ggplot2 < 3.4 as well.
+                    f"geom_line({line_color}size = {chart.get('line_width', 1.5)}, alpha = 0.9)",
+                    f"geom_point({line_color}size = 1.5)",
+                    # A series column is categorical -> journal palette
+                    # (reference bioR33 multi-GSEA trend panel).
+                    (PlotEngine._manual_scale("color", pal_name, color_col, n_levels)
+                     if color_col else ""),
+                    f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                    theme_block,
+                ],
             )
 
         if ct == "area":
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr})) +\n"
-                f"  geom_area(fill = '{pal_first}', alpha = 0.6) +\n"
-                f"  geom_line(color = '{pal_first}') +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
-            )
+            if color_col:
+                head = f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}, fill = {q(color_col)}))"
+                layers = [
+                    "geom_area(alpha = 0.6)",
+                    PlotEngine._manual_scale("fill", pal_name, color_col, n_levels),
+                ]
+            else:
+                head = f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}))"
+                layers = [
+                    f"geom_area(fill = '{pal_first}', alpha = 0.6)",
+                    f"geom_line(color = '{pal_first}')",
+                ]
+            layers += [
+                f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                theme_block,
+            ]
+            return PlotEngine._chain(head, layers)
 
         if ct == "volcano":
-            label_geom = (
-                f"\n  geom_text(data = subset(.data, {y_expr} > 1.3), "
-                f"aes(label = {q(label)}), size = 3, vjust = -0.8)" if label else ""
+            # 常规固定语义（参考 bioR19 的阈值做法，配色统一为低饱和版）：
+            # Up = 红，Down = 蓝，NS = 灰；|log2FC| 与 p 阈值画虚线。
+            fold = float(chart.get("fold_cutoff", 1.0))
+            p_cut = float(chart.get("p_cutoff", 0.05))
+            thr = round(-math.log10(p_cut), 3)
+            up_cond = f"{q(x)} > {fold} & {y_expr} > {thr}"
+            down_cond = f"{q(x)} < -{fold} & {y_expr} > {thr}"
+            # 只标注显著点，并用 ggrepel 防止基因名互相覆盖。
+            label_layer = (
+                f"geom_text_repel(data = subset(.data, {y_expr} > {thr}), "
+                f"aes(label = {q(label)}), size = 3, max.overlaps = 15)"
+                if label else ""
             )
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr})) +\n"
-                f"  geom_point(aes(color = ifelse({y_expr} > 1.3 & abs({q(x)}) > 1, 'Up', "
-                f"ifelse({y_expr} > 1.3, 'Down', 'NS'))), alpha = 0.7){label_geom} +\n"
-                f"  scale_color_manual(values = c('Up' = '#e41a1c', 'Down' = '#377eb8', "
-                f"'NS' = '#bdbdbd'), name = 'Regulation') +\n"
-                f"  geom_hline(yintercept = 1.3, linetype = 'dashed', color = 'grey50') +\n"
-                f"  geom_vline(xintercept = c(-1, 1), linetype = 'dashed', color = 'grey50') +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
+            conv = plot_styles.up_down_colors()
+            up_c, down_c, ns_c = conv["up"], conv["down"], conv["ns"]
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}))",
+                [
+                    (f"geom_point(aes(color = ifelse({up_cond}, 'Up', "
+                     f"ifelse({down_cond}, 'Down', 'NS'))), alpha = 0.75)"),
+                    label_layer,
+                    f"scale_color_manual(values = c('Up' = '{up_c}', "
+                    f"'Down' = '{down_c}', 'NS' = '{ns_c}'), name = 'Regulation')",
+                    f"geom_hline(yintercept = {thr}, linetype = 'dashed', color = 'grey50')",
+                    f"geom_vline(xintercept = c(-{fold}, {fold}), "
+                    f"linetype = 'dashed', color = 'grey50')",
+                    f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                    theme_block,
+                ],
             )
 
         # ---- categorical / distribution ------------------------------- #
         if ct == "bar":
-            fill_aes = f", fill = {q(color_col)}" if color_col else ""
-            fill_scale = (
-                f"scale_fill_gradient(low = '#377eb8', high = '#e41a1c', "
-                f"name = '{color_col}')" if color_col else ""
-            )
-            # Default fill color when no continuous color column is mapped.
-            bar_fill = f"fill = '{pal_first}', " if not color_col else ""
-            return (
-                f"p <- ggplot(.data, aes(x = {sort_expr}, y = {y_expr}{fill_aes})) +\n"
-                f"  geom_col({bar_fill}alpha = 0.85){signif_geom} +\n"
-                f"  coord_flip() +\n"
-                f"  {fill_scale} +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
-            )
+            layers = [
+                # Reference bioR03/bioR05: horizontal bars coloured by
+                # significance, sorted so the most significant term is on TOP.
+                (f"geom_col(aes(fill = {q(color_col)}), alpha = 0.85)" if color_col
+                 else f"geom_col(fill = '{pal_first}', alpha = 0.85)"),
+                signif_geom,
+                (plot_styles.gradient_scale(ramp, "fill", PlotEngine._color_label(color_col))
+                 if color_col else ""),
+            ]
+            if chart.get("expand_zero"):
+                # 数值轴紧贴 0（期刊常规），但存在星级标注时留一点余量，
+                # 否则标记会被面板边界切掉。
+                pad = "0.06" if signif_col else "0"
+                layers += [
+                    f"scale_x_continuous(expand = c(0, {pad}))",
+                    "scale_y_discrete(expand = c(0, 0))",
+                ]
+            layers += [
+                f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                theme_block,
+            ]
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {y_expr}, y = {bar_cat_expr}))", layers)
 
         if ct == "boxplot":
-            fill_aes = f"fill = {q(color_col)}" if color_col else ""
-            # Default fill + outline color when no grouping column is mapped.
-            box_fill = f"fill = '{pal_first}', " if not color_col else ""
-            box_color = f"color = '{pal_first}', " if not color_col else ""
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}{fill_aes})) +\n"
-                f"  geom_boxplot({box_fill}{box_color}outlier.shape = 21, outlier.size = 1.5, alpha = 0.8) +\n"
-                f"  {color_scale} +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
-            )
+            # Group comparison (reference bioR07/09/11): boxes filled by the
+            # grouping column (falling back to the X categories), jittered raw
+            # points in the same colour, ggpubr base theme.
+            group_col = color_col or x
+            layers = [
+                f"geom_boxplot(aes(fill = {q(group_col)}), outlier.shape = 21, "
+                f"outlier.size = 1.5, alpha = 0.8)",
+            ]
+            if chart.get("jitter"):
+                layers.append(
+                    f"geom_jitter(aes(color = {q(group_col)}), width = 0.15, "
+                    f"size = 1, alpha = 0.45)")
+            layers.append(
+                PlotEngine._manual_scale("fill", pal_name, group_col, n_levels))
+            if chart.get("jitter"):
+                # Same palette + same column -> ggplot merges both legends.
+                layers.append(
+                    PlotEngine._manual_scale("color", pal_name, group_col, n_levels))
+            layers += [
+                f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                theme_block,
+            ]
+            rotate = chart.get("rotate_x")
+            if rotate:
+                # 倾斜的 X 轴标签放在基础主题之后，确保不被主题里的 axis.text 覆盖。
+                layers.append(
+                    f"theme(axis.text.x = element_text(angle = {rotate}, hjust = 1))")
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}))", layers)
 
         if ct == "violin":
-            fill_aes = f"fill = {q(color_col)}" if color_col else ""
-            # Default fill + outline when no grouping column is mapped.
-            violin_fill = f"fill = '{pal_first}', " if not color_col else ""
-            violin_color = f"color = '{pal_first}', " if not color_col else ""
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}{fill_aes})) +\n"
-                f"  geom_violin({violin_fill}{violin_color}alpha = 0.7) +\n"
-                f"  geom_boxplot(width = 0.1, outlier.shape = NA) +\n"
-                f"  {color_scale} +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
-            )
+            # Reference bioR11/bioR12: filled violins with a white inner boxplot.
+            group_col = color_col or x
+            layers = [
+                f"geom_violin(aes(fill = {q(group_col)}), alpha = 0.7)",
+                "geom_boxplot(width = 0.1, outlier.shape = NA, fill = 'white', alpha = 0.6)",
+                PlotEngine._manual_scale("fill", pal_name, group_col, n_levels),
+            ]
+            layers += [
+                f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                theme_block,
+            ]
+            rotate = chart.get("rotate_x")
+            if rotate:
+                layers.append(
+                    f"theme(axis.text.x = element_text(angle = {rotate}, hjust = 1))")
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {q(x)}, y = {y_expr}))", layers)
 
         if ct == "histogram":
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)})) +\n"
-                f"  geom_histogram(fill = '{pal_first}', color = 'white', bins = 30, alpha = 0.8) +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"Count\") +\n"
-                f"  {theme_block}"
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {q(x)}))",
+                [
+                    f"geom_histogram(fill = '{pal_first}', color = 'white', "
+                    f"bins = 30, alpha = 0.8)",
+                    f"labs(title = \"{title_r}\", x = \"{x}\", y = \"Count\")",
+                    theme_block,
+                ],
             )
 
         if ct == "density":
-            fill_aes = f"fill = {q(color_col)}" if color_col else ""
-            # Default fill + outline when no grouping column is mapped.
-            dens_fill = f"fill = '{pal_first}', " if not color_col else ""
-            dens_color = f"color = '{pal_first}', " if not color_col else ""
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}{fill_aes})) +\n"
-                f"  geom_density({dens_fill}{dens_color}alpha = 0.5) +\n"
-                f"  {color_scale} +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"Density\") +\n"
-                f"  {theme_block}"
-            )
+            if color_col:
+                head = f"p <- ggplot(.data, aes(x = {q(x)}, fill = {q(color_col)}))"
+                layers = [
+                    "geom_density(alpha = 0.5)",
+                    PlotEngine._manual_scale("fill", pal_name, color_col, n_levels),
+                ]
+            else:
+                head = f"p <- ggplot(.data, aes(x = {q(x)}))"
+                layers = [
+                    f"geom_density(fill = '{pal_first}', color = '{pal_first}', alpha = 0.5)",
+                ]
+            layers += [
+                f"labs(title = \"{title_r}\", x = \"{x}\", y = \"Density\")",
+                theme_block,
+            ]
+            return PlotEngine._chain(head, layers)
 
         if ct == "dotplot":
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {sort_expr})) +\n"
-                f"  geom_point(aes(size = {q(size) if size else y}), color = '{pal_first}', alpha = 0.8) +\n"
-                f"  scale_size_continuous(range = c(2, 8)) +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
+            size_lo, size_hi = chart.get("size_range", (3, 8))
+            mappings = []
+            if size:
+                mappings.append(f"size = {q(size)}")
+            if color_col:
+                mappings.append(f"color = {q(color_col)}")
+            point_layer = (
+                f"geom_point(aes({', '.join(mappings)}), alpha = 0.9)" if mappings
+                else f"geom_point(size = 3, color = '{pal_first}', alpha = 0.9)"
+            )
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {q(x)}, y = {sort_expr}))",
+                [
+                    point_layer,
+                    color_scale,
+                    (f"scale_size_continuous(range = c({size_lo}, {size_hi}))"
+                     if size else ""),
+                    f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                    theme_block,
+                ],
             )
 
         # ---- matrix / heatmap ------------------------------------------ #
         if ct == "heatmap":
+            # 常规固定语义（参考 bioR17/bioR18）：蓝-白-红（低饱和）、按行 z-score、
+            # 行列聚类；字号与行名随矩阵规模自适应，行列过多时隐藏行名，
+            # 从源头避免标签互相重叠。
+            cluster = "TRUE" if chart.get("cluster", True) else "FALSE"
+            base_fs = chart.get("font_size", 8)
             return (
                 f"m <- as.matrix(.data[, c(\"{x}\", \"{y}\")])\n"
                 f"rownames(m) <- .data[[\"{label if label else x}\"]]\n"
-                f"p <- pheatmap::pheatmap(m, main = \"{title_r}\", cluster_cols = FALSE,\n"
-                f"  color = colorRampPalette({pal_vec})(3))"
+                f".fs <- if (nrow(m) > 60) 4 else if (nrow(m) > 30) 6 else {base_fs}\n"
+                f".do_cluster <- nrow(m) > 1 && ncol(m) > 1\n"
+                f"p <- pheatmap::pheatmap(m, main = \"{title_r}\",\n"
+                f"  color = {plot_styles.ramp_call(ramp)},\n"
+                f"  scale = '{chart.get('scale', 'row')}',\n"
+                f"  cluster_rows = {cluster} && .do_cluster,\n"
+                f"  cluster_cols = {cluster} && .do_cluster,\n"
+                f"  show_rownames = nrow(m) <= 60, show_colnames = ncol(m) <= 40,\n"
+                f"  border_color = NA, fontsize = .fs, fontsize_row = .fs,\n"
+                f"  fontsize_col = .fs)"
             )
 
         if ct == "corrplot":
+            # Reference bioR23: circle glyphs, hclust ordering, upper triangle,
+            # coefficients printed, blue-white-red ramp.
+            stops = plot_styles.ramp_stops(ramp)
+            low, mid, high = stops[0], stops[len(stops) // 2], stops[-1]
             return (
                 f"m <- as.matrix(.data[, c(\"{x}\", \"{y}\")])\n"
-                f"p <- ggcorrplot::ggcorrplot(cor(m), method = 'circle',\n"
-                f"  lab = TRUE, title = \"{title_r}\")"
+                f"p <- ggcorrplot::ggcorrplot(cor(m),\n"
+                f"  method = '{chart.get('method', 'circle')}', hc.order = TRUE,\n"
+                f"  type = 'upper', lab = TRUE, lab_size = 3,\n"
+                f"  colors = c('{low}', '{mid}', '{high}'), title = \"{title_r}\")"
             )
 
         # ---- composition ----------------------------------------------- #
         if ct in ("pie", "donut"):
-            hole = "0.5" if ct == "donut" else "0"
-            return (
-                f"p <- ggplot(.data, aes(x = '', y = {q(y)}, fill = {q(x)})) +\n"
-                f"  geom_col(width = 1) +\n"
-                f"  coord_polar(theta = 'y') +\n"
-                f"  scale_fill_manual(values = {pal_vec}) +\n"
-                f"  labs(title = \"{title_r}\", fill = \"{x}\") +\n"
-                f"  theme_void() +\n"
-                f"  theme(plot.title = element_text(face = 'bold', size = 14, hjust = 0.5))"
-            )
+            # Reference bioR28: slices ordered large -> small, single-hue
+            # sequential scale, percentage label on every slice.
+            fill_aes = f"reorder({q(x)}, -{q(y)})"
+            if ct == "donut":
+                head = f"p <- ggplot(.data, aes(x = 2, y = {q(y)}, fill = {fill_aes}))"
+                layers = ["geom_col(width = 1, color = 'white')", "xlim(0.5, 2.5)"]
+            else:
+                head = f"p <- ggplot(.data, aes(x = '', y = {q(y)}, fill = {fill_aes}))"
+                layers = ["geom_col(width = 1, color = 'white')"]
+            layers += [
+                "coord_polar(theta = 'y')",
+                PlotEngine._manual_scale("fill", pal_name, x, n_levels),
+                # 只标注占比 >= 5% 的扇区：小扇区的百分比标签必然互相重叠，
+                # 其类别信息由图例承担（文本用空串占位，避免位置被移动）。
+                (f"geom_text(aes(label = ifelse({q(y)} / sum({q(y)}) >= 0.05, "
+                 f"paste0(round(100 * {q(y)} / sum({q(y)}), 1), '%'), '')), "
+                 f"position = position_stack(vjust = 0.5), size = 3)"),
+                f"labs(title = \"{title_r}\", fill = \"{x}\")",
+                "theme_void()",
+                "theme(plot.title = element_text(face = 'bold', size = 14, hjust = 0.5))",
+            ]
+            return PlotEngine._chain(head, layers)
 
         # ---- advanced / multi-panel ------------------------------------- #
         if ct == "ridge":
-            return (
-                f"p <- ggplot(.data, aes(x = {q(x)}, y = {q(y)}, fill = {q(y)})) +\n"
-                f"  ggridges::geom_density_ridges(alpha = 0.7) +\n"
-                f"  scale_fill_manual(values = {pal_vec}) +\n"
-                f"  labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\") +\n"
-                f"  {theme_block}"
+            group_col = color_col or y
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(x = {q(x)}, y = {q(y)}, fill = {q(group_col)}))",
+                [
+                    "ggridges::geom_density_ridges(alpha = 0.7)",
+                    PlotEngine._manual_scale("fill", pal_name, group_col, n_levels),
+                    f"labs(title = \"{title_r}\", x = \"{x}\", y = \"{y}\")",
+                    theme_block,
+                ],
             )
 
         if ct == "alluvial":
-            return (
-                f"p <- ggplot(.data, aes(axis1 = {q(x)}, axis2 = {q(y)}, y = {q(size or y)})) +\n"
-                f"  ggalluvial::geom_alluvium(aes(fill = {q(x)}), alpha = 0.7) +\n"
-                f"  ggalluvial::geom_stratum() +\n"
-                f"  scale_fill_manual(values = {pal_vec}) +\n"
-                f"  labs(title = \"{title_r}\") +\n"
-                f"  {theme_block}"
+            # Reference bioR27: strata coloured by the source axis, flows
+            # forwarded so consecutive axes keep the upstream colour.
+            y_col = size or y
+            return PlotEngine._chain(
+                f"p <- ggplot(.data, aes(axis1 = {q(x)}, axis2 = {q(y)}, y = {q(y_col)}))",
+                [
+                    f"ggalluvial::geom_alluvium(aes(fill = {q(x)}), alpha = 0.7)",
+                    "ggalluvial::geom_stratum()",
+                    PlotEngine._manual_scale("fill", pal_name, x, n_levels),
+                    f"labs(title = \"{title_r}\")",
+                    theme_block,
+                ],
             )
 
         if ct == "network":
+            # Base graphics: the engine re-draws it through ``draw_plot()`` on
+            # every output device (plain base plots cannot be replayed by
+            # ``print(p)``). Reference bioR25: white nodes, bold black labels.
+            node_size = chart.get("node_size", 8)
             return (
-                f"g <- igraph::graph_from_data_frame(.data[, c(\"{x}\", \"{y}\")], directed = FALSE)\n"
-                f"p <- igraph::plot(g, main = \"{title_r}\", vertex.color = '{pal_first}',\n"
-                f"  vertex.size = 8, vertex.label.cex = 0.7, edge.color = 'grey60')"
+                f"draw_plot <- function() {{\n"
+                f"  g <- igraph::graph_from_data_frame(\n"
+                f"    .data[, c(\"{x}\", \"{y}\")], directed = FALSE)\n"
+                f"  plot(g, main = \"{title_r}\", vertex.color = 'white',\n"
+                f"    vertex.frame.color = NA, vertex.size = {node_size},\n"
+                f"    vertex.label.color = 'black', vertex.label.font = 2,\n"
+                f"    vertex.label.cex = 1.0, edge.color = 'grey60', edge.curved = 0.2)\n"
+                f"}}\n"
+                f"p <- NULL"
             )
 
         # Fallback: unknown chart type -> raise so the agent can ask the user
@@ -969,7 +1153,8 @@ class PlotEngine:
     @staticmethod
     def _compose_script(r_code: str, plot_data: PlotData, svg_path: str,
                         png_path: str, pdf_path: str,
-                        extra_packages: Optional[List[str]] = None) -> str:
+                        extra_packages: Optional[List[str]] = None,
+                        figure_size: Optional[Tuple[float, float]] = None) -> str:
         """Wrap the LLM's plotting code with the sandbox prelude and output
         directives for the three formats."""
         blocked = ", ".join(f"'{f}'" for f in _BLOCKED_R_FUNCTIONS)
@@ -982,34 +1167,48 @@ class PlotEngine:
         png_r = png_path.replace("\\", "/")
         pdf_r = pdf_path.replace("\\", "/")
 
-        # The plot object must be assigned to ``p`` by the spec code so that it
-        # can be re-printed onto each output device. ``dev.copy`` is NOT used:
-        # it replays the display list and is unreliable for grid/ggplot2
+        # 画布尺寸来自样式注册表（参考图库中的期刊尺寸），每个图型各不相同。
+        width, height = (figure_size or plot_styles.DEFAULT_CANVAS)
+        w = PlotEngine._inch(width)
+        h = PlotEngine._inch(height)
+
+        # The plot must be re-drawn onto each output device. ``dev.copy`` is NOT
+        # used: it replays the display list and is unreliable for grid/ggplot2
         # graphics (it can silently produce a blank file), which is exactly the
         # failure mode seen when plots came back empty. Opening each device and
-        # printing ``p`` onto it directly is robust for both base and grid.
+        # drawing onto it directly is robust for both base and grid.
+        # ``.sn_draw()`` covers both plot families: ggplot/pheatmap objects are
+        # assigned to ``p`` and printed, while base-graphics charts (e.g. the
+        # igraph network) expose a ``draw_plot()`` function that re-draws itself.
         # IMPORTANT: the output blocks MUST come *after* ``r_code`` — the spec
-        # code assigns ``p``, and ``print(p)`` executed before that assignment
-        # fails with "Error: object 'p' not found".
+        # code assigns ``p``, and printing before that fails with
+        # "Error: object 'p' not found".
         output_directives = f'''
 # --- output device directives ---
-svg("{svg_r}", width = 8, height = 6)
-print(p)
+.sn_draw <- function() {{
+  if (exists("draw_plot", mode = "function")) {{
+    draw_plot()
+  }} else {{
+    print(p)
+  }}
+}}
+svg("{svg_r}", width = {w}, height = {h})
+.sn_draw()
 dev.off()
 '''
 
         epilogue = f'''
 # --- finalize outputs (SVG + PNG + PDF) ---
-png("{png_r}", width = 8, height = 6, units = "in", res = 150)
-print(p)
+png("{png_r}", width = {w}, height = {h}, units = "in", res = 150)
+.sn_draw()
 dev.off()
-pdf("{pdf_r}", width = 8, height = 6)
-print(p)
+pdf("{pdf_r}", width = {w}, height = {h})
+.sn_draw()
 dev.off()
 # --- end ---
 '''
 
-        # Order: sandbox prelude -> user/spec code (defines ``p``) -> devices.
+        # Order: sandbox prelude -> spec code (defines ``p``) -> devices.
         return prelude + "\n" + r_code + "\n" + output_directives + "\n" + epilogue
 
 

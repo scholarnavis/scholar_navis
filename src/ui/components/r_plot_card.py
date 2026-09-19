@@ -90,7 +90,10 @@ class RPlotCardWidget(QFrame):
         self._preview.setMinimumHeight(120)
         self._preview.setProperty("cssClass", "rPreview")
         self._preview.setCursor(Qt.PointingHandCursor)
-        self._preview.setToolTip("Double-click to open with system image viewer")
+        self._preview.setToolTip(
+            "Double-click to open with system image viewer" if self._has_image_file()
+            else "Chart image file is missing (the output file was removed); "
+                 "ask the AI to re-render the chart")
         self._preview.installEventFilter(self)
 
         # --- download buttons ---
@@ -131,6 +134,10 @@ class RPlotCardWidget(QFrame):
         )
         self._card_layout.addWidget(self._source_view)
         self._load_script_source()
+
+    def _has_image_file(self) -> bool:
+        """卡片引用的 PNG/SVG 是否仍存在于磁盘。"""
+        return any(p and os.path.exists(p) for p in (self._png_path, self._svg_path))
 
     def _make_download_btn(self, text: str, icon_name: str, kind: str) -> QPushButton:
         btn = QPushButton(f" {text}")
@@ -181,10 +188,24 @@ class RPlotCardWidget(QFrame):
         return super().eventFilter(obj, event)
 
     def _open_external(self):
-        """用系统默认图片查看器打开 PNG（优先）或 SVG 原图。"""
+        """用系统默认图片查看器打开 PNG（优先）或 SVG 原图。
+
+        图片文件可能已经不存在（历史对话里的卡片指向早前渲染的临时文件、
+        或用户清理过输出目录）。此时必须给出可见反馈——静默 return 会让
+        用户以为"双击打开图片"这个功能坏了。
+        """
         target = self._png_path if (self._png_path and os.path.exists(self._png_path)) else self._svg_path
         if not target or not os.path.exists(target):
-            logger.warning(f"Open external skipped: no image file available")
+            logger.warning(
+                f"Open external skipped: no image file available "
+                f"(png='{self._png_path}', svg='{self._svg_path}')")
+            from src.ui.components.toast import ToastManager
+            ToastManager().show(
+                "Chart image not found on disk. It was written to a directory that no "
+                "longer exists (temporary/system cleanup), so the file cannot be opened. "
+                "Ask the AI to re-render the chart to view it again.",
+                "error",
+            )
             return
         try:
             ok = QDesktopServices.openUrl(QUrl.fromLocalFile(target))
@@ -192,6 +213,9 @@ class RPlotCardWidget(QFrame):
                 logger.info(f"Opened plot with system viewer: {target}")
             else:
                 logger.warning(f"System viewer failed to open: {target}")
+                from src.ui.components.toast import ToastManager
+                ToastManager().show(
+                    "No system image viewer could be started for this file.", "error")
         except Exception as e:
             logger.error(f"Failed to open plot with system viewer: {e}")
 

@@ -178,8 +178,16 @@ Override the engine cache location with `SCHOLAR_NAVIS_TRT_CACHE` if needed.
 uv run build_app.py      # PyInstaller (Windows / Linux); publishes to R2 under CI
 ```
 
-Artifacts are named `scholar_navis_<platform>_v<version>.zip`; the release workflow
-builds Windows and Linux in parallel.
+Artifacts are named `scholar_navis_<platform>_<channel>_v<version>.zip`, where
+`<channel>` is `stable` or `dev` — decided solely by whether the version string
+contains `-dev` (`src/core/version.py::release_channel`). The release workflow
+builds Windows and Linux in parallel, uploads both to R2, and creates a GitHub
+Release whose body carries the version, channel, download links and changelog.
+
+The in-app update check fetches both channels (`/versions`) but only compares the
+one the running build belongs to; `-dev` builds therefore never notify stable
+users. Release notes are fetched through the site (`/changelog`), which proxies
+the GitHub Release — see `deploy/cloudflare/_worker.js` for the routing contract.
 
 -----
 

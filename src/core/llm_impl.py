@@ -661,10 +661,13 @@ class OpenAICompatibleLLM:
             if b64:
                 import base64
                 import hashlib
-                import tempfile
+                from src.core.output_paths import generated_image_dir
                 img_bytes = base64.b64decode(b64)
                 file_name = f"scholar_navis_gen_{hashlib.md5(img_bytes).hexdigest()[:12]}.png"
-                local_path = os.path.join(tempfile.gettempdir(), file_name)
+                # 生成图会被聊天记录引用（双击打开内部查看器），因此必须落在
+                # 持久化目录：临时目录在 steam-run / 系统清理后会消失，导致
+                # 历史消息里的图片全部打不开。
+                local_path = os.path.join(generated_image_dir(), file_name)
                 if not os.path.exists(local_path):
                     with open(local_path, "wb") as f:
                         f.write(img_bytes)
