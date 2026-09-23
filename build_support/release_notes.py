@@ -462,6 +462,17 @@ def build_body(*, version: str, channel: str, repo: str, commits: list,
             lines.append(f"| {label} | [{url}]({url}) |")
         lines.append("")
 
+        # Linux 产物是源码包（见 build_app.py 的形态说明）：下载链接本身不带形态
+        # 信息，不写清楚的话"下载 Linux 版"会被当成开箱即用。具体前置条件只写在
+        # README 里，这里只做指向，避免同一份要求出现两处说法。
+        if "linux" in platforms:
+            lines += [
+                "> The Linux asset is a **source bundle** (no prebuilt binaries): "
+                "unzip it and run `./run.sh`. See *Running from source* in the README "
+                "for the prerequisites.",
+                "",
+            ]
+
     note = CHANNEL_NOTES.get(channel)
     if note:
         lines += [f"> {note}", ""]

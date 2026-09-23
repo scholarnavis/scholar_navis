@@ -204,7 +204,9 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         self.chat_container.setStyleSheet("background-color: transparent;")
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setSpacing(12)
-        self.chat_layout.setContentsMargins(10, 10, 10, 0)
+        # 底部留出悬浮按钮的占位：按钮是 scroll_area 的浮动子控件，不留白
+        # 就会盖住最后一行内容。
+        self.chat_layout.setContentsMargins(10, 10, 10, self._OVERLAY_RESERVED_BOTTOM)
         self.chat_layout.setAlignment(Qt.AlignTop)
 
         self.scroll_area.setWidget(self.chat_container)
@@ -404,7 +406,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         tm = ThemeManager()
         btn = QPushButton("", self.scroll_area)
         btn.setIcon(tm.icon(icon_name, "bg_main"))
-        btn.setFixedSize(40, 40)
+        btn.setFixedSize(self._OVERLAY_BTN_SIZE, self._OVERLAY_BTN_SIZE)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setStyleSheet(f"""
             QPushButton {{
@@ -433,6 +435,10 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
     # 悬浮按钮竖排布局参数：距滚动区右/下边缘 16px，按钮间距 8px
     _OVERLAY_MARGIN = 16
     _OVERLAY_GAP = 8
+    _OVERLAY_BTN_SIZE = 40
+    # 对话容器底部留白 = 一颗悬浮按钮 + 其右/下边距 + 间距：保证滚到底时
+    # 最后一行内容（如追问建议卡片）不会被右下角悬浮按钮压住。
+    _OVERLAY_RESERVED_BOTTOM = _OVERLAY_BTN_SIZE + _OVERLAY_MARGIN + _OVERLAY_GAP
 
     def _set_overlay_visible(self, key, btn, effect, anim, should_show: bool):
         """悬浮按钮统一显隐切换（渐变动画 + 防重入 + 位置归并）。

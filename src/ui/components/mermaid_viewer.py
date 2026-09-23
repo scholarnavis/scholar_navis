@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 
 from PySide6.QtCore import Qt, QUrl
@@ -12,6 +13,8 @@ from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme, st
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.file_dialogs import save_file_name
 from src.ui.components.source_code_viewer import SourceCodeViewer
+
+logger = logging.getLogger(__name__)
 
 
 #: 导出用全局导出函数，注入页面 <script> 后供 Qt 端 runJavaScript 调用。
@@ -174,6 +177,9 @@ function __navisExportRaster(mime, quality, scale, crop) {
 
 
 class MermaidViewer(QMainWindow):
+    #: 源码面板 : 预览面板 的默认宽度分配（源码展开时使用）。
+    _SPLIT_SIZES = (300, 900)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Academic Diagram Viewer - Mermaid.js")
@@ -192,13 +198,18 @@ class MermaidViewer(QMainWindow):
             max_height=600,
         )
         self.source_editor.textChanged.connect(self._live_update)
+        # 折叠态下源码面板只剩一条标题栏，却仍占着一整列宽度：预览区会白白
+        # 让出约四分之一窗口（观感上就是"图形显示区域只有一点点"）。因此折叠时
+        # 把面板整块移出分割器，把宽度全部还给预览区，展开时再按原比例放回。
+        self.source_editor.collapsedChanged.connect(self._on_source_collapsed)
         self.splitter.addWidget(self.source_editor)
 
         # 右侧：Web 引擎渲染器
         self.web_view = QWebEngineView()
         self.splitter.addWidget(self.web_view)
 
-        self.splitter.setSizes([300, 900])
+        self.splitter.setSizes(list(self._SPLIT_SIZES))
+        self._apply_source_pane()
 
         self._setup_toolbar()
 
@@ -404,14 +415,32 @@ class MermaidViewer(QMainWindow):
 
         self.source_editor.set_code(self.mermaid_code)
 
-        self.render_diagram()
+        # 先显示窗口再渲染：预览页的视口尺寸取自 QWebEngineView 的实际几何，
+        # 若在窗口尚未完成布局时 setHtml，页面首次 fit 会用到中间态尺寸（甚至
+        # 0），图形被缩成很小一条且其后不一定再有 resize 事件来纠正。
         self.showNormal()
+        self.render_diagram()
         self.raise_()
         self.activateWindow()
 
-
     def _toggle_source(self):
         self.source_editor.toggle_collapsed()
+
+    def _on_source_collapsed(self, collapsed: bool):
+        """源码面板折叠状态变化 → 重新分配分割器宽度。"""
+        self._apply_source_pane()
+
+    def _apply_source_pane(self):
+        """折叠时隐藏源码面板（宽度全给预览），展开时恢复左右分栏比例。
+
+        QSplitter 不会因为子控件自身折叠就回收该列宽度，直接把面板从分割器
+        中隐去，预览区才能拿到整个窗口宽度。
+        """
+        collapsed = self.source_editor.is_collapsed()
+        self.source_editor.setVisible(not collapsed)
+        if not collapsed:
+            self.splitter.setSizes(list(self._SPLIT_SIZES))
+        logger.debug("Mermaid source pane collapsed=%s", collapsed)
 
     def _run_js(self, script: str):
         """在预览页执行脚本（页面尚未创建时静默忽略）。
@@ -485,7 +514,9 @@ class MermaidViewer(QMainWindow):
                     gantt: {{ useMaxWidth: false }},
                     state: {{ useMaxWidth: false }},
                     class: {{ useMaxWidth: false }},
-                    er: {{ useMaxWidth: false }}
+                    er: {{ useMaxWidth: false }},
+                    mindmap: {{ useMaxWidth: false }},
+                    timeline: {{ useMaxWidth: false }}
                 }});
                 const code = {safe_code};
 
@@ -495,10 +526,14 @@ class MermaidViewer(QMainWindow):
                 const NAVIS_WHEEL_ZOOM_FACTOR = 1.15;  // 滚轮步进（比按钮更细腻）
                 const NAVIS_BUTTON_ZOOM_FACTOR = 1.25; // 工具栏按钮步进
                 const NAVIS_MARGIN = 24;               // 适应窗口时预留的边距
+                const NAVIS_MIN_VIEWPORT = 120;        // 视口小于此值视为"尚未布局完成"
+                const NAVIS_FIT_RETRY_MS = [0, 60, 200]; // fit 收敛重试阶梯（ms）
+                const NAVIS_FIT_MAX_ROUND = 8;         // 重试轮数上限，避免空转
 
                 var navisNatural = {{ w: 0, h: 0 }};   // 矢量真实尺寸（1:1 像素）
                 var navisScale = 1.0;
                 var navisFitMode = true;               // 适应窗口模式：随窗口变化重适配
+                var navisLastViewport = {{ w: 0, h: 0 }}; // 上次 fit 时的视口，用于去重
 
                 function navisSvg() {{ return document.querySelector('#graphDiv svg'); }}
 
@@ -528,14 +563,51 @@ class MermaidViewer(QMainWindow):
                 function navisZoomBy(factor) {{ navisSetScale(navisScale * factor); }}
                 function navisZoomIn() {{ navisZoomBy(NAVIS_BUTTON_ZOOM_FACTOR); }}
                 function navisZoomOut() {{ navisZoomBy(1 / NAVIS_BUTTON_ZOOM_FACTOR); }}
+                function navisViewport() {{
+                    return {{ w: document.documentElement.clientWidth,
+                             h: document.documentElement.clientHeight }};
+                }}
+
+                // 视口过小说明页面还没完成布局（窗口刚创建 / 分割器刚调整）。
+                // 此刻算出的缩放会极小，而且之后不一定再有 resize 事件纠正，
+                // 图形就"缩成一条"且再也回不来——因此改为稍后重试。
                 function navisFitToWindow() {{
                     var svg = navisSvg();
                     if (!svg) return;
                     if (!navisNatural.w) navisNatural = navisMeasure(svg);
-                    var availW = Math.max(120, document.documentElement.clientWidth - NAVIS_MARGIN);
-                    var availH = Math.max(120, document.documentElement.clientHeight - NAVIS_MARGIN);
+                    var vp = navisViewport();
+                    if (vp.w < NAVIS_MIN_VIEWPORT || vp.h < NAVIS_MIN_VIEWPORT) {{
+                        navisScheduleFit();
+                        return;
+                    }}
+                    var availW = Math.max(NAVIS_MIN_VIEWPORT, vp.w - NAVIS_MARGIN);
+                    var availH = Math.max(NAVIS_MIN_VIEWPORT, vp.h - NAVIS_MARGIN);
                     navisFitMode = true;
+                    navisLastViewport = vp;
                     navisApplyScale(Math.min(availW / navisNatural.w, availH / navisNatural.h));
+                }}
+
+                // fit 收敛重试：首帧视口常是中间态，按阶梯补算几次直到尺寸稳定。
+                var navisFitTimers = [];
+                var navisFitRound = 0;
+                function navisScheduleFit() {{
+                    if (navisFitTimers.length) return;        // 已有待执行的收敛序列
+                    if (navisFitRound >= NAVIS_FIT_MAX_ROUND) return;
+                    navisFitRound += 1;
+                    NAVIS_FIT_RETRY_MS.forEach(function (ms) {{
+                        navisFitTimers.push(setTimeout(function () {{
+                            navisFitTimers.shift();
+                            if (navisFitMode) navisFitToWindow();
+                        }}, ms));
+                    }});
+                }}
+
+                // 视口尺寸变化即重算（仅"适应窗口"模式）：ResizeObserver 覆盖
+                // "首帧拿到中间态尺寸、其后不再有 resize 事件"的情况。
+                function navisFitOnViewportChange() {{
+                    var vp = navisViewport();
+                    if (vp.w === navisLastViewport.w && vp.h === navisLastViewport.h) return;
+                    if (navisFitMode) navisFitToWindow();
                 }}
 
                 // 以鼠标位置为锚点缩放，并回写滚动位置（等价 image_viewer._zoom_anchored）
@@ -581,16 +653,22 @@ class MermaidViewer(QMainWindow):
                 }});
 
                 // 窗口尺寸变化：仅"适应窗口"模式重算（手动缩放后尊重用户选择）
-                window.addEventListener('resize', function () {{ if (navisFitMode) navisFitToWindow(); }});
+                window.addEventListener('resize', navisFitOnViewportChange);
+                window.addEventListener('load', navisFitOnViewportChange);
+                try {{
+                    new ResizeObserver(navisFitOnViewportChange).observe(document.documentElement);
+                }} catch (e) {{ /* 旧内核无 ResizeObserver：退回 resize 事件 */ }}
 
                 async function draw() {{
                     try {{
+                        navisFitRound = 0;   // 每次重新渲染都重置收敛重试预算
                         const {{ svg }} = await mermaid.render('mermaid-svg', code);
                         document.getElementById('graphDiv').innerHTML = svg;
                         // 等容器完成布局，再取矢量真实尺寸并适应窗口
                         requestAnimationFrame(function () {{
                             navisNatural = navisMeasure(navisSvg());
                             navisFitToWindow();
+                            navisScheduleFit();   // 首帧视口可能是中间态，阶梯补算
                         }});
                     }} catch (e) {{
                         document.getElementById('graphDiv').innerHTML = `<pre style="color:{tm.color('danger')};">Error rendering graph:<br>${{e.message}}</pre>`;

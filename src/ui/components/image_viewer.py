@@ -13,6 +13,9 @@ SVG 通过 ``QSvgRenderer`` 以 2x 分辨率栅格化显示，保存时保留
 """
 import logging
 import os
+import shutil
+import subprocess
+import sys
 
 from PySide6.QtCore import Qt, QSize, QPointF, QPoint
 from PySide6.QtGui import QImageReader, QPainter, QPixmap, QDesktopServices
@@ -180,6 +183,9 @@ class ImageViewerDialog(QDialog):
             b.setIcon(tm.icon(icon_key, "text_main"))
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(slot)
+            # 按钮同时带图标和文字时，宽度不足 Qt 会把文字整段隐去（只留图标），
+            # 观感就是"文字按钮不见了"。这里锁定最小宽度，保证文案始终可见。
+            b.setMinimumWidth(b.sizeHint().width())
             return b
 
         btn_bar.addWidget(_btn(" Zoom In", "search", lambda: self.set_scale(self._scale * 1.25)))
@@ -354,7 +360,12 @@ class ImageViewerDialog(QDialog):
             ToastManager().show(f"Failed to save image: {e}", "error")
 
     def open_externally(self):
-        """用系统默认程序打开（需要本地路径或先落盘临时文件）。"""
+        """用系统默认程序打开（需要本地路径或先落盘临时文件）。
+
+        ``QDesktopServices.openUrl`` 在部分 Linux 桌面环境（无注册的 xdg-open /
+        桌面项、沙箱内运行）会直接返回 False 且静默失败，用户观感是"点了没反应"。
+        这里补一条命令行兜底链，并对最终失败给出提示——不再让点击变成无声空操作。
+        """
         path = self.source_path
         if not path and self.raw_bytes is not None:
             import hashlib
@@ -370,11 +381,57 @@ class ImageViewerDialog(QDialog):
                 ToastManager().show(f"Failed to open externally: {e}", "error")
                 return
 
-        if path and os.path.exists(path):
-            from PySide6.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-        else:
+        if not path or not os.path.exists(path):
             ToastManager().show("Image file not found.", "error")
+            return
+
+        from PySide6.QtCore import QUrl
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+            logger.debug("Opened externally via QDesktopServices: %s", path)
+            return
+        if self._open_externally_fallback(path):
+            return
+        logger.warning("No usable system viewer found for: %s", path)
+        ToastManager().show(
+            f"Cannot open with system viewer: {os.path.basename(path)}", "error")
+
+    @staticmethod
+    def _open_externally_fallback(path: str) -> bool:
+        """命令行兜底打开：``QDesktopServices`` 静默失败时按平台挑选打开器。
+
+        Linux：``xdg-open`` → ``gio open`` → ``kde-open``；macOS：``open``；
+        Windows：``os.startfile``。返回是否成功把打开命令拉起来。
+        """
+        if sys.platform == "win32":
+            try:
+                os.startfile(path)  # type: ignore[attr-defined]  # 仅 Windows 存在
+                logger.debug("Opened externally via os.startfile: %s", path)
+                return True
+            except OSError as e:
+                logger.warning("os.startfile failed for %s: %s", path, e)
+                return False
+
+        if sys.platform == "darwin":
+            candidates = [("open", [path])]
+        else:
+            candidates = []
+            for exe, args in (("xdg-open", [path]), ("gio", ["open", path]),
+                              ("kde-open5", [path]), ("kde-open", [path])):
+                found = shutil.which(exe)
+                if found:
+                    candidates.append((found, args))
+            if not candidates:
+                logger.warning("No CLI opener (xdg-open/gio/kde-open) available")
+
+        for exe, args in candidates:
+            try:
+                subprocess.Popen([exe, *args],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                logger.debug("Opened externally via %s: %s", exe, path)
+                return True
+            except OSError as e:
+                logger.warning("Failed to launch %s: %s", exe, e)
+        return False
 
 
 def open_image_viewer(image_path=None, parent=None, raw_bytes=None, svg_bytes=None):

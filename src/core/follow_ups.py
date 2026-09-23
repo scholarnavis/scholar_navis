@@ -91,7 +91,31 @@ _ITEM_LINE_RE = re.compile(
 # ---- 无 bullet 的粗体 tag 行：**Tag**: question（仅当以问号结尾时视为追问行）----
 _BOLD_ITEM_RE = re.compile(r"^\*\*([^*]{1,30})\*\*\s*[:：]?\s*(.+)$")
 
-# ---- tag 规范化：与 FollowUpGroupWidget 的配色映射对齐 ----
+# ---- tag 规范化 + 配色：单一事实来源 ----
+#    canonical tag -> (主题色角色, 图标名)
+#    UI（FollowUpGroupWidget）直接消费此表；"规范名"与"配色"定义在同一处，
+#    避免出现"core 认可某个 tag、UI 却不认识 → 落到灰色 fallback（看起来像
+#    被禁用）"的不一致。
+FOLLOW_UP_TAG_STYLES: dict[str, tuple[str, str]] = {
+    "Deep Dive": ("warning", "search"),
+    "Critical": ("danger", "warning"),
+    "Method": ("accent_hover", "test"),
+    "Data": ("title_blue", "database"),
+    "Broader": ("success", "explore"),
+    "Brainstorm": ("accent", "lightbulb"),
+    "Similar": ("accent_hover", "link"),
+    "Application": ("title_blue", "rocket"),
+    "General": ("text_muted", "help"),
+}
+
+#: 未登记 tag 的确定性配色池：任何新 tag 都有稳定、且非"禁用灰"的外观。
+FOLLOW_UP_TAG_FALLBACK_STYLES: tuple[tuple[str, str], ...] = (
+    ("accent", "tag"),
+    ("success", "explore"),
+    ("warning", "lightbulb"),
+    ("title_blue", "article"),
+)
+
 _CANONICAL_TAGS = {
     "deep dive": "Deep Dive", "deepdive": "Deep Dive", "deep": "Deep Dive",
     "critical": "Critical", "limitation": "Critical", "weakness": "Critical",
@@ -100,8 +124,26 @@ _CANONICAL_TAGS = {
     "similar": "Similar", "parallel": "Similar", "related": "Similar",
     "application": "Application", "applied": "Application", "practical": "Application",
     "general": "General", "explore": "General", "explore more": "General",
-    "methodology": "Critical", "next steps": "Application",
+    "method": "Method", "methods": "Method", "methodology": "Method",
+    "methodological": "Method", "experimental": "Method", "experiment": "Method",
+    "protocol": "Method", "analysis": "Method", "pipeline": "Method",
+    "statistical": "Data", "data": "Data", "dataset": "Data", "datasets": "Data",
+    "statistics": "Data", "validation": "Data", "benchmark": "Data",
+    "next steps": "Application",
 }
+
+
+def tag_style(tag: str) -> tuple[str, str]:
+    """返回 tag 的 (主题色角色, 图标名)，供 UI 渲染胶囊按钮。
+
+    未登记的 tag 用文本哈希取模挑配色：同一 tag 恒定同色（不会每次刷新都变），
+    且不会退化成"看起来被禁用"的灰色。
+    """
+    style = FOLLOW_UP_TAG_STYLES.get(tag)
+    if style is not None:
+        return style
+    idx = sum(tag.encode("utf-8")) % len(FOLLOW_UP_TAG_FALLBACK_STYLES)
+    return FOLLOW_UP_TAG_FALLBACK_STYLES[idx]
 
 
 class FollowUpSplit(NamedTuple):

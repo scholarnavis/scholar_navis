@@ -72,8 +72,8 @@ Given the extreme sensitivity of pre-published biological data, Scholar Navis is
 
 | Platform | Packaged build | Run from source |
 | :--- | :--- | :--- |
-| Windows 10/11 (x64) | ✅ (`scholar_navis_win_*.zip`) | ✅ |
-| Linux (x86_64) | ✅ (`scholar_navis_linux_*.zip`, build on Ubuntu 22.04+) | ✅ |
+| Windows 10/11 (x64) | ✅ frozen binary (`scholar_navis_win_*.zip`) | ✅ |
+| Linux (x86_64) | ✅ **source bundle** (`scholar_navis_linux_*.zip`: unzip → `./run.sh`) | ✅ |
 | macOS | — | ✅ (untested in CI) |
 
 ### Linux prerequisites
@@ -132,6 +132,19 @@ uv sync                # Python 3.12 is required
 uv run main.py
 ```
 
+The Linux release asset (`scholar_navis_linux_*.zip`) is this same source tree
+plus a launcher, so nothing has to be installed system-wide beyond the
+prerequisites on this page:
+
+```bash
+unzip scholar_navis_linux_*.zip && cd scholar_navis
+./run.sh               # = uv sync --locked --no-dev && uv run --locked --no-dev main.py
+```
+
+The first run creates `.venv/` **inside the unzipped folder** (several GB), so
+unzip it somewhere with room to spare. `run.sh` refuses to guess: if `uv` is
+missing it exits with code 3 and prints the install command.
+
 ### R runtime (visualization)
 
 Charts are rendered by R (`ggplot2`). Linux distributions ship R packages
@@ -175,8 +188,20 @@ Override the engine cache location with `SCHOLAR_NAVIS_TRT_CACHE` if needed.
 ### Packaging
 
 ```bash
-uv run build_app.py      # PyInstaller (Windows / Linux); publishes to R2 under CI
+uv run build_app.py      # one entry point; the platform selects the form
 ```
+
+| Platform | Form | Reason |
+| :--- | :--- | :--- |
+| Windows | PyInstaller `--onedir` frozen bundle | the interpreter and the dependencies travel with it |
+| Linux | **source bundle** — sources + `uv.lock` + `run.sh` | the artifact holds no binary, so there is no glibc floor and no build container, the archive is MB- instead of GB-sized, and users link against their own distribution's Qt/X11 stack instead of a copy frozen into the bundle |
+
+The Linux source bundle holds `main.py`, `src/`, `Assets/`, `plugins/`, `docs/`,
+`pyproject.toml`, `uv.lock`, `requirements.txt`, `README.md`, the launcher
+`run.sh` (rendered from `build_support/source_launcher.sh`), and the license files
+(`LICENSE`, `LICENSES/`, `THIRD_PARTY_NOTICES.md`). Dependencies are deliberately
+*not* included: `run.sh` resolves them from the locked manifest on the user's
+machine. The whitelist of what goes in lives in `build_app.py::SOURCE_BUNDLE_PATHS`.
 
 Artifacts are named `scholar_navis_<platform>_<channel>_v<version>.zip`, where
 `<channel>` is `stable` or `dev` — decided solely by whether the version string

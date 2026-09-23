@@ -437,7 +437,7 @@ POSSIBILITY OF SUCH DAMAGE.
             "omitted. Rows marked \u201cExternal\u201d are not bundled \u2014 the plotting engine "
             "detects a local R / Rscript installation. Rows marked \u201cBuild-time only\u201d "
             "contribute no runtime code, except the PyInstaller bootloader embedded in the "
-            "executable. Some wheels additionally ship native libraries "
+            "frozen Windows build. Some wheels additionally ship native libraries "
             "(e.g. SciPy bundles OpenBLAS and LAPACK). Licenses are as declared by each "
             "project's own package metadata.")
         lbl_note.setWordWrap(True)

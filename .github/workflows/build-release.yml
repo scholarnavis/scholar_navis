@@ -1,18 +1,18 @@
 name: Build Scholar Navis (Windows / Linux)
 
-# glibc 基线契约（改动前务必先读）
+# 产物形态契约（改动前务必先读）
 # ---------------------------------------------------------------------------
-# Linux 产物的最低 glibc 由「构建时的那套系统库」决定，而不是由 runner 决定。
-# 当前地板 = glibc 2.34，来自 PySide6/shiboken6 的 manylinux_2_34 wheel
-# （cryptography / bcrypt 同样要求 2.34；torch / onnxruntime / numpy 只要 2.28）。
-# 因此构建环境必须固定在 ubuntu:22.04（glibc 2.35）。
+# * Windows = PyInstaller `--onedir` 冻结包：用户机器上不一定有可用的 Python，
+#   所以解释器与依赖一起带上。冻结包与宿主工具链绑定，因此构建环境仍要固定
+#   （glibc / MSVC 运行库这类约束只作用于这一条链路）。
+# * Linux = **源码包**（不再使用 PyInstaller）：包里只有本项目源码 + uv.lock +
+#   启动器 run.sh，依赖由用户机器上的 uv 解析。**产物里没有任何二进制**，所以
+#   没有 glibc 地板，也不需要构建容器；用户还能用上自己发行版的 Qt/X11 库
+#   （PySide6 的 manylinux wheel 是动态链接的，冻结方案必须把系统库一并复制，
+#   产物与构建镜像强绑定，且体积达 GB 级）。
 #
-# 不要把宿主机换成 ubuntu-24.04 / ubuntu-latest 就直接构建：那会把地板抬到
-# glibc 2.39，Debian 12（2.36）与 RHEL 9（2.34）用户会直接报
-# "version `GLIBC_2.39' not found"。宿主只负责托管容器，基线由容器决定。
-#
-# 背景：ubuntu-22.04 运行器镜像自 2026-09-17 起进入弃用窗口，2027-04-17 完全
-# 停止支持，所以不能再依赖 runner 镜像本身来提供这套 glibc。
+# 两条链路共用同一套命名契约（`scholar_navis_{平台}_{通道}_v{版本}.zip`），
+# 因此 Cloudflare Worker 与应用内的更新检查都无需区分形态。
 # ---------------------------------------------------------------------------
 #
 # 发布链路（改动前同样先读）
@@ -35,8 +35,6 @@ on:
   workflow_dispatch:
 
 env:
-  # 承载构建的发行版；改动它等于改动产物的 glibc 地板。
-  LINUX_BUILD_IMAGE: ubuntu:22.04
   # 把 R2 端点的 DNS 解析限制到 IPv4。R2 的 *.r2.cloudflarestorage.com 同时发布
   # A 与 AAAA 记录，而 GitHub 的 Windows runner 没有 IPv6 出口；Python 的 socket
   # 不做 Happy Eyeballs，会先在不可达的 IPv6 上等到超时，报错只剩
@@ -46,7 +44,6 @@ env:
 jobs:
   build:
     name: Build on ${{ matrix.os }}
-    # ubuntu-24.04 仅作为宿主：真正的构建发生在 LINUX_BUILD_IMAGE 容器内。
     runs-on: ${{ matrix.os }}
     # 构建任务不再需要写权限：Release 由下面的 publish-release 统一创建。
     permissions:
@@ -54,6 +51,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # ubuntu-24.04 只是源码打包的宿主：产物里没有二进制，runner 的 glibc
+        # 不再进入产物，因此不需要为了基线而固定发行版。
         os: [windows-latest, ubuntu-24.04]
 
     steps:
@@ -90,7 +89,7 @@ jobs:
         run: uv python install 3.12
 
       # ------------------------------------------------------------------ #
-      # Windows：直接在宿主构建
+      # Windows：PyInstaller 冻结包（需要完整的锁定环境）
       # ------------------------------------------------------------------ #
       # pyinstaller / boto3 / python-dotenv 都在 dev 依赖组里，`uv sync` 默认就会
       # 安装，因此不需要再补 `uv pip install pyinstaller`。--locked 保证用的就是
@@ -107,13 +106,13 @@ jobs:
           uv run --locked build_app.py
 
       # ------------------------------------------------------------------ #
-      # Linux：在固定发行版的容器内构建，锁住 glibc 基线
+      # Linux：源码包（打包 + 上传 R2）
       # ------------------------------------------------------------------ #
-      # PyInstaller 在分析阶段会 ldd 探测 Qt 运行库，并把能解析到的宿主库复制进
-      # 产物。缺少这些系统库时打包会静默漏库，产物在用户机器上才报
-      # "cannot open shared object file"。容器内构建正好保证这一步解析到的是
-      # ubuntu:22.04 的库，而不是宿主 runner 的。
-      - name: Build Application and Upload to R2 (Linux)
+      # 打包本身只用到 boto3 + python-dotenv（R2 上传），不需要项目运行期依赖：
+      # torch / PySide6 / onnxruntime 合计数 GB，为一个 zip 先装一遍整个运行环境
+      # 是纯浪费。因此用 --no-project 的临时环境构建（源码模式下的许可声明不
+      # 收集 wheel 正文，见 build_support/notices.py 的 mode 说明）。
+      - name: Build source bundle and Upload to R2 (Linux)
         if: runner.os == 'Linux'
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -122,56 +121,14 @@ jobs:
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
           set -euo pipefail
-          mkdir -p out-linux
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE":/src:ro \
-            -v "$GITHUB_WORKSPACE/out-linux":/out \
-            -e R2_ACCOUNT_ID -e R2_ACCESS_KEY_ID \
-            -e R2_SECRET_ACCESS_KEY -e R2_BUCKET_NAME \
-            -e R2_FORCE_IPV4 \
-            -e GITHUB_ACTIONS \
-            "$LINUX_BUILD_IMAGE" bash -euc '
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              # binutils 是**构建期必需品**，不是可选项：PyInstaller 在 Linux 上靠
-              # objdump 解析动态依赖，缺失时直接以
-              # "On Linux, objdump is required ... 'binutils' package" 中止打包。
-              # 下面的可移植性体检脚本也依赖它提供的 readelf。
-              apt-get install -y -qq --no-install-recommends curl ca-certificates binutils \
-                libgl1 libegl1 libglib2.0-0 libdbus-1-3 \
-                libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 \
-                libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 \
-                libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libxcb-xinerama0 \
-                libnss3 libnspr4 libxcomposite1 libxdamage1 libxrandr2 libxshmfence1 \
-                libxtst6 libasound2 libcups2 libdrm2 libgbm1 libfontconfig1
+          uv run --no-project --python 3.12 \
+            --with boto3 --with python-dotenv \
+            build_app.py
 
-              # 容器内做一份可写副本：build_app.py 会改写 pyproject.toml 的版本号
-              # 并写入 dist/ build/，不污染挂载进来的工作区。
-              cp -a /src /app
-              cd /app
-
-              curl -LsSf https://astral.sh/uv/install.sh | sh
-              export PATH="$HOME/.local/bin:$PATH"
-              uv python install 3.12
-              # pyinstaller 在 dev 依赖组内，uv sync 默认安装；--locked 固定用仓库里的
-              # uv.lock，避免容器内解析出与本地/Windows 不同的版本。
-              uv sync --locked
-              uv run --locked build_app.py
-
-              cp -v /app/*.zip /out/
-              cp -a /app/dist /out/dist
-            '
-
-      - name: Stage artifact
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          mv out-linux/*.zip .
-
-      # 非阻断的产物可移植性体检：把「必须由宿主发行版提供的库」列清楚，
-      # 并报告整个产物要求的最高 glibc 符号版本。
-      # 首次跑绿之后，可把末尾的 ::warning:: 改判为 exit 1 变成硬门禁。
-      - name: Report bundle portability (Linux)
+      # 断言源码包"可解压、可运行、不缺件"：产物里没有二进制，出了问题的表现是
+      # 用户在 `uv sync` 或启动时才看到缺文件，因此把检查前移到 CI。
+      # 同时拒绝把 __pycache__ / .venv 之类的本地状态带进产物。
+      - name: Verify source bundle (Linux)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -179,109 +136,79 @@ jobs:
           import os
           import re
           import subprocess
+          import sys
+          import tempfile
+          import zipfile
 
-          # 对应 build_app.py 的 --onedir 输出（dist/<app_name_safe>）。
-          # 可用 BUNDLE_DIST 覆盖；若输出结构变化导致这里取空，下面的
-          # “no ELF objects” 告警会兜住，不会真空通过。
-          DIST = os.environ.get("BUNDLE_DIST", "out-linux/dist")
-          # PyInstaller 明确不打包 glibc 家族与动态加载器，它们必须来自宿主。
-          HOST_ALLOW = {
-              "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0",
-              "librt.so.1", "libutil.so.1", "libgcc_s.so.1", "libresolv.so.2",
-          }
-          HOST_ALLOW_PREFIX = ("ld-linux",)
+          # 命名契约：scholar_navis_linux_{stable|dev}_v{版本}.zip
+          name_re = re.compile(r"^scholar_navis_linux_(stable|dev)_v.+\.zip$")
+          archives = [f for f in os.listdir(".") if f.endswith(".zip")]
+          if len(archives) != 1 or not name_re.match(archives[0]):
+              print(f"::error::expected exactly one artifact matching the naming "
+                    f"contract, found {archives}")
+              sys.exit(1)
 
-          def is_host_provided(soname):
-              return soname in HOST_ALLOW or soname.startswith(HOST_ALLOW_PREFIX)
+          archive = archives[0]
+          root = "scholar_navis/"
+          required = [
+              root + "run.sh",
+              root + "main.py",
+              root + "pyproject.toml",
+              root + "uv.lock",
+              root + "LICENSE",
+              root + "THIRD_PARTY_NOTICES.md",
+              root + "Assets/js/mermaid.min.js",   # 运行期必需的静态资源
+              root + "src/core/version.py",
+          ]
 
-          def walk_elf(root):
-              for base, _dirs, files in os.walk(root):
-                  for f in files:
-                      p = os.path.join(base, f)
-                      try:
-                          with open(p, "rb") as fh:
-                              if fh.read(4) == b"\x7fELF":
-                                  yield p
-                      except OSError:
-                          continue
+          with zipfile.ZipFile(archive) as zf:
+              names = zf.namelist()
+              bad = [n for n in names
+                     if "__pycache__" in n or n.endswith((".pyc", ".pyo"))
+                     or "/.venv/" in n or n.startswith(root + "models/")]
+              missing = [p for p in required if p not in names]
+              mode = (zf.getinfo(root + "run.sh").external_attr >> 16) & 0o777
+              print(f"artifact : {archive} ({os.path.getsize(archive) / 1024 / 1024:.2f} MB)")
+              print(f"entries  : {len(names)}")
+              print(f"top-level: {sorted({n.split('/')[0] for n in names})}")
 
-          def needed(path):
-              # readelf 的文案随 locale 变化（中文环境输出「共享库：[...]」），
-              # 因此强制 LC_ALL=C，并用与语言无关的括号结构匹配。
-              env = dict(os.environ, LC_ALL="C")
-              try:
-                  out = subprocess.run(["readelf", "-d", path], capture_output=True,
-                                       text=True, check=False, env=env).stdout
-              except OSError:
-                  return []
-              return re.findall(r"\(NEEDED\).*?\[(.+?)\]", out)
+              if bad:
+                  print(f"::error::local state leaked into the bundle: {bad[:10]}")
+                  sys.exit(1)
+              if missing:
+                  print(f"::error::the bundle is missing required entries: {missing}")
+                  sys.exit(1)
+              if mode & 0o111 == 0:
+                  print(f"::error::run.sh is not executable inside the archive (mode "
+                        f"{oct(mode)}); unzip would not restore the bit.")
+                  sys.exit(1)
 
-          bundled = {}
-          for p in walk_elf(DIST):
-              bundled.setdefault(os.path.basename(p), p)
-          bundled_names = set(bundled)
+              # 语法体检：解压源码并整体字节码编译，避免把 SyntaxError 交给用户。
+              with tempfile.TemporaryDirectory() as tmp:
+                  zf.extractall(tmp)
+                  package_dir = os.path.join(tmp, "scholar_navis")
 
-          def bundled_satisfies(soname):
-              if soname in bundled_names:
-                  return True
-              # libfoo.so.1 可能以 libfoo.so.1.2.3 的形式落在包里
-              return any(n.startswith(soname + ".") for n in bundled_names)
+                  result = subprocess.run(
+                      [sys.executable, "-m", "compileall", "-q", package_dir],
+                      capture_output=True, text=True)
+                  if result.returncode != 0 or result.stdout.strip():
+                      print("::error::byte-compilation of the bundled sources failed")
+                      print(result.stdout or result.stderr)
+                      sys.exit(1)
 
-          unaccounted = {}
-          host_needed = {}
-          glibc_ceiling = {}
-          objects = list(walk_elf(DIST))
-          needed_seen = 0
-          for p in objects:
-              sonames = needed(p)
-              needed_seen += len(sonames)
-              for soname in sonames:
-                  if bundled_satisfies(soname):
-                      continue
-                  if is_host_provided(soname):
-                      host_needed.setdefault(soname, p)
-                      continue
-                  unaccounted.setdefault(soname, p)
-              try:
-                  blob = subprocess.run(["strings", "-a", p], capture_output=True,
-                                        check=False).stdout
-                  vers = re.findall(rb"GLIBC_(\d+\.\d+)", blob)
-                  if vers:
-                      top = max(vers, key=lambda v: tuple(int(x) for x in v.split(b".")))
-                      glibc_ceiling[top.decode()] = p
-              except OSError:
-                  pass
+                  # 用户对源码包的第一条命令就是 run.sh 里的 `uv sync --locked`，因此
+                  # 包内 pyproject.toml 与 uv.lock 必须是自洽的一对（uv 会把根项目版本号
+                  # 写进 lockfile，版本不同步就会硬失败）。build_app.py 已在打包时刷新，
+                  # 这里独立复核一遍，避免回归。
+                  lock = subprocess.run(["uv", "lock", "--check", "--offline"],
+                                        cwd=package_dir, capture_output=True, text=True)
+                  if lock.returncode != 0:
+                      print("::error::the bundled pyproject.toml / uv.lock pair is not "
+                            "self-consistent; `uv sync --locked` would fail for users")
+                      print(lock.stdout or lock.stderr)
+                      sys.exit(1)
 
-          print(f"bundle root          : {DIST}")
-          print(f"native objects       : {len(objects)}")
-          print(f"DT_NEEDED entries    : {needed_seen}")
-          print(f"host-provided (ok)   : {len(host_needed)}")
-          if not objects:
-              print("")
-              print(f"::warning::no ELF objects found under {DIST}; the bundle layout may "
-                    "have changed, which would make this check vacuous.")
-          elif needed_seen == 0:
-              print("")
-              print("::warning::no DT_NEEDED entries were read from any object; this check "
-                    "is vacuous. Is binutils (readelf) available?")
-          for k in sorted(host_needed):
-              print(f"    {k}")
-          print("highest GLIBC symbol :")
-          for k in sorted(glibc_ceiling, key=lambda v: tuple(int(x) for x in v.split("."))):
-              print(f"    GLIBC_{k}  <- {os.path.basename(glibc_ceiling[k])}")
-
-          if unaccounted:
-              print("")
-              print("::warning::unaccounted runtime dependencies (neither bundled nor "
-                    "known host-provided):")
-              for k in sorted(unaccounted):
-                  print(f"    {k}  required by {unaccounted[k]}")
-              print("These will fail at run time on hosts lacking them. Either add the "
-                    "build-time package so PyInstaller can resolve and bundle it, or add "
-                    "it to HOST_ALLOW with an explicit reason.")
-          elif needed_seen:
-              print("")
-              print("OK: every runtime dependency is either bundled or host-provided.")
+          print("OK: source bundle is complete, clean and byte-compiles.")
           PY
 
       - name: Upload Artifacts to GitHub Actions

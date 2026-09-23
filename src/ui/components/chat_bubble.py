@@ -674,11 +674,19 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.insertWidget(min(insert_idx, self.content_layout.count()), strip)
 
     def open_image_viewer(self, image_path):
-        """用内部查看器打开本地图片（含 SVG）。"""
-        if image_path and os.path.exists(image_path):
-            open_image_viewer(image_path, parent=self)
-        else:
+        """用内部查看器打开本地图片（含 SVG）。
+
+        查看器必须挂在**顶层窗口**上：气泡会在流式渲染 / 重建（``set_content``）
+        时被回收，若把查看器作为气泡的子对象，气泡一重建窗口就被连带销毁，
+        表现为"图片预览点开一闪就没了"。挂到顶层窗口后，查看器与气泡生命周期
+        解耦，实例仍缓存在宿主窗口的 ``_image_viewers`` 中（同图不重复弹窗）。
+        """
+        if not image_path or not os.path.exists(image_path):
             ToastManager().show(f"Image file not found: {os.path.basename(str(image_path))}", "error")
+            return
+        host = self.window() or self
+        logger.debug("Open image viewer for %s (host=%s)", image_path, type(host).__name__)
+        open_image_viewer(image_path, parent=host)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
