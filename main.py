@@ -21,7 +21,7 @@ try:
     from PySide6.QtSvgWidgets import QSvgWidget
     from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication, QMessageBox
     from src.core.logger import setup_logger
-    from src.core.core_task import TaskManager, TaskMode
+    from src.core.core_task import TaskManager, TaskMode, wait_for_running_tasks
 except ImportError as e:
     # NixOS：PyPI 的 PySide6 依赖标准路径下的系统库，先用 steam-run 自动接管；
     # 接管成功时进程已被替换，下面不会执行。
@@ -389,6 +389,11 @@ if __name__ == "__main__":
 
     # 4. 统一在最开始创建 Qt 应用实例
     app = QCoreApplication(sys.argv) if is_api_mode else QApplication(sys.argv)
+
+    # 退出前请求取消并等待仍在运行的任务线程：否则解释器清理模块全局时会回收
+    # 仍在运行的 QThread，Qt 打印
+    # "QThread: Destroyed while thread '' is still running"（有总时限，不阻塞退出）。
+    app.aboutToQuit.connect(lambda: wait_for_running_tasks(1500))
 
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
 

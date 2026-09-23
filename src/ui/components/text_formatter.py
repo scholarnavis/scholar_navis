@@ -854,6 +854,11 @@ class TextFormatter:
 
         text = cls._WRAPPER_SIGN_RE.sub('<div>', text)
 
+        # 行内引用锚点（ref://）由本管线按主题注入强调色/底色：先还原为裸 ``[n]``，
+        # 后续链接化规则会用当前主题重新建链，避免旧主题色被固化在文档里。
+        text = re.sub(r"<a\b[^>]*href=['\"]ref://[^'\"]*['\"][^>]*>(.*?)</a>",
+                      r"\1", text, flags=re.DOTALL | re.IGNORECASE)
+
         def _clean(match):
             tag, attrs = match.group(1), match.group(2)
             align = re.search(r'text-align\s*:\s*[^;"\']+', attrs, re.IGNORECASE)
@@ -1457,7 +1462,17 @@ class TextFormatter:
         html = re.sub(url_pattern, url_repl, html)
 
         # 3. 匹配常见科研数据库/论文 ID 及其它标识，自动挂载官方解析链接
+        #    行内引用标记 [n] 优先建链（置于首位）：链接化为内部 ref:// 协议，
+        #    由气泡层渲染为"可悬停预览、可点开溯源"的参考文献入口（悬浮卡 /
+        #    详情面板）。外观按超链接处理（主题强调色 + 下划线 + 手型光标），
+        #    让用户一眼看出可点；写成带 style 的 <a>，通用链接色规则会跳过它，
+        #    且后续标识符规则因 <a>...</a> 被 skip_pattern 保护而不会误伤编号。
+        _cite_accent = _tm.color('accent', theme_key)
+        _cite_style = (f"color:{_cite_accent}; background-color:{_rgba(_cite_accent, 0.12)}; "
+                       f"text-decoration:underline; font-weight:{_emph_value}; {_emph_family_decl}")
         replacements = [
+            # 正文行内引用标记：[1] / [12] / [101]（模板中的 \1 即 group(2)）
+            (r'\[(\d{1,3})\]', '<a href="ref://cite?n=\\1" style="' + _cite_style + '">[\\1]</a>'),
             # 棉花基因 ID（CottonGen feature 页；置于首位优先建链获得 skip 保护）。
             # 覆盖多套命名体系（[AD]=亚基因组，\d{2}=染色体号）：
             #   Ghir_[AD]xxGxxxx / Gxxxxx（4-5 位，可带 .x 版本号，TM-1 参考基因组）
@@ -1803,13 +1818,13 @@ class TextFormatter:
         if not text:
             return text
         # Markdown 形态的内部链接 → 保留锚文本（锚文本本身可能含 []，如 [[1]](cite://…)）
-        text = re.sub(r"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\((?:cite|mermaid|think)://[^)]*\)",
+        text = re.sub(r"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\((?:cite|mermaid|think|ref)://[^)]*\)",
                       r"\1", text, flags=re.IGNORECASE)
-        # HTML 形态的内部链接 → 保留锚文本
-        text = re.sub(r"<a\b[^>]*?href=['\"](?:cite|mermaid|think)://[^'\"]*['\"][^>]*>(.*?)</a>",
+        # HTML 形态的内部链接 → 保留锚文本（含行内引用 ref://，还原为 [n]）
+        text = re.sub(r"<a\b[^>]*?href=['\"](?:cite|mermaid|think|ref)://[^'\"]*['\"][^>]*>(.*?)</a>",
                       r"\1", text, flags=re.DOTALL | re.IGNORECASE)
         # 裸露的内部协议 URL
-        text = re.sub(r"(?:cite|mermaid|think)://[^\s)\"'<>]+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?:cite|mermaid|think|ref)://[^\s)\"'<>]+", "", text, flags=re.IGNORECASE)
         return text
 
     @staticmethod
@@ -1931,6 +1946,11 @@ class TextFormatter:
 
         scheme = url.scheme()
         query = QUrlQuery(url)
+
+        # 0. 行内引用（ref://cite?n=N）：由气泡层就地弹出悬停卡 / 详情面板处理，
+        #    此处显式拦截，避免落到最后的 QDesktopServices 打开无效协议。
+        if scheme == "ref":
+            return
 
         # 1. 处理 Mermaid 图表
         if scheme == "mermaid":

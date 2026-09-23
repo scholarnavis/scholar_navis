@@ -97,7 +97,7 @@ class ChatBubblesMixin:
         QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True, force=False))
         return bubble
 
-    def inject_dev_demo(self, user_text, ai_text):
+    def inject_dev_demo(self, user_text, ai_text, references=None):
         """Inject a fake user+AI bubble pair (developer render preview).
 
         Used by the Developer Mode "Render Preview" test to showcase the
@@ -107,9 +107,13 @@ class ChatBubblesMixin:
           never leaks into the LLM context of later real turns.
         * The AI bubble goes through the same final rendering pipeline as a
           real answer (``_format_response``: Markdown / LaTeX degradation /
-          identifier auto-linking / file links / Mermaid cards).
+          identifier auto-linking / file links / Mermaid cards / inline
+          ``[n]`` citations).
         * The user bubble has editing disabled so the demo text cannot be
           accidentally re-sent through the real generation pipeline.
+        * ``references`` (optional) are written into the citation popup cache
+          keyed by this bubble's index, so hovering / clicking the demo's
+          ``[n]`` markers opens the real compact card and detail panel.
         """
         self._ensure_chat_ui()
         user_bubble = self.add_bubble(user_text, is_user=True)
@@ -117,6 +121,15 @@ class ChatBubblesMixin:
         ai_bubble = self.add_bubble("", is_user=False)
         # 记住原始文本：演示气泡不进 history，主题切换时只能靠这里回源重渲染
         ai_bubble._raw_source = ai_text
+        if references:
+            try:
+                from src.ui.components.citation_popup import CitationPopupController
+                CitationPopupController.instance().merge_references(
+                    references, ai_bubble.index)
+                logger.info("Dev render preview: %d citation(s) seeded for message #%d.",
+                            len(references), ai_bubble.index)
+            except Exception as e:
+                logger.warning("Failed to seed demo citations: %s", e)
         ai_bubble.set_content(self._format_response(ai_text, ai_bubble.index))
         logger.info("Dev render preview injected (2 bubbles, no history, no LLM call).")
         return ai_bubble

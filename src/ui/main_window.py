@@ -3,8 +3,7 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QSettings
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QTimer, QEvent, QSettings
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem,
@@ -14,7 +13,6 @@ from src.core.config_manager import ConfigManager
 from src.core.theme_manager import (ThemeManager, apply_native_titlebar_theme,
                                     strong_weight_css, title_weight_css)
 from src.ui.components.dialog import StandardDialog, BaseDialog
-from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
 
 
@@ -128,19 +126,6 @@ class MainWindow(QMainWindow):
         self.sidebar.currentRowChanged.connect(self.switch_tool)
         left_layout.addWidget(self.sidebar)
 
-        # 左下角翻译按钮 (要求：圆形底纹，学术蓝)
-        self.btn_quick_trans = QPushButton()
-        self.btn_quick_trans.setToolTip("Quick Translate (Ctrl+Shift+T)")
-        self.btn_quick_trans.setCursor(Qt.PointingHandCursor)
-        self.btn_quick_trans.setFixedSize(48, 48)  # 完美的圆形尺寸
-        self.btn_quick_trans.clicked.connect(self.toggle_quick_translator)
-
-        # 包裹在一个布局里使其居中或靠左不拉伸
-        trans_layout = QHBoxLayout()
-        trans_layout.addWidget(self.btn_quick_trans)
-        trans_layout.addStretch()
-        left_layout.addLayout(trans_layout)
-
         self.main_splitter.addWidget(self.left_panel)
 
         # --- 右侧主面板 ---
@@ -189,11 +174,6 @@ class MainWindow(QMainWindow):
         self.clean_old_logs()
         QTimer.singleShot(300, self.perform_startup_checks)
 
-        # 把原本这里的 translator_dialog 等初始化保留
-        self.translator_dialog = QuickTranslatorWindow(None)
-        self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
-        self.shortcut_translate.activated.connect(self.toggle_quick_translator)
-
         self.tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
@@ -221,9 +201,6 @@ class MainWindow(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
 
-        if hasattr(self, 'translator_dialog') and self.translator_dialog:
-            self.translator_dialog.close()
-
         super().closeEvent(event)
 
         QApplication.quit()
@@ -238,15 +215,6 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentRow(0)
         self.clean_old_logs()
         QTimer.singleShot(300, self.perform_startup_checks)
-
-    def toggle_quick_translator(self):
-        if self.translator_dialog.isHidden() or self.translator_dialog.windowOpacity() == 0.0:
-            self.translator_dialog.setWindowOpacity(1.0)
-            self.translator_dialog.show()
-            self.translator_dialog.activateWindow()
-            self.translator_dialog.input_box.setFocus()
-        else:
-            self.translator_dialog.hide_with_fade()
 
     def _update_logo_theme(self):
         theme = self.tm.current_theme
@@ -304,22 +272,6 @@ class MainWindow(QMainWindow):
         """)
 
         self.lbl_app_name.setStyleSheet(f"color: {tm.color('title_blue')}; font-weight: {title_weight_css()}; font-size: 16px;")
-
-        self.btn_quick_trans.setIcon(tm.icon("translate", "bg_main"))
-        self.btn_quick_trans.setIconSize(QSize(22, 22))
-        self.btn_quick_trans.setStyleSheet(f"""
-            QPushButton {{ 
-                background-color: {tm.color('accent')}; 
-                border: 2px solid {tm.color('border')};
-                border-radius: 24px;
-            }}
-            QPushButton:hover {{ 
-                background-color: {tm.color('accent_hover')}; 
-            }}
-            QPushButton:pressed {{ 
-                background-color: {tm.color('title_blue')}; 
-            }}
-        """)
 
     def _sync_titlebar_theme(self, delay_ms: int = 0):
         """把主窗口原生标题栏同步为 ThemeManager 的当前主题。
@@ -486,15 +438,21 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def route_dev_render_preview(self, note_text, user_text, ai_text):
+    def route_dev_render_preview(self, note_text, user_text, ai_text, references=None):
         """Developer-mode render preview: switch to Chat and inject a fake
         conversation (one user bubble + one AI bubble) WITHOUT any AI call.
 
         Unlike ``route_dev_test`` (which sends a real prompt to the LLM),
         this only exercises the rendering pipeline: identifier auto-linking,
-        file links, advanced Markdown / LaTeX and Mermaid cards. The fake
-        bubbles never enter the chat history, so subsequent real turns are
-        not affected."""
+        every internal link route (cite:// text/PDF viewer, file:// image /
+        system app, mermaid:// viewer), inline ``[n]`` citations, advanced
+        Markdown / LaTeX and Mermaid cards. The fake bubbles never enter the
+        chat history, so subsequent real turns are not affected.
+
+        :param references: optional citation entries for the injected bubble;
+            they are written into the citation popup cache so hovering /
+            clicking the ``[n]`` markers works in the demo.
+        """
         chat_index = 1
         self.sidebar.setCurrentRow(chat_index)
 
@@ -510,7 +468,7 @@ class MainWindow(QMainWindow):
                 chat_tool.show_dev_note(note_text)
             # 2) 注入假对话（不进 history，不触发生成管线）
             if hasattr(chat_tool, 'inject_dev_demo'):
-                chat_tool.inject_dev_demo(user_text, ai_text)
+                chat_tool.inject_dev_demo(user_text, ai_text, references=references)
             else:
                 logging.getLogger(__name__).warning(
                     "ChatTool.inject_dev_demo missing; render preview skipped.")

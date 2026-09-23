@@ -206,6 +206,11 @@ class ChatSendFlowMixin:
         self.current_ai_bubble.set_loading(True)
 
         self.input_container.btn_send.setVisible(False)
+        # 必须"真正禁用"而不只是隐藏：_emit_send() 唯一的拦截条件就是
+        # btn_send.isEnabled()，只隐藏不禁用时生成过程中按回车会再次触发发送，
+        # 新任务会 disconnect 掉正在运行任务的信号——旧任务继续消耗 token 却
+        # 不再上屏，成为不可见也不可控的孤儿任务。
+        self.input_container.set_send_locked(True, "Generating a response, please wait...")
         self.input_container.btn_stop.setVisible(True)
         self.input_container.btn_stop.setEnabled(True)
         self.input_container.btn_stop.setText("Stop")

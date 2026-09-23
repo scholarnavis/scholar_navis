@@ -46,6 +46,12 @@ class ChatResponseFlowMixin:
             if hasattr(self.input_container, 'chk_academic_agent'):
                 self.input_container.chk_academic_agent.setEnabled(enabled)
 
+            # Deep Mode 与上面两个开关同属"轮次级配置"：三者必须一起禁用，
+            # 否则界面会出现"同类控件两个灰、一个可点"的不一致，用户还会以为
+            # 中途切换能改变正在跑的这轮（实际只对下一轮生效）。
+            if hasattr(self.input_container, 'chk_deep_mode'):
+                self.input_container.chk_deep_mode.setEnabled(enabled)
+
             if hasattr(self.input_container, 'btn_mcp_tags'):
                 self.input_container.btn_mcp_tags.setEnabled(enabled)
 
@@ -204,6 +210,16 @@ class ChatResponseFlowMixin:
             bubble = getattr(self, "current_ai_bubble", None)
             if bubble is not None and hasattr(bubble, "attach_ask_user_card"):
                 bubble.attach_ask_user_card(payload.get("data") or {})
+        elif isinstance(payload, dict) and payload.get("event") == "references":
+            # 参考文献结构化数据（cite_references 工具产出）：同步进引用信息存储，
+            # 供正文 [n] 的悬停卡 / 详情面板查询著录与支撑原文。
+            data = payload.get("data") or []
+            bubble = getattr(self, "current_ai_bubble", None)
+            msg_index = getattr(bubble, "index", -1) if bubble is not None else -1
+            from src.ui.components.citation_popup import CitationPopupController
+            CitationPopupController.instance().merge_references(data, msg_index)
+            logger.debug("Reference data synced to citation popup store: %d item(s) for message #%s.",
+                         len(data), msg_index)
         elif isinstance(payload, dict) and payload.get("event") == "await_user":
             # deep-plan 等待确认：同样进入等待状态锁定通用发送。
             self._awaiting_user_input = True
@@ -233,6 +249,8 @@ class ChatResponseFlowMixin:
             self._awaiting_user_input = False
             self.input_container.btn_stop.setVisible(False)
             self.input_container.btn_send.setVisible(True)
+            # 发送按钮在生成期间被真正禁用（防止回车重入），取消路径必须解锁。
+            self.input_container.set_send_locked(False)
 
             if self.current_ai_bubble:
                 self.current_ai_bubble.is_interrupted = True
@@ -349,6 +367,8 @@ class ChatResponseFlowMixin:
         else:
             self.input_container.btn_stop.setVisible(False)
             self.input_container.btn_send.setVisible(True)
+            # 报错路径同样要解锁发送（生成期间按钮被真正禁用）。
+            self.input_container.set_send_locked(False)
 
         if self.current_ai_bubble:
             self.current_ai_bubble.set_loading(False)

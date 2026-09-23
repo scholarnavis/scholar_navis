@@ -23,6 +23,8 @@ import logging
 import re
 from typing import List, NamedTuple, Optional
 
+from src.core.references import FOOTER_RULE_HTML
+
 logger = logging.getLogger(__name__)
 
 # 单个追问的长度边界（过短多为空内容噪声，过长多为正文段落）
@@ -33,16 +35,14 @@ _MAX_BLOCK_NOISE = 250
 # 追问数量上限（提示词要求 6 条，留冗余）
 _MAX_QUESTIONS = 8
 
-# ---- UI 页脚块（Cited Sources / Provenance）剥离 ----
-#    这些块由 chat_tasks 的 Phase 6/7 以 <br><hr ...> 起始追加到回复末尾，
-#    与模型生成的正文/追问建议不同源，须整体剥离并原样拼回。
-_UI_FOOTER_START = "<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
+# ---- UI 页脚块（参考文献 / Provenance）剥离 ----
+#    这些块由 chat_tasks 的 Phase 6/7 追加到回复末尾（文献块由 References
+#    注册表渲染），与模型生成的正文/追问建议不同源，须整体剥离并原样拼回。
+#    起始标记的唯一事实来源在 src.core.references，避免多处各写一份字面量。
+_UI_FOOTER_START = FOOTER_RULE_HTML
 
 # 兼容旧式 Only-Cited 匹配（保留引用链接文本）
-_CITES_RE = re.compile(
-    r"<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
-    r"<b>.*?Cited Sources:</b><br>"
-)
+_CITES_RE = re.compile(re.escape(FOOTER_RULE_HTML) + r"<b>.*?Cited Sources:</b><br>")
 
 
 def _split_ui_footer(text: str) -> tuple[str, str]:

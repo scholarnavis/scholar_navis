@@ -13,6 +13,7 @@ from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
+from src.core.references import FOOTER_RULE_HTML, ReferenceItem, ReferenceRegistry
 from src.core import plot_styles
 from src.core.theme_manager import strong_weight_css
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
@@ -55,6 +56,40 @@ def _source_dedupe_key(meta):
         year = str(meta.get("year") or "").strip()
         return f"{title}|{year}"
     return None
+
+
+def _registry_item_from_source(index, meta):
+    """把 sources_map 的来源元数据规整为参考文献条目（单一映射定义）。
+
+    本地 KB 文档（本地 path）与在线来源（path 为 http(s) URL）走同一入口，
+    避免"来源 -> 条目"的转换散落多处造成字段不一致。
+    """
+    meta = meta or {}
+    path = str(meta.get("path") or "")
+    name = str(meta.get("name") or "")
+    snippet = str(meta.get("search_text") or meta.get("snippet") or "")
+    if path.lower().startswith(("http://", "https://")):
+        title = re.sub(r"^\[Online\]\s*", "", name).strip() or path
+        return ReferenceItem(index=index, title=title, url=path,
+                             snippet=snippet, kind="web")
+    return ReferenceItem(index=index, path=path,
+                         page=int(meta.get("page") or 1),
+                         title=name or os.path.basename(path) or "Local document",
+                         snippet=snippet, kind="local_document")
+
+
+def _seed_registry_from_sources(registry, sources_map):
+    """把 sources_map 中尚未登记的来源补录进注册表（幂等）。
+
+    Deep 模式在合并阶段才把子任务来源写回 sources_map，故注册表同步不能只在
+    检索后做一次；渲染前调用本函数，保证编号与来源一一对应。
+    """
+    if not sources_map:
+        return
+    for rid, meta in sources_map.items():
+        if not isinstance(rid, int) or rid in registry:
+            continue
+        registry.seed(rid, _registry_item_from_source(rid, meta))
 
 
 def _trim_history_for_budget(history, token_budget):
@@ -568,6 +603,9 @@ class ChatGenerationTask(BackgroundTask):
         domain = "General Academic"
         context_str = ""
         sources_map = {}
+        # 会话级参考文献注册表：本地 KB 文档 / 在线来源 / cite_references 工具提交的
+        # 条目共用同一编号空间，正文 [n] 与文献列表恒一一对应。
+        reference_registry = ReferenceRegistry()
 
         # ---- Human-in-the-loop 协议轮：deep plan 确认 / 跳过哨兵解析 ----
         deep_plan_confirmed = None
@@ -656,6 +694,8 @@ class ChatGenerationTask(BackgroundTask):
                 self._emit_token(
                     "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Loading local vector model and retrieving literature...</div>\n\n")
                 context_str, sources_map, domain = self._run_kb_retrieval(search_query, domain)
+                # KB 文档编号（1..N）统一进注册表：与 cite_references 的编号空间合并。
+                _seed_registry_from_sources(reference_registry, sources_map)
 
         if not context_str.strip():
             context_str = "No local database documents provided."
@@ -832,6 +872,8 @@ class ChatGenerationTask(BackgroundTask):
         combined_tools.append(dict(_ALWAYS_TOOLS)["ask_user"])
         # 追问建议改为结构化产出（工具调用），不再依赖模型输出固定文本 + 正则解析
         combined_tools.append(dict(_ALWAYS_TOOLS)["suggest_follow_ups"])
+        # 参考文献改为结构化产出：模型只提交条目，编号与文献列表由程序生成
+        combined_tools.append(dict(_ALWAYS_TOOLS)["cite_references"])
 
         # R 可视化属于**默认能力**：不再作为可勾选的独立技能，也不受技能标签筛选
         # 影响——始终把 plot_chart 交给模型，由它自行判断本次是否需要画图。
@@ -911,9 +953,9 @@ class ChatGenerationTask(BackgroundTask):
             "Also ask before any costly or hard-to-reverse operation. After calling ask_user the runtime pauses "
             "the run automatically; the user's answer arrives as the next user message.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
-            "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. This automatically generates a UI 'Cited Sources' block. NEVER claim facts without these bracketed numbers.\n"
-            "2. FORMAL BIBLIOGRAPHY (For the User): If the user explicitly requests 'references', 'citations', or a 'review', you MUST ALSO generate a standalone 'References' section at the very end of your main text (but BEFORE the [FOLLOW_UPS] section). \n"
-            "3. STRICT FORMATTING: The standalone 'References' section must strictly follow academic formatting (e.g., APA/Nature style: Authors. (Year). Title. Journal. DOI). DO NOT include conversational fluff like 'Cited for the role of...' in this formal list. List purely the bibliographic data.\n\n"
+            "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. NEVER claim facts without these bracketed numbers.\n"
+            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, before you finish, with its bibliographic fields (title, authors, year, journal, doi, url, and the exact supporting 'snippet'). The tool returns the citation numbers; use exactly those numbers inline as [n]. The reference list is then rendered by the app.\n"
+            "3. NEVER WRITE A REFERENCES SECTION YOURSELF: do NOT output a 'References' / 'Bibliography' heading or a manually numbered citation list in your answer text. The app generates that list from your cite_references call; writing one yourself duplicates it and can contradict it.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
             "### PUNCTUATION LOCALIZATION (STRICT):\n"
             "The user's input may already have been translated to English for retrieval, so do NOT infer "
@@ -975,15 +1017,16 @@ class ChatGenerationTask(BackgroundTask):
         def _cite_collector(source_meta: dict):
             """Register an online MCP source for the 'Cited Sources' UI block.
 
-            按归一键去重：同一来源被多次工具调用重复收集时复用既有引用号，
-            参考文献列表不虚增、引用块更省 token。
+            编号统一由参考文献注册表分配（不再单独用 100+ 偏移），因此在线来源
+            与 KB 文档、模型登记的文献共享同一编号空间，绝不会出现"两个来源同一个
+            号"。按归一键去重：同一来源重复收集时复用既有引用号，列表不虚增。
             """
             key = _source_dedupe_key(source_meta)
             if key:
                 for rid, registered in sources_map.items():
                     if _source_dedupe_key(registered) == key:
                         return rid
-            ref_id = max((k for k in sources_map if isinstance(k, int)), default=100) + 1
+            ref_id = reference_registry.add(_registry_item_from_source(0, source_meta))
             sources_map[ref_id] = source_meta
             return ref_id
 
@@ -997,6 +1040,7 @@ class ChatGenerationTask(BackgroundTask):
                 log_fn=self.send_log,
                 plot_registry=getattr(self, "_plot_registry_cache", None),
                 plot_seq=getattr(self, "_plot_seq_cache", 0),
+                reference_registry=reference_registry,
             )
             if self.deep_mode or deep_plan_confirmed is not None:
                 # 深度研究：分解为并行子任务 -> 用户确认计划 -> 独立 Agent 执行
@@ -1098,22 +1142,30 @@ class ChatGenerationTask(BackgroundTask):
                 "elapsed_ms": self._turn_elapsed_ms(),
             })
 
-        # Phase 6: Dynamic Citation Mounting
+        # Phase 6: 参考文献块渲染（程序生成，单一事实来源）
+        # 来源无论是本地 KB 文档、在线工具结果，还是模型通过 cite_references 登记的
+        # 文献，统一由注册表按"正文实际引用到的编号"渲染：格式恒定、编号与来源一一
+        # 对应，模型不再自己书写 References，格式漂移/编号错位从根上消除。
+        _seed_registry_from_sources(reference_registry, sources_map)
         has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
-        if sources_map and has_citation:
-            ref_html = "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'><b>📚 Cited Sources:</b><br>"
-            used_indices = set(int(ref) for ref in re.findall(r'\[(\d+)\]', self.full_response_cache))
-            displayed = 0
-            for rid, info in sources_map.items():
-                if rid in used_indices:
-                    from urllib.parse import quote
-                    safe_path, safe_text, safe_name = quote(info['path']), quote(info['search_text']), quote(
-                        info['name'])
-                    link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}&name={safe_name}"
-                    ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']}</a></div>"
-                    displayed += 1
-            if displayed > 0:
+        if has_citation and len(reference_registry):
+            used_indices = ReferenceRegistry.used_indices(self.full_response_cache)
+            ref_html = reference_registry.to_html(used_indices)
+            if ref_html:
+                cited = sum(1 for item in reference_registry.items() if item.index in used_indices)
                 self._emit_token(ref_html)
+                self.send_log(
+                    "INFO",
+                    f"References rendered: {len(reference_registry)} registered, {cited} cited.")
+            else:
+                self.send_log("INFO", "No cited reference matched the registry; reference block skipped.")
+
+        # Phase 6b: 结构化引用数据上报（UI 悬停卡 / 详情面板据此展示著录与原文片段）
+        if len(reference_registry):
+            self._emit_state(TaskState.PROCESSING, -1, "", payload={
+                "event": "references",
+                "data": reference_registry.to_dict_list(),
+            })
 
         # Phase 7: Persist Provenance evidence chain + show summary to user
         self._emit_provenance()
@@ -1238,8 +1290,8 @@ class ChatGenerationTask(BackgroundTask):
                 )
 
             ref_html = (
-                "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
-                "<b>📊 Provenance (trace log):</b><br>"
+                "\n" + FOOTER_RULE_HTML
+                + "<b>📊 Provenance (trace log):</b><br>"
                 f"<div style='margin-top:6px; font-size:13px;'>"
                 f"{len(records)} tool call(s) this round, "
                 f"{ok_count} succeeded, {fail_count} failed:<br>"
@@ -1338,9 +1390,12 @@ class ChatGenerationTask(BackgroundTask):
         # ---- 并行执行各子任务 ----
         # 子 Agent 无法触达用户：从其工具池剔除 ask_user，避免子任务发起
         # 无人应答的暂停式提问。
+        # 同时剔除 cite_references：子任务的编号需要在合并阶段重映射到全局编号，
+        # 而重映射只覆盖工具来源（sources_map）；子任务自行登记的文献编号会与全局
+        # 冲突，故统一由主流程/合成阶段负责文献登记。
         sub_candidate_tools = [
             t for t in (candidate_tools or [])
-            if (t or {}).get("function", {}).get("name") != "ask_user"
+            if (t or {}).get("function", {}).get("name") not in ("ask_user", "cite_references")
         ]
         results = [None] * len(sub_tasks)
 

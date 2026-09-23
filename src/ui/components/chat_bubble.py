@@ -8,7 +8,7 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize, QRect
 from PySide6.QtGui import (QGuiApplication, QPixmap, QTextBlockFormat,
                            QTextCursor, QFont)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -64,13 +64,106 @@ _LOADING_PHRASE_TICKS = 6
 
 
 class ImageAwareTextBrowser(QTextBrowser):
-    """支持双击激活内联图片的 QTextBrowser。
+    """支持双击激活内联图片、悬停探测行内引用的 QTextBrowser。
 
-    QTextBrowser 默认把图片当作不可交互的富文本元素；本子类在双击
-    时探测光标下是否为图片，并发出 ``sig_image_activated``（携带本地
-    路径），供外层打开内部查看器。
+    * 双击：探测光标下是否为图片，发出 ``sig_image_activated``（携带本地路径）；
+    * 悬停/离开：探测光标下是否为行内引用锚点（``ref://``），发出
+      ``sig_citation_hover``（编号 + 锚点全局矩形；编号 -1 表示离开），供外层
+      弹出引用悬停卡。QTextBrowser 本身不提供锚点悬停事件，故用鼠标跟踪实现。
     """
     sig_image_activated = Signal(str)
+    #: (引用编号, 锚点全局矩形)；编号 <= 0 表示鼠标已离开引用锚点。
+    sig_citation_hover = Signal(int, object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self._hover_ref_index = -1
+
+    # ---- 行内引用悬停 ----
+    @staticmethod
+    def _ref_index(href: str) -> int:
+        """从 ``ref://cite?n=N`` 解析引用编号；非引用链接返回 -1。"""
+        if not href or not str(href).startswith("ref://"):
+            return -1
+        try:
+            from urllib.parse import parse_qs, urlparse
+            values = parse_qs(urlparse(str(href)).query).get("n", [])
+            return int(values[0]) if values else -1
+        except (ValueError, TypeError, IndexError):
+            return -1
+
+    def _anchor_global_rect(self, pos):
+        """把光标所在的**整个引用编号**（``[n]``）换算为全局坐标矩形。
+
+        为什么不能直接用 ``cursorForPosition(pos)`` 的 caret 矩形：它返回的是
+        "光标"位置（一竖条），会随鼠标落在编号字符的左半/右半而在编号**前**与
+        **后**跳变，也会把 ``[12]`` 这种多字符编号只算成其中一个字符——这正是
+        "同一个 [n] 弹窗位置忽左忽右、落点不固定"的根因。
+
+        这里改为：先用 ``anchorHref`` 把锚点扩展到属于同一链接的连续字符区间，
+        再取区间首尾两个 caret 矩形的并集，得到编号整体的包围盒。
+        """
+        try:
+            href = self.anchorAt(pos)
+            if not href:
+                return QRect()
+            doc = self.document()
+            total = max(0, doc.characterCount() - 1)
+
+            def href_at(index):
+                """第 ``index`` 个字符的链接地址（越界返回空串）。
+
+                用"位置 index+1 处光标的前一个字符"取格式，避开
+                ``charFormat()`` 在文本块首返回后一个字符的特殊情形。
+                """
+                if index < 0 or index >= total:
+                    return ""
+                probe = QTextCursor(doc)
+                probe.setPosition(min(index + 1, doc.characterCount() - 1))
+                return probe.charFormat().anchorHref()
+
+            anchor_pos = self.cursorForPosition(pos).position()
+            if href_at(anchor_pos) != href and href_at(anchor_pos - 1) == href:
+                anchor_pos -= 1                      # 光标落在编号右端之后
+
+            start = anchor_pos
+            while start > 0 and href_at(start - 1) == href:
+                start -= 1
+            end = anchor_pos + 1
+            while end < total and href_at(end) == href:
+                end += 1
+
+            first = QTextCursor(doc)
+            first.setPosition(start)
+            last = QTextCursor(doc)
+            last.setPosition(end)
+            rect = self.cursorRect(first).united(self.cursorRect(last))
+            top_left = self.viewport().mapToGlobal(rect.topLeft())
+            return QRect(top_left, rect.size())
+        except Exception as e:  # pragma: no cover - 纯防御
+            logger.debug("Anchor rect resolution failed: %s", e)
+            return QRect()
+
+    def _update_citation_hover(self, pos):
+        index = self._ref_index(self.anchorAt(pos))
+        if index == self._hover_ref_index:
+            return
+        self._hover_ref_index = index
+        if index > 0:
+            self.sig_citation_hover.emit(index, self._anchor_global_rect(pos))
+        else:
+            self.sig_citation_hover.emit(-1, None)
+
+    def mouseMoveEvent(self, event):
+        self._update_citation_hover(event.pos())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self._hover_ref_index > 0:
+            self._hover_ref_index = -1
+            self.sig_citation_hover.emit(-1, None)
+        super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         cursor = self.cursorForPosition(event.pos())
@@ -476,6 +569,8 @@ class ChatBubbleWidget(QWidget):
         self._extra_blocks = []
         self._lbl_last_height = -1
         self._height_sync_pending = False
+        #: 最近一次悬停的行内引用锚点全局矩形：点击展开详情面板时用于定位。
+        self._last_citation_rect = None
 
         self.init_ui()
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -549,9 +644,11 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.lbl_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
-        self.lbl_text.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
+        self.lbl_text.anchorClicked.connect(self._on_anchor_clicked)
         # 双击内联图片（AI 生成 / 工具产图）时打开内部查看器
         self.lbl_text.sig_image_activated.connect(self.open_image_viewer)
+        # 行内引用 [n] 的悬停探测：弹出引用预览卡（编号 -1 表示已离开锚点）
+        self.lbl_text.sig_citation_hover.connect(self._on_citation_hover)
         self.blocks_layout.addWidget(self.lbl_text)
 
         # 文档尺寸变化只做"合并调度"：流式期间 documentSizeChanged 会高频触发，
@@ -687,6 +784,38 @@ class ChatBubbleWidget(QWidget):
         host = self.window() or self
         logger.debug("Open image viewer for %s (host=%s)", image_path, type(host).__name__)
         open_image_viewer(image_path, parent=host)
+
+    # --- 3.1b 行内引用交互（悬停预览卡 / 点击详情面板） ---
+    def _on_citation_hover(self, index, anchor_rect):
+        """正文 ``[n]`` 悬停 / 离开：驱动引用卡片的悬停意图与位置。
+
+        ``index <= 0`` 表示鼠标已离开锚点，转告控制器取消/收尾；
+        引用弹窗自身是否真正关闭由控制器按"锚点 + 卡片"的区域轮询决定，
+        因此鼠标可以从锚点平滑移入卡片继续操作。
+        """
+        from src.ui.components.citation_popup import CitationPopupController
+        controller = CitationPopupController.instance()
+        if index and index > 0 and anchor_rect is not None:
+            self._last_citation_rect = anchor_rect
+            # 带上本消息编号：每轮回答的引用编号都从 1 重新开始，必须按
+            # (消息, 引用号) 定位，历史气泡才不会被新回答的数据覆盖。
+            # 同时传入所在窗口：浮层是该窗口的子控件（Wayland 下位置/拖拽才受控）。
+            controller.hover(self.index, index, anchor_rect, host=self.window())
+        else:
+            controller.leave_hover()
+
+    def _on_anchor_clicked(self, url):
+        """锚点点击统一入口：行内引用展开详情面板，其余链接照旧路由。"""
+        text = url.toString() if hasattr(url, "toString") else str(url)
+        if text.startswith("ref://"):
+            from src.ui.components.citation_popup import CitationPopupController
+            index = ImageAwareTextBrowser._ref_index(text)
+            if index > 0:
+                rect = self._last_citation_rect or QRect()
+                CitationPopupController.instance().expand(
+                    self.index, index, rect, host=self.window())
+                return
+        self.sig_link_clicked.emit(text)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1693,8 +1822,9 @@ class ChatBubbleWidget(QWidget):
         browser.setOpenLinks(False)
         browser.setContextMenuPolicy(Qt.CustomContextMenu)
         browser.customContextMenuRequested.connect(self.show_context_menu)
-        browser.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
+        browser.anchorClicked.connect(self._on_anchor_clicked)
         browser.sig_image_activated.connect(self.open_image_viewer)
+        browser.sig_citation_hover.connect(self._on_citation_hover)
 
         self._style_block(block)
         return block

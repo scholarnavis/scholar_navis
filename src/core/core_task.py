@@ -12,6 +12,8 @@ from enum import Enum
 from typing import Any, Dict, Optional
 from PySide6.QtCore import QObject, Signal, QThread, QTimer, QEventLoop
 
+logger = logging.getLogger("Core.Task")
+
 
 class TaskState(Enum):
     PENDING = "pending"
@@ -209,12 +211,59 @@ class RunnerThread(QThread):
         self.finished.connect(self._on_finish)
 
     def _on_finish(self):
-        # 线程自然死透后，自动从集合中移除，并安全释放 C++ 内存
+        # 线程"自然结束"信号是在 QThread 内部把 running 标记复位**之前**发出的：
+        # 此刻若直接 deleteLater，一旦主线程正跑在嵌套事件循环里（本程序多处调用
+        # QApplication.processEvents / QEventLoop），DeferredDelete 可能赶在标记
+        # 复位前真正析构 C++ 对象，Qt 就会打印
+        # "QThread: Destroyed while thread '' is still running"。
+        # 先 wait() 确认底层线程确实退出（run() 已返回，正常在微秒级返回），再销毁。
+        if not self.wait(1000):
+            logger.warning("RunnerThread '%s' still running after finish signal; "
+                           "deferring deletion to avoid destroyed-while-running.",
+                           self.task.__class__.__name__)
+            return                      # 保命：留在 _active_threads，交给退出流程兜底
         _active_threads.discard(self)
         self.deleteLater()
 
     def run(self):
         self.task.run()
+
+
+def wait_for_running_tasks(timeout_ms: int = 1500) -> int:
+    """请求取消并等待所有仍在运行的任务线程退出（应用退出前调用）。
+
+    为什么需要：THREAD 模式的任务被取消后只是"请求中断"，真正的收尾还需要一点
+    时间；若此期间进程退出，解释器清理模块全局会把 ``_active_threads`` 里的
+    QThread 包装对象回收，而底层线程仍在跑，于是打印
+    ``QThread: Destroyed while thread '' is still running``。
+
+    这里先对每个在跑的任务请求取消（让它在网络/计算循环里尽快返回），再按总时限
+    等待退出；绝不无限阻塞退出流程。返回超时后仍在运行的线程数，供调用方判断。
+    """
+    threads = list(_active_threads)
+    if not threads:
+        return 0
+
+    logger.info("Shutdown: cancelling %d running task thread(s).", len(threads))
+    for thread in threads:
+        task = getattr(thread, "task", None)
+        cancel = getattr(task, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception as e:  # 取消失败不应阻塞退出
+                logger.debug("Task cancel during shutdown failed: %s", e)
+
+    deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
+    for thread in threads:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            if not thread.wait(int(remaining * 1000)):
+                logger.warning("Task thread still running after %dms shutdown wait.", timeout_ms)
+        except RuntimeError as e:
+            # 线程对象可能已被销毁（如取消路径提前回收），忽略即可
+            logger.debug("Task thread already gone during shutdown: %s", e)
+    return len(_active_threads)
 
 
 class TaskManager(QObject):
