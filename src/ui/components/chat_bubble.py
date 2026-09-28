@@ -2,7 +2,6 @@ import hashlib
 import logging
 import os
 import re
-import sys
 import tempfile
 import time
 
@@ -15,6 +14,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
 from src.core.core_task import TaskManager, TaskMode
+from src.core.platform_env import is_windows
 # hex_to_rgba 由核心层统一实现（全应用唯一来源，避免各 UI 模块各自复制）
 from src.core.theme_manager import (ThemeManager, hex_to_rgba, overlay_scrollbar_qss,
                                     strong_weight_css)
@@ -189,7 +189,7 @@ class ImageAwareTextBrowser(QTextBrowser):
                 path = unquote(urlparse(src).path)
             except ValueError:
                 return ""
-            if sys.platform == "win32" and path.startswith("/"):
+            if is_windows() and path.startswith("/"):
                 path = path.lstrip("/")
             return path
         if src.startswith("data:image"):
@@ -1626,7 +1626,7 @@ class ChatBubbleWidget(QWidget):
                         from urllib.parse import urlparse, unquote
                         parsed = urlparse(src_url)
                         local_path = unquote(parsed.path)
-                        if sys.platform == "win32" and local_path.startswith("/"):
+                        if is_windows() and local_path.startswith("/"):
                             local_path = local_path.lstrip("/")
                         lower = local_path.lower()
                     except (ValueError, ImportError):

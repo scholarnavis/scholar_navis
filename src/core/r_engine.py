@@ -30,9 +30,12 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 from typing import Optional, Sequence
+
+from src.core.platform_env import (
+    PLATFORM_MACOS, PLATFORM_WINDOWS, distro_family, no_window_flags, os_family,
+)
 
 logger = logging.getLogger("Core.REngine")
 
@@ -48,15 +51,16 @@ def platform_family() -> str:
     """归一化平台标识：``win`` / ``mac`` / ``nix`` / ``apt`` / ``dnf`` /
     ``pacman`` / ``apk`` / ``unknown``。
 
-    Windows / macOS 无发行版概念，先按 ``sys.platform`` 短路；Linux 交给
-    :func:`src.core.platform_env.distro_family`（NixOS 优先识别为 ``nix``）。
+    Windows / macOS 无发行版概念，先按 :func:`src.core.platform_env.os_family`
+    短路；Linux 交给 :func:`src.core.platform_env.distro_family`
+    （NixOS 优先识别为 ``nix``）。
     """
-    if sys.platform == "win32":
+    family = os_family()
+    if family == PLATFORM_WINDOWS:
         return "win"
-    if sys.platform == "darwin":
+    if family == PLATFORM_MACOS:
         return "mac"
     try:
-        from src.core.platform_env import distro_family
         return distro_family()
     except Exception as e:  # 探测失败只影响提示精度，不影响功能
         logger.debug(f"distro_family() unavailable: {e}")
@@ -299,9 +303,9 @@ class REngine:
     def _common_locations() -> list:
         """Return candidate absolute paths to Rscript/R executables."""
         candidates = []
-        system = sys.platform
+        system = os_family()
 
-        if system == "win32":
+        if system == PLATFORM_WINDOWS:
             # R installs under C:\\Program Files\\R\\R-x.y.z\\bin\\Rscript.exe
             roots = []
             pf = os.environ.get("ProgramFiles", r"C:\Program Files")
@@ -321,7 +325,7 @@ class REngine:
                     candidates.append(os.path.join(root, v, "bin", "Rscript.exe"))
                     candidates.append(os.path.join(root, v, "bin", "R.exe"))
 
-        elif system == "darwin":
+        elif system == PLATFORM_MACOS:
             # Homebrew / CRAN framework installs.
             candidates.append("/usr/local/bin/Rscript")
             candidates.append("/opt/homebrew/bin/Rscript")
@@ -367,16 +371,12 @@ class REngine:
             "cat(paste(.ok, collapse = ''))"
         )
 
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
         result = {p: False for p in pkg_list}
         try:
             proc = subprocess.run(
                 [exe, "--vanilla", "-e", snippet],
                 capture_output=True, text=True, timeout=60,
-                creationflags=creationflags,
+                creationflags=no_window_flags(),
             )
             flags = (proc.stdout or "").strip().splitlines()
             flags = flags[-1].strip() if flags else ""
@@ -405,17 +405,13 @@ class REngine:
         if not os.path.isfile(exe):
             return None
 
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
         try:
             proc = subprocess.run(
                 [exe, "--version"],
                 capture_output=True,
                 text=True,
                 timeout=15,
-                creationflags=creationflags,
+                creationflags=no_window_flags(),
             )
         except (OSError, subprocess.SubprocessError) as e:
             logger.warning(f"R validation failed for {exe}: {e}")

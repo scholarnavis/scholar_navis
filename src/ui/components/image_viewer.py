@@ -14,8 +14,6 @@ SVG 通过 ``QSvgRenderer`` 以 2x 分辨率栅格化显示，保存时保留
 import logging
 import os
 import shutil
-import subprocess
-import sys
 
 from PySide6.QtCore import Qt, QSize, QPointF, QPoint
 from PySide6.QtGui import QImageReader, QPainter, QPixmap, QDesktopServices
@@ -23,6 +21,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QPushButton)
 
+from src.core.platform_env import open_with_system
 from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
 from src.ui.components.file_dialogs import save_file_name
 from src.ui.components.toast import ToastManager
@@ -397,41 +396,13 @@ class ImageViewerDialog(QDialog):
 
     @staticmethod
     def _open_externally_fallback(path: str) -> bool:
-        """命令行兜底打开：``QDesktopServices`` 静默失败时按平台挑选打开器。
+        """命令行兜底打开：``QDesktopServices`` 静默失败时交给系统打开器。
 
-        Linux：``xdg-open`` → ``gio open`` → ``kde-open``；macOS：``open``；
-        Windows：``os.startfile``。返回是否成功把打开命令拉起来。
+        平台差异（Windows ``os.startfile`` / macOS ``open`` / Linux
+        ``xdg-open`` → ``gio open`` → ``kde-open``）统一由
+        :func:`src.core.platform_env.open_with_system` 处理，本模块不再自行分叉。
         """
-        if sys.platform == "win32":
-            try:
-                os.startfile(path)  # type: ignore[attr-defined]  # 仅 Windows 存在
-                logger.debug("Opened externally via os.startfile: %s", path)
-                return True
-            except OSError as e:
-                logger.warning("os.startfile failed for %s: %s", path, e)
-                return False
-
-        if sys.platform == "darwin":
-            candidates = [("open", [path])]
-        else:
-            candidates = []
-            for exe, args in (("xdg-open", [path]), ("gio", ["open", path]),
-                              ("kde-open5", [path]), ("kde-open", [path])):
-                found = shutil.which(exe)
-                if found:
-                    candidates.append((found, args))
-            if not candidates:
-                logger.warning("No CLI opener (xdg-open/gio/kde-open) available")
-
-        for exe, args in candidates:
-            try:
-                subprocess.Popen([exe, *args],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                logger.debug("Opened externally via %s: %s", exe, path)
-                return True
-            except OSError as e:
-                logger.warning("Failed to launch %s: %s", exe, e)
-        return False
+        return open_with_system(path)
 
 
 def open_image_viewer(image_path=None, parent=None, raw_bytes=None, svg_bytes=None):

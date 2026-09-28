@@ -2,7 +2,6 @@ import re
 import logging
 import markdown
 import os
-import sys
 import tempfile
 import shutil
 import hashlib
@@ -13,6 +12,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlparse, parse_qs
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
+from src.core.platform_env import is_windows
 from src.core.theme_manager import ThemeManager, installed_font_families
 from src.ui.components.toast import ToastManager
 
@@ -2034,7 +2034,7 @@ class TextFormatter:
                 if not file_path:
                     from urllib.parse import unquote, urlparse
                     file_path = unquote(urlparse(url.toString()).path)
-                    if sys.platform == "win32" and file_path.startswith("/"):
+                    if is_windows() and file_path.startswith("/"):
                         file_path = file_path.lstrip("/")
 
                 from src.core.image_utils import is_image_file

@@ -8,9 +8,10 @@ import traceback
 # 系统库时，import 抛出的原始 ImportError 无法指导用户修复；本模块把它整理成
 # 可照做的安装指引，并按运行环境注入 Chromium（QtWebEngine）启动参数。
 from src.core.platform_env import (
-    configure_qt_environment, format_qt_import_error, gui_display_available,
-    is_shared_library_error, log_environment, maybe_relaunch_in_fhs,
-    no_display_message, shared_library_hint,
+    app_root, configure_qt_environment, format_qt_import_error,
+    gui_display_available, is_elevated, is_shared_library_error, is_windows,
+    log_environment, maybe_relaunch_in_fhs, no_display_message,
+    shared_library_hint,
 )
 
 configure_qt_environment()
@@ -31,12 +32,7 @@ except ImportError as e:
     print(format_qt_import_error(e), file=sys.stderr)
     sys.exit(3)
 
-is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals()
-
-if is_compiled:
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = app_root()
 
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["SCARF_NO_ANALYTICS"] = "true"
@@ -193,7 +189,7 @@ class SplashScreen(QWidget):
 
         ico_path = ThemeManager.get_resource_path("Assets", "icon.ico")
         png_path = ThemeManager.get_resource_path("Assets", "icon.png")
-        if sys.platform == "win32" and os.path.exists(ico_path):
+        if is_windows() and os.path.exists(ico_path):
             self.setWindowIcon(QIcon(ico_path))
         else:
             self.setWindowIcon(QIcon(png_path))
@@ -367,19 +363,9 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"CRITICAL: failed to display message box: {e}", file=sys.stderr)
 
-    # 3. 提权检测
-    is_admin = False
-    try:
-        if os.name == 'nt':
-            import ctypes
-
-            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
-        else:
-            is_admin = os.geteuid() == 0
-    except (ImportError, OSError, AttributeError):
-        pass
-
-    if is_admin:
+    # 3. 提权检测（Windows 的 IsUserAnAdmin 与 POSIX 的 geteuid 差异由
+    #    platform_env.is_elevated 统一处理，探测失败按"未提权"放行）
+    if is_elevated():
         _fatal_message(
             "Security Alert: Elevated Privileges",
             "Scholar Navis cannot be run with Administrator / Root privileges.",
@@ -448,7 +434,7 @@ if __name__ == "__main__":
         import ctypes
         from src.core.logger import setup_logger
 
-        if sys.platform == "win32":
+        if is_windows():
             try:
                 myappid = ctypes.c_wchar_p("scholar.navis.app")
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)

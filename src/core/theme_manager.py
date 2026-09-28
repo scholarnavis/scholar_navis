@@ -6,8 +6,8 @@ from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon, Qt
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtSvg import QSvgRenderer
 
-from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
+from src.core.platform_env import app_resource_root, is_windows
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def apply_native_titlebar_theme(window, is_dark: bool) -> bool:
 
     非 Windows 平台直接返回 False，调用方无需自行判断平台。
     """
-    if sys.platform != "win32":
+    if not is_windows():
         return False
 
     global _win_titlebar_warned
@@ -477,16 +477,13 @@ class ThemeManager(QObject):
 
     @staticmethod
     def get_resource_path(*paths):
-        if '__compiled__' in globals():
-            base_dir = BASE_DIR
+        """解析打包 / 源码两种布局下的资源绝对路径。
 
-            if sys.platform == "darwin" and ".app/Contents/MacOS" in base_dir:
-                base_dir = os.path.abspath(os.path.join(base_dir, "..", "Resources"))
-
-        elif getattr(sys, 'frozen', False):
-            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
-        else:
-            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        布局判断（PyInstaller 的 ``sys._MEIPASS``、macOS ``.app`` 包内
+        ``Contents/Resources`` 等）统一由 :mod:`src.core.platform_env` 负责，
+        此处不再自行区分平台。
+        """
+        base_dir = app_resource_root()
 
         target = os.path.join(base_dir, *paths)
         if not paths or os.path.exists(target):
@@ -652,7 +649,7 @@ class ThemeManager(QObject):
         return QIcon(pixmap)
 
     def get_app_icon(self) -> QIcon:
-        if sys.platform == "win32":
+        if is_windows():
             ico_path = self.get_resource_path("Assets", "icon.ico")
             if os.path.exists(ico_path):
                 return QIcon(ico_path)

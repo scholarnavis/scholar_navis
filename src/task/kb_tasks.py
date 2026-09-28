@@ -21,14 +21,18 @@ if TYPE_CHECKING:  # 仅用于类型注解：运行期不导入 chromadb（启�
 logger = logging.getLogger("Task.kb")
 
 def _setup_worker_env():
+    """KB 子进程的环境准备，返回数据根目录。
+
+    数据根目录必须与主进程完全一致，统一取自
+    :func:`src.core.platform_env.app_root`；子进程可能是 spawn 出来的全新解释器，
+    因此在此重新求值，而不是依赖父进程的全局变量（此前这里维护了第三份
+    "冻结 or 源码"判断，与主进程的 ``BASE_DIR`` 有分歧风险）。
+    """
     import os
-    import sys
 
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    from src.core.platform_env import app_root
 
+    base_dir = app_root()
     models_dir = os.path.join(base_dir, "models")
     os.environ["HF_HOME"] = models_dir
     os.environ["SENTENCE_TRANSFORMERS_HOME"] = models_dir

@@ -3,7 +3,6 @@ import logging
 import os
 import queue
 import subprocess
-import sys
 import threading
 import time
 import traceback
@@ -11,6 +10,8 @@ import multiprocessing as mp
 from enum import Enum
 from typing import Any, Dict, Optional
 from PySide6.QtCore import QObject, Signal, QThread, QTimer, QEventLoop
+
+from src.core.platform_env import is_windows, no_window_flags
 
 logger = logging.getLogger("Core.Task")
 
@@ -561,12 +562,12 @@ class TaskManager(QObject):
             pass
         except Exception as e:
             logging.getLogger("TaskManager").warning(f"psutil kill failed, fallback to system tool: {e}")
-            if sys.platform == "win32":
+            if is_windows():
                 # CREATE_NO_WINDOW：GUI 进程不闪控制台窗口；Popen 不等待
                 subprocess.Popen(
                     ['taskkill', '/F', '/T', '/PID', str(pid)],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW)
+                    creationflags=no_window_flags())
             else:
                 import signal
                 try:

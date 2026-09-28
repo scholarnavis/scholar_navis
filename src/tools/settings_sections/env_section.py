@@ -5,12 +5,12 @@
 """
 
 import logging
-import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QFormLayout, QHBoxLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QVBoxLayout)
 
+from src.core.platform_env import is_windows
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
@@ -143,7 +143,7 @@ class EnvSectionMixin:
         # Path selection row
         path_layout = QHBoxLayout()
         self.edit_r_path = QLineEdit()
-        if sys.platform == "win32":
+        if is_windows():
             self.edit_r_path.setPlaceholderText(
                 "Rscript path, e.g. C:\\Program Files\\R\\R-4.3.1\\bin\\Rscript.exe")
         else:
@@ -255,7 +255,7 @@ class EnvSectionMixin:
 
         # 过滤器按平台给首选项：Windows 的可执行文件是 *.exe，POSIX 上
         # Rscript 无扩展名（旧的 *.exe 优先过滤在 Linux 上会让用户以为选不中）。
-        if sys.platform == "win32":
+        if is_windows():
             filters = "Rscript executable (*.exe);;All Files (*)"
         else:
             filters = "Rscript executable (Rscript);;All Files (*)"

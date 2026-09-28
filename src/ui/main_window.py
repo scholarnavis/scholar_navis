@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QApplication)
 
 from src.core.config_manager import ConfigManager
+from src.core.platform_env import is_windows
 from src.core.theme_manager import (ThemeManager, apply_native_titlebar_theme,
                                     strong_weight_css, title_weight_css)
 from src.ui.components.dialog import StandardDialog, BaseDialog
@@ -46,7 +47,7 @@ def _load_tool_class(module_path: str, class_name: str):
 
 
 def force_windows_taskbar_icon(hwnd, icon_path):
-    if sys.platform != "win32":
+    if not is_windows():
         return
     if not os.path.exists(icon_path):
         return
@@ -186,7 +187,7 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentRow(0)
         self.switch_tool(0)
 
-        if sys.platform == "win32":
+        if is_windows():
             ico_path = ThemeManager.get_resource_path("Assets", "icon.ico")
             hwnd = int(self.winId())
             QTimer.singleShot(100, lambda: force_windows_taskbar_icon(hwnd, ico_path))
