@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
 from PySide6.QtGui import QAction, QCursor, QColor, QIcon
 from PySide6.QtCore import Qt
 from src.core.core_task import TaskState, TaskManager
+from src.core.i18n import tr
 from src.core.models_registry import get_model_conf, check_model_exists
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.tools.base_tool import BaseTool
@@ -21,6 +22,16 @@ from src.task.kb_tasks import ImportFilesTask, DeleteFilesTask, SwitchKBTask, Re
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import ProjectEditorDialog, ProgressDialog, StandardDialog, BaseDialog
 from src.ui.components.file_dialogs import open_file_name, open_file_names, save_file_name
+
+#: 文件表格状态 -> 展示文案（英文源串）。逻辑判断一律使用存入
+#: ``Qt.UserRole`` 的状态 key（见 :meth:`update_file_list`），**不要**再比对
+#: 显示文本——否则界面语言切换后判断会失效。
+_STATUS_LABELS = {
+    "indexed": "Indexed",
+    "renaming": "Renaming...",
+    "pending_save": "Pending Save",
+    "unsupported": "Unsupported (.docx required)",
+}
 
 
 class ImportTool(BaseTool):
@@ -66,24 +77,24 @@ class ImportTool(BaseTool):
 
 
         # 2项目管理
-        kb_group = QGroupBox("Project / Library Management")
+        kb_group = QGroupBox(tr("Project / Library Management"))
         kb_layout = QHBoxLayout(kb_group)
         self.combo_kb = BaseComboBox(min_height=55)
         self.combo_kb.currentIndexChanged.connect(self.on_kb_switched)
 
         btn_col = QVBoxLayout()
         row1 = QHBoxLayout()
-        self.btn_new = QPushButton(" New")
+        self.btn_new = QPushButton(tr(" New"))
         self.btn_new.clicked.connect(self.create_new_kb)
-        self.btn_snp = QPushButton(" Import .snp")
+        self.btn_snp = QPushButton(tr(" Import .snp"))
         self.btn_snp.clicked.connect(self.import_external_kb)
         row1.addWidget(self.btn_new)
         row1.addWidget(self.btn_snp)
 
         row2 = QHBoxLayout()
-        self.btn_edit = QPushButton(" Edit")
+        self.btn_edit = QPushButton(tr(" Edit"))
         self.btn_edit.clicked.connect(self.edit_current_kb)
-        self.btn_del_kb = QPushButton(" Delete")
+        self.btn_del_kb = QPushButton(tr(" Delete"))
         self.btn_del_kb.clicked.connect(self.delete_current_kb)
         row2.addWidget(self.btn_edit)
         row2.addWidget(self.btn_del_kb)
@@ -96,12 +107,12 @@ class ImportTool(BaseTool):
 
         # 3. 详情与操作
         action_bar = QHBoxLayout()
-        self.lbl_kb_info = QLabel("Select a library...")
+        self.lbl_kb_info = QLabel(tr("Select a library..."))
 
         ctrl_col = QVBoxLayout()
-        self.btn_add_files = QPushButton(" Add Files")
+        self.btn_add_files = QPushButton(tr(" Add Files"))
         self.btn_add_files.clicked.connect(self.select_files)
-        self.btn_export = QPushButton(" Export Project")
+        self.btn_export = QPushButton(tr(" Export Project"))
         self.btn_export.clicked.connect(self.export_current_kb)
         ctrl_col.addWidget(self.btn_add_files)
         ctrl_col.addWidget(self.btn_export)
@@ -113,7 +124,8 @@ class ImportTool(BaseTool):
         # 4. 文件列表
         self.file_table = QTableWidget(0, 3)
         self.file_table.cellDoubleClicked.connect(self._on_table_double_click)
-        self.file_table.setHorizontalHeaderLabels(["Filename", "Size", "Status"])
+        self.file_table.setHorizontalHeaderLabels(
+            [tr("Filename"), tr("Size"), tr("Status")])
         self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.file_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.file_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -127,10 +139,10 @@ class ImportTool(BaseTool):
         layout.addWidget(self.file_table)
 
         # 5. 底部保存区
-        save_group = QGroupBox("Changes Staging")
+        save_group = QGroupBox(tr("Changes Staging"))
         save_layout = QVBoxLayout(save_group)
-        self.lbl_staged_status = QLabel("Ready.")
-        self.btn_save = QPushButton(" Save & Apply All Changes")
+        self.lbl_staged_status = QLabel(tr("Ready."))
+        self.btn_save = QPushButton(tr(" Save & Apply All Changes"))
         self.btn_save.setEnabled(False)
         self.btn_save.clicked.connect(self.commit_changes)
         save_layout.addWidget(self.lbl_staged_status)
@@ -286,7 +298,8 @@ class ImportTool(BaseTool):
 
         if col == 0:
             status_item = self.file_table.item(row, 2)
-            if status_item and "Indexed" in status_item.text():
+            # 用机器可读状态判断，而非显示文本（见 _STATUS_LABELS 说明）
+            if status_item and status_item.data(Qt.UserRole) == "indexed":
                 self._handle_open([row])
 
     def _adjust_table_height(self):
@@ -296,7 +309,7 @@ class ImportTool(BaseTool):
     def refresh_kb_list(self):
         self.combo_kb.blockSignals(True)
         self.combo_kb.clear()
-        self.combo_kb.setPlaceholderText("Select a library...")
+        self.combo_kb.setPlaceholderText(tr("Select a library..."))
 
         kbs = self.kb_manager.get_all_kbs()
         from src.core.models_registry import get_model_conf, check_model_exists
@@ -308,22 +321,23 @@ class ImportTool(BaseTool):
 
             if m:
                 is_downloaded = check_model_exists(m.get('hf_repo_id'))
-                status_marker = "" if is_downloaded else " (Not Downloaded)"
+                status_marker = "" if is_downloaded else f" ({tr('Not Downloaded')})"
                 m_ui = f"{m['ui_name']}{status_marker}"
             else:
-                m_ui = f"{kb.get('model_id', '?')} (Unknown/External)"
+                m_ui = f"{kb.get('model_id', '?')} ({tr('Unknown/External')})"
 
             status = kb.get('status', 'ready')
 
             icon = QIcon()
-            display_text = f"{kb['name']}   [Model: {m_ui} | Docs: {kb.get('doc_count', 0)}]"
+            display_text = tr("{name}   [Model: {model} | Docs: {docs}]").format(
+                name=kb['name'], model=m_ui, docs=kb.get('doc_count', 0))
 
             if status == "corrupted":
                 icon = tm.icon("alert", "danger")
-                display_text = f"[CORRUPTED] {display_text}"
+                display_text = tr("[{status}] {text}").format(status=tr("CORRUPTED"), text=display_text)
             elif status == "building":
                 icon = tm.icon("loader", "warning")
-                display_text = f"[BUILDING] {display_text}"
+                display_text = tr("[{status}] {text}").format(status=tr("BUILDING"), text=display_text)
             else:
                 icon = tm.icon("database", "accent")
 
@@ -373,18 +387,19 @@ class ImportTool(BaseTool):
 
                 # Replace Emoji with Icon
                 if name in self.staged_rename:
-                    status_text = "Renaming..."
+                    status_key = "renaming"
                     color = warning_color
                     icon = tm.icon("edit-2", "warning")
                 else:
-                    status_text = "Indexed"
+                    status_key = "indexed"
                     color = text_color
                     icon = tm.icon("check-circle", "success")
 
                 item_name.setForeground(color)
                 item_size.setForeground(color)
 
-                item_status = QTableWidgetItem(icon, status_text)
+                item_status = QTableWidgetItem(icon, tr(_STATUS_LABELS[status_key]))
+                item_status.setData(Qt.UserRole, status_key)
                 item_status.setForeground(color)
 
                 self.file_table.setItem(row, 0, item_name)
@@ -400,12 +415,16 @@ class ImportTool(BaseTool):
                 item_size = QTableWidgetItem("-")
 
                 if f_path.lower().endswith('.doc'):
-                    item_status = QTableWidgetItem(tm.icon("alert", "danger"), "Unsupported (.docx required)")
+                    item_status = QTableWidgetItem(
+                        tm.icon("alert", "danger"), tr(_STATUS_LABELS["unsupported"]))
+                    item_status.setData(Qt.UserRole, "unsupported")
                     item_name.setForeground(danger_color)
                     item_size.setForeground(danger_color)
                     item_status.setForeground(danger_color)
                 else:
-                    item_status = QTableWidgetItem(tm.icon("clock", "warning"), "Pending Save")
+                    item_status = QTableWidgetItem(
+                        tm.icon("clock", "warning"), tr(_STATUS_LABELS["pending_save"]))
+                    item_status.setData(Qt.UserRole, "pending_save")
                     item_name.setForeground(success_color)
                     item_size.setForeground(success_color)
                     item_status.setForeground(success_color)
@@ -444,21 +463,28 @@ class ImportTool(BaseTool):
 
             if m_conf:
                 is_downloaded = check_model_exists(m_conf.get('hf_repo_id'))
-                dl_tag = "" if is_downloaded else f" <span style='color:{warning}; font-weight:{strong_weight_css()};'>(Not Downloaded)</span>"
+                dl_tag = "" if is_downloaded else (
+                    f" <span style='color:{warning}; font-weight:{strong_weight_css()};'>"
+                    f"({tr('Not Downloaded')})</span>")
                 m_ui = f"{m_conf['ui_name']}{dl_tag}"
             else:
-                m_ui = f"{display_data.get('model_id', 'Unknown')} <span style='color:{danger}; font-weight:{strong_weight_css()};'>(Unknown/External)</span>"
+                m_ui = (f"{display_data.get('model_id', tr('Unknown'))} "
+                        f"<span style='color:{danger}; font-weight:{strong_weight_css()};'>"
+                        f"({tr('Unknown/External')})</span>")
 
             status = display_data.get('status', 'ready')
             status_color = danger if status == "corrupted" else (
                 warning if status == "building" else accent)
 
+            storage_text = tr("{count} files ({size} MB)").format(
+                count=display_data.get('doc_count', 0), size=display_data.get('size_mb', 0))
+
             info = (
-                f"<b>Project:</b> {display_data.get('name', 'Unknown')}<br>"
-                f"<b>Domain:</b> <span style='color:{accent}'>{display_data.get('domain', 'Gen')}</span><br>"
-                f"<b>Status:</b> <span style='color:{status_color}; font-weight:{strong_weight_css()};'>{status.upper()}</span><br>"
-                f"<b>Model:</b> {m_ui}<br>"
-                f"<b>Storage:</b> {display_data.get('doc_count', 0)} files ({display_data.get('size_mb', 0)} MB)"
+                f"<b>{tr('Project:')}</b> {display_data.get('name', tr('Unknown'))}<br>"
+                f"<b>{tr('Domain:')}</b> <span style='color:{accent}'>{display_data.get('domain', 'Gen')}</span><br>"
+                f"<b>{tr('Status:')}</b> <span style='color:{status_color}; font-weight:{strong_weight_css()};'>{tr(status.upper())}</span><br>"
+                f"<b>{tr('Model:')}</b> {m_ui}<br>"
+                f"<b>{tr('Storage:')}</b> {storage_text}"
             )
 
             if hasattr(self, 'lbl_kb_info'):
@@ -483,9 +509,10 @@ class ImportTool(BaseTool):
         """)
 
         # 挂载 SVG 图标
-        act_open = QAction(tm.icon("link", "text_main"), "Open Source File", self.widget)
-        act_rename = QAction(tm.icon("edit", "text_main"), "Rename (Stage)", self.widget)
-        act_del = QAction(tm.icon("delete", "danger"), f"Delete {len(rows)} items (Stage)", self.widget)
+        act_open = QAction(tm.icon("link", "text_main"), tr("Open Source File"), self.widget)
+        act_rename = QAction(tm.icon("edit", "text_main"), tr("Rename (Stage)"), self.widget)
+        act_del = QAction(tm.icon("delete", "danger"),
+                          tr("Delete {n} items (Stage)").format(n=len(rows)), self.widget)
 
         act_open.triggered.connect(lambda: self._handle_open(rows))
         act_rename.triggered.connect(lambda: self._stage_rename_dialog(rows[0]))
@@ -515,16 +542,17 @@ class ImportTool(BaseTool):
         base_name, ext = os.path.splitext(original_name)
 
         # 使用你提供的 BaseDialog
-        dlg = BaseDialog(self.widget, title="Rename File", width=400)
+        dlg = BaseDialog(self.widget, title=tr("Rename File"), width=400)
         inp = QLineEdit(os.path.splitext(old_display_name)[0])
         tm = ThemeManager()
         inp.setStyleSheet(
             f"background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('border')}; padding: 5px; border-radius: 4px;")
 
-        dlg.content_layout.addWidget(QLabel(f"New name (Extension '{ext}' will be auto-added):"))
+        dlg.content_layout.addWidget(QLabel(
+            tr("New name (Extension '{ext}' will be auto-added):").format(ext=ext)))
         dlg.content_layout.addWidget(inp)
-        dlg.add_button("Cancel", dlg.reject)
-        dlg.add_button("Confirm", dlg.accept, is_primary=True)
+        dlg.add_button(tr("Cancel"), dlg.reject)
+        dlg.add_button(tr("Confirm"), dlg.accept, is_primary=True)
 
         if dlg.exec():
             new_name = inp.text().strip()
@@ -550,16 +578,19 @@ class ImportTool(BaseTool):
         kb_status = data.get('status', 'ready') if data else 'ready'
         self._toggle_kb_actions(kb_selected, status=kb_status)
 
-        msg = f"Staged: {len(self.staged_add)} add, {len(self.staged_del)} del, {len(self.staged_rename)} rename"
+        msg = tr("Staged: {added} add, {deleted} del, {renamed} rename").format(
+            added=len(self.staged_add), deleted=len(self.staged_del),
+            renamed=len(self.staged_rename))
         if self.staged_meta:
-            msg += " | Info Edited"
+            msg += tr(" | Info Edited")
         if self.rebuild_required:
-            msg += " | FULL REBUILD"
+            msg += tr(" | FULL REBUILD")
 
         # 覆写提示信息：如果是损坏状态，强制提示用户该怎么做
         is_abnormal = (kb_status != "ready")
         if is_abnormal:
-            msg = f"KB IS {kb_status.upper()}. Locked. Please click 'Edit' -> 'Save' to rebuild, or 'Del'."
+            msg = tr("KB IS {status}. Locked. Please click 'Edit' -> 'Save' to rebuild, or 'Del'.") \
+                .format(status=tr(kb_status.upper()))
 
         self.lbl_staged_status.setText(msg)
 
@@ -589,8 +620,9 @@ class ImportTool(BaseTool):
             if conf and not check_model_exists(conf.get('hf_repo_id')):
                 dlg = StandardDialog(
                     self.widget,
-                    "Action Required",
-                    "The selected AI model weights are missing or incomplete. Please go to 'Global Settings' to download the model first.",
+                    tr("Action Required"),
+                    tr("The selected AI model weights are missing or incomplete. "
+                       "Please go to 'Global Settings' to download the model first."),
                     show_cancel=True
                 )
                 if dlg.exec():
@@ -599,7 +631,7 @@ class ImportTool(BaseTool):
                 return
 
         self.pd = ProgressDialog(
-            self.widget, "Synchronizing", "Synchronizing database and file index...",
+            self.widget, tr("Synchronizing"), tr("Synchronizing database and file index..."),
             telemetry_config={"cpu": True, "ram": True, "gpu": True, "net": False}
         )
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
@@ -620,7 +652,8 @@ class ImportTool(BaseTool):
             self.kb_manager.update_kb_info(self.current_kb_id, m['name'], m['description'], m['domain'])
             self.kb_manager.set_kb_status(self.current_kb_id, "ready")
 
-            self.pd.show_success_state("Info Updated", "Project metadata saved successfully.")
+            self.pd.show_success_state(tr("Info Updated"),
+                                       tr("Project metadata saved successfully."))
             self._clear_staging_state()
             GlobalSignals().kb_modified.emit(self.current_kb_id)
             return
@@ -663,8 +696,8 @@ class ImportTool(BaseTool):
 
         self.mark_dirty()
         self.refresh_kb_list()
-        StandardDialog(self.widget, "Task Terminated",
-                       "The process was interrupted. The library may be corrupted and require a full rebuild.").exec()
+        StandardDialog(self.widget, tr("Task Terminated"),
+                       tr("The process was interrupted. The library may be corrupted and require a full rebuild.")).exec()
 
     def _run_task_chain(self):
         # 必须要先连接信号，再启动任务
@@ -725,7 +758,8 @@ class ImportTool(BaseTool):
 
         if state == TaskState.SUCCESS.value:
             if self.pd:
-                self.pd.show_finish_state(True, "Success", "The library has been fully synchronized and indexed.")
+                self.pd.show_finish_state(True, tr("Success"),
+                                          tr("The library has been fully synchronized and indexed."))
                 self.pd = None
 
             if self.current_kb_id:
@@ -752,16 +786,18 @@ class ImportTool(BaseTool):
         )
 
         if self.pd:
-            self.pd.show_finish_state(False, "Process Halted", f"Operation ended: {msg}")
+            self.pd.show_finish_state(False, tr("Process Halted"),
+                                      tr("Operation ended: {msg}").format(msg=msg))
             self.pd = None
         else:
-            StandardDialog(self.widget, "Error", f"Operation failed: {msg}").exec()
+            StandardDialog(self.widget, tr("Error"), tr("Operation failed: {msg}").format(msg=msg)).exec()
 
         if is_model_error:
             dlg = StandardDialog(
                 self.widget,
-                title="Model Incomplete",
-                message="The required AI model files are missing or corrupted. Would you like to go to Settings to download them now?",
+                title=tr("Model Incomplete"),
+                message=tr("The required AI model files are missing or corrupted. "
+                           "Would you like to go to Settings to download them now?"),
                 show_cancel=True
             )
             if dlg.exec():
@@ -802,7 +838,9 @@ class ImportTool(BaseTool):
     def delete_current_kb(self):
         data = self.combo_kb.currentData()
         if not data: return
-        if StandardDialog(self.widget, "DANGER", f"Confirm deletion of '{data['name']}'?", show_cancel=True).exec():
+        if StandardDialog(self.widget, tr("DANGER"),
+                          tr("Confirm deletion of '{name}'?").format(name=data['name']),
+                          show_cancel=True).exec():
             self.logger.warning(f"Deleting Knowledge Base: '{data['name']}' (ID: {data['id']})")
             self.kb_manager.delete_kb(data['id'])
             self.current_kb_id = None
@@ -823,17 +861,19 @@ class ImportTool(BaseTool):
 
     def select_files(self):
         # 允许选择 PDF 和 Markdown
-        files, _ = open_file_names(self.widget, "Select Documents", "", "Documents (*.pdf *.md *.txt *.doc *.docx)")
+        files, _ = open_file_names(self.widget, tr("Select Documents"), "",
+                                   tr("Documents (*.pdf *.md *.txt *.doc *.docx)"))
         if not files: return
 
         if any(f.lower().endswith('.doc') for f in files):
             from src.ui.components.toast import ToastManager
-            ToastManager().show("Legacy .doc format detected. It will be skipped. Please convert to .docx", "warning")
+            ToastManager().show(tr("Legacy .doc format detected. It will be skipped. Please convert to .docx"),
+                                "warning")
 
         # 阈值警告
         if len(files) > 100:
-            if not StandardDialog(self.widget, "Large Batch",
-                                  f"You are importing {len(files)} files. This might take a while. Continue?",
+            if not StandardDialog(self.widget, tr("Large Batch"),
+                                  tr("You are importing {n} files. This might take a while. Continue?").format(n=len(files)),
                                   show_cancel=True).exec():
                 return
 
@@ -866,7 +906,8 @@ class ImportTool(BaseTool):
         cancel_flag = [False]
 
         if len(files) > 50:
-            pd = ProgressDialog(self.widget, "Checking Duplicates", "Scanning file signatures...", telemetry_config={})
+            pd = ProgressDialog(self.widget, tr("Checking Duplicates"),
+                                tr("Scanning file signatures..."), telemetry_config={})
             pd.sig_canceled.connect(lambda: cancel_flag.__setitem__(0, True))  # 绑定取消事件
             pd.show()
 
@@ -875,7 +916,8 @@ class ImportTool(BaseTool):
                 break
 
             QApplication.processEvents()
-            if pd: pd.update_progress(int((i / len(files)) * 100), f"Checking {os.path.basename(incoming_path)}...")
+            if pd: pd.update_progress(int((i / len(files)) * 100),
+                                      tr("Checking {name}...").format(name=os.path.basename(incoming_path)))
 
             incoming_size = os.path.getsize(incoming_path)
 
@@ -901,14 +943,15 @@ class ImportTool(BaseTool):
 
         if pd:
             if cancel_flag[0]:
-                pd.show_finish_state(False, "Cancelled", "File scanning was cancelled by user.")
+                pd.show_finish_state(False, tr("Cancelled"),
+                                     tr("File scanning was cancelled by user."))
                 return
             else:
                 pd.close_safe()
 
         if duplicate_count > 0:
             from src.ui.components.toast import ToastManager
-            ToastManager().show(f"Skipped {duplicate_count} duplicate files.", "warning")
+            ToastManager().show(tr("Skipped {n} duplicate files.").format(n=duplicate_count), "warning")
 
         if valid_files:
             self.staged_add.extend(valid_files)
@@ -920,9 +963,9 @@ class ImportTool(BaseTool):
         for r in reversed(rows):
             name = self.file_table.item(r, 0).text()
             status_item = self.file_table.item(r, 2)
-            status_text = status_item.text() if status_item else ""
+            status_key = status_item.data(Qt.UserRole) if status_item else None
 
-            if "Indexed" in status_text or "Renaming..." in status_text:
+            if status_key in ("indexed", "renaming"):
                 original_name = name
                 # 如果这个文件被重命名过，需要顺藤摸瓜找到它真正的原始名字
                 for k, v in self.staged_rename.items():
@@ -935,7 +978,7 @@ class ImportTool(BaseTool):
                 if original_name in self.staged_rename:
                     del self.staged_rename[original_name]
 
-            elif "Pending Save" in status_text:
+            elif status_key == "pending_save":
                 self.staged_add = [f for f in self.staged_add if os.path.basename(f) != name]
 
             self.file_table.removeRow(r)
@@ -983,15 +1026,15 @@ class ImportTool(BaseTool):
 
         path, _ = save_file_name(
             self.widget,
-            "Export Project",
+            tr("Export Project"),
             default_name,
-            "Scholar Navis Project (*.snp);;Zip Archive (*.zip)"
+            tr("Scholar Navis Project (*.snp);;Zip Archive (*.zip)")
         )
 
         if path:
             # 开启硬件监控进度条 (只需 CPU, RAM, IO，不需要网络和 GPU)
             self.pd = ProgressDialog(
-                self.widget, "Exporting Project", "Preparing to pack...",
+                self.widget, tr("Exporting Project"), tr("Preparing to pack..."),
                 telemetry_config={"cpu": True, "ram": True, "gpu": False, "net": False, "io": True}
             )
             self.pd.show()
@@ -1007,9 +1050,11 @@ class ImportTool(BaseTool):
 
     def _on_export_done(self, state, msg):
         if state == TaskState.SUCCESS.value:
-            self.pd.show_finish_state(True, "Export Success", "Project has been successfully exported.")
+            self.pd.show_finish_state(True, tr("Export Success"),
+                                      tr("Project has been successfully exported."))
         elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
-            self.pd.show_finish_state(False, "Export Halted", f"Task ended: {msg}")
+            self.pd.show_finish_state(False, tr("Export Halted"),
+                                      tr("Task ended: {msg}").format(msg=msg))
 
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_export_done)
@@ -1024,15 +1069,15 @@ class ImportTool(BaseTool):
     def import_external_kb(self):
         path, _ = open_file_name(
             self.widget,
-            "Import Project",
+            tr("Import Project"),
             "",
-            "Project Bundle (*.snp *.zip)"
+            tr("Project Bundle (*.snp *.zip)")
         )
 
         if path:
             # 开启硬件监控进度条
             self.pd = ProgressDialog(
-                self.widget, "Importing Project", "Reading archive...",
+                self.widget, tr("Importing Project"), tr("Reading archive..."),
                 telemetry_config={"cpu": True, "ram": True, "gpu": False, "net": False, "io": True}
             )
             self.pd.show()
@@ -1048,10 +1093,12 @@ class ImportTool(BaseTool):
 
     def _on_import_done(self, state, msg):
         if state == TaskState.SUCCESS.value:
-            self.pd.show_finish_state(True, "Import Success", "Project has been successfully imported.")
+            self.pd.show_finish_state(True, tr("Import Success"),
+                                      tr("Project has been successfully imported."))
             self.refresh_kb_list()
         elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
-            self.pd.show_finish_state(False, "Import Halted", f"Task ended: {msg}")
+            self.pd.show_finish_state(False, tr("Import Halted"),
+                                      tr("Task ended: {msg}").format(msg=msg))
 
         try:
             self.task_mgr.sig_state_changed.disconnect(self._on_import_done)
@@ -1066,7 +1113,7 @@ class ImportTool(BaseTool):
 
     def download_required_model(self):
         self.pd = ProgressDialog(
-            self.widget, "Downloader", "Connecting...",
+            self.widget, tr("Downloader"), tr("Connecting..."),
             telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": True}
         )
         self.pd.show()
@@ -1080,12 +1127,14 @@ class ImportTool(BaseTool):
                 pass
 
             if state == TaskState.SUCCESS.value:
-                self.pd.show_success_state("Complete", "Model downloaded successfully.")
+                self.pd.show_success_state(tr("Complete"), tr("Model downloaded successfully."))
                 self.refresh_kb_list()  # 下载完刷新一下状态
             elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
                 self.pd.close_safe()
-                err_text = msg if state == TaskState.FAILED.value else "Download task was cancelled."
-                StandardDialog(self.widget, "Download Halted", f"Status: {err_text}").exec()
+                err_text = (msg if state == TaskState.FAILED.value
+                            else tr("Download task was cancelled."))
+                StandardDialog(self.widget, tr("Download Halted"),
+                               tr("Status: {text}").format(text=err_text)).exec()
 
         self.task_mgr.sig_state_changed.connect(on_download_state_changed)
         self.pd.sig_canceled.connect(self.task_mgr.cancel_task)
@@ -1111,4 +1160,5 @@ class ImportTool(BaseTool):
                         shutil.copy2(source_path, temp_file_path)
                         FileService.open_file(temp_file_path)
                     except Exception as e:
-                        StandardDialog(self.widget, "Error", f"Failed to open file: {e}").exec()
+                        StandardDialog(self.widget, tr("Error"),
+                                       tr("Failed to open file: {err}").format(err=e)).exec()

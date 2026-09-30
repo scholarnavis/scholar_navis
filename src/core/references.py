@@ -167,7 +167,9 @@ class ReferenceItem:
     * ``note``     —— 引用理由 / 上下文（可选）；
     * ``path``     —— 本地文件路径（KB 文档；用于内部查看器跳转）；
     * ``page``     —— 本地文档页码；
-    * ``kind``     —— ``reference`` | ``local_document`` | ``web``。
+    * ``kind``     —— ``reference`` | ``local_document`` | ``web``；
+    * ``verified`` —— ``snippet`` 是否经 :mod:`~src.core.evidence` 逐字校验命中
+      （True 时 UI 标注 "verbatim"；False 只可能是 snippet 为空）。
     """
 
     index: int
@@ -183,6 +185,7 @@ class ReferenceItem:
     path: str = ""
     page: int = 1
     kind: str = "reference"
+    verified: bool = False
 
     # ------------------------------------------------------------------ #
     #  规范化

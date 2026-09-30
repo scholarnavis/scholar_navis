@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
+from src.core.i18n import tr
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
@@ -42,8 +43,8 @@ class ChatSendFlowMixin:
         #     全部入口），防止与交互卡的作答流程互相干扰造成重复发送。
         if getattr(self, '_awaiting_user_input', False):
             ToastManager().show(
-                "Please answer the pending question card above first "
-                "(or press Stop to dismiss it).", "warning")
+                tr("Please answer the pending question card above first "
+                   "(or press Stop to dismiss it)."), "warning")
             self.logger.debug("Send blocked: turn is waiting for an interactive-card answer.")
             return
 
@@ -196,7 +197,7 @@ class ChatSendFlowMixin:
         self.input_container.set_send_locked(True, "Generating a response, please wait...")
         self.input_container.btn_stop.setVisible(True)
         self.input_container.btn_stop.setEnabled(True)
-        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setText(tr("Stop"))
         self.input_container.btn_stop.setToolTip("")
         self.set_controls_enabled(False)
 
@@ -260,7 +261,7 @@ class ChatSendFlowMixin:
 
     def handle_edit_resend(self, index, new_text):
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot edit: The current library has been modified. Please clear chat."), "warning")
             old_msg = self.history[index]
             for i in range(self.chat_layout.count()):
                 item = self.chat_layout.itemAt(i)
@@ -277,7 +278,7 @@ class ChatSendFlowMixin:
                 break
 
         if index != last_user_idx:
-            ToastManager().show("You can only edit your most recent message.", "warning")
+            ToastManager().show(tr("You can only edit your most recent message."), "warning")
             return
 
         old_msg = self.history[index]
@@ -346,10 +347,10 @@ class ChatSendFlowMixin:
         feed it through the normal send path.
         """
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         if not final_requirement or not final_requirement.strip():
-            ToastManager().show("Empty plotting requirement.", "warning")
+            ToastManager().show(tr("Empty plotting requirement."), "warning")
             return
 
         text = final_requirement.strip()
@@ -363,11 +364,11 @@ class ChatSendFlowMixin:
         模型凭历史中的工具调用即可将答案与其问题对上，继续任务。
         """
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         answer = (answer or "").strip()
         if not answer:
-            ToastManager().show("Empty answer.", "warning")
+            ToastManager().show(tr("Empty answer."), "warning")
             return
         # 卡片作答即本轮继续：解除等待锁定，走正常发送管线。
         self._awaiting_user_input = False
@@ -382,11 +383,11 @@ class ChatSendFlowMixin:
             plan_text: 卡片中编辑后的编号计划文本（一行一个子问题）。
         """
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         plan_text = (plan_text or "").strip()
         if not plan_text:
-            ToastManager().show("The plan is empty.", "warning")
+            ToastManager().show(tr("The plan is empty."), "warning")
             return
         # 计划确认即本轮继续：解除等待锁定。
         self._awaiting_user_input = False
@@ -399,7 +400,7 @@ class ChatSendFlowMixin:
     def handle_deep_plan_skip(self, original_query: str):
         """用户跳过深度拆解：本轮按普通单 Agent 直接作答。"""
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         original_query = (original_query or "").strip()
         if not original_query:
@@ -422,11 +423,11 @@ class ChatSendFlowMixin:
             self.input_container.btn_stop.setVisible(False)
             self.input_container.btn_send.setVisible(True)
             self.logger.info("Waiting state dismissed by user; normal chat restored.")
-            ToastManager().show("Waiting dismissed. You can chat normally now.", "info")
+            ToastManager().show(tr("Waiting dismissed. You can chat normally now."), "info")
             return
 
         self.input_container.btn_stop.setEnabled(False)
-        self.input_container.btn_stop.setText("Stopping...")
+        self.input_container.btn_stop.setText(tr("Stopping..."))
 
         if hasattr(self, '_render_timer'):
             self._render_timer.stop()
@@ -444,13 +445,14 @@ class ChatSendFlowMixin:
 
     def _trigger_follow_up(self, text):
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: The current library has been modified. Please clear chat.", "warning")
+            # 与上面四处统一为同一译文键（原大小写不一致会造成键分裂）
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         self.process_send(text)
 
     def _edit_follow_up(self, text):
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot edit: The current library has been modified. Please clear chat."), "warning")
             return
         self.input_container.set_text(text)
 

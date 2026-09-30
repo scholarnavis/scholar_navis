@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QGraphicsOpacityEffect, QHBoxLayout, QLabel,
 
 from src.core.kb_manager import DatabaseManager, KBManager
 from src.core.core_task import TaskManager, TaskMode
+from src.core.i18n import tr
 from src.core.models_registry import get_model_conf
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager, overlay_scrollbar_qss
@@ -31,16 +32,18 @@ from src.tools.base_tool import BaseTool
 from src.tools.chat_input_widgets import (ChatDropTargetWidget,
                                           ChatInputContainer)
 from src.tools.chat_mixins import (ChatAttachmentsMixin, ChatBubblesMixin,
-                                   ChatResponseFlowMixin, ChatSendFlowMixin)
+                                   ChatResponseFlowMixin, ChatSearchMixin,
+                                   ChatSendFlowMixin)
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.model_selector import ModelSelectorWidget
+from src.ui.components.search import SearchBar
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
 
 
-class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
+class ChatTool(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin,
                ChatBubblesMixin, ChatAttachmentsMixin, BaseTool):
     # 由 get_ui_widget 与信号槽流程创建，仅作静态检查声明
     top_bar_wrapper: QWidget
@@ -63,6 +66,8 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
     follow_up_shelf: QWidget
     follow_up_shelf_layout: QVBoxLayout
     input_container: ChatInputContainer
+    btn_toggle_search: QPushButton
+    search_bar: SearchBar  # 见 src/ui/components/search.py（共享搜索条）
     _render_timer: QTimer
     _is_rendering_dirty: bool
     kb_id: str
@@ -112,7 +117,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         row1_layout = QHBoxLayout()
         # enable_vision=True：允许为聊天单独配置 Vision 模型，当主模型不支持
         # 图片时，可由该模型把附件图片转成文字描述（Auto 表示跟随主模型）。
-        self.model_selector = ModelSelectorWidget(label_text=" Main Model:", config_key="chat_llm_id",
+        self.model_selector = ModelSelectorWidget(label_text=tr(" Main Model:"), config_key="chat_llm_id",
                                                   model_key="chat_model_name", enable_vision=True)
 
         self.collapsed_placeholder = QLabel(" ")
@@ -123,7 +128,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
 
         # 收起按钮放在第 2 行（与 KB 同一行）；Compute Device 状态已按要求移除
         tm = ThemeManager()
-        self.btn_ribbon_state = QPushButton(" Pinned")
+        self.btn_ribbon_state = QPushButton(tr(" Pinned"))
         self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
         self.btn_ribbon_state.setCursor(Qt.PointingHandCursor)
         self.btn_ribbon_state.setFixedWidth(90)
@@ -131,7 +136,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
 
         # 顶栏两行：第 1 行 = 主模型（已含 Vision），第 2 行 = KB + 收起按钮。
         # Compute Device 与 Translator 均按要求移除。
-        self.lbl_kb = QLabel(" KB:")
+        self.lbl_kb = QLabel(tr(" KB:"))
         self.combo_kb = BaseComboBox(max_width=240)
         self.refresh_kb_list()
 
@@ -144,6 +149,9 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
 
         top_bar.addLayout(row1_layout)
         top_bar.addLayout(row2_layout)
+
+        # 会话搜索：按钮插入 row2（收起按钮前），搜索条在顶栏下方整行展开
+        self.setup_chat_search(row2_layout, top_bar)
 
         main_layout.addWidget(self.top_bar_wrapper)
 
@@ -162,15 +170,15 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
             self.config.save_settings()
 
             if state == "Pinned":
-                self.btn_ribbon_state.setText(" Pinned")
+                self.btn_ribbon_state.setText(tr(" Pinned"))
                 self.btn_ribbon_state.setIcon(tm.icon("keep", "text_muted"))
                 set_ribbon_visible(True)
             elif state == "Hover":
-                self.btn_ribbon_state.setText(" Hover")
+                self.btn_ribbon_state.setText(tr(" Hover"))
                 self.btn_ribbon_state.setIcon(tm.icon("menu", "text_muted"))
                 set_ribbon_visible(False)
             elif state == "Collapsed":
-                self.btn_ribbon_state.setText(" Collapsed")
+                self.btn_ribbon_state.setText(tr(" Collapsed"))
                 self.btn_ribbon_state.setIcon(tm.icon("down", "text_muted"))
                 set_ribbon_visible(False)
 
@@ -353,7 +361,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         self.combo_kb.blockSignals(True)
         self.combo_kb.clear()
 
-        self.combo_kb.addItem("No Knowledge Base (Direct Chat)", "none")
+        self.combo_kb.addItem(tr("No Knowledge Base (Direct Chat)"), "none")
 
         kbs = self.kb_manager.get_all_kbs()
         target_idx = 0  # 默认选中 "none"
@@ -362,7 +370,8 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
             if kb.get('status') == 'ready':
                 m = get_model_conf(kb.get('model_id'), "embedding")
                 m_ui = m['ui_name'] if m else kb.get('model_id', '?')
-                display_text = f"{kb['name']}   [Model: {m_ui} | Docs: {kb.get('doc_count', 0)}]"
+                display_text = tr("{name}   [Model: {model} | Docs: {docs}]").format(
+                    name=kb['name'], model=m_ui, docs=kb.get('doc_count', 0))
                 self.combo_kb.addItem(display_text, kb)
                 if kb['id'] == curr_id:
                     target_idx = self.combo_kb.count() - 1
@@ -401,7 +410,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
             self.is_locked = True
             if hasattr(self, 'input_container'):
                 self.input_container.lock_input()
-            ToastManager().show("The knowledge base was modified. Chat is currently locked.", "warning")
+            ToastManager().show(tr("The knowledge base was modified. Chat is currently locked."), "warning")
 
     def _make_overlay_button(self, icon_name: str):
         """创建悬浮导航圆按钮（40x40 圆形，透明度渐隐动画）。
@@ -519,6 +528,8 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         # 布局高度变化后延迟一帧重检：singleShot(0) 排在布局事件之后执行，
         # 此时 scrollbar range 已是最终值，误显的按钮得以收敛隐藏
         QTimer.singleShot(0, self._check_scroll_position)
+        # 布局变化可能意味着新气泡或流式内容增长，搜索展开时节流重扫命中表
+        self._schedule_chat_search_refresh()
 
     def _find_jump_top_target(self):
         """定位当前正在阅读的长 AI 回答。

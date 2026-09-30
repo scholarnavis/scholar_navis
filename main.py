@@ -23,6 +23,7 @@ try:
     from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication, QMessageBox
     from src.core.logger import setup_logger
     from src.core.core_task import TaskManager, TaskMode, wait_for_running_tasks
+    from src.core.i18n import tr
 except ImportError as e:
     # NixOS：PyPI 的 PySide6 依赖标准路径下的系统库，先用 steam-run 自动接管；
     # 接管成功时进程已被替换，下面不会执行。
@@ -120,53 +121,53 @@ class StartupWorker(QThread):
             phase, phase_started = next_phase, now
 
         try:
-            self.sig_progress.emit(5, "Detecting hardware info...")
+            self.sig_progress.emit(5, tr("Detecting hardware info..."))
             time.sleep(0.1)
             phase_done("model registry import")
 
-            self.sig_progress.emit(6, "Loading model registry framework...")
+            self.sig_progress.emit(6, tr("Loading model registry framework..."))
             time.sleep(0.1)
             from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, \
                 ensure_onnx_model
             phase_done("config/network import")
 
-            self.sig_progress.emit(7, "Loading user settings...")
+            self.sig_progress.emit(7, tr("Loading user settings..."))
             time.sleep(0.1)
             from src.core.network_worker import setup_global_network_env
             from src.core.config_manager import ConfigManager
             from src.core.theme_manager import ThemeManager
 
-            self.sig_progress.emit(10, "Loading system configuration & network profiles...")
+            self.sig_progress.emit(10, tr("Loading system configuration & network profiles..."))
             time.sleep(0.1)
             cfg_mgr = ConfigManager()
             _ = cfg_mgr.user_settings
             setup_global_network_env()
             phase_done("hardware warmup dispatch")
 
-            self.sig_progress.emit(25, "Scanning local hardware & compute engines (Background)...")
+            self.sig_progress.emit(25, tr("Scanning local hardware & compute engines (Background)..."))
             time.sleep(0.1)
             # 交给主线程发起（见 sig_start_hw_warmup 的说明）
             self.sig_start_hw_warmup.emit()
             phase_done("theme assets")
 
-            self.sig_progress.emit(40, "Mounting theme cache and UI assets...")
+            self.sig_progress.emit(40, tr("Mounting theme cache and UI assets..."))
             time.sleep(0.1)
             tm = ThemeManager()
             _ = tm.color('bg_main')
             phase_done("mcp metadata")
 
-            self.sig_progress.emit(60, "Loading MCP Subsystem metadata...")
+            self.sig_progress.emit(60, tr("Loading MCP Subsystem metadata..."))
             time.sleep(0.1)
             cfg_mgr.load_mcp_servers()
             phase_done("UI/ML import")
 
-            self.sig_progress.emit(80, "Pre-loading UI components & ML libraries...")
+            self.sig_progress.emit(80, tr("Pre-loading UI components & ML libraries..."))
             time.sleep(0.1)
             from src.ui.main_window import MainWindow
             from src.core.mcp_manager import MCPManager
             phase_done("ready")
 
-            self.sig_progress.emit(100, "Ready. Building workspace...")
+            self.sig_progress.emit(100, tr("Ready. Building workspace..."))
             time.sleep(0.1)
             self.sig_finished.emit()
 
@@ -222,14 +223,14 @@ class SplashScreen(QWidget):
         self.title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title)
 
-        self.subtitle = QLabel("AI-Powered Research Assistant")
+        self.subtitle = QLabel(tr("AI-Powered Research Assistant"))
         self.subtitle.setStyleSheet(f"color: {text_sub}; font-size: 14px; border: none; font-style: italic;")
         self.subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.subtitle)
 
         layout.addStretch()
 
-        self.lbl_status = QLabel("Initializing engine...")
+        self.lbl_status = QLabel(tr("Initializing engine..."))
         self.lbl_status.setStyleSheet(f"color: {text_sub}; font-size: 12px; border: none;")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_status)
@@ -286,7 +287,7 @@ class AppController(QObject):
     @Slot()
     def on_startup_finished(self):
         self.splash.progress.setValue(100)
-        self.splash.lbl_status.setText("Ready. Initializing workspace...")
+        self.splash.lbl_status.setText(tr("Ready. Initializing workspace..."))
         QApplication.processEvents()
         QTimer.singleShot(50, self._build_and_show_main_window)
 

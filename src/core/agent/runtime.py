@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional
 
 from src.core import plot_styles
+from src.core.evidence import EvidenceStore
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
 
@@ -287,9 +288,11 @@ _ALWAYS_TOOLS = {
                 "section — the app generates the list from this tool call. Call this ONCE, "
                 "passing EVERY source you intend to cite. Each item is an object with: "
                 "'key' (required, short ASCII slug you used inline), 'title' (required), "
-                "'authors', 'year', 'journal', 'doi', 'url', 'snippet' (the exact "
-                "supporting sentence from the source), and 'note' (optional one-line "
-                "reason). Report only real sources that came from your context or tool "
+                "'authors', 'year', 'journal', 'doi', 'url', 'snippet' (a VERBATIM "
+                "excerpt copied character-for-character from a tool result or the "
+                "provided Context — never paraphrased or written from memory; the app "
+                "verifies and replaces/drops non-verbatim passages), and 'note' "
+                "(optional one-line reason). Report only real sources that came from your context or tool "
                 "results; never fabricate DOIs, authors or years."
             ),
             "parameters": {
@@ -316,8 +319,13 @@ _ALWAYS_TOOLS = {
                                 "url": {"type": "string", "description": "Canonical link, if any."},
                                 "snippet": {
                                     "type": "string",
-                                    "description": ("The exact supporting sentence/passage from the "
-                                                    "source, for traceability."),
+                                    "description": ("A VERBATIM excerpt copied character-for-"
+                                                    "character from a tool result or from the "
+                                                    "provided Context (abstract, passage, or "
+                                                    "chunk). Do NOT paraphrase, summarize, or "
+                                                    "write from memory: the app verifies the "
+                                                    "text against captured sources and replaces "
+                                                    "or drops non-verbatim passages."),
                                 },
                                 "note": {"type": "string",
                                          "description": "Optional one-line reason it is cited."},
@@ -342,7 +350,7 @@ class AgentRuntime:
 
     def __init__(self, main_llm, skill_manager, mcp_manager, planner=None, cite_collector=None, log_fn=None,
                  plot_registry: Optional[Dict[str, Dict]] = None, plot_seq: int = 0,
-                 reference_registry=None):
+                 reference_registry=None, evidence_store: Optional[EvidenceStore] = None):
         self.main_llm = main_llm
         self.skill_manager = skill_manager
         self.mcp_manager = mcp_manager
@@ -358,6 +366,9 @@ class AgentRuntime:
         # 会话级参考文献注册表（唯一编号来源）：由任务层创建并注入，本地 KB 文档、
         # 在线 MCP 来源与 cite_references 工具提交的条目共用同一编号空间。
         self.reference_registry = reference_registry
+        # 会话级逐字证据库：收集工具结果 / KB chunk 中的原文，用于校验并强制
+        # cite_references 提交的 snippet 为来源逐字内容（未注入时本地兜底）。
+        self.evidence_store = evidence_store or EvidenceStore()
         # log_fn(level: str, msg: str) : optional logger hook (e.g. ChatTask.send_log)
         self.log_fn = log_fn or (lambda level, msg: None)
         # plot_id -> {script_path, code_path, data_path, chart_title, chart_type,
@@ -997,9 +1008,10 @@ class AgentRuntime:
             args = parsed[idx]["args"]
             self._emit_tool_start(name, args, emit_token)
             try:
-                results[idx] = self._truncate(
-                    self._dispatch_tool(name, args, emit_token), self._tool_result_chars
-                )
+                raw = self._dispatch_tool(name, args, emit_token)
+                # 截断前采集逐字原文：截断后的 head+tail 已不能保证 snippet 可校验。
+                self._harvest_evidence(raw)
+                results[idx] = self._truncate(raw, self._tool_result_chars)
             except Exception as e:
                 logger.error(f"Tool '{name}' raised unexpectedly: {e}")
                 results[idx] = f"[TOOL ERROR] Execution of '{name}' raised: {e}"
@@ -1681,6 +1693,7 @@ class AgentRuntime:
 
         entries = []
         auto_seq = 0
+        replaced = cleared = 0
         for entry in payloads:
             item = ReferenceItem.from_ai_payload(entry, index=0)
             if not (item.title or item.url or item.doi or item.path):
@@ -1689,6 +1702,11 @@ class AgentRuntime:
                 # 模型漏填 key：兜底生成一个（正文若未用该 key 则此条不会被引用）。
                 auto_seq += 1
                 item.key = f"ref{auto_seq}"
+            had_snippet = bool(item.snippet)
+            if self._enforce_verbatim_snippet(item):
+                replaced += 1
+            elif had_snippet and not item.snippet:
+                cleared += 1
             self.reference_registry.add(item)
             entries.append({
                 "key": item.key,
@@ -1704,7 +1722,9 @@ class AgentRuntime:
             }, ensure_ascii=False)
 
         self.log_fn("INFO", f"References registered: {len(entries)} item(s) -> "
-                            f"{[e['key'] for e in entries]}")
+                            f"{[e['key'] for e in entries]}"
+                            + (f" (snippet rewritten: {replaced}, dropped: {cleared})"
+                               if replaced or cleared else ""))
         return json.dumps({
             "status": "success",
             "references": entries,
@@ -1715,6 +1735,44 @@ class AgentRuntime:
                 "References/Bibliography section yourself."
             ),
         }, ensure_ascii=False)
+
+    def _enforce_verbatim_snippet(self, item) -> bool:
+        """强制引用条目的支撑原文（snippet）为来源逐字内容（唯一执行点）。
+
+        判定与处置（与 :mod:`~src.core.evidence` 的逐字标准一致）：
+
+        * snippet 逐字命中已采集的原文（含省略号切分的片段级命中）：
+          保留模型版本并置 ``verified=True``；
+        * 不逐字、但能按 DOI / URL / 标题定位到已采集原文：
+          用程序持有的原文**覆盖**模型版本（不信任模型复述），置 ``verified=True``；
+        * 无任何原文可定位：清空 snippet（UI 显示"未记录支撑原文"），
+          模型的改写/凭记忆文本绝不进入溯源链路。
+
+        :return: True 表示 snippet 被程序改写（覆盖），False 表示保留或清空。
+        """
+        if not item.snippet:
+            return False
+        store = self.evidence_store
+        if store.verify_snippet(item.snippet, doi=item.doi, url=item.url,
+                                title=item.title) is not None:
+            item.verified = True
+            return False
+        held = store.source_for(doi=item.doi, url=item.url, title=item.title)
+        if held:
+            self.log_fn(
+                "INFO",
+                f"Citation [{item.key}] snippet was not verbatim; replaced with the "
+                f"captured source text ({len(held)} chars).")
+            item.snippet = held
+            item.verified = True
+            return True
+        self.log_fn(
+            "WARNING",
+            f"Citation [{item.key}] snippet could not be verified verbatim against any "
+            f"captured source text; passage dropped (reference kept).")
+        item.snippet = ""
+        item.verified = False
+        return False
 
     def _handle_ask_user(self, args: dict, emit_token) -> str:
         """Show an ask-user clarification card and pause the task for user input.
@@ -1902,6 +1960,50 @@ class AgentRuntime:
     # ------------------------------------------------------------------ #
     #  Citation extraction
     # ------------------------------------------------------------------ #
+    #: 工具结果条目中可作为"逐字原文"的字段（按优先级取第一个非空值）。
+    #: PubMed 检索列表返回 "Fetch via fetch_pubmed_abstract." 占位串，须跳过。
+    _EVIDENCE_TEXT_KEYS = ("abstract", "abstractText", "snippet", "summary", "content")
+    _EVIDENCE_URL_KEYS = ("url", "pdf_url", "landing_page_url", "link")
+    _EVIDENCE_TITLE_KEYS = ("title", "name")
+
+    def _harvest_evidence(self, raw: str) -> None:
+        """把工具结果中的逐字原文（摘要/片段）采集进证据库（截断前调用）。
+
+        只解析 JSON 结构（``{"results": [...]}`` 列表形或单条 dict 形），纯文本
+        结果直接跳过。防御式实现：任何解析失败都不影响工具结果本身。
+        """
+        if not isinstance(raw, str):
+            return
+        if not raw.lstrip().startswith(("{", "[")):
+            return
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return
+        if isinstance(data, dict):
+            items = data.get("results") if isinstance(data.get("results"), list) else [data]
+        elif isinstance(data, list):
+            items = data
+        else:
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            text = ""
+            for key in self._EVIDENCE_TEXT_KEYS:
+                val = str(item.get(key) or "").strip()
+                if val and not val.startswith("Fetch via"):
+                    text = val
+                    break
+            if not text:
+                continue
+            url = next((str(item.get(k) or "").strip()
+                        for k in self._EVIDENCE_URL_KEYS if item.get(k)), "")
+            title = next((str(item.get(k) or "").strip()
+                          for k in self._EVIDENCE_TITLE_KEYS if item.get(k)), "")
+            self.evidence_store.add_source(
+                text, doi=str(item.get("doi") or ""), url=url, title=title)
+
     def _collect_mcp_citations(self, tool_name: str, result: str) -> str:
         """
         Parse MCP JSON results for online sources (url / title) and register
@@ -1928,7 +2030,8 @@ class AgentRuntime:
                             "path": source_url,
                             "page": 1,
                             "name": f"[Online] {source_title}",
-                            "search_text": item.get("abstract", "")[:100],
+                            # 完整原文（不再截断）：snippet 必须是来源逐字内容。
+                            "search_text": str(item.get("abstract") or ""),
                         })
                         if ref_id:
                             item["_mcp_cite_id"] = ref_id

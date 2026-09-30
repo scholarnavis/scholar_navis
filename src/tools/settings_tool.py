@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QPushButton, QScrollArea,
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
 from src.core.device_manager import DeviceManager
+from src.core.i18n import AUTO, tr
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.settings_tasks import HWDetectTask
@@ -132,17 +133,17 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         # Bottom Button Area
         btn_layout = QHBoxLayout()
 
-        self.btn_undo = QPushButton(" Revert Changes")
+        self.btn_undo = QPushButton(tr(" Revert Changes"))
         self.btn_undo.clicked.connect(self.on_undo_clicked)
         self.btn_undo.setEnabled(False)
 
-        self.btn_save = QPushButton(" Save Settings")
+        self.btn_save = QPushButton(tr(" Save Settings"))
         self.btn_save.clicked.connect(self.on_save_clicked)
 
-        self.btn_export = QPushButton(" Export Config")
+        self.btn_export = QPushButton(tr(" Export Config"))
         self.btn_export.clicked.connect(self.on_export_clicked)
 
-        self.btn_import = QPushButton(" Import Config")
+        self.btn_import = QPushButton(tr(" Import Config"))
         self.btn_import.clicked.connect(self.on_import_clicked)
 
         btn_layout.addWidget(self.btn_export)
@@ -183,6 +184,7 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.combo_device.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_theme.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_log.currentIndexChanged.connect(self._mark_unsaved)
+        self.combo_language.currentIndexChanged.connect(self._mark_unsaved)
 
         # API Server listeners
         self.input_api_host.textChanged.connect(self._mark_unsaved)
@@ -259,11 +261,12 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         if getattr(self, '_is_loading', False): return
         if not self.btn_undo.isEnabled():
             self.btn_undo.setEnabled(True)
-            self.btn_save.setText(" Save Settings*")
+            # 复用同一译文键，仅追加"未保存"星号，避免两处各写一份文案
+            self.btn_save.setText(tr(" Save Settings") + "*")
 
     def _clear_unsaved(self):
         self.btn_undo.setEnabled(False)
-        self.btn_save.setText(" Save Settings")
+        self.btn_save.setText(tr(" Save Settings"))
 
     def _apply_theme(self):
         if not self.widget: return
@@ -368,6 +371,9 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
 
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
+        idx_lang = self.combo_language.findData(self.config.user_settings.get("language", AUTO))
+        if idx_lang >= 0:
+            self.combo_language.setCurrentIndex(idx_lang)
 
         if hasattr(self, '_load_mcp_servers_to_ui'):
             self._load_mcp_servers_to_ui()

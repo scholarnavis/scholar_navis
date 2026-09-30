@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.core_task import TaskManager, TaskMode
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager, strong_weight_css, title_weight_css
 from src.core.version import (
     __app_name__,
@@ -81,7 +82,8 @@ class AboutTool(BaseTool):
         self.lbl_desc.setAlignment(Qt.AlignCenter)
         self.lbl_desc.setWordWrap(True)
 
-        self.lbl_version = QLabel(f"Current Release: v{__version__}")
+        self.lbl_version = QLabel(
+            tr("Current Release: v{version}").format(version=__version__))
         self.lbl_version.setAlignment(Qt.AlignCenter)
         self.lbl_version.setCursor(Qt.PointingHandCursor)
         # Hidden entry: click the version label 5 times to open developer mode.
@@ -116,7 +118,7 @@ class AboutTool(BaseTool):
         self.lbl_disclaimer_text.setWordWrap(True)
         self.lbl_disclaimer_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-        disclaimer_text = (
+        disclaimer_text = tr(
             "<b>IMPORTANT DISCLAIMER</b><br><br>"
             "Scholar Navis uses Large Language Models (LLMs). While augmented with RAG and MCP, "
             "AI-generated content may still contain <b>inaccuracies or hallucinations</b>. Users are <b>strictly required</b> "
@@ -137,10 +139,10 @@ class AboutTool(BaseTool):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
 
-        self.btn_web = QPushButton(" Website")
-        self.btn_git = QPushButton(" GitHub")
-        self.btn_license = QPushButton(" Licenses")
-        self.btn_api = QPushButton(" Data Providers")
+        self.btn_web = QPushButton(tr(" Website"))
+        self.btn_git = QPushButton(tr(" GitHub"))
+        self.btn_license = QPushButton(tr(" Licenses"))
+        self.btn_api = QPushButton(tr(" Data Providers"))
 
         for btn in [self.btn_web, self.btn_git, self.btn_license, self.btn_api]:
             btn.setCursor(Qt.PointingHandCursor)
@@ -162,13 +164,14 @@ class AboutTool(BaseTool):
         # 版权/许可行：公司名取自 version.py 的 __company__，年份取当前年份 ——
         # 原先公司名与年份都硬编码在字符串里，改公司名或跨年后必须改代码。
         self.lbl_copy = QLabel(
-            f"Licensed under AGPL-3.0 | © {datetime.date.today().year} {__company__}")
+            tr("Licensed under AGPL-3.0 | © {year} {company}").format(
+                year=datetime.date.today().year, company=__company__))
         self.lbl_copy.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_copy)
 
-        self.lbl_third_party = QLabel(
+        self.lbl_third_party = QLabel(tr(
             "Third-party components are listed under Licenses, "
-            "including the optional R runtime and its plotting packages.")
+            "including the optional R runtime and its plotting packages."))
         self.lbl_third_party.setAlignment(Qt.AlignCenter)
         self.lbl_third_party.setWordWrap(True)
         layout.addWidget(self.lbl_third_party)
@@ -185,7 +188,8 @@ class AboutTool(BaseTool):
         self._version_click_count += 1
         remaining = 5 - self._version_click_count
         if remaining > 0:
-            self.lbl_version.setToolTip(f"Click {remaining} more time(s) to open developer mode")
+            self.lbl_version.setToolTip(
+                tr("Click {n} more time(s) to open developer mode").format(n=remaining))
         else:
             self._version_click_count = 0
             self.lbl_version.setToolTip("")
@@ -256,13 +260,13 @@ class AboutTool(BaseTool):
         link_color = tm.color('accent')
         muted_color = tm.color('text_muted')
         link_style = f"color: {link_color}; text-decoration: underline;"
-        channel_note = " (dev channel)" if getattr(self, '_channel', '') == 'dev' else ""
+        channel_note = tr(" (dev channel)") if getattr(self, '_channel', '') == 'dev' else ""
 
-        html = (f'<span style="color: {base_color};">New version v{self._latest_version}'
-                f'{channel_note} available!</span> '
-                f'<a href="{_RELEASE_NOTES_URL}" style="{link_style}">Release notes</a>'
+        html = (f'<span style="color: {base_color};">'
+                f'{tr("New version {version}{note} available!").format(version=f"v{self._latest_version}", note=channel_note)}</span> '
+                f'<a href="{_RELEASE_NOTES_URL}" style="{link_style}">{tr("Release notes")}</a>'
                 f'<span style="color: {muted_color};"> · </span>'
-                f'<a href="{self._dl_url}" style="{link_style}">Download</a>')
+                f'<a href="{self._dl_url}" style="{link_style}">{tr("Download")}</a>')
         self.lbl_update.setText(html)
 
 

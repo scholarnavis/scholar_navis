@@ -440,6 +440,10 @@ class CitationPopup(QWidget):
         self._btn_close.setVisible(full)
         self._snippet_header.setVisible(full)
         self._snippet.setVisible(full)
+        # 逐字标识：verified 由程序侧逐字校验写入（见 src/core/evidence.py），
+        # 只有经校验的原文才带该标注，与模型的复述文字明确区分。
+        self._snippet_title.setText(
+            "Cited passage · verbatim" if self._data.get("verified") else "Cited passage")
         note = str(self._data.get("note") or "").strip()
         self._lbl_note.setVisible(full and bool(note))
         self._lbl_note.setText(f"Why cited: {note}" if note else "")

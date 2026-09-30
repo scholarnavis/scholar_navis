@@ -5,6 +5,7 @@
 """
 
 from src.core.core_task import TaskManager, TaskMode
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager
 from src.task.settings_tasks import FetchModelsTask, TestApiTask
 from src.ui.components.dialog import (AddModelDialog, ProgressDialog,
@@ -25,7 +26,7 @@ class LlmModelOpsMixin:
 
         provider_params = self.editor_provider_params.extract_data()
         if not provider_params:
-            ToastManager().show("Provider has no parameters to copy.", "info")
+            ToastManager().show(tr("Provider has no parameters to copy."), "info")
             return
 
         model_params = self.editor_model_params.extract_data()
@@ -40,18 +41,19 @@ class LlmModelOpsMixin:
 
             if name in model_params_dict:
                 m_param = model_params_dict[name]
-                msg = (
-                    f"Parameter '{name}' already exists in this model.\n\n"
-                    f"【Current Model Parameter】\n"
-                    f"  • Type: {m_param.get('type')}\n"
-                    f"  • Value: {m_param.get('value')}\n\n"
-                    f"【Provider Parameter to Copy】\n"
-                    f"  • Type: {p_param.get('type')}\n"
-                    f"  • Value: {p_param.get('value')}\n\n"
-                    f"Do you want to overwrite the model's parameter with the provider's?"
-                )
+                msg = tr(
+                    "Parameter '{name}' already exists in this model.\n\n"
+                    "【Current Model Parameter】\n"
+                    "  • Type: {cur_type}\n"
+                    "  • Value: {cur_value}\n\n"
+                    "【Provider Parameter to Copy】\n"
+                    "  • Type: {new_type}\n"
+                    "  • Value: {new_value}\n\n"
+                    "Do you want to overwrite the model's parameter with the provider's?"
+                ).format(name=name, cur_type=m_param.get('type'), cur_value=m_param.get('value'),
+                         new_type=p_param.get('type'), new_value=p_param.get('value'))
 
-                dlg = StandardDialog(self.widget, "Duplicate Parameter", msg, show_cancel=True)
+                dlg = StandardDialog(self.widget, tr("Duplicate Parameter"), msg, show_cancel=True)
                 reply = dlg.exec()
 
                 if reply:
@@ -68,7 +70,7 @@ class LlmModelOpsMixin:
             self.editor_model_params.load_data(merged_params)
 
         self._sync_llm_data_execute()
-        ToastManager().show("Parameters copied and merged successfully.", "success")
+        ToastManager().show(tr("Parameters copied and merged successfully."), "success")
 
     def _on_model_index_changed(self, index):
         if self._is_updating_model_ui or index < 0: return
@@ -108,8 +110,9 @@ class LlmModelOpsMixin:
         real_name = self._extract_real_model_name(curr_text)
 
         from src.ui.components.dialog import StandardDialog
-        dlg = StandardDialog(self.widget, "Delete Model",
-                             f"Are you sure you want to remove '{real_name}' from the list?", show_cancel=True)
+        dlg = StandardDialog(self.widget, tr("Delete Model"),
+                             tr("Are you sure you want to remove '{model}' from the list?").format(model=real_name),
+                             show_cancel=True)
         if dlg.exec():
             provider_idx = self.combo_llm_preset.currentIndex()
             if provider_idx >= 0:
@@ -212,10 +215,10 @@ class LlmModelOpsMixin:
         provider_id = conf.get("id", "").strip()
 
         if not base_url:
-            StandardDialog(self.widget, "Warning", "Please enter API Base URL first.").exec()
+            StandardDialog(self.widget, tr("Warning"), tr("Please enter API Base URL first.")).exec()
             return
 
-        self.net_pd = ProgressDialog(self.widget, "Network Request", "Contacting API...")
+        self.net_pd = ProgressDialog(self.widget, tr("Network Request"), tr("Contacting API..."))
         self.net_pd.show()
 
         self.fetch_task_mgr = TaskManager()
@@ -238,7 +241,7 @@ class LlmModelOpsMixin:
         conf["fetched_models"] = current_models
         self._refresh_model_combo(conf)
 
-        ToastManager().show("MiniMax model list refreshed (defaults restored).", "success")
+        ToastManager().show(tr("MiniMax model list refreshed (defaults restored)."), "success")
 
     def _on_models_fetched(self, result):
         if result.get("success"):
@@ -248,10 +251,10 @@ class LlmModelOpsMixin:
             if 0 <= idx < len(self.llm_configs):
                 self.llm_configs[idx]["fetched_models"] = models
                 self._refresh_model_combo(self.llm_configs[idx])
-            self.net_pd.show_finish_state(True, "Success", result["msg"])
+            self.net_pd.show_finish_state(True, tr("Success"), result["msg"])
         else:
             self.logger.warning(f"Failed to fetch models: {result['msg']}")
-            self.net_pd.show_finish_state(False, "Fetch Failed", result['msg'])
+            self.net_pd.show_finish_state(False, tr("Fetch Failed"), result['msg'])
 
     def _start_test_task(self):
         self._sync_llm_data_execute()
@@ -264,7 +267,8 @@ class LlmModelOpsMixin:
         model_name = self._extract_real_model_name(self.combo_llm_model.currentText().strip())
 
         if not base_url or not model_name:
-            StandardDialog(self.widget, "Warning", "Please ensure Base URL and Model Name are provided.").exec()
+            StandardDialog(self.widget, tr("Warning"),
+                           tr("Please ensure Base URL and Model Name are provided.")).exec()
             return
 
         models_config = conf.get("models_config", {})
@@ -287,7 +291,8 @@ class LlmModelOpsMixin:
             except:
                 pass
 
-        self.net_pd = ProgressDialog(self.widget, "API Connection Test", f"Sending test prompt to '{model_name}'...")
+        self.net_pd = ProgressDialog(self.widget, tr("API Connection Test"),
+                                     tr("Sending test prompt to '{model}'...").format(model=model_name))
         self.net_pd.show()
 
         self.test_task_mgr = TaskManager()
@@ -303,6 +308,6 @@ class LlmModelOpsMixin:
 
     def _on_test_finished(self, result):
         if result.get("success"):
-            self.net_pd.show_finish_state(True, "Test Passed", result["msg"])
+            self.net_pd.show_finish_state(True, tr("Test Passed"), result["msg"])
         else:
-            self.net_pd.show_finish_state(False, "Test Failed", result["msg"])
+            self.net_pd.show_finish_state(False, tr("Test Failed"), result["msg"])

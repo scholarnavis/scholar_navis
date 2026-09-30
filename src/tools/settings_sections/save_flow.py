@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from src.core import BASE_DIR
 from src.core.core_task import TaskManager, TaskMode, TaskState
+from src.core.i18n import AUTO, tr
 from src.core.mcp_manager import MCPManager
 from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
@@ -57,8 +58,8 @@ class SaveFlowMixin:
         old_email = self.config.user_settings.get("ncbi_email", "").strip()
 
         self.save_pd = ProgressDialog(
-            self.widget, "Applying Settings",
-            "Validating settings and email address...",
+            self.widget, tr("Applying Settings"),
+            tr("Validating settings and email address..."),
             telemetry_config={"cpu": False, "ram": False, "gpu": False, "net": False, "io": False}
         )
         self.save_pd.pbar.setRange(0, 0)
@@ -91,12 +92,12 @@ class SaveFlowMixin:
                 self.save_pd.close_safe()
             StandardDialog(
                 self.widget,
-                "Validation Error",
+                tr("Validation Error"),
                 msg
             ).exec()
             return
 
-        self.save_pd.update_progress(-1, "Saving configurations...")
+        self.save_pd.update_progress(-1, tr("Saving configurations..."))
         QApplication.processEvents()
 
         new_email = self.input_ncbi_email.text().strip()
@@ -193,6 +194,12 @@ class SaveFlowMixin:
 
         new_theme = self.combo_theme.currentText()
 
+        # 界面语言变更只在重启后生效：此处仅记录"是否变更"，
+        # 由保存完成回调在结果提示里追加重启说明。
+        new_language = self.combo_language.currentData()
+        self._language_changed_on_save = (
+            new_language != self.config.user_settings.get("language", AUTO))
+
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
@@ -203,6 +210,7 @@ class SaveFlowMixin:
             "active_llm_id": self._get_active_llm_id(),
             "theme": new_theme,
             "log_level": self.combo_log.currentText(),
+            "language": new_language,
             "ncbi_email": new_email,
             "ncbi_api_key": new_key,
             "openalex_api_key": new_openalex_key,
@@ -275,7 +283,7 @@ class SaveFlowMixin:
 
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
-        self.save_pd.update_progress(-1, "Initializing background tasks...")
+        self.save_pd.update_progress(-1, tr("Initializing background tasks..."))
 
         if hasattr(self, 'save_task_mgr') and self.save_task_mgr:
             self.save_task_mgr.cancel_task()
@@ -301,7 +309,9 @@ class SaveFlowMixin:
     def _on_save_task_state_changed(self, state, msg):
         if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
             if hasattr(self, 'save_pd'):
-                self.save_pd.show_finish_state(False, "Process Halted", f"Save process ended: {msg}")
+                self.save_pd.show_finish_state(
+                    False, tr("Process Halted"),
+                    tr("Save process ended: {msg}").format(msg=msg))
 
     def _on_save_task_result(self, result_dict):
         self._clear_unsaved()
@@ -322,12 +332,22 @@ class SaveFlowMixin:
 
         QTimer.singleShot(100, _bootstrap_mcp_async)
 
-        msg = "Settings saved successfully."
+        msg = tr("Settings saved successfully.")
         if result_dict and result_dict.get("to_download"):
-            msg += "\n\nNote: Some selected models are missing locally. Please click 'Download' next to the models to fetch and convert them."
+            msg += "\n\n" + tr(
+                "Note: Some selected models are missing locally. Please click 'Download' "
+                "next to the models to fetch and convert them.")
+
+        if getattr(self, '_language_changed_on_save', False):
+            # 界面语言在启动时一次性构建，无法热切换：明确告知需重启，
+            # 避免用户以为设置未生效。（提示文案用当前语言，与常规做法一致。）
+            self._language_changed_on_save = False
+            msg += "\n\n" + tr(
+                "Note: Interface language has been changed. "
+                "Please restart the application to apply it.")
 
         if hasattr(self, 'save_pd'):
-            self.save_pd.show_finish_state(True, "Settings Saved", msg)
+            self.save_pd.show_finish_state(True, tr("Settings Saved"), msg)
 
         self.check_models_status()
 

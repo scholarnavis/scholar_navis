@@ -7,6 +7,7 @@ import logging
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from src.core.i18n import tr
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.pill_button import FollowUpGroupWidget
 from src.ui.components.toast import ToastManager
@@ -266,7 +267,7 @@ class ChatBubblesMixin:
         self.input_container.clear_text()
         self.clear_attached_context()
         self.is_locked = False
-        ToastManager().show("Chat history cleared.", "success")
+        ToastManager().show(tr("Chat history cleared."), "success")
 
     def clear_layout(self, layout):
         while layout.count() > 0:

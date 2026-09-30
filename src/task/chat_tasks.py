@@ -14,6 +14,7 @@ from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.references import FOOTER_RULE_HTML, ReferenceItem, ReferenceRegistry
+from src.core.evidence import EvidenceStore
 from src.core import plot_styles
 from src.core.theme_manager import strong_weight_css
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
@@ -78,14 +79,25 @@ def _registry_item_from_source(index, meta):
                          snippet=snippet, kind="local_document")
 
 
-def _seed_registry_from_sources(registry, sources_map):
+def _seed_registry_from_sources(registry, sources_map, evidence_store=None):
     """把 sources_map 中尚未登记的来源补录进注册表（幂等）。
 
     Deep 模式在合并阶段才把子任务来源写回 sources_map，故注册表同步不能只在
-    检索后做一次；渲染前调用本函数，保证编号与来源一一对应。
+    检索后做一次；渲染前调用本函数，保证编号与来源一一对应。同时把来源原文
+    （完整 chunk / 摘要）采集进逐字证据库，供 cite_references 的 snippet 校验。
     """
     if not sources_map:
         return
+    if evidence_store is not None:
+        # 证据采集先于注册表循环：即使来源已注册过（幂等跳过），原文仍需入库。
+        for meta in sources_map.values():
+            meta = meta or {}
+            text = str(meta.get("search_text") or meta.get("snippet") or "")
+            if text.strip():
+                evidence_store.add_source(
+                    text,
+                    url=str(meta.get("path") or meta.get("url") or ""),
+                    title=str(meta.get("name") or meta.get("title") or ""))
     for rid, meta in sources_map.items():
         if not isinstance(rid, int) or rid in registry:
             continue
@@ -215,7 +227,8 @@ def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="")
             "path": doc['metadata'].get('file_path', ''),
             "page": doc['metadata'].get('page', 1),
             "name": doc['metadata'].get('source', 'Local DB'),
-            "search_text": doc['content'][:100],
+            # 完整 chunk 原文（不再截断）：引用条目的 snippet 必须是来源逐字内容。
+            "search_text": doc['content'],
         }
         chunk = doc['content']
         if len(chunk) > _KB_CHUNK_MAX_CHARS:
@@ -607,6 +620,9 @@ class ChatGenerationTask(BackgroundTask):
         # 会话级参考文献注册表：本地 KB 文档 / 在线来源 / cite_references 工具提交的
         # 条目共用同一编号空间，正文 [n] 与文献列表恒一一对应。
         reference_registry = ReferenceRegistry()
+        # 会话级逐字证据库：收集工具结果 / KB chunk / 附件中的原文，强制
+        # cite_references 提交的 snippet 为来源逐字内容（见 runtime 的校验逻辑）。
+        evidence_store = EvidenceStore()
 
         # ---- Human-in-the-loop 协议轮：deep plan 确认 / 跳过哨兵解析 ----
         deep_plan_confirmed = None
@@ -696,7 +712,7 @@ class ChatGenerationTask(BackgroundTask):
                     "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Loading local vector model and retrieving literature...</div>\n\n")
                 context_str, sources_map, domain = self._run_kb_retrieval(search_query, domain)
                 # KB 文档编号（1..N）统一进注册表：与 cite_references 的编号空间合并。
-                _seed_registry_from_sources(reference_registry, sources_map)
+                _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
 
         if not context_str.strip():
             context_str = "No local database documents provided."
@@ -705,6 +721,12 @@ class ChatGenerationTask(BackgroundTask):
         images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
             IMAGE_EXTENSIONS)]
         docs = [c for c in external_chunks if c not in images]
+
+        # 附件文档正文同样进入逐字证据库：模型引用用户上传文件内容时可校验。
+        for d in docs:
+            content = str(d.get("content") or "")
+            if content.strip():
+                evidence_store.add_source(content, title=str(d.get("name") or ""))
 
         llm_content = []
 
@@ -955,7 +977,7 @@ class ChatGenerationTask(BackgroundTask):
             "the run automatically; the user's answer arrives as the next user message.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
             "1. IN-TEXT KEYS (For UI Tracking): For EVERY source you cite, first choose a short, unique ASCII KEY (e.g. [lariguet2004]) and attach it inline IMMEDIATELY after the claim; reuse that SAME key everywhere the source is cited. Local knowledge-base documents are already numbered in the Context as '--- [Document n] ---' — cite those with [n]. If a tool result already carries a numeric id (e.g. '_mcp_cite_id'), you may cite that number directly. NEVER claim facts without an inline citation.\n"
-            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the exact supporting 'snippet'). The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself; use only keys (or the pre-assigned numbers above).\n"
+            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'). The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself; use only keys (or the pre-assigned numbers above).\n"
             "3. NEVER WRITE A REFERENCES SECTION YOURSELF: do NOT output a 'References' / 'Bibliography' heading or a manually numbered citation list in your answer text. The app generates that list from your cite_references call; writing one yourself duplicates it and can contradict it.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
             "### PUNCTUATION LOCALIZATION (STRICT):\n"
@@ -1042,6 +1064,7 @@ class ChatGenerationTask(BackgroundTask):
                 plot_registry=getattr(self, "_plot_registry_cache", None),
                 plot_seq=getattr(self, "_plot_seq_cache", 0),
                 reference_registry=reference_registry,
+                evidence_store=evidence_store,
             )
             if self.deep_mode or deep_plan_confirmed is not None:
                 # 深度研究：分解为并行子任务 -> 用户确认计划 -> 独立 Agent 执行
@@ -1148,7 +1171,7 @@ class ChatGenerationTask(BackgroundTask):
         # 按"首次出现顺序"统一重新编号，并就地改写正文。因此：
         #   * 模型不必猜数字，先写正文还是先调 cite_references 都不会编号错位；
         #   * 列表顺序 = 正文首次引用顺序（符合学术惯例）。
-        _seed_registry_from_sources(reference_registry, sources_map)
+        _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
         # Agent 的返回缓存里混有 UI 控制标记（[CLEAR_SEARCH]/[START_LLM_NETWORK] 等，
         # 由 AgentRuntime._emit 一并计入）；作为"上屏正文"前必须先剥离，否则这些
         # 字面量会在整段替换时漏成正文。
@@ -1442,6 +1465,7 @@ class ChatGenerationTask(BackgroundTask):
             sub_agent = AgentRuntime(
                 self.main_llm, skill_mgr, mcp_mgr, planner=planner,
                 cite_collector=_local_cite, log_fn=self.send_log,
+                evidence_store=evidence_store,
             )
             buffer = []
             try:

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QFormLayout, QGroupBox, QHBoxLayout,
 
 from src.core import BASE_DIR
 from src.core.core_task import TaskManager, TaskMode, TaskState
+from src.core.i18n import tr
 from src.core.models_registry import (EMBEDDING_MODELS, RERANKER_MODELS,
                                       get_model_conf, resolve_auto_model, get_onnx_cache_dir)
 from src.core.network_worker import setup_global_network_env
@@ -32,21 +33,21 @@ class ModelSectionMixin:
     # ---------- Section build ----------
     def init_model_section(self):
         tm = ThemeManager()
-        group = QGroupBox("AI Models Configuration")
+        group = QGroupBox(tr("AI Models Configuration"))
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
         # 把 Open Model Directory 按钮提前，并放在模型布局旁边/上方
-        self.btn_open_cache = QPushButton(" Open Model Storage Directory")
+        self.btn_open_cache = QPushButton(tr(" Open Model Storage Directory"))
         ThemeManager().apply_class(self.btn_open_cache, "link-btn")
         self.btn_open_cache.setCursor(Qt.PointingHandCursor)
         self.btn_open_cache.clicked.connect(self._open_hf_cache)
-        layout.addRow("Model Storage:", self.btn_open_cache)
+        layout.addRow(tr("Model Storage:"), self.btn_open_cache)
 
         # --- 1. Embedding 模型选择 ---
         self.combo_embed = BaseComboBox()
         self.lbl_embed_icon = QLabel()
-        self.lbl_embed_text = QLabel("Checking...")
+        self.lbl_embed_text = QLabel(tr("Checking..."))
         self.lbl_embed_text.setWordWrap(True)
         self.lbl_embed_text.setTextFormat(Qt.RichText)
 
@@ -55,8 +56,8 @@ class ModelSectionMixin:
         embed_layout.addWidget(self.lbl_embed_icon)
         embed_layout.addWidget(self.lbl_embed_text)
 
-        self.btn_dl_embed = QPushButton(" Download")
-        self.btn_del_embed = QPushButton(" Delete")
+        self.btn_dl_embed = QPushButton(tr(" Download"))
+        self.btn_del_embed = QPushButton(tr(" Delete"))
         self.btn_dl_embed.clicked.connect(lambda: self._on_manual_model_action("embedding", "download"))
         self.btn_del_embed.clicked.connect(lambda: self._on_manual_model_action("embedding", "delete"))
 
@@ -75,7 +76,7 @@ class ModelSectionMixin:
         # --- 2. Reranker 模型选择 ---
         self.combo_rerank = BaseComboBox()
         self.lbl_rerank_icon = QLabel()
-        self.lbl_rerank_text = QLabel("Checking...")
+        self.lbl_rerank_text = QLabel(tr("Checking..."))
         self.lbl_rerank_text.setWordWrap(True)
         self.lbl_rerank_text.setTextFormat(Qt.RichText)
 
@@ -83,8 +84,8 @@ class ModelSectionMixin:
         rerank_layout.setContentsMargins(0, 0, 0, 0)
         rerank_layout.addWidget(self.lbl_rerank_icon)
         rerank_layout.addWidget(self.lbl_rerank_text)
-        self.btn_dl_rerank = QPushButton(" Download")
-        self.btn_del_rerank = QPushButton(" Delete")
+        self.btn_dl_rerank = QPushButton(tr(" Download"))
+        self.btn_del_rerank = QPushButton(tr(" Delete"))
         self.btn_dl_rerank.clicked.connect(lambda: self._on_manual_model_action("reranker", "download"))
         self.btn_del_rerank.clicked.connect(lambda: self._on_manual_model_action("reranker", "delete"))
 
@@ -100,19 +101,19 @@ class ModelSectionMixin:
         self.combo_rerank.setCurrentIndex(max(0, idx))
         self.combo_rerank.currentIndexChanged.connect(self.check_models_status)
 
-        layout.addRow("Embedding:", self.combo_embed)
+        layout.addRow(tr("Embedding:"), self.combo_embed)
         layout.addRow("", embed_layout)
-        layout.addRow("Reranker:", self.combo_rerank)
+        layout.addRow(tr("Reranker:"), self.combo_rerank)
         layout.addRow("", rerank_layout)
 
         # --- 3. 硬件加速设备选择 ---
         self.combo_device = BaseComboBox()
         curr_device = self.config.user_settings.get("inference_device", "auto")
-        self.combo_device.addItem("Detecting devices...", curr_device)
-        layout.addRow("Compute Device:", self.combo_device)
+        self.combo_device.addItem(tr("Detecting devices..."), curr_device)
+        layout.addRow(tr("Compute Device:"), self.combo_device)
 
         # --- 4. 其他模型设置 ---
-        self.btn_test_device = QPushButton(" Test Compute Device")
+        self.btn_test_device = QPushButton(tr(" Test Compute Device"))
         ThemeManager().apply_class(self.btn_test_device, "link-btn")
         self.btn_test_device.setCursor(Qt.PointingHandCursor)
         self.btn_test_device.clicked.connect(self._test_compute_device)
@@ -125,19 +126,24 @@ class ModelSectionMixin:
         self.combo_embed.currentTextChanged.connect(self.combo_embed.setToolTip)
         self.combo_rerank.currentTextChanged.connect(self.combo_rerank.setToolTip)
 
+    #: 显存策略说明的 HTML 模板：色值以 ``{占位符}`` 注入，保证翻译键稳定。
+    _VRAM_HINT_TEMPLATE = (
+        "<div style='font-size: 11px; color: {muted}; line-height: 1.5; margin-left: 20px;'>"
+        "<b>Turn ON (Low VRAM):</b> Frees up memory immediately after document retrieval.<br>"
+        "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{success};'>Pros: Maximizes LLM context length, prevents Out-of-Memory (OOM) crashes.</span><br>"
+        "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{danger};'>Cons: Adds 1~3s loading delay to every new query.</span><br>"
+        "<b>Turn OFF (Speed Mode):</b> Keeps RAG models persistently in memory.<br>"
+        "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{success};'>Pros: Lightning-fast multi-turn conversation.</span><br>"
+        "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{danger};'>Cons: Embedding + Reranker will constantly occupy VRAM/RAM.</span>"
+        "</div>"
+    )
+
     def _update_vram_html(self):
         if not hasattr(self, 'lbl_vram_desc'): return
         tm = ThemeManager()
-        self.lbl_vram_desc.setText(
-            f"<div style='font-size: 11px; color: {tm.color('text_muted')}; line-height: 1.5; margin-left: 20px;'>"
-            f"<b>Turn ON (Low VRAM):</b> Frees up memory immediately after document retrieval.<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('success')};'>Pros: Maximizes LLM context length, prevents Out-of-Memory (OOM) crashes.</span><br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('danger')};'>Cons: Adds 1~3s loading delay to every new query.</span><br>"
-            f"<b>Turn OFF (Speed Mode):</b> Keeps RAG models persistently in memory.<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('success')};'>Pros: Lightning-fast multi-turn conversation.</span><br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{tm.color('danger')};'>Cons: Embedding + Reranker will constantly occupy VRAM/RAM.</span>"
-            f"</div>"
-        )
+        self.lbl_vram_desc.setText(tr(self._VRAM_HINT_TEMPLATE).format(
+            muted=tm.color('text_muted'), success=tm.color('success'),
+            danger=tm.color('danger')))
 
     def _open_hf_cache(self):
         model_dir = os.path.join(BASE_DIR, "models")
@@ -158,9 +164,9 @@ class ModelSectionMixin:
         if item is None or item.isEnabled():
             return False
 
-        hint = item.data(Qt.ItemDataRole.ToolTipRole) or (
+        hint = item.data(Qt.ItemDataRole.ToolTipRole) or tr(
             "This device is listed for information only and cannot be used.")
-        StandardDialog(self.widget, "Device Not Available",
+        StandardDialog(self.widget, tr("Device Not Available"),
                        f"{item.text()}\n\n{hint}").exec()
         return True
 
@@ -172,12 +178,12 @@ class ModelSectionMixin:
         if self._selected_device_is_unavailable():
             return
 
-        detail = f"Testing inference device '{device_id}'..."
+        detail = tr("Testing inference device '{device}'...").format(device=device_id)
         if str(device_id).startswith(("trt", "tensorrt")):
-            detail = ("Testing TensorRT device; the first run compiles engines "
-                      "(may take tens of seconds), later runs reuse the cache...")
+            detail = tr("Testing TensorRT device; the first run compiles engines "
+                        "(may take tens of seconds), later runs reuse the cache...")
 
-        self.test_dev_pd = ProgressDialog(self.widget, "Device Connection Test", detail)
+        self.test_dev_pd = ProgressDialog(self.widget, tr("Device Connection Test"), detail)
         self.test_dev_pd.show()
 
         self.test_dev_task_mgr = TaskManager()
@@ -192,9 +198,9 @@ class ModelSectionMixin:
 
     def _on_test_device_finished(self, result):
         if result.get("success"):
-            self.test_dev_pd.show_finish_state(True, "Test Passed", result["msg"])
+            self.test_dev_pd.show_finish_state(True, tr("Test Passed"), result["msg"])
         else:
-            self.test_dev_pd.show_finish_state(False, "Test Failed", result["msg"])
+            self.test_dev_pd.show_finish_state(False, tr("Test Failed"), result["msg"])
 
     # ---------- Manual model actions ----------
     def _on_manual_model_action(self, model_type, action):
@@ -210,7 +216,8 @@ class ModelSectionMixin:
 
         conf = get_model_conf(model_id, model_type)
         if not conf:
-            ToastManager().show(f"Model configuration not found for {model_id}", "error")
+            ToastManager().show(
+                tr("Model configuration not found for {model}").format(model=model_id), "error")
             return
 
         repo_id = conf.get("hf_repo_id")
@@ -221,8 +228,9 @@ class ModelSectionMixin:
         elif action == "delete":
             dlg = StandardDialog(
                 self.widget,
-                "Confirm Delete",
-                f"Are you sure you want to delete the local cache for '{repo_id}'?\nThis will free up disk space by removing the ONNX files.",
+                tr("Confirm Delete"),
+                tr("Are you sure you want to delete the local cache for '{repo}'?\n"
+                   "This will free up disk space by removing the ONNX files.").format(repo=repo_id),
                 show_cancel=True
             )
             if dlg.exec():
@@ -231,12 +239,14 @@ class ModelSectionMixin:
                     try:
                         import shutil
                         shutil.rmtree(cache_dir)
-                        ToastManager().show(f"Successfully deleted {repo_id}", "success")
+                        ToastManager().show(
+                            tr("Successfully deleted {repo}").format(repo=repo_id), "success")
                         self.check_models_status()
                     except Exception as e:
-                        ToastManager().show(f"Failed to delete model: {e}", "error")
+                        ToastManager().show(
+                            tr("Failed to delete model: {err}").format(err=e), "error")
                 else:
-                    ToastManager().show("Model cache not found locally.", "info")
+                    ToastManager().show(tr("Model cache not found locally."), "info")
                     self.check_models_status()
 
     # ---------- Combo refresh ----------
@@ -277,9 +287,10 @@ class ModelSectionMixin:
 
         self.check_models_status()
 
-        StandardDialog(self.widget, "Model Required",
-                       f"The model '{model_id}' is required for this operation but is not installed.\n\n"
-                       f"It has been auto-selected in the list. Please click the blue 'Save Settings & Verify Models' button below to download it.",
+        StandardDialog(self.widget, tr("Model Required"),
+                       tr("The model '{model}' is required for this operation but is not installed.\n\n"
+                          "It has been auto-selected in the list. Please click the blue "
+                          "'Save Settings & Verify Models' button below to download it.").format(model=model_id),
                        show_cancel=False).exec()
 
     # ---------- Status verification ----------
@@ -304,8 +315,8 @@ class ModelSectionMixin:
 
     def check_models_status(self):
         """Asynchronously trigger VerifyModelsTask to check local ONNX files."""
-        self.lbl_embed_text.setText("Verifying...")
-        self.lbl_rerank_text.setText("Verifying...")
+        self.lbl_embed_text.setText(tr("Verifying..."))
+        self.lbl_rerank_text.setText(tr("Verifying..."))
 
         if hasattr(self, 'verify_task_mgr') and self.verify_task_mgr:
             self.verify_task_mgr.cancel_task()
@@ -337,24 +348,28 @@ class ModelSectionMixin:
         req_html = self._get_req_html(e_conf)
         repo_id = embed_info.get("repo_id") or "Unknown"
 
-        msg = f"Target: {embed_info.get('id')}" if embed_id == "embed_auto" else f"Repo: {repo_id}"
+        msg = (tr("Target: {v}").format(v=embed_info.get('id')) if embed_id == "embed_auto"
+               else tr("Repo: {v}").format(v=repo_id))
         e_exists = repo_id not in to_download and not embed_info.get("is_network")
 
         if embed_info.get("is_network"):
             self.lbl_embed_icon.setPixmap(tm.icon("api", "success").pixmap(16, 16))
-            self.lbl_embed_text.setText(f"Ready (Network API) | {msg}{req_html}")
+            self.lbl_embed_text.setText(
+                tr("Ready (Network API) | {info}").format(info=f"{msg}{req_html}"))
             self.btn_dl_embed.setVisible(False)
             self.btn_del_embed.setVisible(False)
         elif e_exists:
             self.lbl_embed_icon.setPixmap(tm.icon("check-circle", "success").pixmap(16, 16))
-            self.lbl_embed_text.setText(f"Ready (ONNX verified) | {msg}{req_html}")
+            self.lbl_embed_text.setText(
+                tr("Ready (ONNX verified) | {info}").format(info=f"{msg}{req_html}"))
             self.btn_dl_embed.setVisible(False)
             self.btn_del_embed.setVisible(True)
             self.btn_del_embed.setStyleSheet(self._get_btn_style(btn_type="danger"))
             self.btn_del_embed.setIcon(tm.icon("delete", "danger"))
         else:
             self.lbl_embed_icon.setPixmap(tm.icon("cancel", "danger").pixmap(16, 16))
-            self.lbl_embed_text.setText(f"ONNX Not Found | {msg}{req_html}")
+            self.lbl_embed_text.setText(
+                tr("ONNX Not Found | {info}").format(info=f"{msg}{req_html}"))
             self.btn_dl_embed.setVisible(True)
             self.btn_del_embed.setVisible(False)
             self.btn_dl_embed.setStyleSheet(self._get_btn_style(btn_type="primary"))
@@ -366,24 +381,28 @@ class ModelSectionMixin:
         req_html_r = self._get_req_html(r_conf)
         repo_id_r = rerank_info.get("repo_id") or "Unknown"
 
-        msg_r = f"Target: {rerank_info.get('id')}" if rerank_id == "rerank_auto" else f"Repo: {repo_id_r}"
+        msg_r = (tr("Target: {v}").format(v=rerank_info.get('id')) if rerank_id == "rerank_auto"
+                 else tr("Repo: {v}").format(v=repo_id_r))
         r_exists = repo_id_r not in to_download and not rerank_info.get("is_network")
 
         if rerank_info.get("is_network"):
             self.lbl_rerank_icon.setPixmap(tm.icon("api", "success").pixmap(16, 16))
-            self.lbl_rerank_text.setText(f"Ready (Network API) | {msg_r}{req_html_r}")
+            self.lbl_rerank_text.setText(
+                tr("Ready (Network API) | {info}").format(info=f"{msg_r}{req_html_r}"))
             self.btn_dl_rerank.setVisible(False)
             self.btn_del_rerank.setVisible(False)
         elif r_exists:
             self.lbl_rerank_icon.setPixmap(tm.icon("check-circle", "success").pixmap(16, 16))
-            self.lbl_rerank_text.setText(f"Ready (ONNX verified) | {msg_r}{req_html_r}")
+            self.lbl_rerank_text.setText(
+                tr("Ready (ONNX verified) | {info}").format(info=f"{msg_r}{req_html_r}"))
             self.btn_dl_rerank.setVisible(False)
             self.btn_del_rerank.setVisible(True)
             self.btn_del_rerank.setStyleSheet(self._get_btn_style(btn_type="danger"))
             self.btn_del_rerank.setIcon(tm.icon("delete", "danger"))
         else:
             self.lbl_rerank_icon.setPixmap(tm.icon("cancel", "danger").pixmap(16, 16))
-            self.lbl_rerank_text.setText(f"ONNX Not Found | {msg_r}{req_html_r}")
+            self.lbl_rerank_text.setText(
+                tr("ONNX Not Found | {info}").format(info=f"{msg_r}{req_html_r}"))
             self.btn_dl_rerank.setVisible(True)
             self.btn_del_rerank.setVisible(False)
             self.btn_dl_rerank.setStyleSheet(self._get_btn_style(btn_type="primary"))
@@ -393,13 +412,14 @@ class ModelSectionMixin:
     def start_download(self, repo_list):
         if not repo_list: return
         self.pending_downloads = repo_list
-        self.pd = ProgressDialog(self.widget, "Downloading", "Initializing...", telemetry_config={"net": True})
+        self.pd = ProgressDialog(self.widget, tr("Downloading"), tr("Initializing..."),
+                                 telemetry_config={"net": True})
         self.pd.show()
         self._download_next()
 
     def _download_next(self):
         if not self.pending_downloads:
-            self.pd.show_finish_state(True, "Complete", "All downloads finished.")
+            self.pd.show_finish_state(True, tr("Complete"), tr("All downloads finished."))
             self.check_models_status()
             GlobalSignals().kb_list_changed.emit()
             return
@@ -428,4 +448,5 @@ class ModelSectionMixin:
                     pass
             QTimer.singleShot(500, self._download_next)
         elif state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
-            self.pd.show_finish_state(False, "Download Halted", f"Task ended: {msg}")
+            self.pd.show_finish_state(False, tr("Download Halted"),
+                                      tr("Task ended: {msg}").format(msg=msg))

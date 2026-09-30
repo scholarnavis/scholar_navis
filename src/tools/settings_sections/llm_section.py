@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QFrame, QFormLayout, QGroupBox, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
@@ -30,7 +31,7 @@ class LlmSectionMixin:
     # ---------- Section build ----------
     def init_llm_section(self):
 
-        group = QGroupBox("LLM Generation API")
+        group = QGroupBox(tr("LLM Generation API"))
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
@@ -39,21 +40,22 @@ class LlmSectionMixin:
         header_layout = QHBoxLayout()
         self.combo_llm_preset = BaseComboBox()
         for conf in self.llm_configs:
-            self.combo_llm_preset.addItem(conf.get("name", "Unnamed Provider"))
+            self.combo_llm_preset.addItem(conf.get("name", tr("Unnamed Provider")))
 
-        self.btn_add_llm = QPushButton(" Add")
+        self.btn_add_llm = QPushButton(tr(" Add"))
         self.btn_add_llm.clicked.connect(self._add_llm_provider)
 
-        self.btn_del_llm = QPushButton(" Delete")
+        self.btn_del_llm = QPushButton(tr(" Delete"))
         self.btn_del_llm.clicked.connect(self._del_llm_provider)
 
-        self.btn_help_params = QPushButton(" Parameter Help")
+        self.btn_help_params = QPushButton(tr(" Parameter Help"))
         self.btn_help_params.clicked.connect(lambda: StandardDialog(
-            self.widget, "Custom Parameter Guide",
-            "You can specify request parameters (e.g., temperature, top_p, max_tokens) for the provider or specifically for a model.\n\n"
-            "• Priority: Model Custom > Provider Inherit\n"
-            "• If 'Closed' is selected for a model, no parameters are appended.\n"
-            "• The model dropdown indicates your configuration with (⚙️ Custom) or (🚫 Closed).",
+            self.widget, tr("Custom Parameter Guide"),
+            tr("You can specify request parameters (e.g., temperature, top_p, max_tokens) "
+               "for the provider or specifically for a model.\n\n"
+               "• Priority: Model Custom > Provider Inherit\n"
+               "• If 'Closed' is selected for a model, no parameters are appended.\n"
+               "• The model dropdown indicates your configuration with (⚙️ Custom) or (🚫 Closed)."),
             show_cancel=False
         ).exec())
 
@@ -68,7 +70,7 @@ class LlmSectionMixin:
         self.input_llm_key = HoverRevealLineEdit()
 
         self.editor_provider_params = ParamEditorWidget()
-        self.btn_add_provider_param = QPushButton(" Add Provider Parameter")
+        self.btn_add_provider_param = QPushButton(tr(" Add Provider Parameter"))
         self.btn_add_provider_param.clicked.connect(lambda: self.editor_provider_params.add_param_row())
 
         provider_param_layout = QVBoxLayout()
@@ -78,16 +80,16 @@ class LlmSectionMixin:
         model_layout = QHBoxLayout()
         self.combo_llm_model = BaseComboBox()
 
-        self.btn_add_model = QPushButton(" Add")
+        self.btn_add_model = QPushButton(tr(" Add"))
         self.btn_add_model.clicked.connect(self._add_llm_model)
 
-        self.btn_del_model = QPushButton(" Delete")
+        self.btn_del_model = QPushButton(tr(" Delete"))
         self.btn_del_model.clicked.connect(self._del_llm_model)
 
-        self.btn_fetch_models = QPushButton(" Fetch")
+        self.btn_fetch_models = QPushButton(tr(" Fetch"))
         self.btn_fetch_models.clicked.connect(self._start_fetch_task)
 
-        self.btn_test_api = QPushButton(" Test")
+        self.btn_test_api = QPushButton(tr(" Test"))
         self.btn_test_api.clicked.connect(self._start_test_task)
 
         model_layout.addWidget(self.combo_llm_model, stretch=1)
@@ -96,17 +98,20 @@ class LlmSectionMixin:
         model_layout.addWidget(self.btn_fetch_models)
         model_layout.addWidget(self.btn_test_api)
 
+        # 策略按**索引**取值（strategy_map: 0=inherit / 1=custom / 2=closed），
+        # 与显示文本无关，故可安全本地化选项文本。
         self.combo_model_param_strategy = BaseComboBox()
-        self.combo_model_param_strategy.addItems(["Inherit (Provider)", "Custom (Model Only)", "Closed (No Params)"])
+        self.combo_model_param_strategy.addItems([
+            tr("Inherit (Provider)"), tr("Custom (Model Only)"), tr("Closed (No Params)")])
 
         self.editor_model_params = ParamEditorWidget()
 
         model_param_btn_layout = QHBoxLayout()
-        self.btn_add_model_param = QPushButton(" Add Model Parameter")
+        self.btn_add_model_param = QPushButton(tr(" Add Model Parameter"))
         self.btn_add_model_param.clicked.connect(lambda: self.editor_model_params.add_param_row())
 
-        self.btn_copy_params = QPushButton(" Copy from Provider")
-        self.btn_copy_params.setToolTip("Copies global provider parameters to the current model.")
+        self.btn_copy_params = QPushButton(tr(" Copy from Provider"))
+        self.btn_copy_params.setToolTip(tr("Copies global provider parameters to the current model."))
         self.btn_copy_params.clicked.connect(self._on_copy_params_clicked)
 
         model_param_btn_layout.addWidget(self.btn_add_model_param)
@@ -122,14 +127,14 @@ class LlmSectionMixin:
             lambda idx: self.model_param_container.setVisible(idx == 1)
         )
 
-        layout.addRow("Service Provider:", header_layout)
-        layout.addRow("Provider Name:", self.input_llm_name)
-        layout.addRow("API Base URL:", self.input_llm_url)
-        layout.addRow("API Key:", self.input_llm_key)
-        layout.addRow("Provider Params:", provider_param_layout)
+        layout.addRow(tr("Service Provider:"), header_layout)
+        layout.addRow(tr("Provider Name:"), self.input_llm_name)
+        layout.addRow(tr("API Base URL:"), self.input_llm_url)
+        layout.addRow(tr("API Key:"), self.input_llm_key)
+        layout.addRow(tr("Provider Params:"), provider_param_layout)
         layout.addRow(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
-        layout.addRow("Model Name:", model_layout)
-        layout.addRow("Params Strategy:", self.combo_model_param_strategy)
+        layout.addRow(tr("Model Name:"), model_layout)
+        layout.addRow(tr("Params Strategy:"), self.combo_model_param_strategy)
         layout.addRow("", self.model_param_container)
 
         self.layout.addWidget(group)
@@ -183,12 +188,13 @@ class LlmSectionMixin:
         tm = ThemeManager()
 
         if is_minimax:
-            self.btn_fetch_models.setText(" Refresh")
+            self.btn_fetch_models.setText(tr(" Refresh"))
             self.btn_fetch_models.setIcon(tm.icon("refresh", "bg_main"))
-            self.btn_fetch_models.setToolTip("Model retrieval is currently unsupported by the MiniMax provider. "
-                                             "Click to restore predefined models.")
+            self.btn_fetch_models.setToolTip(tr(
+                "Model retrieval is currently unsupported by the MiniMax provider. "
+                "Click to restore predefined models."))
         else:
-            self.btn_fetch_models.setText(" Fetch")
+            self.btn_fetch_models.setText(tr(" Fetch"))
             self.btn_fetch_models.setIcon(tm.icon("api", "bg_main"))
             self.btn_fetch_models.setToolTip("")
 
@@ -244,7 +250,7 @@ class LlmSectionMixin:
         new_id = f"custom_{int(time.time())}"
         new_conf = {
             "id": new_id,
-            "name": "New Provider",
+            "name": tr("New Provider"),
             "base_url": "https://",
             "model_name": "",
             "api_key": "",
@@ -263,8 +269,8 @@ class LlmSectionMixin:
         if conf.get("id") in default_ids:
             StandardDialog(
                 self.widget,
-                "Warning",
-                "Built-in default providers cannot be deleted."
+                tr("Warning"),
+                tr("Built-in default providers cannot be deleted.")
             ).exec()
             return
 

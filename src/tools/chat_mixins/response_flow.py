@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from src.core.core_task import TaskState
 from src.core.follow_ups import split_follow_ups
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.toast import ToastManager
@@ -251,7 +252,7 @@ class ChatResponseFlowMixin:
         if not self.current_ai_bubble:
             return
 
-        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setText(tr("Stop"))
         self.input_container.btn_stop.setEnabled(True)
         awaiting = getattr(self, '_awaiting_user_input', False)
 
@@ -270,7 +271,8 @@ class ChatResponseFlowMixin:
 
             if self.current_ai_bubble:
                 self.current_ai_bubble.is_interrupted = True
-            StandardDialog(self.widget, "Task Cancelled", "The AI generation has been stopped by the user.",
+            StandardDialog(self.widget, tr("Task Cancelled"),
+                           tr("The AI generation has been stopped by the user."),
                            show_cancel=False).exec()
             if hasattr(self, '_restore_last_input'):
                 self._restore_last_input()
@@ -372,7 +374,7 @@ class ChatResponseFlowMixin:
             self._render_timer.stop()
         self.set_controls_enabled(True)
 
-        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setText(tr("Stop"))
         self.input_container.btn_stop.setEnabled(True)
         if getattr(self, '_awaiting_user_input', False):
             # 提问卡已渲染但本轮后续流程失败：保持等待锁定，
@@ -415,6 +417,6 @@ class ChatResponseFlowMixin:
         self.current_ai_bubble = None
         # 完整原始错误（含 JSON payload 中的 details）写入日志
         self.logger.error("Chat task failed.\n%s", msg)
-        ToastManager().show("Generation failed due to an error.", "error")
+        ToastManager().show(tr("Generation failed due to an error."), "error")
         # 报错同样不强制拉回底部（错误已在气泡内呈现）
         self.scroll_to_bottom(force=False)

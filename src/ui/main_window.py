@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QApplication)
 
 from src.core.config_manager import ConfigManager
+from src.core.i18n import tr
 from src.core.platform_env import is_windows
 from src.core.theme_manager import (ThemeManager, apply_native_titlebar_theme,
                                     strong_weight_css, title_weight_css)
@@ -87,7 +88,7 @@ def force_windows_taskbar_icon(hwnd, icon_path):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Scholar Navis - Research Assistant")
+        self.setWindowTitle(tr("Scholar Navis - Research Assistant"))
         self.resize(1280, 800)
 
         self.setWindowIcon(ThemeManager().get_app_icon())
@@ -163,9 +164,11 @@ class MainWindow(QMainWindow):
         self.tools = [None] * len(self.tool_classes)
 
         # 仅生成左侧边栏按钮和右侧占位符，不进行耗时的实例化
+        # 注意：name 是**内部标识符**（同时用于 icon_map 与工具构造），
+        # 必须保持英文；只有侧边栏**显示文本**参与翻译。
         for name, _, _ in self.tool_classes:
             icon_name = self.icon_map.get(name, "tag")
-            item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {name}")
+            item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {tr(name)}")
             self.sidebar.addItem(item)
 
             dummy_widget = QWidget()
