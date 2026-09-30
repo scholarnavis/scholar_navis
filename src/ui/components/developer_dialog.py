@@ -80,7 +80,7 @@ AI_TESTS = {
             '{"term": "response to red or far red light", "category": "BP", "p_value": 5.6e-8, "gene_count": 12, "gene_ratio": 0.12}, '
             '{"term": "regulation of flower development", "category": "BP", "p_value": 1.7e-6, "gene_count": 9, "gene_ratio": 0.09}, '
             '{"term": "response to blue light", "category": "BP", "p_value": 4.3e-5, "gene_count": 11, "gene_ratio": 0.11}, '
-            '{"term": "phototropism", "category": "BP", "p_value": 2.8e-4, "gene_count": 6, "gene_ratio": 0.06}, '
+            '{"term": "photosynthesis", "category": "BP", "p_value": 2.8e-4, "gene_count": 6, "gene_ratio": 0.06}, '
             '{"term": "seed germination", "category": "BP", "p_value": 1.2e-3, "gene_count": 8, "gene_ratio": 0.08}, '
             '{"term": "response to cold", "category": "BP", "p_value": 6.7e-3, "gene_count": 14, "gene_ratio": 0.14}, '
             '{"term": "response to gibberellin", "category": "BP", "p_value": 2.4e-2, "gene_count": 19, "gene_ratio": 0.19}'
@@ -163,6 +163,31 @@ AI_TESTS = {
             "I'm working on stress signaling and I'd like a quick briefing on the MAPK6 "
             "gene: what's known about its function, a couple of recent papers on it, and "
             "its protein sequence. Thanks!"
+        ),
+    },
+    "reference_numbering": {
+        "note": (
+            "Developer test: exercising the <b>citation / reference numbering</b> "
+            "pipeline end to end, in the real Chat panel. Expected: the agent really "
+            "calls <b>search_academic_literature</b> (and/or search_preprints) and "
+            "cites sources inline as <b>[key]</b> (e.g. [sharkey2019]); the app then "
+            "renumbers them by FIRST APPEARANCE and renders the '📚 Cited Sources' "
+            "list. Verify in the reply: (1) every inline [n] matches the list number "
+            "AND the correct paper; (2) list order == order of first appearance in the "
+            "text; (3) hovering a [n] shows the SAME paper; (4) clicking [n] opens the "
+            "matching detail card. Check the log for 'Unresolved inline citations' — "
+            "there should be none when every source was registered."
+        ),
+        "prompt": (
+            "I'm preparing a short literature briefing for a journal club and I need "
+            "accurate citations. Could you find recent and relevant studies on the "
+            "regulation of photosynthesis in plants, and give me a concise summary "
+            "where each claim is supported by a real paper? Please cover: (a) how "
+            "the light reactions and the Calvin-Benson cycle are regulated, (b) how "
+            "photosynthesis responds to environmental stress such as drought or high "
+            "light, and (c) any shared molecular nodes such as Rubisco or the "
+            "thioredoxin system. Cite every claim with its source and give me the "
+            "full reference list."
         ),
     },
     "deep_plan_confirm": {
@@ -442,6 +467,15 @@ class DeveloperDialog(BaseDialog):
         ai_row2.addStretch()
         self.content_layout.addLayout(ai_row2)
 
+        # AI 测试第三行：参考文献编号链路（真实检索 + 编号一致性核对）
+        ai_row3 = QHBoxLayout()
+        ai_row3.setSpacing(8)
+        self.btn_ai_refnum = self._make_btn("AI: Reference Numbering (real search)",
+                                            lambda: self._ai_test("reference_numbering"))
+        ai_row3.addWidget(self.btn_ai_refnum)
+        ai_row3.addStretch()
+        self.content_layout.addLayout(ai_row3)
+
         # --- Functional tests ---
         self.content_layout.addWidget(self._section_label("Functional Tests"))
         func_row = QHBoxLayout()
@@ -482,8 +516,10 @@ class DeveloperDialog(BaseDialog):
         self.btn_scrollbar = self._make_btn("Scrollbar Theme", self._test_scrollbar_theme)
         self.btn_attachwire = self._make_btn("Attachment Wiring", self._test_attachment_wiring)
         self.btn_typography = self._make_btn("Chat Typography", self._test_chat_typography)
+        self.btn_refnum = self._make_btn("Reference Numbering", self._test_reference_citations)
         for b in (self.btn_filetypes, self.btn_textviewer,
-                  self.btn_scrollbar, self.btn_attachwire, self.btn_typography):
+                  self.btn_scrollbar, self.btn_attachwire, self.btn_typography,
+                  self.btn_refnum):
             func_row3.addWidget(b)
         func_row3.addStretch()
         self.content_layout.addLayout(func_row3)
@@ -712,6 +748,84 @@ class DeveloperDialog(BaseDialog):
     # ------------------------------------------------------------------ #
     #  Functional tests
     # ------------------------------------------------------------------ #
+    def _test_reference_citations(self, clear: bool = True):
+        """Functional test for the citation-numbering pipeline (key protocol).
+
+        Reproduces and guards against "正文编号与参考文献列表对不上"：模型用稳定的
+        ``[key]`` 引用，正文编号由程序按"首次出现顺序"统一分配，因此模型先写正文
+        还是先调用 cite_references 都不影响一致性。断言：
+          * key 解析 + 按首次出现顺序重编号（与注册顺序无关）；
+          * 重复出现的同一 key 复用同一编号；
+          * 数字引用（本地 KB 文档号）仍可解析；
+          * 未登记 key 被如实报告，而非被静默错编；
+          * 渲染出的列表顺序与重编号后的顺序一致。
+        """
+        if clear:
+            self._clear()
+        self._log("--- Reference Numbering (key protocol) ---", "INFO")
+        try:
+            from src.core.references import ReferenceRegistry, ReferenceItem
+
+            reg = ReferenceRegistry()
+            # 注册顺序故意与正文引用顺序不同（复现"模型提交顺序 ≠ 引用顺序"）。
+            reg.add(ReferenceItem(index=0, key="long2006",
+                                  title="Can improvement in photosynthesis increase crop yields?",
+                                  authors="Long", year="2006"))
+            reg.add(ReferenceItem(index=0, key="sharkey2019",
+                                  title="The Calvin-Benson cycle and its regulation",
+                                  authors="Sharkey", year="2019"))
+            # 本地 KB 文档：无 key，只有已分配编号（模拟 '--- [Document 3] ---'）。
+            reg.seed(3, ReferenceItem(index=3, title="Local KB doc",
+                                      path="/tmp/kb.pdf", kind="local_document"))
+
+            body = ("光合作用受光调节 [sharkey2019]，且碳同化参与 [long2006]；"
+                    "再次引用同一来源 [sharkey2019]；本地文档 [3]；"
+                    "未登记 [ghost2020]。")
+            new_text, ordered, unresolved = reg.resolve_citations(body)
+
+            fails = []
+            # 1) 首次出现顺序：sharkey=1, long=2, local=3
+            if [it.index for it in ordered] != [1, 2, 3]:
+                fails.append(f"order != [1,2,3]: {[it.index for it in ordered]}")
+            if [it.key for it in ordered] != ["sharkey2019", "long2006", ""]:
+                fails.append(f"order keys wrong: {[it.key for it in ordered]}")
+            # 2) 正文就地改写 + 重复 key 复用同号
+            expect = ("光合作用受光调节 [1]，且碳同化参与 [2]；再次引用同一来源 [1]；"
+                      "本地文档 [3]；未登记 [ghost2020]。")
+            if new_text != expect:
+                fails.append(f"rewrite mismatch: got={new_text!r} exp={expect!r}")
+            # 3) 未登记 key 被报告
+            if unresolved != ["ghost2020"]:
+                fails.append(f"unresolved != ['ghost2020']: {unresolved}")
+            # 4) 渲染列表顺序与编号一致
+            html = reg.render_items(ordered)
+            if not (0 <= html.find("[1]") < html.find("[2]") < html.find("[3]")):
+                fails.append("rendered list order != renumbered order")
+            if "<b>[1]</b>" not in html or "Sharkey" not in html:
+                fails.append("rendered list missing [1]/Sharkey")
+
+            # 5) 回归场景：模型"先写正文再登记"（两版草稿同 key）也不应错位
+            reg2 = ReferenceRegistry()
+            reg2.add(ReferenceItem(index=0, key="a2004", title="A", year="2004"))
+            reg2.add(ReferenceItem(index=0, key="b2011", title="B", year="2011"))
+            draft = "第一版 [b2011][a2004] 结束。\n第二版 [b2011][a2004] 结束。"
+            t2, _o2, u2 = reg2.resolve_citations(draft)
+            if t2.count("[1][2]") != 2 or u2:
+                fails.append(f"duplicate-draft rewrite failed: {t2!r} unresolved={u2}")
+
+            if fails:
+                for f in fails:
+                    self._log(f"FAIL: {f}", "FAIL")
+                self._log(f"Reference numbering test FAILED ({len(fails)} assertion(s)).", "FAIL")
+            else:
+                self._log("Key resolution + first-appearance renumbering OK.", "OK")
+                self._log("Numeric (KB) citation + duplicate-draft key reuse OK.", "OK")
+                self._log("Unresolved-key reporting OK.", "OK")
+                self._log(f"Sample rewritten body: {new_text}", "INFO")
+                self._log("Reference numbering test PASSED.", "OK")
+        except Exception as e:
+            self._log(f"Reference numbering test failed: {e}", "FAIL")
+
     def _run_all(self):
         self._clear()
         self._log("=== Run All Functional Tests ===", "INFO")
@@ -726,6 +840,7 @@ class DeveloperDialog(BaseDialog):
         self._test_r_engine(clear=False)
         self._test_provenance(clear=False)
         self._test_literature_merge(clear=False)
+        self._test_reference_citations(clear=False)
         self._test_image_pipeline(clear=False)
         self._test_deep_plan_card(clear=False)
         self._test_hitl_pipeline(clear=False)

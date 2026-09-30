@@ -27,6 +27,7 @@ from src.ui.components.text_formatter import (TextFormatter, qt_font_family_css,
                                               resolve_qt_font_families,
                                               naturalize_table_html)
 from src.ui.components.toast import ToastManager
+from src.ui.components.copy_button import CopyButton
 from src.ui.components.image_viewer import open_image_viewer
 
 
@@ -797,16 +798,18 @@ class ChatBubbleWidget(QWidget):
         self.btn_layout.setSpacing(10)
         self.btn_layout.setAlignment(btn_alignment)
 
-        self.btn_copy = QPushButton(" Copy")
+        # 复制按钮统一用 CopyButton：provider 每次点击求值（流式增长的内容也能
+        # 复制到最新一版），且复制成功会在按钮上给出可见反馈。
+        self.btn_copy = CopyButton(" Copy", copied_text=" Copied",
+                                   provider=self._plain_copy_text,
+                                   toast="Plain text successfully copied to clipboard.")
         self.btn_copy.setIcon(tm.icon("copy", "text_muted"))
-        self.btn_copy.setCursor(Qt.PointingHandCursor)
-        self.btn_copy.clicked.connect(self.copy_plain_text)
         self.btn_layout.addWidget(self.btn_copy)
 
-        self.btn_copy_md = QPushButton(" Copy MD")
+        self.btn_copy_md = CopyButton(" Copy MD", copied_text=" Copied",
+                                      provider=self._markdown_copy_text,
+                                      toast="Markdown successfully copied to clipboard.")
         self.btn_copy_md.setIcon(tm.icon("markdown_copy", "text_muted"))
-        self.btn_copy_md.setCursor(Qt.PointingHandCursor)
-        self.btn_copy_md.clicked.connect(self.copy_markdown)
         self.btn_layout.addWidget(self.btn_copy_md)
 
         if not self.is_user and self.msg_type != self.MSG_ERROR:
@@ -2329,19 +2332,25 @@ class ChatBubbleWidget(QWidget):
 
         return cleaned
 
+    def _plain_copy_text(self) -> str:
+        """CopyButton 的纯文本来源（会话被打断时不复制）。"""
+        if getattr(self, 'is_interrupted', False):
+            return ""
+        return self._extract_content_for_copy(is_markdown=False)
+
+    def _markdown_copy_text(self) -> str:
+        """CopyButton 的 Markdown 来源（会话被打断时不复制）。"""
+        if getattr(self, 'is_interrupted', False):
+            return ""
+        return self._extract_content_for_copy(is_markdown=True)
+
     def copy_plain_text(self):
-        if getattr(self, 'is_interrupted', False): return
-        clipboard = QGuiApplication.clipboard()
-        cleaned = self._extract_content_for_copy(is_markdown=False)
-        clipboard.setText(cleaned)
-        ToastManager().show("Plain text successfully copied to clipboard.", "success")
+        """兼容入口：交由 CopyButton 统一处理（右键菜单仍走此处）。"""
+        self.btn_copy.copy_now()
 
     def copy_markdown(self):
-        if getattr(self, 'is_interrupted', False): return
-        clipboard = QGuiApplication.clipboard()
-        cleaned = self._extract_content_for_copy(is_markdown=True)
-        clipboard.setText(cleaned)
-        ToastManager().show("Markdown successfully copied to clipboard.", "success")
+        """兼容入口：交由 CopyButton 统一处理（右键菜单仍走此处）。"""
+        self.btn_copy_md.copy_now()
 
 
     def toggle_edit(self):

@@ -311,7 +311,8 @@ class ChatGenerationTask(BackgroundTask):
                 f"only accept English (e.g. academic literature search, NCBI, Semantic Scholar), "
                 f"internally translate the user's intent into an accurate English query in your tool "
                 f"arguments, while the final prose answer remains in {reply_lang}. Structural protocol "
-                f"tokens, in-text citation markers ([1]/[101]) and code blocks remain ASCII unchanged.\n"
+                f"tokens, in-text citation markers ([key] or [1]) and code blocks remain ASCII "
+                f"unchanged.\n"
             )
         return (
             f"### OUTPUT LANGUAGE (MANDATORY):\n"
@@ -319,7 +320,7 @@ class ChatGenerationTask(BackgroundTask):
             f"retrieval, but the user originally wrote in {reply_lang}. You MUST compose "
             f"your final answer in {reply_lang} (do NOT reply in English), and use that "
             f"language's native punctuation. Structural protocol tokens, in-text citation "
-            f"markers ([1]/[101]) and code blocks remain ASCII and unchanged.\n"
+            f"markers ([key] or [1]) and code blocks remain ASCII and unchanged.\n"
         )
 
     def cancel(self):
@@ -953,8 +954,8 @@ class ChatGenerationTask(BackgroundTask):
             "Also ask before any costly or hard-to-reverse operation. After calling ask_user the runtime pauses "
             "the run automatically; the user's answer arrives as the next user message.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
-            "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. NEVER claim facts without these bracketed numbers.\n"
-            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, before you finish, with its bibliographic fields (title, authors, year, journal, doi, url, and the exact supporting 'snippet'). The tool returns the citation numbers; use exactly those numbers inline as [n]. The reference list is then rendered by the app.\n"
+            "1. IN-TEXT KEYS (For UI Tracking): For EVERY source you cite, first choose a short, unique ASCII KEY (e.g. [lariguet2004]) and attach it inline IMMEDIATELY after the claim; reuse that SAME key everywhere the source is cited. Local knowledge-base documents are already numbered in the Context as '--- [Document n] ---' — cite those with [n]. If a tool result already carries a numeric id (e.g. '_mcp_cite_id'), you may cite that number directly. NEVER claim facts without an inline citation.\n"
+            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the exact supporting 'snippet'). The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself; use only keys (or the pre-assigned numbers above).\n"
             "3. NEVER WRITE A REFERENCES SECTION YOURSELF: do NOT output a 'References' / 'Bibliography' heading or a manually numbered citation list in your answer text. The app generates that list from your cite_references call; writing one yourself duplicates it and can contradict it.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
             "### PUNCTUATION LOCALIZATION (STRICT):\n"
@@ -963,7 +964,7 @@ class ChatGenerationTask(BackgroundTask):
             "ACTUALLY writing each passage in:\n"
             "   - When writing in Chinese: use FULL-WIDTH punctuation — Chinese commas（，）, periods（。）, semicolons（；）, colons（：）, question/exclamation marks（？！）, Chinese ellipsis（……）, and Chinese parentheses（）for parenthetical remarks. Use Chinese curly quotes（“” and ‘’）for quotations instead of straight or half-width quotes.\n"
             "   - When writing in English or other languages: follow that language's standard punctuation conventions (half-width punctuation and straight quotes for English).\n"
-            "2. CRITICAL EXCEPTION — do NOT modify these machine-parsed ASCII tokens under any circumstance: in-text citation markers written as [1]/[101], the literal [FOLLOW_UPS] header, JSON blocks, code fences (```...```), mermaid code blocks, tool names, identifiers, and URLs. Keep those exactly half-width ASCII.\n\n"
+            "2. CRITICAL EXCEPTION — do NOT modify these machine-parsed ASCII tokens under any circumstance: in-text citation markers written as [key] or [1], the literal [FOLLOW_UPS] header, JSON blocks, code fences (```...```), mermaid code blocks, tool names, identifiers, and URLs. Keep those exactly half-width ASCII.\n\n"
             "### FOLLOW-UP SUGGESTIONS (MANDATORY):\n"
             "At the very end of your response — after ALL other content — you MUST call the "
             "suggest_follow_ups tool with exactly 6 follow-up questions, each carrying the tag of "
@@ -1142,30 +1143,37 @@ class ChatGenerationTask(BackgroundTask):
                 "elapsed_ms": self._turn_elapsed_ms(),
             })
 
-        # Phase 6: 参考文献块渲染（程序生成，单一事实来源）
-        # 来源无论是本地 KB 文档、在线工具结果，还是模型通过 cite_references 登记的
-        # 文献，统一由注册表按"正文实际引用到的编号"渲染：格式恒定、编号与来源一一
-        # 对应，模型不再自己书写 References，格式漂移/编号错位从根上消除。
+        # Phase 6: 参考文献与正文引用编号的统一收口（程序生成，单一事实来源）
+        # 正文里的 [key]（模型自拟别名）与 [n]（KB 文档号 / 工具结果 id）由注册表
+        # 按"首次出现顺序"统一重新编号，并就地改写正文。因此：
+        #   * 模型不必猜数字，先写正文还是先调 cite_references 都不会编号错位；
+        #   * 列表顺序 = 正文首次引用顺序（符合学术惯例）。
         _seed_registry_from_sources(reference_registry, sources_map)
-        has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
-        if has_citation and len(reference_registry):
-            used_indices = ReferenceRegistry.used_indices(self.full_response_cache)
-            ref_html = reference_registry.to_html(used_indices)
-            if ref_html:
-                cited = sum(1 for item in reference_registry.items() if item.index in used_indices)
-                self._emit_token(ref_html)
-                self.send_log(
-                    "INFO",
-                    f"References rendered: {len(reference_registry)} registered, {cited} cited.")
-            else:
-                self.send_log("INFO", "No cited reference matched the registry; reference block skipped.")
-
-        # Phase 6b: 结构化引用数据上报（UI 悬停卡 / 详情面板据此展示著录与原文片段）
-        if len(reference_registry):
+        # Agent 的返回缓存里混有 UI 控制标记（[CLEAR_SEARCH]/[START_LLM_NETWORK] 等，
+        # 由 AgentRuntime._emit 一并计入）；作为"上屏正文"前必须先剥离，否则这些
+        # 字面量会在整段替换时漏成正文。
+        display_text = re.sub(
+            r"\[(?:CLEAR_SEARCH|START_LLM_NETWORK)\]", "", self.full_response_cache or "")
+        new_text, ordered, unresolved = reference_registry.resolve_citations(display_text)
+        if unresolved:
+            self.send_log(
+                "WARNING",
+                "Unresolved inline citations (not registered, left as-is): "
+                f"{', '.join(dict.fromkeys(unresolved))[:200]}")
+        if ordered:
+            self.full_response_cache = new_text + reference_registry.render_items(ordered)
+            self.send_log(
+                "INFO",
+                f"References rendered: {len(reference_registry)} registered, "
+                f"{len(ordered)} cited (ordered by first appearance).")
+            # 结构化收口：用"已编号"正文替换上屏，并把引用数据直达悬停卡/详情面板。
             self._emit_state(TaskState.PROCESSING, -1, "", payload={
-                "event": "references",
-                "data": reference_registry.to_dict_list(),
+                "event": "answer_final",
+                "text": self.full_response_cache,
+                "references": [it.to_dict() for it in ordered],
             })
+        elif len(reference_registry):
+            self.send_log("INFO", "No cited reference matched the registry; reference block skipped.")
 
         # Phase 7: Persist Provenance evidence chain + show summary to user
         self._emit_provenance()

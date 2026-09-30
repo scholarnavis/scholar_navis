@@ -10,13 +10,16 @@
    否则"产物名里的通道"与"Release 标记的通道"会漂移；
 2. **下载地址**：``https://scholarnavis.com/dl?os={os}&channel={channel}``，
    与应用内更新提示指向同一个入口（Worker 决定实际对象）；
-3. **更新日志**：上一个可达 tag 到本 tag 之间的非合并提交；首版则退化为
-   全部历史（此时会显式标注，不假装有"变更范围"）。
+3. **更新日志**：发布基准 tag 到本 tag 之间的非合并提交；首版则退化为
+   全部历史（此时会显式标注，不假装有"变更范围"）。基准 tag 按通道取：
+   **stable 与上一个 stable 比较**（dev tag 是 stable 用户从未拿到过的中间
+   状态，混进来会描述一个不存在的"上一版"），dev 仍取最近的可达 tag。
    调用方同时开启 ``generate_release_notes``，GitHub 会在正文之后追加它自己
    生成的贡献者名单。
-4. **LLM 双语摘要**（可选）：把提交列表交给 OpenAI 兼容接口，产出中英两段
-   面向用户的变更说明。**未配置或调用失败一律自动退化为"只列提交"**——
-   发版不能被一个可选的润色环节卡住。
+4. **LLM 双语摘要**（可选）：把每条提交的**标题与正文**（标题之外"到底改了
+   什么"的唯一来源）交给 OpenAI 兼容接口，由模型合并重复项、压缩冗长描述、
+   剔除对用户不可见的内容，产出中英两段面向用户的变更说明。**未配置或调用
+   失败一律自动退化为"只列提交"**——发版不能被一个可选的润色环节卡住。
 
 顺带做一次**产物自检**：给定 ``--assets-dir`` 时，目录里的每个 zip 都必须匹配
 ``scholar_navis_{平台}_{通道}_v{版本}.zip`` 且通道/版本与 tag 一致。发版流水线里
@@ -92,6 +95,14 @@ LLM_NOTE_ZH = "本节由 LLM 依据提交日志自动汇总；若表述有出入
 # --------------------------------------------------------------------------- #
 #: 提交过多时只把最近 N 条交给模型（更早的变更由上一个版本覆盖）。
 DEFAULT_MAX_COMMITS = 100
+#: 单条提交正文（commit body）压成单行后交给模型的最大字符数。正文是"标题
+#: 之外到底改了什么"的唯一来源，但过长会挤占上下文；标题始终完整保留。
+MAX_BODY_CHARS = 480
+#: 提交正文里的机器生成尾注（trailer）：对用户没有意义，且常在多条提交之间
+#: 重复。在进入模型材料前就确定性地剥掉，免得模型把它们当成"变更内容"。
+_TRAILER_RE = re.compile(
+    r"^(?:Co-authored-by|Signed-off-by|Reviewed-by|Tested-by|Acked-by|"
+    r"Suggested-by|Reported-by|Change-Id|See-also|Refs?)\s*:", re.IGNORECASE)
 #: 单次请求超时（秒）与重试次数（重试间隔 = 3s × 第几次）。
 LLM_TIMEOUT = 120
 LLM_RETRIES = 2
@@ -106,15 +117,29 @@ OpenAlex, UniProt, PDB, STRING, KEGG ...), optional R-based figure rendering,
 and an MCP tool / skill plugin system. Builds ship for Windows and Linux on a
 stable channel and a dev channel.
 
-You receive the git commit subjects of a single release. Produce a concise,
-user-facing changelog in English and in Chinese.
+You receive the git commit log of a single release. Each entry is a subject line
+plus, when the author wrote one, an indented "details" body that explains what
+actually changed. Produce a concise, user-facing changelog in English and in
+Chinese.
 
 Hard rules:
-- Use ONLY what the commit subjects state. Never invent features, numbers,
+- Read the details body, not just the subject: it is the authority on what
+  changed, while the subject is often terse or uses internal shorthand.
+- Use ONLY what the subjects and bodies state. Never invent features, numbers,
   file names, or user impact that is not implied by them.
 - Group by type, in this order, skipping empty groups: Features, Fixes,
-  Performance, Refactoring, Documentation, Build & CI, Other.
-- Merge duplicates and near-duplicates; one bullet per user-visible change.
+  Performance, Documentation, Build & CI, Other.
+- Merge duplicates and near-duplicates: several commits that iterate on the
+  same change become one bullet, and one bullet covers exactly one
+  user-visible change.
+- Condense verbose or rambling entries into short, plain-language bullets.
+  Never transcribe a body verbatim.
+- Drop anything a user of the application cannot observe: internal refactors
+  with no behaviour change, formatting / typo / test-only churn, debug prints
+  and logging tweaks, routine CI or packaging housekeeping, dependency bumps
+  that change nothing for the user, and commit metadata (Co-authored-by,
+  Signed-off-by, issue references). Skip a group if nothing user-visible
+  remains in it.
 - Prefer wording an application user understands over internal symbol names.
 - Keep technology, product and database names exactly as written
   (PySide6, ONNX, PubMed, R2, Markdown ...).
@@ -168,19 +193,24 @@ def llm_settings(args) -> dict:
 
 
 def build_llm_messages(version: str, channel: str, commits: list, previous: str = "") -> list:
-    """构造 chat messages：系统提示 + 事实材料（版本/通道/提交列表）。"""
+    """构造 chat messages：系统提示 + 事实材料（版本/通道/提交标题与正文）。"""
     if previous:
         scope = f"Changes since {previous} (compare against that tag)."
     else:
-        scope = "This is the first release; the list covers the whole history."
+        scope = f"This is the first {channel} release; the log covers the whole history."
 
-    commit_lines = "\n".join(f"- {short} {subject}" for short, subject in commits) \
-        or "- (no commit metadata available)"
+    lines = []
+    for short, subject, body in commits:
+        lines.append(f"- {short} {subject}")
+        if body:
+            lines.append(f"  details: {body}")
+    commit_lines = "\n".join(lines) or "- (no commit metadata available)"
 
     user_prompt = (
         f"Release: v{version} ({channel} channel)\n"
         f"{scope}\n"
-        f"Commit subjects ({len(commits)}):\n{commit_lines}"
+        f"Commit log ({len(commits)} entries, newest first; each entry is a "
+        f"subject line plus an optional indented 'details' body):\n{commit_lines}"
     )
     return [{"role": "system", "content": LLM_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt}]
@@ -323,39 +353,102 @@ def resolve_revision(tag: str, cwd: str | Path | None = None) -> str:
     return "HEAD"
 
 
-def previous_tag(tag: str, cwd: str | Path | None = None) -> str:
-    """返回 ``tag`` 之前最近的可达 tag；没有则返回空串（视作首版）。"""
+def previous_tag(tag: str, cwd: str | Path | None = None,
+                 channel: str = "stable") -> str:
+    """返回 ``tag`` 的发布基准 tag；没有则返回空串（视作首版）。
+
+    基准 tag 按通道取（见模块文档）：
+
+    * ``stable``：跳过 dev tag，与**上一个 stable** 比较。dev tag 是开发通道
+      的中间状态，stable 用户从未收到过，混进来会描述一个不存在的"上一版"；
+    * ``dev``：与最近的**任意**可达 tag 比较——dev 版本是叠在上一次发布
+      （无论哪条通道）之上的增量，因此不做过滤。
+
+    ``stable`` 的候选集是 ``tag^`` 可达的 tag（拓扑上早于 ``tag``），按
+    ``creatordate`` 降序，取其中最新的 stable tag。
+    """
+    directory = str(cwd or Path.cwd())
+
+    if channel != "stable":
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0", f"{tag}^"],
+            cwd=directory, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            logger.info("No previous tag reachable from %s^; treating as the first "
+                        "release.", tag)
+            return ""
+        return result.stdout.strip()
+
     result = subprocess.run(
-        ["git", "describe", "--tags", "--abbrev=0", f"{tag}^"],
-        cwd=str(cwd or Path.cwd()), capture_output=True, text=True, check=False)
+        ["git", "tag", "--merged", f"{tag}^", "--sort=-creatordate"],
+        cwd=directory, capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        logger.info("No previous tag reachable from %s^; treating as the first release.",
-                    tag)
-        return ""
-    return result.stdout.strip()
+        message = (result.stderr or "").strip() or "unknown git error"
+        logger.warning("Could not list tags reachable from %s^ (%s); falling back "
+                       "to git describe.", tag, message)
+        fallback = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0", f"{tag}^"],
+            cwd=directory, capture_output=True, text=True, check=False)
+        return fallback.stdout.strip() if fallback.returncode == 0 else ""
+
+    for name in result.stdout.splitlines():
+        name = name.strip()
+        if name and release_channel(name) == "stable":
+            logger.info("Changelog base for %s (stable channel): %s", tag, name)
+            return name
+
+    logger.info("No earlier stable tag reachable from %s^; treating as the first "
+                "stable release.", tag)
+    return ""
+
+
+def _clean_body(body: str) -> str:
+    """把提交正文压成单行、剥掉机器尾注，并按 :data:`MAX_BODY_CHARS` 截断。
+
+    正文只进入 LLM 材料（原始提交列表仍只展示标题），因此可以牺牲排版换取
+    "每条提交占用的上下文可预期"。尾注在这里确定性地剥掉；"哪些正文内容与
+    用户无关"属于语义判断，留给模型（见 :data:`LLM_SYSTEM_PROMPT`）。
+    """
+    lines = []
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if not line or _TRAILER_RE.match(line):
+            continue
+        lines.append(line)
+
+    text = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    if len(text) > MAX_BODY_CHARS:
+        text = text[:MAX_BODY_CHARS].rstrip() + " …"
+    return text
 
 
 def collect_commits(tag: str, previous: str = "", cwd: str | Path | None = None,
                     max_commits: int = 200) -> list:
-    """取更新范围内的非合并提交，返回 ``[(短哈希, 标题), ...]``（新→旧）。
+    """取更新范围内的非合并提交，返回 ``[(短哈希, 标题, 正文), ...]``（新→旧）。
 
-    用 ``\\x1f`` 作字段分隔符：提交标题里出现 ``|``、``:`` 甚至制表符都不影响解析。
+    正文经 :func:`_clean_body` 压缩后只用于 LLM 摘要：标题常常是内部简写，
+    "到底改了什么"写在正文里，缺了它模型只能凭标题猜。
+
+    用 ``\\x1f`` / ``\\x1e`` 作字段与记录分隔符：标题、正文里出现 ``|``、``:``、
+    换行甚至制表符都不影响解析。
     """
     revision = f"{previous}..{tag}" if previous else tag
     result = subprocess.run(
         ["git", "log", "--no-merges", f"--max-count={max_commits}",
-         "--pretty=format:%h\x1f%s", revision],
+         "--pretty=format:%h\x1f%s\x1f%b\x1e", revision],
         cwd=str(cwd or Path.cwd()), capture_output=True, text=True, check=False)
     if result.returncode != 0:
         message = (result.stderr or "").strip() or "unknown git error"
         raise SystemExit(f"git log failed for {revision!r}: {message}")
 
     commits = []
-    for line in result.stdout.splitlines():
-        if not line.strip():
+    for record in result.stdout.split("\x1e"):
+        record = record.strip("\n")
+        if not record.strip():
             continue
-        short_hash, _, subject = line.partition("\x1f")
-        commits.append((short_hash.strip(), subject.strip()))
+        short_hash, _, rest = record.partition("\x1f")
+        subject, _, body = rest.partition("\x1f")
+        commits.append((short_hash.strip(), subject.strip(), _clean_body(body)))
     logger.info("Collected %d commit(s) for range %r.", len(commits), revision)
     return commits
 
@@ -408,7 +501,7 @@ def _raw_commits_block(commits: list, previous: str, collapsed: bool) -> list:
     else:
         title = f"Raw commit log — initial release ({len(commits)} commits)"
 
-    body = [f"- `{short}` {subject}" for short, subject in commits] \
+    body = [f"- `{short}` {subject}" for short, subject, _body in commits] \
         or ["- No commit metadata available for this range."]
 
     if not collapsed:
@@ -558,7 +651,9 @@ def main(argv=None) -> int:
                         help="Explicit version string; overrides --tag when given.")
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument("--previous-tag", default="",
-                        help="Force the changelog base tag instead of git describe.")
+                        help="Force the changelog base tag instead of the "
+                             "channel-scoped default (the previous stable tag for "
+                             "stable builds, the nearest reachable tag for dev).")
     parser.add_argument("--assets-dir", default="",
                         help="Directory holding the *.zip artifacts to validate.")
     parser.add_argument("--download-base", default=DEFAULT_DOWNLOAD_BASE)
@@ -595,7 +690,8 @@ def main(argv=None) -> int:
                     len(assets), ", ".join(name for name, *_ in assets))
 
     revision = resolve_revision(f"v{version}", args.cwd or None)
-    base = args.previous_tag or previous_tag(revision, args.cwd or None)
+    base = args.previous_tag or previous_tag(revision, args.cwd or None,
+                                             channel=channel)
     commits = collect_commits(revision, previous=base, cwd=args.cwd or None,
                               max_commits=args.max_commits)
 

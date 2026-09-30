@@ -1924,10 +1924,14 @@ class TextFormatter:
             citations_text = "\n\n📚 Reference:\n"
             if len(parts) > 1:
                 raw_cites = parts[1]
-                matches = re.findall(r"<b>\[(\d+)\]</b>\s*(.*?)\s*\(Page (\d+)\)", raw_cites)
-                for m in matches:
-                    idx, name, page = m
-                    citations_text += f"[{idx}] {name.strip()} (第 {page} 页)\n"
+                # 参考文献行统一形态：`▪ [<a…>]<b>[n]</b> 著录文本[</a>]</div>`。
+                # 旧版本地文档行末尾带 "(Page N)"，此处一并用同一正则吞掉末尾的
+                # `</div>`，再剥标签——两种历史格式都能正确还原为 `[n] 著录`。
+                matches = re.findall(r"<b>\[(\d+)\]</b>\s*(.*?)</div>",
+                                     raw_cites, flags=re.DOTALL)
+                for idx, label in matches:
+                    label = re.sub(r"<[^>]+>", "", label).strip()
+                    citations_text += f"[{idx}] {label}\n"
             text = main_text + citations_text
         else:
             text = _strip(text)

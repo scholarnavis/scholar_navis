@@ -8,8 +8,9 @@
 * **点击**：在概览卡基础上**原地长大**为**详情面板**（几何连续变形，不闪烁、
   不重建），额外展示该引用对应的**支撑原文片段**（按文本实际高度自适应，
   过长才滚动）与引用理由，便于溯源。
-* **详情面板**只在卡片自身持有键盘焦点时响应 Esc，或点击标题栏关闭按钮；点击
-  程序本体不会关闭它。面板可通过标题栏或卡片空白处拖动（限制在宿主窗口内）。
+* **详情面板**支持三种关闭方式：卡片自身持有键盘焦点时按 Esc、点击标题栏关闭
+  按钮、或点击程序内卡片以外的任意位置（应用级按下过滤）。面板可通过标题栏或
+  卡片空白处拖动（限制在宿主窗口内）。
 
 它是"窗口内的浮层"，不是独立窗口
 --------------------------------
@@ -50,6 +51,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
                                QTextBrowser, QVBoxLayout, QWidget)
 
 from src.core.theme_manager import ThemeManager, strong_weight_css
+from src.ui.components.copy_button import CopyButton
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger("UI.CitationPopup")
@@ -99,6 +101,17 @@ _KIND_LABELS = {
 
 def _kind_label(kind: str) -> str:
     return _KIND_LABELS.get(str(kind or "").lower(), "Reference")
+
+
+def _event_global_pos(event) -> QPoint:
+    """取鼠标事件的全局坐标（Qt6 走 globalPosition；异常时退回当前光标点）。"""
+    getter = getattr(event, "globalPosition", None)
+    if callable(getter):
+        try:
+            return getter().toPoint()
+        except Exception:  # pragma: no cover - 纯防御
+            pass
+    return QCursor.pos()
 
 
 class CitationPopup(QWidget):
@@ -217,10 +230,11 @@ class CitationPopup(QWidget):
         # --- 操作按钮（NoFocus：避免抢走焦点导致 Esc 收不到） ---
         self._btn_row = QHBoxLayout()
         self._btn_row.setSpacing(6)
-        self._btn_copy = QPushButton("Copy citation")
-        self._btn_copy.setCursor(Qt.PointingHandCursor)
-        self._btn_copy.setFocusPolicy(Qt.NoFocus)
-        self._btn_copy.clicked.connect(self._copy_citation)
+        # 复制按钮为项目统一的 CopyButton（provider 每次点击求值 -> 切换条目后
+        # 复制的仍是当前条目），反馈方式与聊天/源码查看器一致。
+        self._btn_copy = CopyButton("Copy citation", copied_text="Copied",
+                                    provider=self._citation_copy_text,
+                                    toast="Citation copied to clipboard")
         self._btn_open = QPushButton("Open source")
         self._btn_open.setCursor(Qt.PointingHandCursor)
         self._btn_open.setFocusPolicy(Qt.NoFocus)
@@ -231,10 +245,22 @@ class CitationPopup(QWidget):
         lay.addLayout(self._btn_row)
 
         # --- 支撑原文（仅详情态可见；高度按文本实测，过长才滚动） ---
+        #     标题右侧配一个复用 CopyButton：一键复制该条目的支撑原文（与正文
+        #     悬停看到的 passage 完全一致），并把复制成功反馈做在按钮上。
+        self._snippet_header = QWidget()
+        _snip_head = QHBoxLayout(self._snippet_header)
+        _snip_head.setContentsMargins(0, 0, 0, 0)
+        _snip_head.setSpacing(6)
         self._snippet_title = QLabel("Cited passage")
         self._snippet_title.setObjectName("CitationSectionTitle")
-        self._snippet_title.setVisible(False)
-        lay.addWidget(self._snippet_title)
+        _snip_head.addWidget(self._snippet_title)
+        _snip_head.addStretch(1)
+        self._btn_copy_snippet = CopyButton("Copy", copied_text="Copied",
+                                            provider=self._snippet_copy_text)
+        self._btn_copy_snippet.setObjectName("CitationSnippetCopy")
+        _snip_head.addWidget(self._btn_copy_snippet)
+        self._snippet_header.setVisible(False)
+        lay.addWidget(self._snippet_header)
 
         self._snippet = QTextBrowser()
         self._snippet.setObjectName("CitationSnippet")
@@ -325,6 +351,9 @@ class CitationPopup(QWidget):
                 padding: 3px 10px; font-family: {fam}; font-size: 11px;
             }}
             QPushButton:hover {{ background-color: {hover}; }}
+            QPushButton#CitationSnippetCopy {{
+                padding: 1px 7px; font-size: 10px;
+            }}
             QPushButton#CitationClose {{
                 border: none; background: transparent; color: {muted};
                 font-size: 12px; padding: 0px;
@@ -409,7 +438,7 @@ class CitationPopup(QWidget):
 
         full = (mode == self.MODE_FULL)
         self._btn_close.setVisible(full)
-        self._snippet_title.setVisible(full)
+        self._snippet_header.setVisible(full)
         self._snippet.setVisible(full)
         note = str(self._data.get("note") or "").strip()
         self._lbl_note.setVisible(full and bool(note))
@@ -745,15 +774,22 @@ class CitationPopup(QWidget):
     # ------------------------------------------------------------------ #
     #  操作
     # ------------------------------------------------------------------ #
-    def _copy_citation(self):
+    def _citation_copy_text(self) -> str:
+        """CopyButton 的文本来源：当前条目的 ``[n] 著录``（切换条目后自动取新值）。"""
         from src.core.references import ReferenceItem
         try:
             item = ReferenceItem.from_dict(self._data)
-            text = f"[{item.index}] {item.citation_text()}"
+            return f"[{item.index}] {item.citation_text()}"
         except Exception:  # pragma: no cover - 纯防御
-            text = str(self._data.get("title") or "")
-        QGuiApplication.clipboard().setText(text)
-        ToastManager().show("Citation copied to clipboard", "success")
+            return str(self._data.get("title") or "")
+
+    def _snippet_copy_text(self) -> str:
+        """CopyButton 的文本来源：当前条目的支撑原文（与正文悬停所见一致）。"""
+        return str(self._data.get("snippet") or "").strip()
+
+    def _copy_citation(self):
+        """兼容入口：交由 CopyButton 统一处理（保留供外部历史接线调用）。"""
+        self._btn_copy.copy_now()
 
     def _open_source(self):
         data = self._data
@@ -810,11 +846,53 @@ class CitationPopupController(QObject):
         except Exception as e:  # pragma: no cover - 主题连接失败不影响功能
             logger.debug("Theme hook for citation popup skipped: %s", e)
 
+        # 详情面板"点程序其他位置即关闭"：浮层是宿主子控件，收不到其它控件的
+        # 点击，故在应用级装一个按下过滤器（只处理 MouseButtonPress，开销极低）。
+        self._install_app_filter()
+
     @classmethod
     def instance(cls) -> "CitationPopupController":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    # ------------------------------------------------------------------ #
+    #  应用级事件过滤（点击卡片外即关闭）
+    # ------------------------------------------------------------------ #
+    def _install_app_filter(self):
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            app.installEventFilter(self)
+        except Exception as e:  # pragma: no cover - 极端环境兜底
+            logger.debug("Citation popup app filter install skipped: %s", e)
+
+    def eventFilter(self, obj, event):
+        """鼠标按下落在卡片之外时收起面板；其余事件一律放行（返回 False）。
+
+        只关心 ``MouseButtonPress`` 且仅在浮层可见时动作，不影响既有交互。
+        """
+        try:
+            if (event.type() == QEvent.MouseButtonPress
+                    and self._popup is not None and self._popup.isVisible()):
+                self._dismiss_on_outside_press(_event_global_pos(event))
+        except Exception:  # pragma: no cover - 过滤链异常不得外泄
+            pass
+        return False
+
+    def _dismiss_on_outside_press(self, global_pos):
+        """点击卡片外即收起；落在当前引用锚点上的按下不算"外部"（否则点击引用
+        展开它的那一次按下就会把面板立刻关掉）。"""
+        popup = self._popup
+        if popup is None or not popup.isVisible():
+            return
+        if popup.contains_global(global_pos):
+            return
+        if self._anchor_rect.isValid() and \
+                self._anchor_rect.adjusted(-6, -6, 6, 6).contains(global_pos):
+            return
+        self.dismiss()
 
     # ------------------------------------------------------------------ #
     #  数据同步
@@ -935,8 +1013,8 @@ class CitationPopupController(QObject):
         popup.show_with_animation(anchor, mode, from_rect=from_rect)
         self._outside_ticks = 0
         if mode == CitationPopup.MODE_FULL:
-            # 详情面板不参与"离开即收起"的轮询：点击程序本体不会关闭它，
-            # 只能由 Esc（卡片持有焦点时）或标题栏关闭按钮结束。
+            # 详情面板不参与"离开即收起"的轮询（否则鼠标一移开就消失）；改由
+            # 应用级按下过滤处理"点击卡片外关闭"，并保留 Esc 与标题栏关闭按钮。
             self._watch_timer.stop()
         elif not self._watch_timer.isActive():
             self._watch_timer.start()
@@ -978,8 +1056,8 @@ class CitationPopupController(QObject):
     def _watch_cursor(self):
         """轮询光标：概览卡在鼠标离开锚点与卡片后自动收起。
 
-        详情面板不参与该轮询（只能由 Esc / 标题栏关闭按钮结束），因此这里直接
-        返回，避免"用户去看别的窗口时面板被抢走"。
+        详情面板不参与该轮询（由应用级按下过滤实现"点击卡片外关闭"），因此这里
+        直接返回，避免"用户去看别的窗口时面板被抢走"。
         """
         popup = self._popup
         if popup is None or not popup.isVisible() or self._mode == CitationPopup.MODE_FULL:

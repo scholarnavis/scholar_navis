@@ -30,7 +30,7 @@ import logging
 import os
 import re
 import threading
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 logger = logging.getLogger("Core.References")
@@ -45,8 +45,26 @@ CITES_HEADER_HTML = "<b>📚 Cited Sources:</b><br>"
 #: 页脚整体起始标记：正文/追问与参考文献块的分界点。
 FOOTER_MARKER = FOOTER_RULE_HTML + CITES_HEADER_HTML
 
-#: 正文行内引用标记 ``[n]``（n 为 1~3 位数字）。
+#: 正文行内引用标记 ``[n]``（n 为 1~3 位数字；本地 KB 文档等已编号来源使用）。
 INLINE_CITE_RE = re.compile(r"\[(\d{1,3})\]")
+
+#: 正文行内引用 key（``[lariguet2004]`` 形态）：字母开头、长度受限的 ASCII slug。
+#: 模型为每个来源自拟 key 并在正文中复用；编号由程序按"首次出现顺序"统一分配，
+#: 从根本上消除"模型猜数字"导致的编号错位（模型写正文与调用工具孰先孰后都不影响）。
+_KEY_TOKEN_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9._:-]{0,63})\]")
+
+#: 统一的正文引用 token 扫描：``[key]`` 或 ``[n]``（用于按序编号与就地改写）。
+INLINE_TOKEN_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9._:-]{0,63}|\d{1,3})\]")
+
+#: key 合法性校验（与 _KEY_TOKEN_RE 同形，整串匹配）。
+_VALID_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]{0,63}$")
+
+#: 思维链 / 工具过程块：统计"首次出现顺序"时排除，避免模型在 <think> 里的
+#: 示例编号抢占正文的首次出现位置。
+_THINK_BLOCK_RE = re.compile(
+    r"<(?:think|mcp_process)\b[^>]*>.*?</(?:think|mcp_process)>"
+    r"|<(?:think|mcp_process)\b[^>]*>.*$",
+    re.DOTALL | re.IGNORECASE)
 
 #: 条目文本的展示上限（超出仅用于展示截断，原始数据不丢）。
 _SNIPPET_DISPLAY_MAX = 2000
@@ -137,7 +155,8 @@ class ReferenceItem:
 
     字段刻意保持扁平，便于 JSON 序列化后在 UI 线程重建：
 
-    * ``index``    —— 引用编号（= 正文里的 ``[n]``），程序分配；
+    * ``index``    —— 引用编号（= 正文里的 ``[n]``），程序按首次出现顺序分配；
+    * ``key``      —— 正文里的引用 key（``[key]``，模型自拟的 ASCII slug），可空；
     * ``title``    —— 标题；
     * ``authors``  —— 作者（字符串，分号/逗号分隔均可）；
     * ``year``     —— 年份；
@@ -152,6 +171,7 @@ class ReferenceItem:
     """
 
     index: int
+    key: str = ""
     title: str = ""
     authors: str = ""
     year: str = ""
@@ -168,7 +188,8 @@ class ReferenceItem:
     #  规范化
     # ------------------------------------------------------------------ #
     def normalized(self) -> "ReferenceItem":
-        """就地清洗字段：去首尾空白、DOI 去前缀、kind 归一。"""
+        """就地清洗字段：去首尾空白、DOI 去前缀、kind 归一、key 合法性校验。"""
+        self.key = self._normalize_key(self.key)
         self.title = str(self.title or "").strip()
         self.authors = str(self.authors or "").strip()
         self.year = str(self.year or "").strip()
@@ -185,6 +206,14 @@ class ReferenceItem:
             self.page = 1
         self.kind = str(self.kind or "reference").strip().lower() or "reference"
         return self
+
+    @staticmethod
+    def _normalize_key(value: str) -> str:
+        """规整正文引用 key：去方括号/空白，非法形态（含空格、中文、超长）则丢弃。"""
+        raw = str(value or "").strip().strip("[]").strip()
+        if not raw or not _VALID_KEY_RE.match(raw):
+            return ""
+        return raw
 
     # ------------------------------------------------------------------ #
     #  展示
@@ -292,6 +321,8 @@ class ReferenceItem:
         data = raw or {}
         item = cls(
             index=index,
+            key=str(data.get("key") or data.get("ref_key") or data.get("cite_key")
+                    or data.get("slug") or ""),
             title=str(data.get("title") or data.get("name") or ""),
             authors=str(data.get("authors") or data.get("author") or ""),
             year=str(data.get("year") or data.get("date") or ""),
@@ -320,7 +351,14 @@ class ReferenceRegistry:
     def __init__(self) -> None:
         self._items: Dict[int, ReferenceItem] = {}
         self._by_key: Dict[str, int] = {}
+        #: 正文引用 key（小写）-> 注册表编号。仅登记模型显式提供 key 的条目。
+        self._key_index: Dict[str, int] = {}
         self._lock = threading.RLock()
+
+    def _index_key(self, item: ReferenceItem, idx: int) -> None:
+        """登记条目的正文引用 key（重复 key 保留首次登记，避免抢占既有编号）。"""
+        if item.key:
+            self._key_index.setdefault(item.key.lower(), idx)
 
     # ------------------------------------------------------------------ #
     #  写入
@@ -338,6 +376,7 @@ class ReferenceRegistry:
             item.index = idx
             item.normalized()
             self._items[idx] = item
+            self._index_key(item, idx)
             key = item.dedupe_key
             if key:
                 self._by_key.setdefault(key, idx)
@@ -358,6 +397,7 @@ class ReferenceRegistry:
             idx = int(index) if index else self._next_index()
             item.index = idx
             self._items[idx] = item
+            self._index_key(item, idx)
             if key:
                 self._by_key[key] = idx
             logger.debug("Reference registered: [%d] %s", idx, item.display_name[:80])
@@ -436,11 +476,86 @@ class ReferenceRegistry:
             return set()
         return {int(m) for m in INLINE_CITE_RE.findall(text)}
 
+    def lookup_key(self, key: str) -> Optional[int]:
+        """按正文引用 key 查编号（大小写不敏感）；未登记返回 None。"""
+        with self._lock:
+            return self._key_index.get(str(key or "").strip().lower())
+
+    def _resolve_token(self, token: str) -> Optional[int]:
+        """把正文 token 解析为注册表编号：纯数字按编号，其余按 key。"""
+        token = str(token or "").strip()
+        if not token:
+            return None
+        if token.isdigit():
+            idx = int(token)
+            return idx if idx in self._items else None
+        return self._key_index.get(token.lower())
+
+    # ------------------------------------------------------------------ #
+    #  正文引用 -> 编号（唯一权威映射）
+    # ------------------------------------------------------------------ #
+    def resolve_citations(self, text: str):
+        """扫描正文引用（``[key]`` / ``[n]``），按"首次出现顺序"重新编号。
+
+        这是"正文编号 ↔ 参考文献列表"的唯一权威映射：
+
+        * 模型只需为每个来源自拟一个 key 并在正文复用，**不必猜数字**——因此
+          无论它先写正文还是先调用 ``cite_references``，编号都不会错位；
+        * 编号 1..K 严格按正文中该来源的首次出现顺序分配，列表顺序与正文一致
+          （符合学术惯例，也消除了"提交顺序 ≠ 引用顺序"的历史问题）。
+
+        :return: ``(new_text, ordered_items, unresolved)``
+            - ``new_text``：引用已就地改写为 ``[1..K]`` 后的正文；
+            - ``ordered_items``：按新编号排序的条目副本（``index`` 已改为新编号）；
+            - ``unresolved``：无法解析的 token（正文出现但未登记，记日志用）。
+        """
+        if not text:
+            return text or "", [], []
+        with self._lock:
+            # 统计首次出现顺序时排除 <think>/<mcp_process>：模型可能在其中
+            # 写"用 [x] 引用"这类示意，不应参与正文编号。
+            scan_text = _THINK_BLOCK_RE.sub(" ", text)
+            order: Dict[int, int] = {}
+            unresolved: List[str] = []
+
+            def _scan(m: "re.Match[str]") -> str:
+                idx = self._resolve_token(m.group(1))
+                if idx is None:
+                    unresolved.append(m.group(1))
+                elif idx not in order:
+                    order[idx] = len(order) + 1
+                return m.group(0)
+
+            INLINE_TOKEN_RE.sub(_scan, scan_text)
+
+            def _rewrite(m: "re.Match[str]") -> str:
+                idx = self._resolve_token(m.group(1))
+                if idx is None or idx not in order:
+                    # 未登记引用 / 仅出现在 <think> 中的示意 token：原样保留。
+                    return m.group(0)
+                return f"[{order[idx]}]"
+
+            new_text = INLINE_TOKEN_RE.sub(_rewrite, text)
+            ordered = [replace(self._items[i], index=order[i])
+                       for i in sorted(order, key=lambda k: order[k])]
+        return new_text, ordered, unresolved
+
     # ------------------------------------------------------------------ #
     #  渲染
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def render_items(items: Sequence[ReferenceItem]) -> str:
+        """按给定顺序渲染参考文献块 HTML（编号取各条目 ``index``；无条目返回空串）。"""
+        rows = [ReferenceRegistry._entry_html(it) for it in (items or [])]
+        if not rows:
+            return ""
+        return "\n" + FOOTER_MARKER + "".join(rows)
+
     def to_html(self, indices: Optional[Iterable[int]] = None) -> str:
         """渲染正文末尾的参考文献块 HTML（无可用条目时返回空串）。
+
+        保留此接口以兼容历史调用；新流程请用 :meth:`resolve_citations` +
+        :meth:`render_items`（编号按正文首次出现顺序，而非注册顺序）。
 
         :param indices: 仅渲染这些编号（通常为正文实际引用到的编号）；
                         None 表示渲染全部。

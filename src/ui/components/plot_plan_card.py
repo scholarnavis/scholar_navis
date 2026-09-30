@@ -18,7 +18,6 @@ import re
 import threading
 
 from PySide6.QtCore import Qt, QEvent, Signal, Slot
-from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -29,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.theme_manager import ThemeManager, strong_weight_css
+from src.ui.components.copy_button import CopyButton
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -127,10 +127,10 @@ class PlotPlanCardWidget(QFrame):
         actions.setSpacing(8)
         actions.addStretch(1)
 
-        self._btn_copy = QPushButton(" Copy Suggestion")
+        self._btn_copy = CopyButton(" Copy Suggestion", copied_text=" Copied",
+                                    provider=lambda: self._plan_text or "",
+                                    toast="Plotting plan copied to clipboard.")
         self._btn_copy.setProperty("cssClass", "plotPlanBtn")
-        self._btn_copy.setCursor(Qt.PointingHandCursor)
-        self._btn_copy.clicked.connect(self._copy_suggestion)
         actions.addWidget(self._btn_copy)
 
         self._btn_translate = QPushButton(" Translate to English")
@@ -262,10 +262,8 @@ class PlotPlanCardWidget(QFrame):
         return super().eventFilter(obj, event)
 
     def _copy_suggestion(self):
-        if self._plan_text:
-            QGuiApplication.clipboard().setText(self._plan_text)
-            ToastManager().show("Plotting plan copied to clipboard.", "success")
-        else:
+        """兼容入口：交由 CopyButton 统一处理（点击建议区的复制路径也走这里）。"""
+        if not self._btn_copy.copy_now():
             ToastManager().show("Nothing to copy.", "warning")
 
     def _set_translating(self, busy: bool):

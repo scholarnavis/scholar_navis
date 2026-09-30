@@ -220,6 +220,22 @@ class ChatResponseFlowMixin:
             CitationPopupController.instance().merge_references(data, msg_index)
             logger.debug("Reference data synced to citation popup store: %d item(s) for message #%s.",
                          len(data), msg_index)
+        elif isinstance(payload, dict) and payload.get("event") == "answer_final":
+            # 正文引用编号收口：任务端已把 [key]/[n] 按首次出现顺序改写为 [n]，
+            # 这里用"已编号"版本整体替换气泡累计文本（而非追加），保证正文编号与
+            # 参考文献列表严格一致——修正"模型先写正文、编号靠猜"导致的对不上。
+            text = payload.get("text") or ""
+            if text:
+                self.current_ai_text = text
+                self._is_rendering_dirty = True
+                self._throttled_render()
+            data = payload.get("references") or []
+            bubble = getattr(self, "current_ai_bubble", None)
+            msg_index = getattr(bubble, "index", -1) if bubble is not None else -1
+            from src.ui.components.citation_popup import CitationPopupController
+            CitationPopupController.instance().merge_references(data, msg_index)
+            logger.debug("Final answer (renumbered citations) applied: %d chars, %d reference(s) "
+                         "for message #%s.", len(text), len(data), msg_index)
         elif isinstance(payload, dict) and payload.get("event") == "await_user":
             # deep-plan 等待确认：同样进入等待状态锁定通用发送。
             self._awaiting_user_input = True

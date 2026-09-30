@@ -224,14 +224,18 @@ owns is the **contract** between them:
   `/changelog`) and the `os` / `channel` query values the app sends;
 * the release flow that keeps both in sync (`.github/workflows/build-release.yml`).
 
-Release bodies are composed by `build_support/release_notes.py`. When
-`LLM_API_KEY`, `LLM_BASE_URL` (OpenAI-compatible, e.g. `https://.../v1`) and
-`LLM_MODEL` are configured (the workflow reads them from repository secrets /
-variables), the commit log is summarised into an English and a Chinese section by
-that model; the raw commit list is always kept in the body for verification. If
-any of the three is missing, or the call fails / returns an unusable shape, the
-body silently falls back to the plain commit list — an optional polish step must
-never block a release.
+Release bodies are composed by `build_support/release_notes.py`. The changelog
+covers the non-merge commits since the previous release **of the same channel**:
+a stable build is compared against the previous stable tag, a dev build against
+the nearest reachable tag. When `LLM_API_KEY`, `LLM_BASE_URL`
+(OpenAI-compatible, e.g. `https://.../v1`) and `LLM_MODEL` are configured (the
+workflow reads them from repository secrets / variables), a model reads both the
+subject and the body of every commit and summarises them into an English and a
+Chinese section — merging duplicates, condensing long entries, and dropping
+changes users cannot observe; the raw commit list is always kept in the body for
+verification. If any of the three is missing, or the call fails / returns an
+unusable shape, the body silently falls back to the plain commit list — an
+optional polish step must never block a release.
 
 The release workflow reads the following from repository **secrets** (and falls
 back to **variables** for the two non-sensitive ones):
