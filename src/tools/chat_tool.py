@@ -195,7 +195,7 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
         # 3. 对话展示滚动区 (仅存放消息气泡)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        # 滚动条走 overlay 样式：不操作时完全不可见，鼠标移到滚动条上才显形
+        # 滚动条走 overlay 样式：常态为浅色滑块（能看出可滚动），交互时加深
         self.scroll_area.setStyleSheet(
             "QScrollArea { border: none; background-color: transparent; }"
             + overlay_scrollbar_qss())
@@ -265,6 +265,11 @@ class ChatTool(ChatSendFlowMixin, ChatResponseFlowMixin,
             self.input_container.sig_remove_image.connect(self.remove_attached_image)
         if hasattr(self.input_container, 'sig_open_image'):
             self.input_container.sig_open_image.connect(self.open_attachment_image)
+        # 文档附件芯片：打开 / 移除动作
+        if hasattr(self.input_container, 'sig_remove_file'):
+            self.input_container.sig_remove_file.connect(self.remove_attached_file)
+        if hasattr(self.input_container, 'sig_open_file'):
+            self.input_container.sig_open_file.connect(self.open_attachment_file)
 
         main_layout.addWidget(self.input_container)
 

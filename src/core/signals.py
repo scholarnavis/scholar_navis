@@ -21,6 +21,8 @@ class GlobalSignals(QObject):
     sig_toast = Signal(str, str)
     mcp_status_changed = Signal()
     theme_changed = Signal()
+    #: 聊天气泡排版参数（字号/字距/行距/段距）已保存：已存在的气泡据此就地重排
+    chat_typography_changed = Signal()
 
     def __new__(cls):
         if cls._instance is None:

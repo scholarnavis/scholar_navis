@@ -14,6 +14,10 @@ from src.ui.components.dialogs.base import BaseDialog
 from src.ui.components.dialogs.common import StandardDialog
 from src.ui.components.text_formatter import TextFormatter
 
+#: ReleaseNotesDialog 正文浏览器的 objectName：QSS 用它把选择器提升到"含 id"级别，
+#: 以压过父类 BaseDialog 的通用输入框规则（详见 _apply_theme 内的说明）。
+_BROWSER_OBJECT_NAME = "ReleaseNotesBrowser"
+
 
 class ApiProvidersDialog(BaseDialog):
     def __init__(self, parent=None):
@@ -505,6 +509,8 @@ class ReleaseNotesDialog(BaseDialog):
         self.content_layout.addWidget(self.lbl_header)
 
         self.browser = QTextBrowser()
+        # objectName 供 _apply_theme 里的带 id 选择器使用（见那里的说明）
+        self.browser.setObjectName(_BROWSER_OBJECT_NAME)
         # 日志正文里的 GitHub / PR 链接交给系统浏览器打开；此处不拦截链接，
         # 也不做内嵌导航（setOpenExternalLinks 对 http(s) 生效）。
         self.browser.setOpenExternalLinks(True)
@@ -549,7 +555,13 @@ class ReleaseNotesDialog(BaseDialog):
         self.lbl_header.setText(
             f'<span style="color:{tm.color("text_main")}; font-size:15px;">'
             f'{self._header_html}</span>')
+        # 选择器必须带 id：父类 BaseDialog 的通用输入框规则是
+        # ``QLineEdit, QTextEdit, ... { background-color/border/border-radius/padding }``，
+        # 与本规则**特异性相同**，而 Qt 在特异性相同时是祖先样式优先；
+        # QTextBrowser 又是 QTextEdit 的子类，于是"透明无边框"会被盖成
+        # 输入框样式的底色块（正文外多一层底纹）。加 id 后特异性升至 (0,0,1,1)，
+        # 稳定压过父类的类型选择器。
         self.browser.setStyleSheet(
-            f"QTextBrowser {{ background-color: transparent; border: none; "
-            f"color: {tm.color('text_main')}; }}")
+            f"QTextBrowser#{_BROWSER_OBJECT_NAME} {{ background-color: transparent; "
+            f"border: none; color: {tm.color('text_main')}; }}")
         self._render()

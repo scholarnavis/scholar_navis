@@ -117,25 +117,8 @@ class ChatSendFlowMixin:
 
             self.external_files = list(files) if files else []
             self.external_context_html = html if html else ""
-
-            if self.external_files:
-                names = []
-                for c in self.external_files:
-                    if c['name'] not in names:
-                        names.append(c['name'])
-                display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(
-                    names)
-                self.input_container.show_context_preview(display_text)
-                self._sync_image_thumbs()
-            else:
-                self.input_container.hide_context_preview()
-                self._sync_image_thumbs()
-
-    def _sync_image_thumbs(self):
-        """将当前待发送附件中的图片同步到输入区预览条。"""
-        image_files = [c for c in getattr(self, 'external_files', []) if c.get("type") == "image"]
-        if hasattr(self.input_container, 'set_image_thumbs'):
-            self.input_container.set_image_thumbs(image_files)
+            # 预览条（文本横幅 + 图片/文档芯片）统一由 attachments mixin 重建
+            self._refresh_attachment_preview()
 
     def _on_query_translated(self, translated_text):
         for i in range(self.chat_layout.count() - 1, -1, -1):
@@ -272,9 +255,8 @@ class ChatSendFlowMixin:
 
         self.external_files = []
         self.external_context_html = ""
+        # hide_context_preview 会一并清空图片 / 文档芯片
         self.input_container.hide_context_preview()
-        if hasattr(self.input_container, 'set_image_thumbs'):
-            self.input_container.set_image_thumbs([])
 
     def handle_edit_resend(self, index, new_text):
         if getattr(self, 'is_locked', False):
@@ -350,16 +332,9 @@ class ChatSendFlowMixin:
         })
 
         self.external_files = old_files
-        # 附件保持挂载（供后续追问继续引用）：同步输入区预览条与图片芯片
-        if old_files:
-            names = []
-            for c in old_files:
-                if c.get('type') != 'image' and c['name'] not in names:
-                    names.append(c['name'])
-            display_text = (f"{names[0]}, {names[1]} and {len(names) - 2} more"
-                            if len(names) > 2 else (", ".join(names) if names else f"{len(old_files)} attachment(s)"))
-            self.input_container.show_context_preview(display_text)
-        self._sync_image_thumbs()
+        # 附件保持挂载（供后续追问继续引用）：预览条（文本横幅 + 图片/文档芯片）
+        # 统一由 attachments mixin 重建，避免此处重复展示逻辑。
+        self._refresh_attachment_preview()
         self.start_ai_response(kb_id)
 
     def handle_plot_plan_confirm(self, final_requirement: str):

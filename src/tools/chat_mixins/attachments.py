@@ -13,6 +13,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QMenu
 
 from src.core.core_task import TaskManager, TaskMode
+from src.core.file_types import (ATTACHABLE_EXTS, DOCUMENT_EXTS, IMAGE_EXTS,
+                                 TEXT_VIEWER_EXTS)
 from src.core.theme_manager import ThemeManager
 from src.ui.components.file_dialogs import (open_file_name, open_file_names,
                                           save_file_name)
@@ -22,6 +24,11 @@ from src.ui.components.toast import ToastManager
 logger = logging.getLogger(__name__)
 
 
+def _glob_patterns(exts) -> str:
+    """把扩展名集合转成 QFileDialog 过滤串（排序保证各平台顺序稳定）。"""
+    return " ".join(f"*.{ext}" for ext in sorted(exts))
+
+
 class ChatAttachmentsMixin:
     """附件管理与导出。"""
 
@@ -29,13 +36,18 @@ class ChatAttachmentsMixin:
     MAX_IMAGES_PER_MESSAGE = 8
 
     def attach_from_local(self):
-        """按钮点击触发的文件选择器"""
+        """按钮点击触发的文件选择器。
+
+        过滤清单全部由 :mod:`src.core.file_types` 派生，新增格式只改那一处即可，
+        不会出现"查看器能打开但选不到 / 拖不进来"的脱节。
+        """
+        filter_str = ";;".join([
+            f"Supported Files ({_glob_patterns(ATTACHABLE_EXTS)})",
+            f"Documents & Text ({_glob_patterns(DOCUMENT_EXTS | TEXT_VIEWER_EXTS)})",
+            f"Images ({_glob_patterns(IMAGE_EXTS)})",
+        ])
         paths, _ = open_file_names(
-            self.widget, "Select File(s)", "",
-            "Supported Files (*.pdf *.md *.txt *.docx *.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg);;"
-            "Documents (*.pdf *.md *.txt *.docx);;"
-            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg)"
-        )
+            self.widget, "Select File(s)", "", filter_str)
         if not paths:
             return
         self.process_attached_files(paths)
@@ -242,13 +254,15 @@ class ChatAttachmentsMixin:
         timer.start(100)
 
     def _refresh_attachment_preview(self):
-        """按当前 ``external_files`` 重建输入区预览（文本横幅 + 图片芯片）。"""
+        """按当前 ``external_files`` 重建输入区预览（文本横幅 + 图片/文档芯片）。"""
         names = []
         image_files = []
+        doc_files = []
         for c in getattr(self, 'external_files', []):
             if c.get('type') == 'image':
                 image_files.append(c)
                 continue
+            doc_files.append(c)
             if c['name'] not in names:
                 names.append(c['name'])
 
@@ -263,6 +277,8 @@ class ChatAttachmentsMixin:
 
         if hasattr(self.input_container, 'set_image_thumbs'):
             self.input_container.set_image_thumbs(image_files)
+        if hasattr(self.input_container, 'set_file_chips'):
+            self.input_container.set_file_chips(doc_files)
 
     def _prepare_image_entry(self, path, name):
         """校验并构建图片附件条目。
@@ -359,12 +375,32 @@ class ChatAttachmentsMixin:
         else:
             ToastManager().show(f"Image file not found: {os.path.basename(str(image_path))}", "error")
 
+    def open_attachment_file(self, path, name=""):
+        """打开待发送的文档附件（输入区芯片单击）。
+
+        复用已发送消息中 ``cite://`` 链接的统一路由：PDF / 文本走内部查看器，
+        其余扩展名（如 DOCX）交由系统默认程序，保证"发送前预览"与"发送后点击
+        链接"行为完全一致（同一套实现，不在此处重复分支）。
+        """
+        if not path or not os.path.exists(path):
+            ToastManager().show(
+                f"File not found: {name or os.path.basename(str(path))}", "error")
+            return
+        display_name = name or os.path.basename(path)
+        link = f"cite://view?path={quote(path)}&page=1&name={quote(display_name)}"
+        logger.debug("Open attached file from input chip: %s", path)
+        self.handle_link_click(link)
+
+    def remove_attached_file(self, info):
+        """从待发送附件中移除指定文档（输入区芯片上的 x 按钮）。"""
+        self.external_files = [f for f in getattr(self, 'external_files', []) if f is not info]
+        self._refresh_attachment_preview()
+
     def clear_attached_context(self):
         self.external_files = []
         self.external_context_html = ""
+        # hide_context_preview 会一并清空图片 / 文档芯片
         self.input_container.hide_context_preview()
-        if hasattr(self.input_container, 'set_image_thumbs'):
-            self.input_container.set_image_thumbs([])
 
     def export_chat_history(self):
         if not self.history:

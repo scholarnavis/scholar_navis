@@ -35,6 +35,7 @@ _EXPORTS = {
     "ApiProvidersDialog": ("about_dialogs", "ApiProvidersDialog"),
     "LicenseDialog": ("about_dialogs", "LicenseDialog"),
     "ReleaseNotesDialog": ("about_dialogs", "ReleaseNotesDialog"),
+    "ChatTypographyDialog": ("chat_typography_dialog", "ChatTypographyDialog"),
 }
 
 __all__ = [
@@ -58,6 +59,7 @@ __all__ = [
     "ApiProvidersDialog",
     "LicenseDialog",
     "ReleaseNotesDialog",
+    "ChatTypographyDialog",
 ]
 
 

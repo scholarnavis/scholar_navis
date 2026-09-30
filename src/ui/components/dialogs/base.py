@@ -94,11 +94,14 @@ class BaseDialog(QDialog):
         self.tm.theme_changed.connect(self._apply_theme)
 
         self._parent_ref = parent
-        QTimer.singleShot(0, self._adjust_and_anchor)
+        # 定时器一律带上 self 作为上下文：对话框可能在触发前就被销毁（用户秒关、
+        # 或在自检里构造完即 deleteLater），无上下文时 Qt 仍会调用已析构对象上的
+        # Python 方法并抛 "Internal C++ object already deleted"。
+        QTimer.singleShot(0, self, self._adjust_and_anchor)
         # 首次主题应用：对话框是独立顶层窗口，其原生标题栏不会继承主窗口的
         # 深浅色状态，必须自己设一次。放到事件循环第一帧（而非 __init__ 内同步
         # 调用），因为子类重写的 _apply_theme 会访问其 __init__ 后段才创建的控件。
-        QTimer.singleShot(0, self._apply_theme)
+        QTimer.singleShot(0, self, self._apply_theme)
 
     def _adjust_and_anchor(self):
         """动态尺寸结算修复：去除套娃滚动条，利用原生 sizeHint 进行精准测量"""

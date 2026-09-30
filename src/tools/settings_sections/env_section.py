@@ -315,7 +315,32 @@ class EnvSectionMixin:
 
         layout.addRow("Theme:", self.combo_theme)
         layout.addRow("Log Level:", self.combo_log)
+
+        # 聊天气泡排版（字号 / 字符间距 / 行距 / 段前距 / 段后距）：参数较多且需要
+        # 实时预览，放在**独立的模态小面板**里编辑（含确认 / 取消 / 修改标记 /
+        # 未保存退出确认）。该面板自管保存，不参与本页的 Save / Revert 流程。
+        self.btn_chat_typography = QPushButton(" Adjust...")
+        self.btn_chat_typography.setCursor(Qt.PointingHandCursor)
+        self.btn_chat_typography.setToolTip(
+            "Adjust font size, letter spacing, line spacing and paragraph spacing "
+            "for LLM and user chat bubbles (with live preview).")
+        self.btn_chat_typography.clicked.connect(self._open_chat_typography)
+        layout.addRow("Chat text:", self.btn_chat_typography)
+
         self.layout.addWidget(group)
+
+    def _open_chat_typography(self):
+        """打开聊天气泡排版面板。
+
+        惰性导入：面板会拉起 ``ChatBubbleWidget``（连带 chat_tasks / 知识库等
+        依赖），不能挂在设置页的导入链上，否则首次进入设置就要多等数秒。
+        """
+        from src.ui.components.dialogs.chat_typography_dialog import ChatTypographyDialog
+
+        dialog = ChatTypographyDialog(self.widget)
+        dialog.exec()
+        # 面板是临时窗口且带 parent，不显式回收会在反复打开时持续堆积 C++ 对象
+        dialog.deleteLater()
 
     # ---------- API Keys ----------
     def init_api_keys_section(self):

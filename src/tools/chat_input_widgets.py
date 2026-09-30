@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QSizePolicy, QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.image_utils import IMAGE_EXTENSIONS
+from src.core.file_types import is_attachable
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
@@ -107,6 +107,85 @@ class _ImageChip(QWidget):
         event.ignore()
 
 
+class _FileChip(QWidget):
+    """输入区附件预览条中的文档附件芯片（PDF / DOCX / MD / TXT ...）。
+
+    单击打开：复用气泡内 ``cite://`` 链接的统一路由（PDF / 文本走内部查看器，
+    其余扩展名交由系统默认程序），保证"发送前预览"与"发送后点击链接"行为一致；
+    右侧内嵌 "x" 按钮移除该附件。
+    """
+    sig_remove = Signal(object)
+    #: (path, name)
+    sig_open = Signal(str, str)
+
+    #: 文件名展示的最大像素宽度（超出中间省略）
+    NAME_MAX_WIDTH = 180
+
+    def __init__(self, info, parent=None):
+        super().__init__(parent)
+        self.info = info
+        self.file_path = info.get("path", "")
+        self.file_name = info.get("name") or os.path.basename(self.file_path)
+
+        self.setObjectName("AttachFileChip")
+        self.setFixedHeight(24)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"{self.file_name}\n{self.file_path}\nClick to open")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 0, 4, 0)
+        layout.setSpacing(6)
+
+        self.lbl_icon = QLabel()
+        self.lbl_icon.setFixedSize(14, 14)
+
+        self.lbl_name = QLabel()
+        self.lbl_name.setText(self.lbl_name.fontMetrics().elidedText(
+            self.file_name, Qt.ElideMiddle, self.NAME_MAX_WIDTH))
+
+        # 图标 / 文件名对鼠标透明：点击落到芯片自身（mousePressEvent 打开附件），
+        # 保证点在文字或图标上都能触发打开，而不依赖 QLabel 的事件透传行为。
+        for child in (self.lbl_icon, self.lbl_name):
+            child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self.btn_remove = QLabel("x", self)
+        self.btn_remove.setFixedSize(14, 14)
+        self.btn_remove.setAlignment(Qt.AlignCenter)
+        self.btn_remove.setCursor(Qt.PointingHandCursor)
+        self.btn_remove.setToolTip("Remove this attachment")
+        self.btn_remove.mousePressEvent = self._on_remove
+
+        layout.addWidget(self.lbl_icon)
+        layout.addWidget(self.lbl_name)
+        layout.addWidget(self.btn_remove)
+
+        self._apply_theme()
+        ThemeManager().theme_changed.connect(self._apply_theme)
+
+    def _apply_theme(self):
+        # 用 objectName 限定选择器：避免子孙 QLabel 继承到芯片的底色与描边
+        tm = ThemeManager()
+        self.setStyleSheet(
+            f"QWidget#AttachFileChip {{ background-color: {hex_to_rgba(tm.color('accent'), 0.12)}; "
+            f"border: 1px solid {tm.color('accent')}; border-radius: 4px; }}")
+        self.lbl_icon.setPixmap(tm.icon("file-text", "accent").pixmap(14, 14))
+        self.lbl_name.setStyleSheet(
+            f"QLabel {{ color: {tm.color('accent')}; font-size: 12px; border: none; "
+            f"background: transparent; font-family: {tm.font_family()}; }}")
+        self.btn_remove.setStyleSheet(
+            f"QLabel {{ color: {tm.color('text_muted')}; font-size: 10px; border: none; "
+            f"background: transparent; font-weight: {strong_weight_css()}; }}")
+
+    def _on_remove(self, event):
+        if event.button() == Qt.LeftButton:
+            self.sig_remove.emit(self.info)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.sig_open.emit(self.file_path, self.file_name)
+        super().mousePressEvent(event)
+
+
 class ChatDropTargetWidget(QWidget):
     """支持全局拖拽上传文件的容器，并带有视觉叠加层"""
     sig_files_dropped = Signal(list)
@@ -149,11 +228,11 @@ class ChatDropTargetWidget(QWidget):
     def dropEvent(self, event):
         self.overlay.hide()
 
-        # 文档 + 图片附件（图片同样进入多模态对话链路）
-        supported_exts = ('.pdf', '.md', '.txt', '.docx') + IMAGE_EXTENSIONS
+        # 文档 + 图片附件（图片同样进入多模态对话链路）。可接受的类型统一由
+        # core.file_types 判定，与文件选择器、内部查看器共用同一份清单。
         paths = [
             url.toLocalFile() for url in event.mimeData().urls()
-            if url.isLocalFile() and url.toLocalFile().lower().endswith(supported_exts)
+            if url.isLocalFile() and is_attachable(url.toLocalFile())
         ]
 
         if paths:
@@ -194,20 +273,21 @@ class AutoResizingTextEdit(QPlainTextEdit):
         return super().canInsertFromMimeData(source)
 
     def insertFromMimeData(self, source):
-        """粘贴路由：位图/图片文件转附件链路，其余保持默认文本插入。
+        """粘贴路由：本地文件 / 位图转附件链路，其余保持默认文本插入。
 
-        优先级：本地图片 URL（资源管理器复制文件）> 纯位图（截图工具、
-        浏览器"复制图片"，均无纯文本伴生）> 文本。Excel 等同时携带
-        文本+位图的场景仍按文本粘贴，避免误吞表格数据。
+        优先级：本地文件 URL（资源管理器复制文件，类型由
+        :func:`core.file_types.is_attachable` 判定，与拖拽、文件选择器一致）
+        > 纯位图（截图工具、浏览器"复制图片"，均无纯文本伴生）> 文本。
+        Excel 等同时携带文本+位图的场景仍按文本粘贴，避免误吞表格数据；
+        浏览器复制的链接是 http(s) URL（非本地文件），同样落回文本粘贴。
         """
         if source.hasUrls():
-            img_paths = [
+            paths = [
                 url.toLocalFile() for url in source.urls()
-                if url.isLocalFile()
-                and url.toLocalFile().lower().endswith(IMAGE_EXTENSIONS)
+                if url.isLocalFile() and is_attachable(url.toLocalFile())
             ]
-            if img_paths:
-                self.sig_paste_files.emit(img_paths)
+            if paths:
+                self.sig_paste_files.emit(paths)
                 return
 
         if source.hasImage() and not source.hasText():
@@ -233,6 +313,9 @@ class ChatInputContainer(QFrame):
     sig_clear_context_clicked = Signal()
     sig_remove_image = Signal(object)
     sig_open_image = Signal(str)
+    #: 文档附件芯片：sig_open_file 携带 (path, name)
+    sig_remove_file = Signal(object)
+    sig_open_file = Signal(str, str)
     sig_paste_image = Signal()
     sig_paste_files = Signal(list)
 
@@ -728,10 +811,12 @@ class ChatInputContainer(QFrame):
         self._has_attachments = True
 
     def hide_context_preview(self):
-        """隐藏输入框上方的附件预览条"""
+        """隐藏输入框上方的附件预览条，并清空全部附件芯片。"""
         self.context_banner.setVisible(False)
         self.lbl_context_info.setText("📎 Context Attached")
         self._has_attachments = False
+        self.set_image_thumbs([])
+        self.set_file_chips([])
 
     def set_image_thumbs(self, image_infos):
         """同步输入区预览条中的图片缩略图芯片。
@@ -759,4 +844,32 @@ class ChatInputContainer(QFrame):
             chip.sig_open.connect(self.sig_open_image.emit)
             self.banner_layout.insertWidget(insert_pos, chip)
             self._image_chips.append(chip)
+            insert_pos += 1
+
+    def set_file_chips(self, file_infos):
+        """同步输入区预览条中的文档附件芯片（可点击打开 / 移除）。
+
+        :param file_infos: 当前待发送的非图片附件 dict 列表（需含 path / name）。
+        """
+        # 清理旧芯片
+        for chip in getattr(self, '_file_chips', []):
+            try:
+                chip.setParent(None)
+                chip.deleteLater()
+            except RuntimeError:
+                pass
+        self._file_chips = []
+
+        if not file_infos:
+            return
+
+        self.context_banner.setVisible(True)
+        # 插入到 stretch 与清除按钮之前，保证布局顺序稳定
+        insert_pos = max(0, self.banner_layout.count() - 2)
+        for info in file_infos:
+            chip = _FileChip(info)
+            chip.sig_remove.connect(self.sig_remove_file.emit)
+            chip.sig_open.connect(self.sig_open_file.emit)
+            self.banner_layout.insertWidget(insert_pos, chip)
+            self._file_chips.append(chip)
             insert_pos += 1

@@ -232,7 +232,7 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
             self._get_btn_style(btn_type="success"))
 
         # Default styling for the rest
-        for btn_name in ['btn_help_params', 'btn_copy_params']:
+        for btn_name in ['btn_help_params', 'btn_copy_params', 'btn_chat_typography']:
             if hasattr(self, btn_name):
                 getattr(self, btn_name).setStyleSheet(self._get_btn_style())
 
@@ -306,6 +306,7 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
 
         if hasattr(self, 'btn_help_params'): self.btn_help_params.setIcon(tm.icon("help", "text_main"))
         if hasattr(self, 'btn_copy_params'): self.btn_copy_params.setIcon(tm.icon("copy", "text_main"))
+        if hasattr(self, 'btn_chat_typography'): self.btn_chat_typography.setIcon(tm.icon("file-text", "text_main"))
 
         # Append test_device next to btn_open_cache
         if hasattr(self, 'btn_open_cache'): self.btn_open_cache.setIcon(tm.icon("folder", "accent"))
