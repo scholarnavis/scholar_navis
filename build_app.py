@@ -144,6 +144,88 @@ def _copy_add_data(src: str, dest: str, target_folder: str) -> None:
         shutil.copy2(src, target_dir / os.path.basename(src))
 
 
+def _lock_root_dist_name(package_dir: str) -> str:
+    """读包内 ``pyproject.toml`` 的 ``[project].name`` 并按 PEP 503 归一。
+
+    归一是因为 lockfile 记录的是规范化后的发行名（``Scholar_Navis`` -> ``scholar-navis``），
+    用它才能可靠定位 ``uv.lock`` 里的根条目。
+    """
+    try:
+        import tomllib
+        with open(os.path.join(package_dir, "pyproject.toml"), "rb") as f:
+            data = tomllib.load(f)
+        name = str((data.get("project") or {}).get("name") or "").strip()
+    except (OSError, ValueError, ImportError) as e:  # 缺失 / TOML 非法 / py<3.11
+        logger.debug("Read project name failed: %s", e)
+        return ""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _uv_normalized_version(uv: str, package_dir: str) -> str:
+    """用 ``uv version --short`` 取根项目的 **PEP 440 规范版本**（离线、不解析依赖）。
+
+    ``pyproject.toml`` 里写的是 ``2.0.6-dev-3``，lockfile 记的是规范化的 ``2.0.6.dev3``；
+    两者不能混用，所以规范形态必须由 uv 给出，而不是自己拼。
+    """
+    try:
+        res = subprocess.run([uv, "version", "--short"], cwd=package_dir,
+                             capture_output=True, text=True, check=False)
+    except OSError as e:
+        logger.debug("uv version probe failed: %s", e)
+        return ""
+    if res.returncode != 0:
+        return ""
+    lines = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def _patch_lock_root_version(package_dir: str, dist: str, version: str) -> bool:
+    """纯文本把 ``uv.lock`` 里根项目（``source = { virtual = "." }``）的版本号改成 ``version``。
+
+    只改这一行，**不动任何依赖解析结果**，因此不需要包元数据、不需要联网。这正是
+    "冷缓存 CI 里 ``uv lock --offline`` 因缺少 onnxruntime 等元数据而失败"的解法：实测
+    只要版本号发生变化，uv 就会重跑解析去重建分平台的 fork 标记，冷缓存 + 离线必然失败。
+
+    定位不到（lock 格式变化 / 名字不符）时返回 False，由调用方走 uv 兜底。
+    """
+    lock_path = os.path.join(package_dir, "uv.lock")
+    if not (dist and version and os.path.exists(lock_path)):
+        return False
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        logger.debug("Read uv.lock failed: %s", e)
+        return False
+
+    pattern = re.compile(
+        r'(?m)^(name = "' + re.escape(dist) + r'"\n)version = "[^"]*"\n'
+        r'(source = \{ virtual = "\." \})')
+    new_text, count = pattern.subn(
+        lambda m: f'{m.group(1)}version = "{version}"\n{m.group(2)}', text, count=1)
+    if count != 1:
+        return False
+    if new_text == text:
+        return True  # 已经是目标版本
+    try:
+        with open(lock_path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+    except OSError as e:
+        logger.debug("Write uv.lock failed: %s", e)
+        return False
+    return True
+
+
+def _lock_check_offline(uv: str, package_dir: str) -> tuple:
+    """``uv lock --check --offline``：验证包内 pyproject/lock 自洽（不解析依赖）。
+
+    返回 ``(ok, output)``；``output`` 供失败时原样打印。
+    """
+    res = subprocess.run([uv, "lock", "--check", "--offline"], cwd=package_dir,
+                         capture_output=True, text=True, check=False)
+    return res.returncode == 0, (res.stdout or "") + (res.stderr or "")
+
+
 def _refresh_lockfile(package_dir: str) -> None:
     """把包内 ``uv.lock`` 里根项目的版本号刷成刚写进 ``pyproject.toml`` 的版本。
 
@@ -153,9 +235,15 @@ def _refresh_lockfile(package_dir: str) -> None:
     ``uv sync --locked`` 就会硬失败（"``uv.lock`` needs to be updated, but ``--locked``
     was provided"）——这正是这个函数存在的唯一原因。
 
-    用 ``--offline``：版本号变化不该引起任何重新解析，若离线刷新都失败，说明仓库里的
-    lockfile 本来就与依赖声明不一致，这种"用户拿到手也装不上"的产物必须在构建期断掉，
-    而不是让它去联网重新解析出一套与 CI 验证环境不同的依赖。
+    刷新策略（两级，都不联网）：
+
+    1. **纯文本改版本号**（首选）：把根条目的 ``version`` 直接换成 ``uv version --short``
+       给出的规范版本，再用 ``uv lock --check --offline`` 校验。全程不触发依赖解析，
+       冷缓存 / 无网环境也能通过（CI 的 Linux 任务用 ``--no-project`` 起 uv，项目依赖
+       元数据根本不在缓存里，靠解析刷新必然失败）。
+    2. **兜底交给 uv**：``uv lock --offline``。仍失败说明仓库里的 lockfile 本来就与依赖
+       声明不一致——这种"用户拿到手也装不上"的产物必须在构建期断掉，而不是联网重新解析
+       出一套与 CI 验证环境不同的依赖。
     """
     if not (os.path.exists(os.path.join(package_dir, "pyproject.toml"))
             and os.path.exists(os.path.join(package_dir, "uv.lock"))):
@@ -168,6 +256,21 @@ def _refresh_lockfile(package_dir: str) -> None:
         sys.exit(1)
 
     print("[*] Refreshing uv.lock in the bundle (root project version only)...")
+
+    # ---- 1) 元数据无关的文本级版本同步 ----
+    normalized = _uv_normalized_version(uv, package_dir)
+    dist = _lock_root_dist_name(package_dir)
+    if normalized and _patch_lock_root_version(package_dir, dist, normalized):
+        ok, _ = _lock_check_offline(uv, package_dir)
+        if ok:
+            logger.debug("uv.lock root version pinned to %s (textual bump, no resolution).",
+                         normalized)
+            return
+        logger.debug("Textual lock bump applied but `--check` failed; falling back to uv.")
+    else:
+        logger.debug("Textual lock bump unavailable; falling back to `uv lock --offline`.")
+
+    # ---- 2) 兜底：交给 uv 自己刷新 ----
     refreshed = subprocess.run([uv, "lock", "--offline"], cwd=package_dir,
                                capture_output=True, text=True, check=False)
     if refreshed.returncode != 0:
@@ -178,11 +281,10 @@ def _refresh_lockfile(package_dir: str) -> None:
     logger.debug("uv lock: %s", (refreshed.stdout + refreshed.stderr).strip().replace("\n", " | "))
 
     # 后置条件：必须真的能通过 --locked 校验，否则用户第一次运行就会失败。
-    checked = subprocess.run([uv, "lock", "--check", "--offline"], cwd=package_dir,
-                             capture_output=True, text=True, check=False)
-    if checked.returncode != 0:
+    ok, output = _lock_check_offline(uv, package_dir)
+    if not ok:
         print(f"\n[-] The bundled pyproject.toml / uv.lock pair is not self-consistent:\n"
-              f"{checked.stdout}{checked.stderr}")
+              f"{output}")
         sys.exit(1)
 
 
