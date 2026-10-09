@@ -18,7 +18,9 @@ from src.core.chat_typography import read as read_typography, scope_values
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
 from src.core.platform_env import is_windows
+from src.core.references import render_footer_references, split_footer
 from src.core.signals import GlobalSignals
+from src.core.think_tags import strip as strip_think_blocks
 # hex_to_rgba 由核心层统一实现（全应用唯一来源，避免各 UI 模块各自复制）
 from src.core.theme_manager import (ThemeManager, hex_to_rgba, overlay_scrollbar_qss,
                                     strong_weight_css)
@@ -2222,8 +2224,18 @@ class ChatBubbleWidget(QWidget):
         self.set_content(self.original_text)
 
     def _extract_content_for_copy(self, is_markdown=False):
-        """核心提取逻辑：全局跨组件打捞 Mermaid 源码，精准清洗 Cite 链接"""
+        """核心提取逻辑：只复制**正文 + 参考文献**。
+
+        与导出走同一口径（见 ``TextFormatter.clean_text_for_export``）：
+
+        * 思考链（``<think>`` 及各 provider 变体）与 Provenance 追溯日志不复制；
+        * 参考文献从页脚回收后按目标格式重排版（Markdown 给可点击链接，
+          纯文本给裸地址），不再像旧实现那样"MD 直接丢弃 / TXT 混成裸文本"；
+        * Mermaid 图表从哈希缓存里还原成 ```mermaid 源码（否则只能复制到
+          一句"点击查看"的 UI 提示）。
+        """
         text = self.original_text
+        target = "markdown" if is_markdown else "plain"
 
         # 0. 错误内容：错误气泡导出为可读文本（标题/建议/真实详情），
         #    AI 气泡剥离错误面板标记，避免 base64 噪声进入剪贴板。
@@ -2241,8 +2253,15 @@ class ChatBubbleWidget(QWidget):
             from src.core.llm_errors import strip_markers
             text = strip_markers(text)
 
-        # 1. 预处理：移除后台思考过程和系统标识
-        text = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # 1. 正文 / 页脚分离：页脚里只有参考文献被回收，Provenance 等一并丢弃。
+        text, footer_refs = split_footer(text)
+
+        # 2. 预处理：移除思考链与系统标识。
+        #    气泡的 original_text 是**渲染结果**，思考链在 data-navis-think 面板里
+        #    而非 <think> 标签里，两条路都要走（顺序无关，先摘面板可让后续的
+        #    Mermaid 处理不必面对面板内的转义代码块）。
+        text = TextFormatter.strip_think_panels(text)
+        text = strip_think_blocks(text)
         text = re.sub(r'Initializing\.\.\.|Reasoning & Tool Execution|\[FINAL_ANSWER\]', '', text, flags=re.IGNORECASE)
         if self.is_loading:
             text = re.sub(r'^Thinking\.{0,3}', '', text)
@@ -2314,9 +2333,7 @@ class ChatBubbleWidget(QWidget):
             # 剥离所有 HTML 标签
             text = re.sub(r'<[^>]+>', '', text)
         else:
-            # Markdown模式：HTTP 保持原状，但截断底部的引言区 UI
-            if "<b>📚 Cited Sources:</b>" in text or "Reference:" in text:
-                text = re.split(r"<br><hr[^>]*>|📚 Reference:", text)[0]
+            # Markdown模式：HTTP 保持原状（页脚已在第 1 步分离，这里无需再截断）
             # 残留 HTML 转成 Markdown（表格 / 图片 / 加粗 / 代码 / 卡片…）：复制出来的
             # .md 应当尽量是 Markdown，只有 Markdown 表达不了的结构才保留精简 HTML。
             text = TextFormatter.html_to_markdown(text)
@@ -2329,6 +2346,11 @@ class ChatBubbleWidget(QWidget):
         lines = [line.rstrip() for line in text.splitlines()]
         cleaned = '\n'.join(lines)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+        # 参考文献按目标格式补回（页脚里的其它内容已经在第 1 步丢弃）
+        references = render_footer_references(footer_refs, target)
+        if references:
+            cleaned = f"{cleaned}\n\n{references}" if cleaned else references
 
         return cleaned
 

@@ -58,10 +58,10 @@ dependencies = [
     "lxml>=6.1.0",
     "python-multipart>=0.0.31",
     "langsmith>=0.8.18",
-    "urllib3>=2.7.0",
+    "urllib3>=2.8.0",
     "starlette>=1.3.1",
     "idna>=3.15",
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.15.0",
     "tiktoken>=0.12.0",
     "httpx[socks]>=0.28.1",
 ]
@@ -98,10 +98,13 @@ override-dependencies = ["onnxruntime==1.24.4"]
 # 集中声明全局最低版本，防止解析器把它们降回受影响区间而重新引入同一告警。
 # 每项注明对应公告；上游再发修复版时同步抬高。
 constraint-dependencies = [
-    "anyio>=4.14.2",       # GHSA-82r6-8w77-94w6(Critical) / GHSA-5p39-cfhj-2xmp
-    "click>=8.3.3",        # PYSEC-2026-2132
-    "setuptools>=83.0.0",  # GHSA-h35f-9h28-mq5c
-    "soupsieve>=2.9.0",    # GHSA-2wc2-fm75-p42x / -836r-79rf-4m37 / -gjv8-xp57-g29c / -j934-xhv5-fg8f
+    "anyio>=4.14.2",        # GHSA-82r6-8w77-94w6(Critical) / GHSA-5p39-cfhj-2xmp
+    "click>=8.3.3",         # PYSEC-2026-2132
+    "setuptools>=83.0.0",   # GHSA-h35f-9h28-mq5c
+    "soupsieve>=2.9.0",     # GHSA-2wc2-fm75-p42x / -836r-79rf-4m37 / -gjv8-xp57-g29c / -j934-xhv5-fg8f
+    "fsspec>=2026.6.0",     # GHSA-27vj-qcqg-25rc(High)
+    "multidict>=6.9.1",     # GHSA-54p9-h82j-f925；aiohttp 钉 <7.0，故下限即 6.9.1
+    "oauthlib>=4.0.0",      # GHSA-xpv3-w29h-x7cv / GHSA-hj66-6f7g-4r5v
 ]
 
 # ---- 已确认暂时无法修复，勿盲目升级 ----
@@ -111,8 +114,14 @@ constraint-dependencies = [
 #    (/api/v2/tenants/{tenant}/databases/{db}/collections + trust_remote_code)；
 #    本项目只用进程内嵌的 PersistentClient（src/core/kb_manager.py），
 #    不对外暴露 Chroma 服务端，因此实际暴露面很低。
-# 2) transformers 5 条（全 High）：修复需 transformers>=5.10.0，但 optimum-onnx
-#    0.1.0（PyPI 最新）硬性要求 transformers<4.58.0，无法同时满足。
+# 2) transformers 5 条（4 High + 1 Medium）：修复下限依次为 5.3.0 / 5.5.0 / 5.10.0
+#    （GHSA-29pf-2h5f-8g72、GHSA-fgcw-684q-jj6r、GHSA-xrqw-3rrv-vx5w）与
+#    5.0.0rc3（GHSA-69w3-r845-3855）；GHSA-x9r9-c232-4q39（>=4.49.0, <=5.8.1）
+#    则直接没有 first_patched_version。即要清空这 5 条至少要 transformers>=5.10.0，
+#    但 optimum-onnx 0.1.0（PyPI 最新）硬性要求 transformers<4.58.0，无法同时满足。
+#    缓解：本项目的 transformers 只被 optimum 的 ORTModel* 走 ONNX 推理路径
+#    （src/task/kb_tasks.py、src/core/rerank_engine.py 的 from_pretrained），
+#    不构造 Trainer、不加载外部 checkpoint，因此这几条告警的触发面不经过本项目。
 #    解除条件：optimum-onnx 发布支持 transformers 5.x 的版本，或移除 ONNX 导出链路。
 
 

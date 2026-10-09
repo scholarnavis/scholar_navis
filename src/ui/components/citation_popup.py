@@ -3,8 +3,8 @@
 交互设计
 --------
 * **悬停**：鼠标停在正文的 ``[n]`` 上（悬停意图约 220ms）弹出**概览卡**：
-  编号、来源类型、标题、作者/年份/期刊、DOI/链接，以及"复制引用"等操作。
-  鼠标可以从锚点移入卡片继续操作，离开两者后才自动收起。
+  编号、来源类型、标题、作者/年份/期刊、DOI/链接，以及"复制引用 / 复制链接
+  （DOI 优先）"等操作。鼠标可以从锚点移入卡片继续操作，离开两者后才自动收起。
 * **点击**：在概览卡基础上**原地长大**为**详情面板**（几何连续变形，不闪烁、
   不重建），额外展示该引用对应的**支撑原文片段**（按文本实际高度自适应，
   过长才滚动）与引用理由，便于溯源。
@@ -240,11 +240,17 @@ class CitationPopup(QWidget):
         self._btn_copy = CopyButton("Copy citation", copied_text="Copied",
                                     provider=self._citation_copy_text,
                                     toast="Citation copied to clipboard")
+        # 复制引文地址：DOI 优先（见 ReferenceItem.citable_link）。条目没有可复制的
+        # 网址（如本地文档）时整个按钮隐藏，不留一个点了没反应的空档。
+        self._btn_copy_link = CopyButton("Copy link", copied_text="Copied",
+                                         provider=self._link_copy_text,
+                                         toast="Link copied to clipboard")
         self._btn_open = QPushButton("Open source")
         self._btn_open.setCursor(Qt.PointingHandCursor)
         self._btn_open.setFocusPolicy(Qt.NoFocus)
         self._btn_open.clicked.connect(self._open_source)
         self._btn_row.addWidget(self._btn_copy)
+        self._btn_row.addWidget(self._btn_copy_link)
         self._btn_row.addWidget(self._btn_open)
         self._btn_row.addStretch(1)
         lay.addLayout(self._btn_row)
@@ -440,6 +446,8 @@ class CitationPopup(QWidget):
 
         self._lbl_meta.setText(self._meta_text())
         self._lbl_links.setText(self._links_html())
+        # 无可复制网址的条目（本地文档）隐藏该按钮：留着只会是"点了没反应"。
+        self._btn_copy_link.setVisible(bool(self._link_copy_text()))
 
         full = (mode == self.MODE_FULL)
         self._btn_close.setVisible(full)
@@ -791,6 +799,18 @@ class CitationPopup(QWidget):
             return f"[{item.index}] {item.citation_text()}"
         except Exception:  # pragma: no cover - 纯防御
             return str(self._data.get("title") or "")
+
+    def _link_copy_text(self) -> str:
+        """CopyButton 的文本来源：当前条目的可引用地址（DOI 优先，见 References）。
+
+        求值入口与显示、打开共用 :class:`ReferenceItem` 的同一份判定，避免这里
+        再写一遍"DOI 还是 URL"的取舍。
+        """
+        from src.core.references import ReferenceItem
+        try:
+            return ReferenceItem.from_dict(self._data).citable_link
+        except Exception:  # pragma: no cover - 纯防御
+            return ""
 
     def _snippet_copy_text(self) -> str:
         """CopyButton 的文本来源：当前条目的支撑原文（与正文悬停所见一致）。"""

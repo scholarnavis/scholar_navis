@@ -20,6 +20,7 @@ from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import check_model_exists, get_model_conf, resolve_auto_model
+from src.core.think_tags import ThinkStreamSplitter
 from src.core.version import __github__, __version__, __website__
 from src.task.chat_tasks import ChatGenerationTask
 
@@ -360,11 +361,24 @@ def _clean_ui_token(raw_token: str) -> str:
 
 
 class APIStreamParser:
+    """把应用内部 token 流翻译成 OpenAI 风格的 ``(reasoning, content)`` 两路。
+
+    思考/正文的分流复用 :class:`src.core.think_tags.ThinkStreamSplitter`：
+    这里曾经只看字面量 ``"<think>"`` 并且从不把 ``is_thinking`` 置为 ``True``，
+    于是整条 HTTP 链路的思考链都会以 ``content`` 形式返回，与桌面端
+    "折叠进 Reasoning 面板"的口径完全相反。
+    """
+
     def __init__(self):
-        self.is_thinking = False
+        self._splitter = ThinkStreamSplitter()
         self.current_section = "content"
         self.follow_up_buffer = ""
         self.cited_sources_buffer = ""
+
+    @property
+    def is_thinking(self) -> bool:
+        """当前是否处于思考态（保持历史属性名，供兼容读取）。"""
+        return self._splitter.in_think
 
     def parse_token(self, raw_token: str):
         token = _clean_ui_token(raw_token)
@@ -382,19 +396,7 @@ class APIStreamParser:
         elif self.current_section == "follow_ups":
             self.follow_up_buffer += token
             return None, None
-        reasoning_chunk = ""
-        content_chunk = ""
-        if "" in token:
-            parts = token.split("</think>")
-            reasoning_chunk += parts[0]
-            self.is_thinking = False
-            token = parts[1] if len(parts) > 1 else ""
-            content_chunk += token
-            return reasoning_chunk, content_chunk
-        if self.is_thinking:
-            reasoning_chunk += token
-        else:
-            content_chunk += token
+        reasoning_chunk, content_chunk = self._splitter.feed(token)
         return reasoning_chunk, content_chunk
 
     def extract_list_items(self, buffer: str) -> List[str]:

@@ -641,8 +641,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Context Attached": "已附加上下文",
         "📎 Context Attached": "📎 已附加上下文",
         "📎 Attached: {name}": "📎 已附加：{name}",
-        "Ask a question... (Recommend English or enabling translator for best results. Enter to send, Shift+Enter for new line)":
-            "输入问题…（建议使用英文或启用翻译以获得最佳效果。Enter 发送，Shift+Enter 换行）",
+        "Ask a question... (Enter to send, Shift+Enter for new line)":
+            "输入问题…（Enter 发送，Shift+Enter 换行）",
         "Knowledge base updated. Clear history to resume chat.": "知识库已更新。请清空历史以继续对话。",
         "The linked knowledge base or model has changed. Continuing may cause context inconsistency. Please click 'Clear' to reset history.":
             "关联的知识库或模型已变更，继续对话可能导致上下文不一致。请点击“清空”重置历史。",
@@ -679,16 +679,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Export as PDF": "导出为 PDF",
         "Export as MD": "导出为 MD",
         "Export as TXT": "导出为 TXT",
-        "Export as JSON (Lossless, for re-import)": "导出为 JSON（无损，可再导入）",
+        "Export as Archive (.schat, lossless, for re-import)": "导出为归档（.schat，无损，可重新导入）",
         "PDF Document (*.pdf)": "PDF 文档 (*.pdf)",
         "Markdown File (*.md)": "Markdown 文件 (*.md)",
-        "Scholar Navis History (*.schat *.json)": "Scholar Navis 记录 (*.schat *.json)",
+        "Scholar Navis Archive (*.schat)": "Scholar Navis 归档 (*.schat)",
         "Text File (*.txt)": "文本文件 (*.txt)",
         "Export Log": "导出记录",
         "Exporting Chat": "正在导出对话",
         "Processing file in background...": "正在后台处理文件…",
         "Export Complete": "导出完成",
         "Saved to {name}": "已保存至 {name}",
+        "{n} attachment(s) embedded.": "已内嵌 {n} 个附件。",
+        "{n} attachment(s) not found (original path kept).": "有 {n} 个附件未找到（保留原路径）。",
         "Document successfully exported.": "文档导出成功。",
         "Import Chat History": "导入聊天记录",
         "Chat History (*.schat *.json *.md *.txt *.csv);;Scholar Navis Lossless (*.schat *.json);;Markdown (*.md);;Text (*.txt);;CSV (*.csv)":

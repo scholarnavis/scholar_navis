@@ -12,6 +12,8 @@ from litellm.exceptions import APIError, APIConnectionError, ContextWindowExceed
 
 from src.core.config_manager import ConfigManager
 from src.core.network_worker import _get_explicit_proxy_kwargs
+from src.core.think_tags import (THINK_CLOSE_TAG, THINK_OPEN_TAG,
+                                 ThinkStreamSplitter)
 
 
 _translation_lock = threading.Lock()
@@ -405,8 +407,28 @@ class OpenAICompatibleLLM:
         stream = payload.pop("stream", True)
         self._log_params(payload)
 
-        is_thinking = False
-        native_reasoning_mode = False
+        # 思考/正文的分流交给统一状态机（src/core/think_tags.py）：它识别全部
+        # provider 写法（thinking/reasoning/管道/Harmony/Kimi），允许正文之后
+        # 重新进入思考态，并暂扣被切开的标签。旧的"只认字面量 <think>、一次
+        # 闭合后永久失效"的状态机正是思考链漏进正文的根因。
+        splitter = ThinkStreamSplitter()
+        emitted_think_open = False
+
+        def _render(reasoning: str, content: str):
+            """把切分出的两路文本还原成带规范标签的单流（UI 按标签折叠）。"""
+            nonlocal emitted_think_open
+            out = []
+            if reasoning:
+                if not emitted_think_open:
+                    out.append(THINK_OPEN_TAG + "\n")
+                    emitted_think_open = True
+                out.append(reasoning)
+            if content:
+                if emitted_think_open:
+                    out.append("\n" + THINK_CLOSE_TAG + "\n\n")
+                    emitted_think_open = False
+                out.append(content)
+            return out
 
         try:
             litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=stream)
@@ -418,8 +440,9 @@ class OpenAICompatibleLLM:
 
             for chunk in response:
                 if self._is_cancelled:
-                    if is_thinking:
-                        yield "\n</think>\n\n"
+                    if emitted_think_open:
+                        yield "\n" + THINK_CLOSE_TAG + "\n\n"
+                        emitted_think_open = False
                     yield "\n\n[⛔ Generation halted by user.]"
                     break
 
@@ -431,39 +454,22 @@ class OpenAICompatibleLLM:
                 # 提取思考内容（跨 provider 字段名兼容，务必先于 content 判定，
                 # 避免思考链被当成正文输出）
                 reasoning = _extract_reasoning(delta)
-
-                if reasoning:
-                    if not is_thinking:
-                        yield "<think>\n"
-                        is_thinking = True
-                        native_reasoning_mode = True
-                    yield reasoning
-
                 # 提取正文内容
                 content = getattr(delta, 'content', None)
-                if content:
-                    if "<think>" in content and not is_thinking:
-                        is_thinking = True
-                        native_reasoning_mode = False
 
-                    if "</think>" in content and is_thinking:
-                        yield content
-                        is_thinking = False
-                        continue
+                if not reasoning and not content:
+                    continue
 
-                    if is_thinking:
-                        if native_reasoning_mode:
-                            yield "\n</think>\n\n"
-                            is_thinking = False
-                            native_reasoning_mode = False
-                            yield content
-                        else:
-                            yield content
-                    else:
-                        yield content
+                for r_part, c_part in splitter.feed_chunk(reasoning or "", content or ""):
+                    for piece in _render(r_part, c_part):
+                        yield piece
 
-            if is_thinking:
-                yield "\n</think>\n"
+            # 流结束：放出暂扣片段，并闭合仍开着的思考块
+            r_tail, c_tail = splitter.flush()
+            for piece in _render(r_tail, c_tail):
+                yield piece
+            if emitted_think_open:
+                yield "\n" + THINK_CLOSE_TAG + "\n"
 
 
         except Exception as e:

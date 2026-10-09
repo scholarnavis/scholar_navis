@@ -13,9 +13,11 @@ from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
-from src.core.references import FOOTER_RULE_HTML, ReferenceItem, ReferenceRegistry
+from src.core.references import (FOOTER_RULE_HTML, PROVENANCE_HEADER_HTML,
+                                 ReferenceItem, ReferenceRegistry)
 from src.core.evidence import EvidenceStore
 from src.core import plot_styles
+from src.core.think_tags import strip as strip_think_blocks
 from src.core.theme_manager import strong_weight_css
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
@@ -1418,8 +1420,8 @@ class ChatGenerationTask(BackgroundTask):
 
             ref_html = (
                 "\n" + FOOTER_RULE_HTML
-                + "<b>📊 Provenance (trace log):</b><br>"
-                f"<div style='margin-top:6px; font-size:13px;'>"
+                + PROVENANCE_HEADER_HTML
+                + f"<div style='margin-top:6px; font-size:13px;'>"
                 f"{len(records)} tool call(s) this round, "
                 f"{ok_count} succeeded, {fail_count} failed:<br>"
                 + "".join(rows)
@@ -1768,10 +1770,13 @@ class ChatGenerationTask(BackgroundTask):
 
         Agent.run 的返回值混杂了 UI 控制 token（[CLEAR_SEARCH]、
         [START_LLM_NETWORK]）与思考块（<think>...</think>），合成前必须剥离。
+        剥离走 src/core/think_tags.py 的统一口径：它同时覆盖 thinking /
+        reasoning / 管道 / Harmony 等变体写法，也覆盖**未闭合**的思考块——
+        子任务思考一旦漏进 final_text，就会以正文形态出现在合成结果里。
         """
         if not text:
             return ""
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        text = strip_think_blocks(text)
         for token in ("[CLEAR_SEARCH]", "[START_LLM_NETWORK]", "[FOLLOW_UPS]"):
             text = text.replace(token, "")
         # ask_user/deep_plan 不应出现在子任务结果（前者已从子工具池剔除，
@@ -1931,8 +1936,15 @@ class ChatGenerationTask(BackgroundTask):
 
 
 class ExportChatTask(BackgroundTask):
-    """
-    后台任务：异步导出聊天记录（支持 PDF, MD, TXT, CSV）
+    """后台任务：异步导出聊天记录。
+
+    两类产物，语义刻意不同：
+
+    * **PDF / MD / TXT** —— 只导出**正文 + 规范参考文献**。思考链与 Provenance
+      追溯日志属于运行过程信息，不进这些"给人读"的文件；清洗口径统一在
+      :meth:`TextFormatter.clean_text_for_export`。
+    * **JSON / .schat** —— 无损归档：正文、思考链、参考文献、附件全部保留，
+      用 ZIP 压缩并内嵌附件本体，读写口径见 :mod:`src.core.chat_archive`。
     """
     def _execute(self):
         history = self.kwargs.get('history', [])
@@ -1995,7 +2007,11 @@ class ExportChatTask(BackgroundTask):
 
                 for msg in clean_history:
                     is_user = (msg['role'] == "user")
-                    clean_content = TextFormatter.clean_text_for_export(msg['content'])
+                    # 与 .md 导出走同一条正文管线（markdown 目标）：表格/图片/列表
+                    # 先转成 Markdown 再由 markdown_to_html 渲染，避免"先剥标签
+                    # 再渲染"把表格压成一行文字。
+                    clean_content = TextFormatter.clean_text_for_export(
+                        msg['content'], target="markdown")
                     # PDF 版式固定白底浅色文档（见上方 setDefaultStyleSheet），
                     # 传 theme_key="light" 使代码块/链接等内联主题色与版式
                     # 一致，不随应用当前主题漂移。
@@ -2030,7 +2046,7 @@ class ExportChatTask(BackgroundTask):
                     # markdown_mode：残留 HTML 转成 Markdown 语法（表格 / 图片 / 加粗…），
                     # 而不是把标签直接剥掉——.md 文件里应当尽量是 Markdown，只有
                     # Markdown 表达不了的结构才保留精简 HTML。
-                    content = TextFormatter.clean_text_for_export(msg['content'], markdown_mode=True)
+                    content = TextFormatter.clean_text_for_export(msg['content'], target="markdown")
                     note = _status_note(msg)
                     note_text = f"> {note}\n\n" if note else ""
                     md_lines.append(f"### {role}\n\n{note_text}{content}\n\n---\n\n")
@@ -2046,7 +2062,7 @@ class ExportChatTask(BackgroundTask):
                 ]
                 for msg in clean_history:
                     role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
-                    content = TextFormatter.clean_text_for_export(msg['content'])
+                    content = TextFormatter.clean_text_for_export(msg['content'], target="plain")
                     content = TextFormatter.markdown_to_plain_text(content)
                     note = _status_note(msg)
                     txt_lines.append(f"[{role}]")
@@ -2059,30 +2075,13 @@ class ExportChatTask(BackgroundTask):
                     f.write("\n".join(txt_lines))
 
             elif export_fmt in (".json", ".schat"):
-                # 无损导出：完整序列化历史记录（含富字段、引文、附件引用等）。
-                # 供 "Import" 还原为可继续对话的上下文。非 JSON 可序列化内容降级为 str。
-                import json as _json
-
-                def _sanitize(value):
-                    if isinstance(value, (str, int, float, bool)) or value is None:
-                        return value
-                    if isinstance(value, list):
-                        return [_sanitize(v) for v in value]
-                    if isinstance(value, dict):
-                        return {k: _sanitize(v) for k, v in value.items()}
-                    try:
-                        return str(value)
-                    except Exception:
-                        return None
-
-                lossless_payload = {
-                    "format": "scholar_navis_chat_history",
-                    "version": 1,
-                    "generated": datetime.datetime.now().isoformat(timespec="seconds"),
-                    "messages": [_sanitize(m) for m in history],
-                }
-                with open(path, "w", encoding="utf-8") as f:
-                    _json.dump(lossless_payload, f, ensure_ascii=False, indent=2)
+                # 无损归档：正文、思考链、参考文献、附件引用全部保留，供 Import
+                # 还原为可继续对话的上下文。容器为 ZIP（DEFLATE）+ 内嵌附件本体：
+                # 纯 JSON 体积过大，且附件只存本机绝对路径换机器即失效。
+                # 读写口径统一在 src/core/chat_archive.py。
+                from src.core.chat_archive import write_archive
+                stats = write_archive(path, history)
+                return {"success": True, "path": path, "stats": stats}
 
             return {"success": True, "path": path}
         except Exception as e:
@@ -2095,8 +2094,9 @@ class ImportChatHistoryTask(BackgroundTask):
     后台任务：解析并导入聊天记录。
 
     支持的输入：
-    - ``.schat`` / ``.json``：Scholar Navis 无损格式（含富字段 / 引文 / 附件引用）。
-    - ``.md`` / ``.txt``：旧格式导出，尽力还原为纯文本气泡（有损）。
+    - ``.schat`` / ``.json``：Scholar Navis 无损格式（ZIP 压缩归档，含正文 /
+      思考链 / 引文 / 附件本体），导入后附件按归档内容解包并改写路径。
+    - ``.md`` / ``.txt``：纯文本导出格式，尽力还原为文本气泡（有损）。
 
     返回 ``{"success": True, "messages": [...], "lossless": bool}``，
     消息结构已规范化为可写入 ``self.history`` 的条目。
@@ -2153,23 +2153,34 @@ class ImportChatHistoryTask(BackgroundTask):
         return msg
 
     def _parse_lossless(self, path):
-        import json as _json
-        with open(path, "r", encoding="utf-8") as f:
-            payload = _json.load(f)
+        """解析无损归档：ZIP 压缩容器（含内嵌附件）与历史纯 JSON 都走这里。
+
+        容器判别与附件解包口径统一在 :mod:`src.core.chat_archive`；本方法只负责
+        把 payload 规范成消息列表，并把解包后的附件路径写回消息。
+        """
+        from src.core.chat_archive import read_archive, remap_attachment_paths
+        payload, meta = read_archive(path)
+        messages = self._extract_lossless_messages(payload)
+        attachment_map = meta.get("attachment_map") or {}
+        if messages and attachment_map:
+            remap_attachment_paths(messages, attachment_map)
+        return messages, True
+
+    def _extract_lossless_messages(self, payload):
+        """从归档 payload 取消息列表，兼容单条 / 列表 / 多种包装键。"""
         if isinstance(payload, dict) and payload.get("format") == "scholar_navis_chat_history":
-            messages = [self._normalize_msg(m) for m in payload.get("messages", [])]
-            return messages, True
+            return [self._normalize_msg(m) for m in payload.get("messages", [])]
         # 退路：形如 {"role": ..., "content": ...} 的单条，或 {"history"/"messages": [...]} 的包装
         if isinstance(payload, list):
-            return [self._normalize_msg(m) for m in payload if isinstance(m, dict)], True
+            return [self._normalize_msg(m) for m in payload if isinstance(m, dict)]
         if isinstance(payload, dict):
             for key in ("messages", "history", "conversation"):
                 val = payload.get(key)
                 if isinstance(val, list):
-                    return [self._normalize_msg(m) for m in val if isinstance(m, dict)], True
+                    return [self._normalize_msg(m) for m in val if isinstance(m, dict)]
             if "role" in payload and "content" in payload:
-                return [self._normalize_msg(payload)], True
-        return [], True
+                return [self._normalize_msg(payload)]
+        return []
 
     def _parse_markdown(self, path):
         # 按历史消息的 `### ... User Inquiry / AI Analysis` 标题切分。

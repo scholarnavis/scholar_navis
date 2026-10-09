@@ -39,6 +39,7 @@ from typing import Callable, Dict, List, Optional
 
 from src.core import plot_styles
 from src.core.evidence import EvidenceStore
+from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
 
@@ -706,7 +707,7 @@ class AgentRuntime:
                     text = ev.get("text") or ""
                     reasoning_parts.append(text)
                     if not think_open:
-                        emit_token("<think>\n")
+                        emit_token(THINK_OPEN_TAG + "\n")
                         think_open = True
                     if not truncated:
                         if sum(map(len, reasoning_parts)) <= _MAX_REASONING_CHARS:
@@ -721,16 +722,16 @@ class AgentRuntime:
                     # 先闭合思考块，避免正文被吞进 think 区间渲染异常。
                     if text:
                         if think_open:
-                            emit_token("\n</think>\n\n")
+                            emit_token("\n" + THINK_CLOSE_TAG + "\n\n")
                             think_open = False
                         emit_token(text)
                         live_text = True
                 elif ev_type == "final":
                     response = ev.get("response") or {}
         finally:
-            # 任何异常路径都保证闭合 <think> 标签，避免 UI 残留未闭合块
+            # 任何异常路径都保证闭合思考块，避免 UI 残留未闭合块
             if think_open:
-                emit_token("\n</think>\n\n")
+                emit_token("\n" + THINK_CLOSE_TAG + "\n\n")
 
         content = "".join(content_parts)
         # 流式错误文本转统一错误面板（与 _final_stream 相同的处理路径）
@@ -756,12 +757,17 @@ class AgentRuntime:
 
     @staticmethod
     def _emit_reasoning_block(reasoning: str, emit_token: Callable[[str], None]) -> bool:
-        """把整段思维链以 `` thinking`` 折叠块一次性 emit 给 UI。
+        """把整段思维链以 ``<think>`` 折叠块一次性 emit 给 UI。
 
         仅非流式回退路径使用：真流式路径逐 delta 实时透出，回退路径（provider
         不支持流式工具调用）只能拿到整块 reasoning，此处补齐，避免该路径下
         Reasoning 面板整段缺失。展示长度受 ``_MAX_REASONING_CHARS`` 约束，超限
         截断，与真流式路径保持同一展示策略。
+
+        **必须闭合**：结束标记一旦缺失，含义就完全不同——UI 会把标记之后的
+        一切（含随后流式上屏的正文本体）当作"未闭合的思考链"折进 Reasoning
+        面板，而下游所有"成对剥离"的逻辑（导出、引用扫描、子任务合成）也会
+        全部失配，把思考原文当正文处理。
 
         Returns:
             是否实际 emit 了思考块（reasoning 为空时返回 ``False``）。
@@ -769,13 +775,13 @@ class AgentRuntime:
         text = (reasoning or "").strip()
         if not text:
             return False
-        emit_token(" thinking\n")
+        emit_token(THINK_OPEN_TAG + "\n")
         if len(text) <= _MAX_REASONING_CHARS:
             emit_token(text)
         else:
             emit_token(text[:_MAX_REASONING_CHARS])
             emit_token(_REASONING_TRUNCATION_NOTE)
-        emit_token("\n\n\n")
+        emit_token("\n" + THINK_CLOSE_TAG + "\n\n")
         return True
 
     @staticmethod

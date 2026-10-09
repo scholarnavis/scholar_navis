@@ -8,6 +8,7 @@ import hashlib
 import json as _json
 from base64 import b64decode as _b64decode
 from functools import lru_cache
+from html import escape as _html_escape
 from html.parser import HTMLParser
 from urllib.parse import urlparse, parse_qs
 from PySide6.QtGui import QDesktopServices
@@ -16,6 +17,12 @@ from src.core.chat_typography import (PARAM_BY_NAME as _TYPO_PARAMS,
                                       clamp, clamp_font_size, heading_metrics)
 from src.core.file_types import TEXT_VIEWER_EXTS, file_extension
 from src.core.platform_env import is_windows
+from src.core.references import render_footer_references, split_footer
+from src.core.think_tags import (
+    THINK_NOISE_RE,
+    normalize as normalize_think_tags,
+    strip as strip_think_blocks,
+)
 from src.core.theme_manager import ThemeManager, installed_font_families
 from src.ui.components.toast import ToastManager
 
@@ -746,44 +753,15 @@ def _tidy_markdown(text: str) -> str:
     return text.strip() + "\n"
 
 
-# 不同 provider 的"内联思考"包裹写法各异，但语义一致（都应折叠进 Reasoning
-# 面板）。只识别 ＜think＞ 一种写法时，其余变体会残留在正文——这正是"思考链
-# 泄漏进正文"的根因之一。以下正则把这些写法统一折叠为 <think> / </think>。
-# 覆盖：
-#   1) XML 变体：＜think＞ ＜thinking＞ ＜reasoning＞ ＜reasoning_content＞
-#   2) 管道变体：＜|thinking|＞ ＜|reasoning|＞（GPT-OSS、部分本地推理网关）
-#   3) 符号包裹：◁think▷（Kimi K1.5 系列）
-#   4) Harmony 频道：＜|channel|＞analysis＜|message|＞（思考信道起点）
-# 这些字面量在正常学术正文中几乎不会出现；即便误判，代价也只是内容被移入
-# 可折叠面板而非丢失，因此可安全用于兜底。
-_THINK_OPEN_RE = re.compile(
-    r"(?:"
-    r"<\s*\??\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
-    r"|<\|\s*(?:think|thinking|reasoning)\s*\|>"
-    r"|<\|\s*channel\s*\|>\s*analysis\s*<\|message\|>"
-    r"|◁\s*think\s*▷"
-    r")",
-    re.IGNORECASE,
-)
+# 思考链/工具过程块的标签词表与规范化实现统一收敛在 src/core/think_tags.py，
+# 此处不再自建正则：历史上 UI 渲染、引用扫描、导出、HTTP API 各写一份且口径
+# 不一致，是"思考链漏进正文"的根因之一。
 
-_THINK_CLOSE_RE = re.compile(
-    r"(?:"
-    r"<\s*[/?]+\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
-    r"|<\|\s*/\s*(?:think|thinking|reasoning)\s*\|>"
-    r"|<\|\s*channel\s*\|>\s*final\s*<\|message\|>"
-    r"|◁\s*/\s*think\s*▷"
-    r")",
-    re.IGNORECASE,
-)
-
-#: 推理/Harmony 协议的孤立标记：自身不承载正文，正文抽取后一并清除。
-_THINK_NOISE_RE = re.compile(
-    r"<\|\s*(?:end|start|message|constrain)\s*\|>"
-    r"|<\|\s*channel\s*\|>\s*(?:analysis|final)?"
-    r"|<\s*[/?]*\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
-    r"|◁\s*/?\s*think\s*▷",
-    re.IGNORECASE,
-)
+#: 思考链 / 工具过程折叠面板的标记属性。渲染期由 :meth:`TextFormatter.format_chat_text`
+#: 注入，供两处共用：:meth:`TextFormatter.split_overflow_blocks` 把它拆成独立滚动块，
+#: :meth:`TextFormatter.strip_think_panels` 在复制/导出时整块剔除。**唯一定义处**，
+#: 不要在别处再写死该字面量。
+THINK_PANEL_ATTR = "data-navis-think"
 
 
 class TextFormatter:
@@ -1072,24 +1050,10 @@ class TextFormatter:
         mcp_contents = []
         is_closed = True
 
-        # 统一规范化标签
-        text = re.sub(r'<\s*think\s*>', '<think>', text, flags=re.IGNORECASE)
-        text = re.sub(r'<\s*/\s*think\s*>', '</think>', text, flags=re.IGNORECASE)
-        text = re.sub(r'<\s*mcp_process\s*>', '<mcp_process>', text, flags=re.IGNORECASE)
-        text = re.sub(r'<\s*/\s*mcp_process\s*>', '</mcp_process>', text, flags=re.IGNORECASE)
-
-        # 兜底规范化：把其余 provider 的内联思考写法（thinking / reasoning /
-        # 管道变体 / Harmony 频道 / Kimi 符号）也折叠为统一标签。只识别单一
-        # 写法会让这些模型把思考链直接写进正文。
-        # 注意：替换结果必须是带尖括号的 <think>，后续正文抽取是按
-        # r'<think>(.*?)</think>' 匹配的；替换成裸文字（如 ' thinking'）会让
-        # 这些思考块匹配不到，从而原样漏进正文——这正是"思考链与正文掺和
-        # 在一起"的根因。
-        text = _THINK_OPEN_RE.sub('<think>', text)
-        # 关闭写法必须折叠为 </think> 而非删除：删除会让 <think> 块失去配对的
-        # 结束标记，随后的正文会被当成"未闭合思考链"一并吞进 Reasoning 面板，
-        # 导致正文区变空（比原来的泄漏更严重）。
-        text = _THINK_CLOSE_RE.sub('</think>', text)
+        # 统一规范化：把各家 provider 的思考/工具过程写法折叠成 <think> /
+        # <mcp_process>，供下方的配对抽取使用。实现见 src/core/think_tags.py
+        # （唯一事实来源），此处不再自建正则。
+        text = normalize_think_tags(text)
 
         # [FINAL_ANSWER] 的位置必须在规范化之后重算：规范化会改变其前缀长度
         # （如角括号写法会多出字符），沿用规范化前的偏移切片会让标记前后的
@@ -1133,11 +1097,26 @@ class TextFormatter:
                 main_text = main_text[:unclosed_mcp.start()].strip()
                 is_closed = False
 
+        def render_hidden(raw: str) -> str:
+            """把一段思考/工具过程文本转成面板内可安全渲染的 HTML。
+
+            模型输出必须先转义再套强调标签：思考文本里出现裸 ``<div>`` /
+            ``</div>`` 时会破坏面板自身的 ``<div>`` 配对，导致
+            :meth:`split_overflow_blocks` 认不出这个 ``data-navis-think``
+            容器，整段思考就退化成普通文本块落进**正文区**
+            （症状即"思考内容跑到正文里"）。
+            """
+            safe = _html_escape(raw).replace('\n', '<br>')
+            safe = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', safe)
+            return re.sub(r'\*(.*?)\*', r'<i>\1</i>', safe)
+
         hidden_blocks = []
         if think_contents:
-            hidden_blocks.append("<b>🧠 AI Reasoning:</b><br>" + "<br><br>".join(filter(None, think_contents)))
+            hidden_blocks.append("<b>🧠 AI Reasoning:</b><br>"
+                                 + "<br><br>".join(render_hidden(c) for c in think_contents if c))
         if mcp_contents:
-            hidden_blocks.append("<b>🛠️ MCP Tool Execution:</b><br>" + "<br><br>".join(filter(None, mcp_contents)))
+            hidden_blocks.append("<b>🛠️ MCP Tool Execution:</b><br>"
+                                 + "<br><br>".join(render_hidden(c) for c in mcp_contents if c))
 
         hidden_content = "<br><br>".join(hidden_blocks)
         final_html = ""
@@ -1171,27 +1150,24 @@ class TextFormatter:
 
             link = f"<a href='think://{action}?index={index}' style='color:{accent_color}; text-decoration:none;'><nobr>{icon_html} <b>{status_title}</b></nobr></a>"
 
-            # data-navis-think 标记：仅供 UI 层拆分块时识别思考链面板
-            # （见 TextFormatter.split_overflow_blocks），Qt 渲染时忽略未知属性。
+            # THINK_PANEL_ATTR 标记：供 UI 层拆分块（split_overflow_blocks）与
+            # 复制/导出剔除（strip_think_panels）共同识别，Qt 渲染时忽略未知属性。
             if not is_expanded:
-                final_html += (f"<div data-navis-think='1' style='background:{bg_color}; border-left: 3px solid {border_color}; "
+                final_html += (f"<div {THINK_PANEL_ATTR}='1' style='background:{bg_color}; border-left: 3px solid {border_color}; "
                                f"padding: 8px 12px; margin: 10px 0; border-radius: 4px; font-size: 13px;'>{link}</div>")
             else:
-                safe_content = hidden_content.replace('\n', '<br>')
-                safe_content = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', safe_content)
-                safe_content = re.sub(r'\*(.*?)\*', r'<i>\1</i>', safe_content)
                 suffix = "" if is_closed else f" <span style='color:{accent_color};'><i>...</i></span>"
                 final_html += (
-                    f"<div data-navis-think='1' style='background:{bg_color}; border-left: 3px solid {accent_color}; padding: 8px 12px; "
+                    f"<div {THINK_PANEL_ATTR}='1' style='background:{bg_color}; border-left: 3px solid {accent_color}; padding: 8px 12px; "
                     f"margin: 10px 0; border-radius: 4px; font-size: 13px; color: {text_muted};'>"
-                    f"{link}<br><br><div style='color:{text_muted};'>{safe_content}{suffix}</div></div>")
+                    f"{link}<br><br><div style='color:{text_muted};'>{hidden_content}{suffix}</div></div>")
 
         if main_text:
             main_text = re.sub(r'\[FINAL_ANSWER\]\s*', '', main_text, flags=re.IGNORECASE)
             main_text = re.sub(r'\[\s*FOLLOW[_-]?\s*UPS?\s*\]\s*', '', main_text, flags=re.IGNORECASE)
             # 兜底清除孤立的推理/Harmony 协议标记：它们不承载正文，若上游
             # 传入了不配对的开闭标签，会以裸标记形式残留在正文里。
-            main_text = _THINK_NOISE_RE.sub('', main_text)
+            main_text = THINK_NOISE_RE.sub('', main_text)
 
             main_text = re.sub(r'<br\s*/?>', '\n', main_text, flags=re.IGNORECASE)
 
@@ -1757,7 +1733,7 @@ class TextFormatter:
                 kind = 'quote'
             elif name == 'pre':
                 kind = 'code'
-            elif name == 'div' and 'data-navis-think' in tag_text:
+            elif name == 'div' and THINK_PANEL_ATTR in tag_text:
                 kind = 'think'
             else:
                 continue
@@ -1781,6 +1757,42 @@ class TextFormatter:
         if tail.strip():
             blocks.append(('text', _wrap(tail)))
         return blocks
+
+    @classmethod
+    def strip_think_panels(cls, html: str) -> str:
+        """移除渲染期注入的思考链 / 工具过程折叠面板（``THINK_PANEL_ATTR``）。
+
+        复制与导出拿到的文本经常是**渲染结果**——气泡的 ``original_text`` 即
+        :meth:`format_chat_text` 的输出，此时思考链已不在 ``<think>`` 标签里，
+        而是这段面板 HTML。只剥标签会把面板内的思考原文当作正文复制/导出出去
+        （用户可见症状："复制的正文里夹着整段推理"）。
+
+        面板内部含嵌套 ``<div>``（内容层），纯正则无法可靠配对，故复用
+        :meth:`_matching_close_end` 的同名标签计数法——与
+        :meth:`split_overflow_blocks` 判定"什么是思考面板"的口径完全一致。
+        """
+        if not html or THINK_PANEL_ATTR not in html:
+            return html
+        out = []
+        pos = 0
+        for m in _TAG_TOKEN_RE.finditer(html):
+            if m.start() < pos:
+                continue
+            if m.group(1):  # 闭合标签
+                continue
+            if m.group(2).lower() != 'div' or THINK_PANEL_ATTR not in m.group(0):
+                continue
+            end = cls._matching_close_end(html, m.end(), 'div')
+            if end < 0:
+                # 配对不上：只摘掉开标签，宁可残留样式也不要整段吞掉正文。
+                logger.warning("Unbalanced think panel; dropping its opening tag only.")
+                end = m.end()
+            out.append(html[pos:m.start()])
+            pos = end
+        if not out:
+            return html
+        out.append(html[pos:])
+        return "".join(out)
 
     @staticmethod
     def _strip_tool_json(text: str) -> str:
@@ -1891,13 +1903,25 @@ class TextFormatter:
         return TextFormatter.strip_internal_links(text)
 
     @staticmethod
-    def clean_text_for_export(text, include_citations=True, markdown_mode=False):
-        """清理待导出文本（剥离运行标识、可选保留引用区）。
+    def clean_text_for_export(text, target="plain"):
+        """清理待导出 / 待复制文本：**只保留正文 + 参考文献**。
 
-        ``markdown_mode=True`` 时残留 HTML 交给 :meth:`html_to_markdown` 转成 Markdown
-        语法（表格/图片/加粗/代码…）；``False`` 保持旧的"剥掉所有标签"行为，供 TXT
-        纯文本导出使用。
+        ``target`` 取 ``"markdown"`` / ``"plain"``：
+
+        * ``markdown`` —— 残留 HTML 交给 :meth:`html_to_markdown` 转成 Markdown
+          语法（表格 / 图片 / 加粗 / 代码…），输出 .md 与 Markdown 复制用；
+        * ``plain`` —— 剥掉所有标签，输出 .txt 纯文本用。
+
+        两类内容**一律不进导出**：
+
+        * 思考链（``<think>`` 及各家变体，口径见 :mod:`src.core.think_tags`）——
+          在正文抽取前整体剥离；
+        * Provenance 追溯日志与其它 UI 页脚 —— 随页脚丢弃，其中只有参考文献行
+          会被回收，并按目标格式重新排版（见
+          :func:`src.core.references.render_footer_references`）。
         """
+        markdown_mode = (target == "markdown")
+
         def _strip(value):
             # 顺序要紧：先摘掉只在应用内有效的交互块/路由链接与样式脚本，再决定
             # 转 Markdown 还是纯文本，否则 cite://、mermaid:// 会被写进导出文件。
@@ -1910,7 +1934,12 @@ class TextFormatter:
         if final_match:
             text = text[final_match.end():]
         else:
-            text = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
+            # 与渲染侧共用同一套标签口径（含 thinking/reasoning/管道/Harmony 变体），
+            # 否则变体写法会被原样导出成"正文里夹着思考链"。
+            text = strip_think_blocks(text)
+        # 入参也可能已经是**渲染结果**（气泡的 original_text 即 format_chat_text 的
+        # 输出）：此时思考链在面板 HTML 里，不在 <think> 标签里，必须整块剔除。
+        text = TextFormatter.strip_think_panels(text)
 
         # 全局清理不需要的运行标识与文字
         text = re.sub(r"\[CLEAR_SEARCH\]|\[START_LLM_NETWORK\]|\[\s*FOLLOW[_-]?\s*UPS?\s*\]", "", text, flags=re.IGNORECASE)
@@ -1918,23 +1947,15 @@ class TextFormatter:
         text = re.sub(r"Initializing\.\.\.", "", text, flags=re.IGNORECASE)
         text = re.sub(r"Reasoning & Tool Execution", "", text, flags=re.IGNORECASE)
 
-        if include_citations and "<b>📚 Cited Sources:</b>" in text:
-            parts = text.split("<b>📚 Cited Sources:</b><br>")
-            main_text = _strip(parts[0])
-            citations_text = "\n\n📚 Reference:\n"
-            if len(parts) > 1:
-                raw_cites = parts[1]
-                # 参考文献行统一形态：`▪ [<a…>]<b>[n]</b> 著录文本[</a>]</div>`。
-                # 旧版本地文档行末尾带 "(Page N)"，此处一并用同一正则吞掉末尾的
-                # `</div>`，再剥标签——两种历史格式都能正确还原为 `[n] 著录`。
-                matches = re.findall(r"<b>\[(\d+)\]</b>\s*(.*?)</div>",
-                                     raw_cites, flags=re.DOTALL)
-                for idx, label in matches:
-                    label = re.sub(r"<[^>]+>", "", label).strip()
-                    citations_text += f"[{idx}] {label}\n"
-            text = main_text + citations_text
-        else:
-            text = _strip(text)
+        # 正文 / 页脚分离：页脚里的参考文献回收重排，Provenance 等一并丢弃。
+        body, refs = split_footer(text)
+        # 逐段 strip：正文尾部常带多个空行（思考块被摘除后留下），不收敛就会在
+        # 正文与参考文献之间留下成片空行。
+        sections = [_strip(body).strip()]
+        references = render_footer_references(refs, target)
+        if references:
+            sections.append(references.strip())
+        text = "\n\n".join(s for s in sections if s)
 
         # 兜底：剥离混入正文的工具调用 JSON/JSONL（reasoning fallback 常见泄漏），
         # 避免导出里出现"正文中断后跟一段工具 JSON"。
@@ -1944,24 +1965,21 @@ class TextFormatter:
     def hide_think_tags(text, for_display=False):
         final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
         if final_answer_match:
-            cleaned = text[final_answer_match.end():]
+            cleaned = normalize_think_tags(text[final_answer_match.end():])
             return re.sub(r'</?(think|mcp_process)\s*>', '', cleaned, flags=re.IGNORECASE).strip()
 
-        # 修改为匹配两种标签
-        cleaned = re.sub(r'<(think|mcp_process)>.*?(?:</\1>|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = strip_think_blocks(text)
 
-        if ('<think>' in text or '<mcp_process>' in text) and not cleaned.strip():
+        # 整条消息只有思考链（流式早期/后台推理）：给占位提示，而不是留一片空白。
+        # 判定依据是"剥离后什么都不剩"，因此不再依赖具体的标签字面量，
+        # thinking/reasoning/管道等变体写法同样能命中。
+        if not cleaned.strip() and text.strip():
             if for_display:
                 from src.core.theme_manager import ThemeManager
                 tm = ThemeManager()
                 return f"<span style='color:{tm.color('text_muted')}; font-style:italic;'>[AI is working in the background...]</span>"
             return ""
         return cleaned.lstrip()
-
-    @staticmethod
-    def clean_text_for_copy(text):
-        return TextFormatter.clean_text_for_export(text, include_citations=False)
-
 
     @staticmethod
     def format_response(text, index, expanded_indices, user_toggled_thinks, mermaid_cache):
