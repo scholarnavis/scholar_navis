@@ -108,17 +108,26 @@ constraint-dependencies = [
 ]
 
 # ---- 已确认暂时无法修复，勿盲目升级 ----
-# 1) chromadb 4 条（2 Critical + 2 High）：上游最新版 1.5.9 仍落在受影响区间
-#    (>= 0.4.17, <= 1.5.9)，GitHub Advisory 的 first_patched_version 为 null。
+# 现存的唯一告警是 9 条（2 Critical + 6 High + 1 Moderate），全部来自 chromadb 与
+# transformers；`uv.lock` 与 `requirements.txt` 表达同一份解析结果，Dependabot 按
+# manifest 分别记录，因此默认分支上的计数是 18（4 Critical / 12 High / 2 Moderate）。
+# 下列区间与 first_patched_version 取自 GitHub Advisory（2026-10 复核，与 PyPI 实际
+# 可安装版本一致）。以上 9 条**没有任何一条**能靠升级本仓库依赖消除。
+# 1) chromadb 4 条（2 Critical：GHSA-36p7-vc44-83pf、GHSA-f4j7-r4q5-qw2c；
+#    2 High：GHSA-2wm9-hf6c-p5cr、GHSA-xph7-9rjv-w5fr）：vulnerable_version_range
+#    上界一律为 `<= 1.5.9`，first_patched_version 为 null，而 PyPI 最新版就是 1.5.9
+#    —— 上游尚未发布修复版本，降级到区间外（< 0.4.17）不可行。
 #    缓解：两条 Critical 攻击的是 Chroma **服务端**的 HTTP API
 #    (/api/v2/tenants/{tenant}/databases/{db}/collections + trust_remote_code)；
 #    本项目只用进程内嵌的 PersistentClient（src/core/kb_manager.py），
 #    不对外暴露 Chroma 服务端，因此实际暴露面很低。
-# 2) transformers 5 条（4 High + 1 Medium）：修复下限依次为 5.3.0 / 5.5.0 / 5.10.0
-#    （GHSA-29pf-2h5f-8g72、GHSA-fgcw-684q-jj6r、GHSA-xrqw-3rrv-vx5w）与
-#    5.0.0rc3（GHSA-69w3-r845-3855）；GHSA-x9r9-c232-4q39（>=4.49.0, <=5.8.1）
-#    则直接没有 first_patched_version。即要清空这 5 条至少要 transformers>=5.10.0，
-#    但 optimum-onnx 0.1.0（PyPI 最新）硬性要求 transformers<4.58.0，无法同时满足。
+# 2) transformers 5 条（4 High + 1 Moderate）：修复下限依次为
+#    GHSA-29pf-2h5f-8g72 → 5.3.0、GHSA-fgcw-684q-jj6r → 5.5.0、
+#    GHSA-xrqw-3rrv-vx5w → 5.10.0、GHSA-69w3-r845-3855 → 5.0.0rc3；
+#    GHSA-x9r9-c232-4q39（>= 4.49.0, <= 5.8.1）的 first_patched_version 为 null，
+#    但升级到 5.9+ 即脱离该区间。即清空这 5 条至少要 transformers>=5.10.0，
+#    而 optimum-onnx 0.1.0（PyPI 最新版）硬性要求 transformers<4.58.0，无法同时满足
+#    （optimum 已发布到 2.3.0，但其 onnx 能力仍由 optimum-onnx 提供，约束未变）。
 #    缓解：本项目的 transformers 只被 optimum 的 ORTModel* 走 ONNX 推理路径
 #    （src/task/kb_tasks.py、src/core/rerank_engine.py 的 from_pretrained），
 #    不构造 Trainer、不加载外部 checkpoint，因此这几条告警的触发面不经过本项目。
