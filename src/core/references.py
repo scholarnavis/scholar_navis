@@ -245,6 +245,23 @@ class ReferenceItem:
                 or f"Reference {self.index}")
 
     @property
+    def citable_link(self) -> str:
+        """**可引用的稳定地址**：DOI 优先（``https://doi.org/<doi>``），其次在线链接。
+
+        与 :attr:`primary_link` 的优先级差异是刻意的，两者服务于不同的动作：
+
+        * :attr:`primary_link` 是"打开源文件"的目标，用户此刻的意图是看原始页面，
+          因此在线链接优先；
+        * 本属性是"复制引文地址"的目标，学术场景下 DOI 才是可长期寻址的标识，
+          原始 URL 可能随时改版失效。
+
+        本地文档没有可复制的网址，返回空串（调用方据此隐藏入口）。
+        """
+        if self.doi:
+            return f"https://doi.org/{self.doi}"
+        return self.url
+
+    @property
     def primary_link(self) -> str:
         """点击条目时的跳转目标：在线链接 > DOI > 内部文档查看器。"""
         if self.url:

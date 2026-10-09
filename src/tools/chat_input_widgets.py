@@ -25,6 +25,11 @@ from src.core.theme_manager import (ThemeManager, hex_to_rgba, overlay_scrollbar
                                     strong_weight_css, title_weight_css)
 from src.ui.components.toast import ToastManager
 
+#: 输入框的空态提示语。英文原串即 i18n 查表键（译文见 ``src/core/locales.py``），
+#: 这里只定义一次：控件构造与 :meth:`ChatInputContainer.unlock_input` 恢复提示语都
+#: 引用它，避免同一句文案在两处字面量上各自演化。
+INPUT_PLACEHOLDER = "Ask a question... (Enter to send, Shift+Enter for new line)"
+
 
 class _ImageChip(QWidget):
     """输入区附件预览条中的图片缩略图芯片。
@@ -255,9 +260,7 @@ class AutoResizingTextEdit(QPlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText(tr(
-            "Ask a question... (Recommend English or enabling translator for best results. "
-            "Enter to send, Shift+Enter for new line)"))
+        self.setPlaceholderText(tr(INPUT_PLACEHOLDER))
         self.setStyleSheet("""
             QPlainTextEdit { background-color: transparent; border: none; font-size: 14px; }
         """)
@@ -821,9 +824,7 @@ class ChatInputContainer(QFrame):
 
     def unlock_input(self):
         self.text_edit.setEnabled(True)
-        self.text_edit.setPlaceholderText(tr(
-            "Ask a question... (Recommend English or enabling translator for best results. "
-            "Enter to send, Shift+Enter for new line)"))
+        self.text_edit.setPlaceholderText(tr(INPUT_PLACEHOLDER))
         self.btn_send.setEnabled(True)
 
     def show_context_preview(self, text_info):

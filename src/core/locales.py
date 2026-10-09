@@ -641,8 +641,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Context Attached": "已附加上下文",
         "📎 Context Attached": "📎 已附加上下文",
         "📎 Attached: {name}": "📎 已附加：{name}",
-        "Ask a question... (Recommend English or enabling translator for best results. Enter to send, Shift+Enter for new line)":
-            "输入问题…（建议使用英文或启用翻译以获得最佳效果。Enter 发送，Shift+Enter 换行）",
+        "Ask a question... (Enter to send, Shift+Enter for new line)":
+            "输入问题…（Enter 发送，Shift+Enter 换行）",
         "Knowledge base updated. Clear history to resume chat.": "知识库已更新。请清空历史以继续对话。",
         "The linked knowledge base or model has changed. Continuing may cause context inconsistency. Please click 'Clear' to reset history.":
             "关联的知识库或模型已变更，继续对话可能导致上下文不一致。请点击“清空”重置历史。",
