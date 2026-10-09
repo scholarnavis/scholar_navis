@@ -366,6 +366,16 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
 
     data_to_collect = ["docx", "litellm"]
 
+    # 惰性导入的包在字节码里没有 import 指令，静态分析无法发现，必须显式收集：
+    # 对话框包用 PEP 562 ``__getattr__`` + ``import_module(f".{name}")`` 转发子模块
+    # （见 src/ui/components/dialogs/__init__.py），工具面板由主窗口按字符串模块路径
+    # ``importlib.import_module`` 加载（见 src/ui/main_window.py）。二者在冻结产物里
+    # 都会因模块缺失抛 ModuleNotFoundError。
+    submodules_to_collect = [
+        "src.ui.components.dialogs",
+        "src.tools",
+    ]
+
     hidden_imports = [
         "torch",
         "torch.autograd",
@@ -408,6 +418,8 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
         cmd.extend(["--collect-all", pkg])
     for pkg in data_to_collect:
         cmd.extend(["--collect-data", pkg])
+    for pkg in submodules_to_collect:
+        cmd.extend(["--collect-submodules", pkg])
     for hi in hidden_imports:
         cmd.extend(["--hidden-import", hi])
 
