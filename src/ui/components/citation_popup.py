@@ -35,12 +35,17 @@ KDE/Wayland 逼出来的唯一可行做法：Wayland 协议不允许客户端摆
 ``CitationPopupController`` 是一个进程级单例，持有 ``(消息编号, 引用编号) -> 条目``
 的映射，由任务层通过结构化事件（``references``）增量同步（见 response_flow）。
 正文里的 ``[n]`` 只携带编号，因此渲染/重渲染都不依赖气泡对象的生命周期。
+
+缓存本身是**内存态**，不构成持久化：每轮回答收尾时由 ``references_for`` 按消息
+取出并写入该条 ``history`` 的 ``references`` 字段（导出无损留存），会话重建
+（导入 / 编辑重发 / 清空）时再用 ``merge_references`` 按新气泡编号整批回灌，
+两端都只经这两个接口，保证"存"与"取"永远对称。
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation,
                             QRect, Qt, QTimer)
@@ -930,6 +935,30 @@ class CitationPopupController(QObject):
             return self._store.get((int(msg_index), int(index)))
         except (TypeError, ValueError):
             return None
+
+    def references_for(self, msg_index: int) -> List[Dict[str, Any]]:
+        """取某条消息已同步的引用条目（按引用编号升序）。
+
+        :meth:`merge_references` 的读取侧对称接口：供历史持久化（导出）与
+        历史重放（导入 / 编辑重发）按消息整批取用，使引用随对话一起留存。
+        """
+        try:
+            mid = int(msg_index)
+        except (TypeError, ValueError):
+            return []
+        items = [entry for (m, _idx), entry in self._store.items() if m == mid]
+        return sorted(items, key=lambda e: int(e.get("index") or 0))
+
+    def clear_store(self) -> None:
+        """清空引用信息缓存并收起浮层。
+
+        会话被整体重建（清空对话 / 导入 / 编辑重发）时调用：编号空间随之重置，
+        若不清空，新会话里未登记的 ``[n]`` 会串到上一会话残留的旧条目上。
+        """
+        if self._store:
+            logger.debug("Citation store cleared (%d item(s)).", len(self._store))
+        self._store.clear()
+        self.dismiss()
 
     # ------------------------------------------------------------------ #
     #  悬停

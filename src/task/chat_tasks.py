@@ -104,6 +104,80 @@ def _seed_registry_from_sources(registry, sources_map, evidence_store=None):
         registry.seed(rid, _registry_item_from_source(rid, meta))
 
 
+#: 模型自拟引用 key 的常见形态：姓氏/单词 + 四位年份（如 ``christie2017``）。
+#: 仅用于"未登记来源、无法解析"时的兜底清理，不参与正常解析。
+_CITE_KEY_YEAR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]*?(?:19|20)\d{2}[a-z]?$")
+
+
+def _seed_registry_from_history(registry, messages):
+    """把历史回答里已登记过的引用补录进本轮注册表（跨轮连续性）。
+
+    注册表在每轮任务内新建，但模型在追问轮里会**复用上一条回答的引用**：
+    或复述编号（``[1]``），或复用自拟 key（``[christie2017]``）。若不回灌，
+    本轮注册表为空，这些 token 既解析不出编号、也渲染不出参考文献列表——正是
+    "正文残留 [key]、末尾没有 References"的来源。
+
+    历史条目的 ``references`` 字段就是"该轮已登记条目"的无损快照（由 UI 收尾时
+    写入，见 ``ChatResponseFlowMixin._attach_references``）。此处按消息**从新到旧**
+    回灌：key 始终登记；编号仅在未被占用时沿用（最近一次回答的编号优先），
+    与 KB/在线来源已有的编号冲突时退化为新编号，避免占用既有编号空间。
+
+    :return: 回灌的条目数（供日志）。
+    """
+    if not messages:
+        return 0
+    seeded_keys = set()
+    seeded = 0
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        refs = msg.get("references")
+        if not isinstance(refs, list):
+            continue
+        for entry in refs:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("key") or "").strip().lower()
+            if key and key in seeded_keys:
+                continue
+            item = ReferenceItem.from_dict(entry)
+            if not (item.title or item.url or item.doi or item.path):
+                continue
+            if key:
+                seeded_keys.add(key)
+            try:
+                idx = int(entry.get("index") or 0)
+            except (TypeError, ValueError):
+                idx = 0
+            if idx > 0 and idx not in registry:
+                registry.seed(idx, item)
+            else:
+                registry.add(item)
+            seeded += 1
+    return seeded
+
+
+def _strip_unresolved_cite_keys(text, unresolved):
+    """移除正文里"无法解析"的引用 key（姓氏+年份形态），返回 ``(text, removed)``。
+
+    这类 token 是模型自拟的引用别名，但本轮与历史都没有对应来源登记，既不能编号
+    也无著录可渲染，留在正文只会呈现为 ``[christie2017]`` 这样的坏标记。数字型
+    token 不动（可能是正文自身的编号用法），纯净短缩写（如 ``[EC]``）也不动，
+    只清理能明确判定为引用 key 的形态。
+    """
+    keys = {str(t) for t in (unresolved or []) if _CITE_KEY_YEAR_RE.match(str(t))}
+    if not keys:
+        return text, []
+    pattern = re.compile(r"\[(" + "|".join(re.escape(k) for k in sorted(keys)) + r")\]")
+    removed = []
+
+    def _drop(match):
+        removed.append(match.group(1))
+        return ""
+
+    return pattern.sub(_drop, text), removed
+
+
 def _trim_history_for_budget(history, token_budget):
     """按轮次边界裁剪历史消息至 token 预算内（从最新往回保留）。
 
@@ -617,8 +691,9 @@ class ChatGenerationTask(BackgroundTask):
         domain = "General Academic"
         context_str = ""
         sources_map = {}
-        # 会话级参考文献注册表：本地 KB 文档 / 在线来源 / cite_references 工具提交的
-        # 条目共用同一编号空间，正文 [n] 与文献列表恒一一对应。
+        # 本轮回答的参考文献注册表：本地 KB 文档 / 在线来源 / cite_references 工具
+        # 提交的条目共用同一编号空间，正文 [n] 与文献列表恒一一对应。任务每轮新建，
+        # 历史已登记条目在渲染前由 _seed_registry_from_history 回灌（跨轮连续性）。
         reference_registry = ReferenceRegistry()
         # 会话级逐字证据库：收集工具结果 / KB chunk / 附件中的原文，强制
         # cite_references 提交的 snippet 为来源逐字内容（见 runtime 的校验逻辑）。
@@ -977,7 +1052,7 @@ class ChatGenerationTask(BackgroundTask):
             "the run automatically; the user's answer arrives as the next user message.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
             "1. IN-TEXT KEYS (For UI Tracking): For EVERY source you cite, first choose a short, unique ASCII KEY (e.g. [lariguet2004]) and attach it inline IMMEDIATELY after the claim; reuse that SAME key everywhere the source is cited. Local knowledge-base documents are already numbered in the Context as '--- [Document n] ---' — cite those with [n]. If a tool result already carries a numeric id (e.g. '_mcp_cite_id'), you may cite that number directly. NEVER claim facts without an inline citation.\n"
-            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'). The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself; use only keys (or the pre-assigned numbers above).\n"
+            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'). Registration is PER REPLY: keys registered in an earlier turn remain resolvable, but any source you cite that has NOT been registered before MUST be registered again in THIS reply — never write an inline key that has no matching cite_references entry (an unregistered key is dropped from the text and produces no reference list). The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself; use only keys (or the pre-assigned numbers above).\n"
             "3. NEVER WRITE A REFERENCES SECTION YOURSELF: do NOT output a 'References' / 'Bibliography' heading or a manually numbered citation list in your answer text. The app generates that list from your cite_references call; writing one yourself duplicates it and can contradict it.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
             "### PUNCTUATION LOCALIZATION (STRICT):\n"
@@ -1172,13 +1247,28 @@ class ChatGenerationTask(BackgroundTask):
         #   * 模型不必猜数字，先写正文还是先调 cite_references 都不会编号错位；
         #   * 列表顺序 = 正文首次引用顺序（符合学术惯例）。
         _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
+        # 跨轮引用连续性：回灌历史回答里已登记的引用，使追问轮复用 [n]/[key] 也能
+        # 解析、并渲染出参考文献列表（见 _seed_registry_from_history 说明）。
+        restored = _seed_registry_from_history(reference_registry, self.messages)
+        if restored:
+            self.send_log(
+                "INFO",
+                f"Historical references restored for cross-turn continuity: {restored} item(s).")
         # Agent 的返回缓存里混有 UI 控制标记（[CLEAR_SEARCH]/[START_LLM_NETWORK] 等，
         # 由 AgentRuntime._emit 一并计入）；作为"上屏正文"前必须先剥离，否则这些
         # 字面量会在整段替换时漏成正文。
         display_text = re.sub(
             r"\[(?:CLEAR_SEARCH|START_LLM_NETWORK)\]", "", self.full_response_cache or "")
         new_text, ordered, unresolved = reference_registry.resolve_citations(display_text)
-        if unresolved:
+        # 兜底清理：仍无法解析的引用 key（姓氏+年份形态）从正文移除，避免呈现为
+        # 坏标记 [christie2017]；数字型与短缩写形态不动。
+        new_text, dropped_keys = _strip_unresolved_cite_keys(new_text, unresolved)
+        if dropped_keys:
+            self.send_log(
+                "WARNING",
+                "Unregistered citation key(s) removed from the answer text: "
+                f"{', '.join(dict.fromkeys(dropped_keys))[:200]}")
+        elif unresolved:
             self.send_log(
                 "WARNING",
                 "Unresolved inline citations (not registered, left as-is): "
@@ -1189,14 +1279,20 @@ class ChatGenerationTask(BackgroundTask):
                 "INFO",
                 f"References rendered: {len(reference_registry)} registered, "
                 f"{len(ordered)} cited (ordered by first appearance).")
-            # 结构化收口：用"已编号"正文替换上屏，并把引用数据直达悬停卡/详情面板。
+        elif dropped_keys:
+            # 无条目可渲染，但正文已因清理而变化：仍需回传，保证上屏与落历史一致。
+            self.full_response_cache = new_text
+        else:
+            self.full_response_cache = display_text
+            if len(reference_registry):
+                self.send_log("INFO", "No cited reference matched the registry; reference block skipped.")
+        if ordered or dropped_keys:
+            # 结构化收口：用"已编号/已清理"正文替换上屏，并把引用数据直达悬停卡/详情面板。
             self._emit_state(TaskState.PROCESSING, -1, "", payload={
                 "event": "answer_final",
                 "text": self.full_response_cache,
                 "references": [it.to_dict() for it in ordered],
             })
-        elif len(reference_registry):
-            self.send_log("INFO", "No cited reference matched the registry; reference block skipped.")
 
         # Phase 7: Persist Provenance evidence chain + show summary to user
         self._emit_provenance()
@@ -2050,8 +2146,8 @@ class ImportChatHistoryTask(BackgroundTask):
             msg["content"] = ""
         else:
             msg["content"] = str(content)
-        # 保留供气泡渲染的富字段
-        for key in ("display_text", "context_html", "external_files", "status"):
+        # 保留供气泡渲染的富字段（references 为引用条目，回灌后恢复 [n] 悬停著录）
+        for key in ("display_text", "context_html", "external_files", "status", "references"):
             if key in raw:
                 msg[key] = raw[key]
         return msg

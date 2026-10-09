@@ -277,7 +277,9 @@ class ChatResponseFlowMixin:
             if hasattr(self, '_restore_last_input'):
                 self._restore_last_input()
 
-            self.history.append({"role": "assistant", "content": self.current_ai_text, "status": "interrupted"})
+            entry = {"role": "assistant", "content": self.current_ai_text, "status": "interrupted"}
+            self._attach_references(entry)
+            self.history.append(entry)
             self.current_ai_bubble = None
             self.scroll_to_bottom(force=False)
             return
@@ -328,9 +330,32 @@ class ChatResponseFlowMixin:
         if questions:
             self.render_follow_up_buttons(questions)
 
-        self.history.append({"role": "assistant", "content": self.current_ai_text})
+        entry = {"role": "assistant", "content": self.current_ai_text}
+        self._attach_references(entry)
+        self.history.append(entry)
         self.current_ai_bubble = None
         self.logger.info("AI response generation finished and UI updated.")
+
+    def _attach_references(self, entry: dict):
+        """把当前 AI 气泡的引用条目写入历史条目（导出无损留存的唯一写入点）。
+
+        引用条目此前只存在于 :class:`CitationPopupController` 的内存缓存里，
+        导出再导入后便会全部丢失（正文 ``[n]`` 仍在，悬停却只剩占位文案）。
+        故在收尾落历史时按气泡编号取出并挂到该条 ``references`` 字段上：
+        ``ExportChatTask`` 的无损导出会原样序列化，导入 / 编辑重发再整批回灌。
+        """
+        bubble = getattr(self, "current_ai_bubble", None)
+        idx = getattr(bubble, "index", -1) if bubble is not None else -1
+        try:
+            from src.ui.components.citation_popup import CitationPopupController
+            refs = CitationPopupController.instance().references_for(idx)
+        except Exception as e:  # pragma: no cover - 纯防御
+            self.logger.debug("Reference snapshot for message #%s skipped: %s", idx, e)
+            return
+        if refs:
+            entry["references"] = refs
+            self.logger.debug("Attached %d reference(s) to history message #%s.",
+                              len(refs), idx)
 
     @staticmethod
     def _build_error_marker(msg):
@@ -407,12 +432,14 @@ class ChatResponseFlowMixin:
             final_html = self._format_response(self.current_ai_text, idx)
             self.current_ai_bubble.set_content(final_html)
 
-        # 记录到历史避免上下文结构断裂
-        self.history.append({
+        # 记录到历史避免上下文结构断裂（已同步的引用同样随历史留存）
+        entry = {
             "role": "assistant",
             "content": self.current_ai_text,
             "status": "error"
-        })
+        }
+        self._attach_references(entry)
+        self.history.append(entry)
 
         self.current_ai_bubble = None
         # 完整原始错误（含 JSON payload 中的 details）写入日志

@@ -287,31 +287,41 @@ class ChatSendFlowMixin:
 
         self.history = self.history[:index]
 
-        v_bar = self.scroll_area.verticalScrollBar()
-        current_scroll = v_bar.value()
+        # 重放期间抑制每个气泡各自的自动滚动（否则每加一条都会被拉走一次），
+        # 视图定位统一留到重放结束后交给"发送"路径处理，见下方 _is_editing 复位。
         self._is_editing = True
 
         self.clear_layout(self.chat_layout)
         temp_history = list(self.history)
         self.history = []
 
+        # 重放会重建气泡并重置编号空间：引用缓存跟随重建，历史条目携带的引用
+        # 按新气泡编号逐条回灌，保证被截断前那些回答的 [n] 仍可溯源。
+        from src.ui.components.citation_popup import CitationPopupController
+        CitationPopupController.instance().clear_store()
+
         for msg in temp_history:
             display_text = msg.get('display_text', msg['content'])
             ctx_html = msg.get('context_html')
             msg_images = [c for c in msg.get('external_files', []) if c.get("type") == "image"]
-            self.add_bubble(display_text, is_user=(msg['role'] == 'user'), context_html=ctx_html,
-                            image_files=msg_images)
+            bubble = self.add_bubble(display_text, is_user=(msg['role'] == 'user'),
+                                     context_html=ctx_html, image_files=msg_images)
+            self._restore_message_references(bubble, msg)
             self.history.append(msg)
 
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
 
+        # 重放完成、恢复常规滚动策略后再挂新气泡：新气泡走"用户发送"同一条路径
+        # （add_bubble 延迟定位到该气泡顶端），与普通发送行为一致。
+        #
+        # 不能再沿用"清空前快照 scrollBar.value()、重建后 setValue 还原"的旧做法：
+        # clear_layout 会把内容高度清零，重建后的气泡高度又由 _schedule_height_sync
+        # 延后一帧才收敛，此刻的 scrollBar.maximum 仍是未收敛的偏小值，还原值被夹取
+        # 到 0；待高度真正收敛后视图仍停在 0，于是表现为"编辑重发后总是跳到顶部"。
+        self._is_editing = False
         old_images = [c for c in old_files if c.get("type") == "image"]
         self.add_bubble(new_text, is_user=True, context_html=old_context_html, image_files=old_images)
-
-        QApplication.processEvents()
-        v_bar.setValue(current_scroll)
-        self._is_editing = False
 
         llm_text = new_text
         if old_files:

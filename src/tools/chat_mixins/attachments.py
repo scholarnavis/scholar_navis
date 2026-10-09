@@ -610,6 +610,11 @@ class ChatAttachmentsMixin:
         self.clear_layout(self.chat_layout)
         self.remove_old_follow_ups()
 
+        # 编号空间随会话重建而重置：先清空引用缓存，再按新气泡编号逐条回灌，
+        # 避免旧会话残留条目串到导入结果的正文 [n] 上。
+        from src.ui.components.citation_popup import CitationPopupController
+        CitationPopupController.instance().clear_store()
+
         # 逐条重放并同时写入 self.history：add_bubble 依赖 len(history) 生成自增
         # 气泡索引，故必须与历史写入交替进行（与 edit-resend 重放逻辑一致）。
         self.history = []
@@ -623,6 +628,8 @@ class ChatAttachmentsMixin:
                 if msg.get("external_files") else []
             bubble = self.add_bubble(display_text, is_user=is_user, context_html=ctx_html,
                                      image_files=msg_images)
+            # 无损导入的引用条目按新气泡编号回灌，恢复 [n] 的悬停著录与支撑原文。
+            self._restore_message_references(bubble, msg)
             if not is_user and bubble is not None:
                 # AI 消息必须走与正常生成流一致的渲染管线（_format_response）：
                 # 无损导出的 content 是原始 markdown，含 <think>/<mcp_process>
