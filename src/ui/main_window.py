@@ -3,18 +3,18 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QSettings
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QTimer, QEvent, QSettings
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QListWidget,
                                QStackedWidget, QSplitter, QPushButton, QLabel, QHBoxLayout, QListWidgetItem,
                                QApplication)
 
 from src.core.config_manager import ConfigManager
+from src.core.i18n import tr
+from src.core.platform_env import is_windows
 from src.core.theme_manager import (ThemeManager, apply_native_titlebar_theme,
                                     strong_weight_css, title_weight_css)
 from src.ui.components.dialog import StandardDialog, BaseDialog
-from src.ui.components.quick_translator import QuickTranslatorWindow
 from src.ui.components.toast import ToastManager
 
 
@@ -48,7 +48,7 @@ def _load_tool_class(module_path: str, class_name: str):
 
 
 def force_windows_taskbar_icon(hwnd, icon_path):
-    if sys.platform != "win32":
+    if not is_windows():
         return
     if not os.path.exists(icon_path):
         return
@@ -88,7 +88,7 @@ def force_windows_taskbar_icon(hwnd, icon_path):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Scholar Navis - Research Assistant")
+        self.setWindowTitle(tr("Scholar Navis - Research Assistant"))
         self.resize(1280, 800)
 
         self.setWindowIcon(ThemeManager().get_app_icon())
@@ -128,19 +128,6 @@ class MainWindow(QMainWindow):
         self.sidebar.currentRowChanged.connect(self.switch_tool)
         left_layout.addWidget(self.sidebar)
 
-        # 左下角翻译按钮 (要求：圆形底纹，学术蓝)
-        self.btn_quick_trans = QPushButton()
-        self.btn_quick_trans.setToolTip("Quick Translate (Ctrl+Shift+T)")
-        self.btn_quick_trans.setCursor(Qt.PointingHandCursor)
-        self.btn_quick_trans.setFixedSize(48, 48)  # 完美的圆形尺寸
-        self.btn_quick_trans.clicked.connect(self.toggle_quick_translator)
-
-        # 包裹在一个布局里使其居中或靠左不拉伸
-        trans_layout = QHBoxLayout()
-        trans_layout.addWidget(self.btn_quick_trans)
-        trans_layout.addStretch()
-        left_layout.addLayout(trans_layout)
-
         self.main_splitter.addWidget(self.left_panel)
 
         # --- 右侧主面板 ---
@@ -177,9 +164,11 @@ class MainWindow(QMainWindow):
         self.tools = [None] * len(self.tool_classes)
 
         # 仅生成左侧边栏按钮和右侧占位符，不进行耗时的实例化
+        # 注意：name 是**内部标识符**（同时用于 icon_map 与工具构造），
+        # 必须保持英文；只有侧边栏**显示文本**参与翻译。
         for name, _, _ in self.tool_classes:
             icon_name = self.icon_map.get(name, "tag")
-            item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {name}")
+            item = QListWidgetItem(self.tm.icon(icon_name, "text_muted"), f"  {tr(name)}")
             self.sidebar.addItem(item)
 
             dummy_widget = QWidget()
@@ -188,11 +177,6 @@ class MainWindow(QMainWindow):
 
         self.clean_old_logs()
         QTimer.singleShot(300, self.perform_startup_checks)
-
-        # 把原本这里的 translator_dialog 等初始化保留
-        self.translator_dialog = QuickTranslatorWindow(None)
-        self.shortcut_translate = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
-        self.shortcut_translate.activated.connect(self.toggle_quick_translator)
 
         self.tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
@@ -206,7 +190,7 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentRow(0)
         self.switch_tool(0)
 
-        if sys.platform == "win32":
+        if is_windows():
             ico_path = ThemeManager.get_resource_path("Assets", "icon.ico")
             hwnd = int(self.winId())
             QTimer.singleShot(100, lambda: force_windows_taskbar_icon(hwnd, ico_path))
@@ -220,9 +204,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
-
-        if hasattr(self, 'translator_dialog') and self.translator_dialog:
-            self.translator_dialog.close()
 
         super().closeEvent(event)
 
@@ -238,15 +219,6 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentRow(0)
         self.clean_old_logs()
         QTimer.singleShot(300, self.perform_startup_checks)
-
-    def toggle_quick_translator(self):
-        if self.translator_dialog.isHidden() or self.translator_dialog.windowOpacity() == 0.0:
-            self.translator_dialog.setWindowOpacity(1.0)
-            self.translator_dialog.show()
-            self.translator_dialog.activateWindow()
-            self.translator_dialog.input_box.setFocus()
-        else:
-            self.translator_dialog.hide_with_fade()
 
     def _update_logo_theme(self):
         theme = self.tm.current_theme
@@ -304,22 +276,6 @@ class MainWindow(QMainWindow):
         """)
 
         self.lbl_app_name.setStyleSheet(f"color: {tm.color('title_blue')}; font-weight: {title_weight_css()}; font-size: 16px;")
-
-        self.btn_quick_trans.setIcon(tm.icon("translate", "bg_main"))
-        self.btn_quick_trans.setIconSize(QSize(22, 22))
-        self.btn_quick_trans.setStyleSheet(f"""
-            QPushButton {{ 
-                background-color: {tm.color('accent')}; 
-                border: 2px solid {tm.color('border')};
-                border-radius: 24px;
-            }}
-            QPushButton:hover {{ 
-                background-color: {tm.color('accent_hover')}; 
-            }}
-            QPushButton:pressed {{ 
-                background-color: {tm.color('title_blue')}; 
-            }}
-        """)
 
     def _sync_titlebar_theme(self, delay_ms: int = 0):
         """把主窗口原生标题栏同步为 ThemeManager 的当前主题。
@@ -454,10 +410,10 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def route_dev_test(self, prompt_text, note_text="", image_paths=None):
+    def route_dev_test(self, prompt_text, note_text="", attachment_paths=None):
         """Developer-mode AI test: switch to Chat, show a user-visible note
-        (NOT sent to the LLM), optionally mount image attachments, then send
-        the real prompt to the LLM."""
+        (NOT sent to the LLM), optionally mount attachments (images and/or
+        documents), then send the real prompt to the LLM."""
         chat_index = 1
         self.sidebar.setCurrentRow(chat_index)
 
@@ -471,8 +427,9 @@ class MainWindow(QMainWindow):
             # 1) 展示测试说明（仅给用户看，不进 LLM 历史）
             if note_text and hasattr(chat_tool, 'show_dev_note'):
                 chat_tool.show_dev_note(note_text)
-            # 2) 挂载图片附件（走标准 attachments 管线：校验 + SVG 栅格化 + 预览条）
-            for p in (image_paths or []):
+            # 2) 挂载附件（走标准 attachments 管线：类型校验 + SVG 栅格化 + 预览条；
+            #    非图片文件同样经此入口挂载，与用户手动 Attach 完全同一条链路）
+            for p in (attachment_paths or []):
                 if p and os.path.exists(p) and hasattr(chat_tool, 'process_attached_files'):
                     chat_tool.process_attached_files([p])
             # 3) 发送真实提示词给 LLM
@@ -486,15 +443,21 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def route_dev_render_preview(self, note_text, user_text, ai_text):
+    def route_dev_render_preview(self, note_text, user_text, ai_text, references=None):
         """Developer-mode render preview: switch to Chat and inject a fake
         conversation (one user bubble + one AI bubble) WITHOUT any AI call.
 
         Unlike ``route_dev_test`` (which sends a real prompt to the LLM),
         this only exercises the rendering pipeline: identifier auto-linking,
-        file links, advanced Markdown / LaTeX and Mermaid cards. The fake
-        bubbles never enter the chat history, so subsequent real turns are
-        not affected."""
+        every internal link route (cite:// text/PDF viewer, file:// image /
+        system app, mermaid:// viewer), inline ``[n]`` citations, advanced
+        Markdown / LaTeX and Mermaid cards. The fake bubbles never enter the
+        chat history, so subsequent real turns are not affected.
+
+        :param references: optional citation entries for the injected bubble;
+            they are written into the citation popup cache so hovering /
+            clicking the ``[n]`` markers works in the demo.
+        """
         chat_index = 1
         self.sidebar.setCurrentRow(chat_index)
 
@@ -510,7 +473,7 @@ class MainWindow(QMainWindow):
                 chat_tool.show_dev_note(note_text)
             # 2) 注入假对话（不进 history，不触发生成管线）
             if hasattr(chat_tool, 'inject_dev_demo'):
-                chat_tool.inject_dev_demo(user_text, ai_text)
+                chat_tool.inject_dev_demo(user_text, ai_text, references=references)
             else:
                 logging.getLogger(__name__).warning(
                     "ChatTool.inject_dev_demo missing; render preview skipped.")

@@ -1,4 +1,4 @@
-"""跨平台运行环境预检与启动期修正。
+"""跨平台运行环境预检与启动期修正，并集中托管平台相关的**唯一判断入口**。
 
 **必须在任何 PySide6 导入之前调用**（见 ``main.py`` 顶部）。Linux 上有三类
 高频启动故障，本模块集中处理，避免平台判断散落在入口文件里：
@@ -13,6 +13,17 @@
    会退回 Qt 自绘窗口，导入/导出看不到系统文件选择器（见
    :func:`enable_native_file_dialogs`）。
 
+除上述预检之外，本模块还是**跨平台原语的单一来源**（同一件事只在一处定义）：
+
+* :func:`os_family` —— 全应用唯一的平台标识。不要再内联比较 ``sys.platform``
+  / ``platform.system()`` / ``os.name``：三种写法混用时会互相矛盾；
+* :func:`no_window_flags` —— 子进程的"不弹控制台窗口"标志；
+* :func:`app_root` / :func:`app_resource_root` —— 可写数据目录与只读资源目录
+  （含 macOS ``.app`` 包内 ``Contents/Resources`` 的映射）；
+* :func:`open_with_system` / :func:`reveal_in_file_manager` —— 交给系统打开器
+  （不经 shell）；
+* :func:`path_total_bytes` —— 跨平台读取文件系统容量。
+
 所有函数都是幂等的，且只依赖标准库，保证调用点尽可能靠前。
 """
 
@@ -20,15 +31,228 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import functools
 import importlib.util
 import logging
 import os
 import platform
 import re
+import shutil
 import stat
+import subprocess
 import sys
 
 logger = logging.getLogger("Core.PlatformEnv")
+
+
+# --------------------------------------------------------------------------- #
+#  平台标识
+# --------------------------------------------------------------------------- #
+PLATFORM_WINDOWS = "windows"
+PLATFORM_MACOS = "macos"
+PLATFORM_LINUX = "linux"
+PLATFORM_OTHER = "other"
+
+
+@functools.lru_cache(maxsize=1)
+def os_family() -> str:
+    """归一化的平台标识：``windows`` / ``macos`` / ``linux`` / ``other``。
+
+    平台在进程生命周期内不会变化，结果缓存于首次调用，因此可在启动早期调用。
+    需要按平台分叉的代码一律走本函数（或 :func:`is_windows` / :func:`is_macos`
+    / :func:`is_linux`）。
+
+    例外：向更新服务上报的 ``os`` 查询参数**不要**用本函数——那是与云端
+    ``/dl`` 接口约定的字符串（``windows`` / ``darwin`` / ``linux``，见
+    ``src/task/common_task.py``），改动会直接打断版本检查。
+    """
+    if sys.platform.startswith("win"):
+        return PLATFORM_WINDOWS
+    if sys.platform == "darwin":
+        return PLATFORM_MACOS
+    if sys.platform.startswith("linux"):
+        return PLATFORM_LINUX
+    return PLATFORM_OTHER
+
+
+def is_windows() -> bool:
+    """是否为 Windows。"""
+    return os_family() == PLATFORM_WINDOWS
+
+
+def is_macos() -> bool:
+    """是否为 macOS。"""
+    return os_family() == PLATFORM_MACOS
+
+
+def is_linux() -> bool:
+    """是否为 Linux（NixOS 等发行版亦在此列）。"""
+    return os_family() == PLATFORM_LINUX
+
+
+def no_window_flags() -> int:
+    """创建子进程时使用的 ``creationflags``：Windows 上不弹控制台窗口。
+
+    GUI 子系统程序每调用一次 ``subprocess``（R/Rscript、nvidia-smi、
+    powershell、taskkill …）都会闪出一个控制台窗口，故 Windows 统一追加
+    ``CREATE_NO_WINDOW``。非 Windows 平台返回 0——``subprocess`` 在 POSIX 上
+    只接受 0，传入非 0 会直接抛 ``ValueError``。
+    """
+    if not is_windows():
+        return 0
+    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def is_elevated() -> bool:
+    """当前进程是否以管理员（Windows）/ root（POSIX）身份运行。
+
+    应用禁止提权启动（否则 Chromium 沙箱、自更新都会失去意义）。macOS 与
+    Linux 共用 ``os.geteuid``，Windows 走 ``shell32.IsUserAnAdmin``。探测失败
+    一律按"未提权"处理，绝不因探测本身阻断启动。
+    """
+    try:
+        if is_windows():
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        geteuid = getattr(os, "geteuid", None)
+        return bool(geteuid is not None and geteuid() == 0)
+    except (ImportError, OSError, AttributeError) as e:
+        logger.debug(f"Elevation check unavailable: {e}")
+        return False
+
+
+# --------------------------------------------------------------------------- #
+#  目录布局（打包 / 源码）
+# --------------------------------------------------------------------------- #
+def _is_frozen() -> bool:
+    """当前是否运行在打包产物中。
+
+    Nuitka 向各模块 globals 注入 ``__compiled__``，PyInstaller 设置
+    ``sys.frozen``；源码运行时两者皆无。
+    """
+    return bool(getattr(sys, "frozen", False) or "__compiled__" in globals())
+
+
+def _source_root() -> str:
+    """源码运行时的项目根目录（本文件位于 ``<root>/src/core/``）。"""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def app_root() -> str:
+    """应用根目录：冻结产物为可执行文件所在目录，源码运行为项目根目录。
+
+    ``config/``、``logs/``、``models/``、``output/`` 等**可写数据**均以此为基准
+    （见 ``src/core/__init__.py`` 的 ``BASE_DIR``），因此打包形态必须保持
+    "数据与可执行文件同级"的免安装布局。
+
+    macOS 注意：``.app`` 包内该目录为 ``Contents/MacOS``，属于代码签名覆盖范围，
+    已签名/公证的产物不可写。发布 mac 版前需把数据根目录改为
+    ``~/Library/Application Support/ScholarNavis``；改动只需修改本函数，
+    调用方不必逐个平台判断。
+    """
+    if _is_frozen():
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return _source_root()
+
+
+def app_resource_root() -> str:
+    """只读资源根目录（图标、Mermaid 脚本、内置模板等）。
+
+    与 :func:`app_root` 的差别只出现在"资源与可写数据不在同一目录"的打包形态：
+
+    * PyInstaller ``--onedir``：资源位于 ``sys._MEIPASS``（即产物目录），与数据
+      目录一致；
+    * Nuitka + macOS ``.app``：可执行文件在 ``Contents/MacOS``，而数据文件随
+      ``--include-data-dir`` 落在 ``Contents/Resources``，缺少这层映射会导致
+      整套图标与脚本静默消失（Linux / Windows 的 Nuitka 产物无此差异）；
+    * 源码运行：与 :func:`app_root` 相同。
+    """
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", app_root())
+    if "__compiled__" in globals():
+        root = app_root()
+        if is_macos() and root.replace(os.sep, "/").endswith(".app/Contents/MacOS"):
+            return os.path.abspath(os.path.join(root, os.pardir, "Resources"))
+        return root
+    return _source_root()
+
+
+# --------------------------------------------------------------------------- #
+#  通用原语（容量 / 交予系统打开）
+# --------------------------------------------------------------------------- #
+def path_total_bytes(path: str) -> int | None:
+    """``path`` 所在文件系统的总容量（字节）；无法读取时返回 None。
+
+    用 ``shutil.disk_usage`` 而不是 ``os.statvfs``：后者仅存在于 POSIX，
+    Windows 上访问 ``os.statvfs`` 抛的是 ``AttributeError``（而非 ``OSError``），
+    常规的 ``except OSError`` 兜不住——这正是启动预检曾在 Windows 上整体崩溃的
+    原因。``shutil.disk_usage`` 在三大平台都有实现。
+    """
+    try:
+        return int(shutil.disk_usage(path).total)
+    except (OSError, ValueError) as e:
+        logger.debug(f"Filesystem usage unavailable for {path}: {e}")
+        return None
+
+
+def _launch_first(candidates: list, target: str) -> bool:
+    """按顺序尝试拉起外部程序，任一成功即返回 True。"""
+    for exe, args in candidates:
+        try:
+            subprocess.Popen([exe, *args],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.debug(f"Launched {exe} for: {target}")
+            return True
+        except OSError as e:
+            logger.warning(f"Failed to launch {exe}: {e}")
+    return False
+
+
+def open_with_system(target: str) -> bool:
+    """用系统默认程序打开文件路径或 URL，返回是否成功拉起。
+
+    全程不经 shell：Windows 走 ``os.startfile``（ShellExecute，含空格的路径与
+    ``#page=3`` 这类 URL 片段都能原样交给注册的处理器），macOS 走 ``open``，
+    Linux 依次尝试 ``xdg-open`` / ``gio open`` / ``kde-open``。
+    """
+    if not target:
+        return False
+    if is_windows():
+        try:
+            os.startfile(target)  # type: ignore[attr-defined]  # Windows 独有
+            logger.debug(f"Opened with the Windows shell handler: {target}")
+            return True
+        except OSError as e:
+            logger.warning(f"os.startfile failed for {target}: {e}")
+            return False
+    if is_macos():
+        return _launch_first([("open", [target])], target)
+    candidates = [
+        (found, args)
+        for exe, args in (("xdg-open", [target]), ("gio", ["open", target]),
+                          ("kde-open5", [target]), ("kde-open", [target]))
+        if (found := shutil.which(exe))
+    ]
+    if not candidates:
+        logger.warning("No CLI opener (xdg-open/gio/kde-open) available")
+    return _launch_first(candidates, target)
+
+
+def reveal_in_file_manager(path: str) -> bool:
+    """在系统文件管理器中定位文件（资源管理器 / Finder / Linux 文件管理器）。"""
+    if not path:
+        return False
+    path = os.path.abspath(path)
+    if is_windows():
+        return _launch_first([("explorer", ["/select,", path])], path)
+    if is_macos():
+        return _launch_first([("open", ["-R", path])], path)
+    folder = os.path.dirname(path) or path
+    candidates = [
+        (found, [folder])
+        for exe in ("xdg-open", "gio", "kde-open5", "kde-open")
+        if (found := shutil.which(exe))
+    ]
+    return _launch_first(candidates, folder)
 
 #: Linux 上 Qt / QtWebEngine 需要的系统库 → 各发行版包名。
 #: 键为 soname（ImportError 中出现的名字），值为包名映射。
@@ -219,7 +443,8 @@ def _nix_store_lib_dirs() -> list:
 
 
 def is_nixos() -> bool:
-    return platform.system() == "Linux" and os.path.isdir("/nix/store")
+    """是否为 NixOS（以 ``/nix/store`` 是否存在为判据，而非发行版字段）。"""
+    return is_linux() and os.path.isdir("/nix/store")
 
 
 def maybe_relaunch_in_fhs(exc: BaseException) -> bool:
@@ -240,8 +465,6 @@ def maybe_relaunch_in_fhs(exc: BaseException) -> bool:
         return False  # 已经由本模块拉起过，避免无限重启
     if not is_nixos() or not is_shared_library_error(exc):
         return False
-
-    import shutil
 
     steam_run = shutil.which("steam-run")
     if not steam_run:
@@ -290,7 +513,15 @@ def _os_release() -> dict:
 
 
 def distro_family() -> str:
-    """返回包管理器家族标识：apt / dnf / pacman / apk / nix / unknown。"""
+    """返回包管理器家族标识：apt / dnf / pacman / apk / nix / unknown。
+
+    只有 Linux 有"发行版 / 包管理器家族"这一概念：Windows / macOS 直接返回
+    ``unknown``，不去读仅 Linux 存在的 ``/etc/os-release``，也不去探测包管理器
+    二进制（``ctypes.util.find_library`` 在 Windows 上会扫库目录，无谓耗时）。
+    """
+    if not is_linux():
+        return "unknown"
+
     if os.path.isdir("/nix/store"):
         return "nix"
 
@@ -343,7 +574,7 @@ def _extract_missing_libs(error_text: str) -> list:
 def format_qt_import_error(exc: BaseException) -> str:
     """把 Qt 导入失败整理成可直接照做的操作指引。"""
     error_text = str(exc)
-    system = platform.system()
+    os_name = os_family()
     lines = [
         "=" * 72,
         "Scholar Navis cannot start: the Qt GUI runtime could not be loaded.",
@@ -351,7 +582,7 @@ def format_qt_import_error(exc: BaseException) -> str:
         "=" * 72,
     ]
 
-    if system != "Linux":
+    if os_name != PLATFORM_LINUX:
         lines += [
             "",
             "Windows: install/repair the Microsoft Visual C++ Redistributable (x64) and",
@@ -430,8 +661,8 @@ def is_shared_library_error(exc: BaseException) -> bool:
 
 def shared_library_hint(exc: BaseException) -> str:
     """崩溃对话框中展示的简短可操作提示（按平台给结论）。"""
-    system = platform.system()
-    if system == "Linux":
+    os_name = os_family()
+    if os_name == PLATFORM_LINUX:
         missing = _extract_missing_libs(str(exc))
         packages = []
         family = distro_family()
@@ -452,7 +683,7 @@ def shared_library_hint(exc: BaseException) -> str:
             f"{detail}\n{action}\n"
             "See the console output for the full dependency list."
         )
-    if system == "Darwin":
+    if os_name == PLATFORM_MACOS:
         return ("A required macOS framework/library could not be loaded.\n"
                 "Reinstall the application bundle without moving files out of it.")
     return ("A required Windows library (DLL) could not be loaded.\n"
@@ -481,8 +712,11 @@ def no_display_message() -> str:
 
 
 def gui_display_available() -> bool:
-    """当前会话是否存在可用的图形显示（Linux 上 SSH/纯终端场景返回 False）。"""
-    if platform.system() != "Linux":
+    """当前会话是否存在可用的图形显示（Linux 上 SSH/纯终端场景返回 False）。
+
+    Windows / macOS 的图形会话由系统自身保证，无需（也无从）探测，直接返回 True。
+    """
+    if not is_linux():
         return True
     if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() in ("offscreen", "minimal", "vnc"):
         return True
@@ -527,12 +761,17 @@ def user_namespaces_disabled() -> bool:
 
 
 def shm_too_small() -> bool:
-    """``/dev/shm`` 是否小于 Chromium 需要的下限（容器默认 64MB）。"""
-    try:
-        stat = os.statvfs("/dev/shm")
-        return stat.f_blocks * stat.f_frsize < _SHM_MIN_BYTES
-    except OSError:
+    """``/dev/shm`` 是否小于 Chromium 需要的下限（容器默认 64MB）。
+
+    仅 Linux 存在 ``/dev/shm`` 这一共享内存挂载点，Chromium 在 Windows /
+    macOS 上并不使用它，因此非 Linux 必须**短路**返回 False：旧实现无条件执行
+    ``os.statvfs``，而 Windows 根本没有这个属性，抛出的 ``AttributeError``
+    不是 ``OSError`` 的子类，兜不住，直接把整个启动预检打断。
+    """
+    if not is_linux():
         return False
+    total = path_total_bytes("/dev/shm")
+    return total is not None and total < _SHM_MIN_BYTES
 
 
 def _merge_chromium_flags(extra: list) -> list:
@@ -627,7 +866,7 @@ def enable_native_file_dialogs() -> list:
     用户已显式指定主题、缺少插件或缺少会话总线时均保持原状（Qt 会自行回退）。
     """
     applied = []
-    if platform.system() != "Linux":
+    if not is_linux():
         return applied
     current = os.environ.get("QT_QPA_PLATFORMTHEME", "").strip()
     if current:
@@ -650,7 +889,7 @@ def configure_qt_environment() -> list:
     幂等，可在导入 PySide6 之前安全重复调用。
     """
     applied = []
-    if platform.system() != "Linux":
+    if not is_linux():
         return applied
 
     # 与沙箱分支无关，任何 Linux 会话都应启用系统原生文件对话框
@@ -684,23 +923,48 @@ def configure_qt_environment() -> list:
 
 
 def summarize_environment() -> dict:
-    """采集与启动相关的环境事实，便于问题排查（写入日志）。"""
-    return {
+    """采集与启动相关的环境事实，便于问题排查（写入日志）。
+
+    按平台选取**有意义**的字段：X11/Wayland、容器、``/dev/shm`` 等都是 Linux
+    独有事实，在 Windows / macOS 上采集出来只会是误导性的常量值。
+    """
+    family = os_family()
+    facts = {
         "platform": platform.platform(),
-        "distro_family": distro_family(),
-        "session": os.environ.get("XDG_SESSION_TYPE", "unknown"),
-        "display": bool(os.environ.get("DISPLAY")),
-        "wayland": bool(os.environ.get("WAYLAND_DISPLAY")),
-        "container": in_container(),
-        "userns_disabled": user_namespaces_disabled(),
-        "shm_ok": not shm_too_small(),
-        "platform_theme": os.environ.get("QT_QPA_PLATFORMTHEME", "") or "default",
-        "chromium_flags": os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", ""),
+        "os_family": family,
+        "arch": platform.machine() or "unknown",
         "python": sys.version.split()[0],
+        "frozen": _is_frozen(),
+        "data_root": app_root(),
+        "chromium_flags": os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", ""),
     }
+    if family == PLATFORM_LINUX:
+        facts.update({
+            "distro_family": distro_family(),
+            "session": os.environ.get("XDG_SESSION_TYPE", "unknown"),
+            "display": bool(os.environ.get("DISPLAY")),
+            "wayland": bool(os.environ.get("WAYLAND_DISPLAY")),
+            "container": in_container(),
+            "userns_disabled": user_namespaces_disabled(),
+            "shm_ok": not shm_too_small(),
+            "platform_theme": os.environ.get("QT_QPA_PLATFORMTHEME", "") or "default",
+        })
+    else:
+        # 图形会话由系统保证（Windows / macOS 不需要 DISPLAY 探测）
+        facts["display"] = True
+    return facts
 
 
 def log_environment() -> None:
-    """把环境事实写进日志（在日志系统就绪后调用）。"""
-    facts = summarize_environment()
+    """把环境事实写进日志（在日志系统就绪后调用）。
+
+    本函数只能**成功或沉默**：它位于启动链上，任何探测异常都不应阻止应用启动。
+    旧实现里 ``shm_too_small()`` 在 Windows 上抛 ``AttributeError``，直接把
+    启动流程打断——诊断信息永远不该有这种"杀死主程序"的权力。
+    """
+    try:
+        facts = summarize_environment()
+    except Exception as e:  # noqa: BLE001 - 诊断信息不得中断启动
+        logger.warning(f"Runtime environment summary unavailable: {e}")
+        return
     logger.info("Runtime environment: " + " | ".join(f"{k}={v}" for k, v in facts.items()))

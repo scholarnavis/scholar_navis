@@ -13,6 +13,9 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QMenu
 
 from src.core.core_task import TaskManager, TaskMode
+from src.core.file_types import (ATTACHABLE_EXTS, DOCUMENT_EXTS, IMAGE_EXTS,
+                                 TEXT_VIEWER_EXTS)
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager
 from src.ui.components.file_dialogs import (open_file_name, open_file_names,
                                           save_file_name)
@@ -22,6 +25,11 @@ from src.ui.components.toast import ToastManager
 logger = logging.getLogger(__name__)
 
 
+def _glob_patterns(exts) -> str:
+    """把扩展名集合转成 QFileDialog 过滤串（排序保证各平台顺序稳定）。"""
+    return " ".join(f"*.{ext}" for ext in sorted(exts))
+
+
 class ChatAttachmentsMixin:
     """附件管理与导出。"""
 
@@ -29,13 +37,18 @@ class ChatAttachmentsMixin:
     MAX_IMAGES_PER_MESSAGE = 8
 
     def attach_from_local(self):
-        """按钮点击触发的文件选择器"""
+        """按钮点击触发的文件选择器。
+
+        过滤清单全部由 :mod:`src.core.file_types` 派生，新增格式只改那一处即可，
+        不会出现"查看器能打开但选不到 / 拖不进来"的脱节。
+        """
+        filter_str = ";;".join([
+            f"Supported Files ({_glob_patterns(ATTACHABLE_EXTS)})",
+            f"Documents & Text ({_glob_patterns(DOCUMENT_EXTS | TEXT_VIEWER_EXTS)})",
+            f"Images ({_glob_patterns(IMAGE_EXTS)})",
+        ])
         paths, _ = open_file_names(
-            self.widget, "Select File(s)", "",
-            "Supported Files (*.pdf *.md *.txt *.docx *.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg);;"
-            "Documents (*.pdf *.md *.txt *.docx);;"
-            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg)"
-        )
+            self.widget, "Select File(s)", "", filter_str)
         if not paths:
             return
         self.process_attached_files(paths)
@@ -75,12 +88,12 @@ class ChatAttachmentsMixin:
 
         image = clipboard.image()
         if image.isNull():
-            ToastManager().show("No image found in clipboard.", "warning")
+            ToastManager().show(tr("No image found in clipboard."), "warning")
             return
 
         path = self._save_clipboard_image(image)
         if not path:
-            ToastManager().show("Failed to save clipboard image.", "error")
+            ToastManager().show(tr("Failed to save clipboard image."), "error")
             return
 
         self.process_attached_files([path])
@@ -124,9 +137,9 @@ class ChatAttachmentsMixin:
             QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
         """)
 
-        act_kb = menu.addAction(tm.icon("folder", "text_main"), "Select from Knowledge Base")
-        act_local = menu.addAction(tm.icon("upload", "text_main"), "Upload Local File")
-        act_clip = menu.addAction(tm.icon("copy", "text_main"), "Paste Image from Clipboard")
+        act_kb = menu.addAction(tm.icon("folder", "text_main"), tr("Select from Knowledge Base"))
+        act_local = menu.addAction(tm.icon("upload", "text_main"), tr("Upload Local File"))
+        act_clip = menu.addAction(tm.icon("copy", "text_main"), tr("Paste Image from Clipboard"))
 
         act_kb.triggered.connect(self.attach_from_kb)
         act_local.triggered.connect(self.attach_from_local)
@@ -178,11 +191,12 @@ class ChatAttachmentsMixin:
                     has_legacy_doc = True
 
         if has_legacy_doc:
-            ToastManager().show("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx",
+            ToastManager().show(tr("Legacy .doc format detected. It may not be fully parsed. Please convert to .docx"),
                                 "warning")
 
         if rejected:
-            ToastManager().show(f"Some files were skipped: {'; '.join(rejected)}", "warning")
+            ToastManager().show(tr("Some files were skipped: {names}").format(names='; '.join(rejected)),
+                                "warning")
 
         # 直接将文件路径保存，交由 Chat 进程去处理
         self.external_files.extend(file_infos)
@@ -212,13 +226,15 @@ class ChatAttachmentsMixin:
                     names.append(c['name'])
 
             if names:
-                display_text = (f"{names[0]}, {names[1]} and {len(names) - 2} more"
-                                if len(names) > 2 else ", ".join(names))
+                display_text = (tr("{first}, {second} and {rest} more").format(
+                    first=names[0], second=names[1], rest=len(names) - 2)
+                    if len(names) > 2 else ", ".join(names))
             elif image_files:
-                display_text = f"{len(image_files)} image(s)"
+                display_text = tr("{n} image(s)").format(n=len(image_files))
 
             self._schedule_attachment_preview(display_text)
-            ToastManager().show(f"Attached {len(names) + len(image_files)} file(s).", "success")
+            ToastManager().show(
+                tr("Attached {n} file(s).").format(n=len(names) + len(image_files)), "success")
         else:
             self._refresh_attachment_preview()
 
@@ -242,13 +258,15 @@ class ChatAttachmentsMixin:
         timer.start(100)
 
     def _refresh_attachment_preview(self):
-        """按当前 ``external_files`` 重建输入区预览（文本横幅 + 图片芯片）。"""
+        """按当前 ``external_files`` 重建输入区预览（文本横幅 + 图片/文档芯片）。"""
         names = []
         image_files = []
+        doc_files = []
         for c in getattr(self, 'external_files', []):
             if c.get('type') == 'image':
                 image_files.append(c)
                 continue
+            doc_files.append(c)
             if c['name'] not in names:
                 names.append(c['name'])
 
@@ -263,6 +281,8 @@ class ChatAttachmentsMixin:
 
         if hasattr(self.input_container, 'set_image_thumbs'):
             self.input_container.set_image_thumbs(image_files)
+        if hasattr(self.input_container, 'set_file_chips'):
+            self.input_container.set_file_chips(doc_files)
 
     def _prepare_image_entry(self, path, name):
         """校验并构建图片附件条目。
@@ -275,16 +295,17 @@ class ChatAttachmentsMixin:
         from src.core.image_utils import is_svg_file, MAX_IMAGE_BYTES
 
         if not os.path.exists(path):
-            ToastManager().show(f"Image not found: {name}", "error")
+            ToastManager().show(tr("Image not found: {name}").format(name=name), "error")
             return None
 
         try:
             if os.path.getsize(path) > MAX_IMAGE_BYTES:
                 ToastManager().show(
-                    f"Image '{name}' exceeds {MAX_IMAGE_BYTES // (1024 * 1024)} MB limit.", "error")
+                    tr("Image '{name}' exceeds {limit} MB limit.")
+                    .format(name=name, limit=MAX_IMAGE_BYTES // (1024 * 1024)), "error")
                 return None
         except OSError as e:
-            ToastManager().show(f"Cannot read image '{name}': {e}", "error")
+            ToastManager().show(tr("Cannot read image '{name}': {err}").format(name=name, err=e), "error")
             return None
 
         entry = {"type": "image", "path": path, "name": name}
@@ -292,7 +313,9 @@ class ChatAttachmentsMixin:
         if is_svg_file(path):
             png_path = self._rasterize_svg(path)
             if not png_path:
-                ToastManager().show(f"Failed to rasterize SVG '{name}'. The file cannot be sent to models.", "error")
+                ToastManager().show(
+                    tr("Failed to rasterize SVG '{name}'. The file cannot be sent to models.").format(name=name),
+                    "error")
                 return None
             entry["image_path"] = png_path
         else:
@@ -357,18 +380,39 @@ class ChatAttachmentsMixin:
         if image_path and os.path.exists(image_path):
             open_image_viewer(image_path, parent=getattr(self, 'widget', None))
         else:
-            ToastManager().show(f"Image file not found: {os.path.basename(str(image_path))}", "error")
+            ToastManager().show(
+                tr("Image file not found: {name}").format(name=os.path.basename(str(image_path))), "error")
+
+    def open_attachment_file(self, path, name=""):
+        """打开待发送的文档附件（输入区芯片单击）。
+
+        复用已发送消息中 ``cite://`` 链接的统一路由：PDF / 文本走内部查看器，
+        其余扩展名（如 DOCX）交由系统默认程序，保证"发送前预览"与"发送后点击
+        链接"行为完全一致（同一套实现，不在此处重复分支）。
+        """
+        if not path or not os.path.exists(path):
+            ToastManager().show(
+                tr("File not found: {name}").format(name=name or os.path.basename(str(path))), "error")
+            return
+        display_name = name or os.path.basename(path)
+        link = f"cite://view?path={quote(path)}&page=1&name={quote(display_name)}"
+        logger.debug("Open attached file from input chip: %s", path)
+        self.handle_link_click(link)
+
+    def remove_attached_file(self, info):
+        """从待发送附件中移除指定文档（输入区芯片上的 x 按钮）。"""
+        self.external_files = [f for f in getattr(self, 'external_files', []) if f is not info]
+        self._refresh_attachment_preview()
 
     def clear_attached_context(self):
         self.external_files = []
         self.external_context_html = ""
+        # hide_context_preview 会一并清空图片 / 文档芯片
         self.input_container.hide_context_preview()
-        if hasattr(self.input_container, 'set_image_thumbs'):
-            self.input_container.set_image_thumbs([])
 
     def export_chat_history(self):
         if not self.history:
-            ToastManager().show("There are currently no chat records to export.", "warning")
+            ToastManager().show(tr("There are currently no chat records to export."), "warning")
             self.logger.warning("Attempted to export empty chat history.")
             return
 
@@ -380,12 +424,12 @@ class ChatAttachmentsMixin:
             QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
         """)
 
-        act_pdf = menu.addAction(tm.icon("article", "text_main"), "Export as PDF")
-        act_md = menu.addAction(tm.icon("markdown", "text_main"), "Export as MD")
-        act_txt = menu.addAction(tm.icon("file-text", "text_main"), "Export as TXT")
+        act_pdf = menu.addAction(tm.icon("article", "text_main"), tr("Export as PDF"))
+        act_md = menu.addAction(tm.icon("markdown", "text_main"), tr("Export as MD"))
+        act_txt = menu.addAction(tm.icon("file-text", "text_main"), tr("Export as TXT"))
         menu.addSeparator()
         act_json = menu.addAction(tm.icon("archive", "text_main"),
-                                  "Export as JSON (Lossless, for re-import)")
+                                  tr("Export as JSON (Lossless, for re-import)"))
 
         # 在鼠标位置弹出菜单
         action = menu.exec(QCursor.pos())
@@ -393,17 +437,17 @@ class ChatAttachmentsMixin:
             return
 
         if action == act_pdf:
-            filter_str, default_ext = "PDF Document (*.pdf)", ".pdf"
+            filter_str, default_ext = tr("PDF Document (*.pdf)"), ".pdf"
         elif action == act_md:
-            filter_str, default_ext = "Markdown File (*.md)", ".md"
+            filter_str, default_ext = tr("Markdown File (*.md)"), ".md"
         elif action == act_json:
-            filter_str, default_ext = "Scholar Navis History (*.schat *.json)", ".schat"
+            filter_str, default_ext = tr("Scholar Navis History (*.schat *.json)"), ".schat"
         else:
-            filter_str, default_ext = "Text File (*.txt)", ".txt"
+            filter_str, default_ext = tr("Text File (*.txt)"), ".txt"
 
         # 弹出系统保存对话框
         path, _ = save_file_name(
-            self.widget, "Export Log", f"Scholar_Navis_Log{default_ext}", filter_str
+            self.widget, tr("Export Log"), f"Scholar_Navis_Log{default_ext}", filter_str
         )
 
         if not path:
@@ -435,7 +479,8 @@ class ChatAttachmentsMixin:
 
         # 初始化后台导出任务并连接弹窗
         from src.ui.components.dialog import ProgressDialog
-        self.export_pd = ProgressDialog(self.widget, "Exporting Chat", "Processing file in background...")
+        self.export_pd = ProgressDialog(self.widget, tr("Exporting Chat"),
+                                        tr("Processing file in background..."))
         self.export_pd.show()
 
         self.export_task_mgr = TaskManager()
@@ -461,17 +506,19 @@ class ChatAttachmentsMixin:
     def _on_export_state_changed(self, state, msg):
         from src.core.core_task import TaskState
         if state == TaskState.FAILED.value:
-            self.export_pd.show_finish_state(False, "Export Failed", str(msg))
+            self.export_pd.show_finish_state(False, tr("Export Failed"), str(msg))
 
     def _on_export_result(self, result):
         if result and result.get("success"):
-            self.export_pd.show_finish_state(True, "Export Complete",
-                                             f"Saved to {os.path.basename(result.get('path', ''))}")
-            ToastManager().show(f"Document successfully exported.", "success")
+            self.export_pd.show_finish_state(
+                True, tr("Export Complete"),
+                tr("Saved to {name}").format(name=os.path.basename(result.get('path', ''))))
+            ToastManager().show(tr("Document successfully exported."), "success")
             self.logger.info(f"Chat history successfully exported to: {result.get('path')}")
         else:
-            self.export_pd.show_finish_state(False, "Export Failed",
-                                             result.get("msg", "Unknown error") if result else "Unknown error")
+            self.export_pd.show_finish_state(
+                False, tr("Export Failed"),
+                result.get("msg", tr("Unknown error")) if result else tr("Unknown error"))
             self.logger.error(f"Failed to export document: {result.get('msg') if result else 'None'}")
 
     # ---------- Import ----------
@@ -482,15 +529,16 @@ class ChatAttachmentsMixin:
 
         # 空历史也允许导入（直接填充），因此不做前置判空
         path, _ = open_file_name(
-            self.widget, "Import Chat History", "",
-            "Chat History (*.schat *.json *.md *.txt *.csv);;"
-            "Scholar Navis Lossless (*.schat *.json);;"
-            "Markdown (*.md);;Text (*.txt);;CSV (*.csv)"
+            self.widget, tr("Import Chat History"), "",
+            tr("Chat History (*.schat *.json *.md *.txt *.csv);;"
+               "Scholar Navis Lossless (*.schat *.json);;"
+               "Markdown (*.md);;Text (*.txt);;CSV (*.csv)")
         )
         if not path:
             return
 
-        pd = ProgressDialog(self.widget, "Importing Chat", "Reading and parsing chat history...")
+        pd = ProgressDialog(self.widget, tr("Importing Chat"),
+                            tr("Reading and parsing chat history..."))
         pd.show()
 
         self.import_task_mgr = TaskManager()
@@ -506,25 +554,27 @@ class ChatAttachmentsMixin:
     def _on_import_history_result(self, result, path, pd):
         if not result or not result.get("success"):
             msg = result.get("msg", "Unknown error") if result else "Unknown error"
-            pd.show_finish_state(False, "Import Failed", msg)
+            pd.show_finish_state(False, tr("Import Failed"), msg)
             self.logger.error("Chat history import failed: %s", msg)
             return
 
         messages = result.get("messages", [])
         lossless = result.get("lossless", False)
         if not messages:
-            pd.show_finish_state(False, "Import Failed", "No chat messages were found in the file.")
+            pd.show_finish_state(False, tr("Import Failed"),
+                                 tr("No chat messages were found in the file."))
             return
 
         # 确认是否用导入内容替换当前对话上下文
         from src.ui.components.dialog import StandardDialog
-        fmt_note = "Lossless (full fidelity)." if lossless else \
-            "Best-effort text import (rich content such as citations/images may be reduced to plain text)."
+        fmt_note = tr("Lossless (full fidelity).") if lossless else \
+            tr("Best-effort text import (rich content such as citations/images may be reduced to plain text).")
         dlg = StandardDialog(
             self.widget,
-            "Import Chat History",
-            f"Found {len(messages)} message(s).\n{fmt_note}\n\n"
-            "This will replace the current conversation. Continue?",
+            tr("Import Chat History"),
+            tr("Found {n} message(s).\n{note}\n\n"
+               "This will replace the current conversation. Continue?").format(
+                n=len(messages), note=fmt_note),
             show_cancel=True,
         )
         if not dlg.exec():
@@ -533,13 +583,16 @@ class ChatAttachmentsMixin:
 
         try:
             self._apply_imported_history(messages)
-            pd.show_finish_state(True, "Import Complete",
-                                 f"Imported {len(messages)} message(s) from:\n{os.path.basename(path)}")
+            pd.show_finish_state(
+                True, tr("Import Complete"),
+                tr("Imported {n} message(s) from:\n{name}").format(
+                    n=len(messages), name=os.path.basename(path)))
             self.logger.info("Imported %d chat message(s) from %s (lossless=%s)",
                              len(messages), path, lossless)
         except Exception as e:
             self.logger.exception("Failed to render imported history.")
-            pd.show_finish_state(False, "Import Error", f"Failed to render chat history:\n{e}")
+            pd.show_finish_state(False, tr("Import Error"),
+                                 tr("Failed to render chat history:\n{err}").format(err=e))
 
     def _apply_imported_history(self, messages):
         """将导入的消息替换进对话：重建气泡并写回 self.history。
@@ -557,6 +610,11 @@ class ChatAttachmentsMixin:
         self.clear_layout(self.chat_layout)
         self.remove_old_follow_ups()
 
+        # 编号空间随会话重建而重置：先清空引用缓存，再按新气泡编号逐条回灌，
+        # 避免旧会话残留条目串到导入结果的正文 [n] 上。
+        from src.ui.components.citation_popup import CitationPopupController
+        CitationPopupController.instance().clear_store()
+
         # 逐条重放并同时写入 self.history：add_bubble 依赖 len(history) 生成自增
         # 气泡索引，故必须与历史写入交替进行（与 edit-resend 重放逻辑一致）。
         self.history = []
@@ -570,6 +628,8 @@ class ChatAttachmentsMixin:
                 if msg.get("external_files") else []
             bubble = self.add_bubble(display_text, is_user=is_user, context_html=ctx_html,
                                      image_files=msg_images)
+            # 无损导入的引用条目按新气泡编号回灌，恢复 [n] 的悬停著录与支撑原文。
+            self._restore_message_references(bubble, msg)
             if not is_user and bubble is not None:
                 # AI 消息必须走与正常生成流一致的渲染管线（_format_response）：
                 # 无损导出的 content 是原始 markdown，含 <think>/<mcp_process>
@@ -591,4 +651,4 @@ class ChatAttachmentsMixin:
             self.input_container.clear_text()
         self.clear_attached_context()
         self.scroll_to_bottom(smooth=True)
-        ToastManager().show(f"Imported {len(messages)} message(s).", "success")
+        ToastManager().show(tr("Imported {n} message(s).").format(n=len(messages)), "success")

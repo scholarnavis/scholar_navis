@@ -2141,7 +2141,7 @@ wheels = [
 
 [[package]]
 name = "scholar-navis"
-version = "2.0.3"
+version = "2.0.6.dev2"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },

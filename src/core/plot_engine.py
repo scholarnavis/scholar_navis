@@ -38,7 +38,6 @@ import logging
 import math
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -48,6 +47,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # 默认样式（主题 / 配色 / 画布尺寸 / 各图型风格契约）集中在本模块之外的单一样式
 # 注册表里，本引擎只负责把它翻译成安全的 ggplot2 代码，避免样式知识散落多处。
 from src.core import plot_styles
+from src.core.platform_env import no_window_flags
 
 logger = logging.getLogger("Core.PlotEngine")
 
@@ -442,10 +442,6 @@ class PlotEngine:
             logger.warning(f"[plot {job_id}] Could not persist pure R code to {code_path}")
             code_path = ""
 
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
         start = time.time()
         logger.info(
             f"[plot {job_id}] Executing R script: {script_path} | "
@@ -459,7 +455,7 @@ class PlotEngine:
                 text=True,
                 timeout=R_TIMEOUT_SECONDS,
                 cwd=out_dir,
-                creationflags=creationflags,
+                creationflags=no_window_flags(),
             )
         except subprocess.TimeoutExpired:
             logger.error(

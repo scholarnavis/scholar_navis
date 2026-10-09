@@ -1,10 +1,10 @@
-import os
-import sys
+"""应用包根：``BASE_DIR`` 作为可写数据（config / logs / models / output …）的基准目录。
 
-if getattr(sys, 'frozen', False):
-    base_dir = os.path.dirname(sys.executable)
-else:
-    current_path = os.path.abspath(__file__)
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_path)))
+"冻结产物 or 源码运行"的布局判断集中在 :mod:`src.core.platform_env` 的
+:func:`~src.core.platform_env.app_root`，不再由本文件、打包脚本与主题资源解析
+各自维护一份（三份实现曾出现 macOS ``.app`` 包内路径处理不一致的问题）。
+"""
 
-BASE_DIR = base_dir
+from src.core.platform_env import app_root
+
+BASE_DIR = app_root()

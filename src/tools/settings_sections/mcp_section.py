@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox,
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
+from src.core.feature_flags import EXTERNAL_TOOLS_SETTINGS_SECTION_ENABLED
+from src.core.i18n import tr
 from src.core.mcp_manager import MCPManager
 from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager, strong_weight_css
@@ -26,22 +28,27 @@ class McpSectionMixin:
 
     # ---------- Section build ----------
     def init_agent_tool_section(self):
+        # 功能开关关闭时不创建整个区块（见 src/core/feature_flags.py）；
+        # settings_tool / save_flow 对本区块控件的访问均有 hasattr 守卫。
+        if not EXTERNAL_TOOLS_SETTINGS_SECTION_ENABLED:
+            return
+
         tm = ThemeManager()
-        group = QGroupBox("AI Agent & External Tools")
+        group = QGroupBox(tr("AI Agent & External Tools"))
         layout = QVBoxLayout(group)
 
         header_layout = QHBoxLayout()
-        header_layout.addWidget(QLabel("<b>Manage Local & Remote Tools:</b>"))
+        header_layout.addWidget(QLabel(tr("<b>Manage Local & Remote Tools:</b>")))
         header_layout.addStretch()
 
-        self.btn_add_mcp = QPushButton(" Add MCP Server")
+        self.btn_add_mcp = QPushButton(tr(" Add MCP Server"))
         self.btn_add_mcp.clicked.connect(self._on_add_mcp_clicked)
 
-        self.btn_import_skill = QPushButton(" Import Native Skill")
+        self.btn_import_skill = QPushButton(tr(" Import Native Skill"))
         self.btn_import_skill.clicked.connect(self._on_import_skill_clicked)
         self.btn_import_skill.setStyleSheet(self._get_btn_style(btn_type="warning"))
 
-        self.btn_refresh_mcp = QPushButton(" Refresh Status")
+        self.btn_refresh_mcp = QPushButton(tr(" Refresh Status"))
         self.btn_refresh_mcp.clicked.connect(self._on_refresh_mcp_clicked)
 
         header_layout.addWidget(self.btn_import_skill)
@@ -51,7 +58,8 @@ class McpSectionMixin:
 
         self.table_mcp = QTableWidget(0, 7)
         self.table_mcp.setHorizontalHeaderLabels(
-            ["Enabled", "Name", "Description", "Type", "Target", "Status", "Action"])
+            [tr("Enabled"), tr("Name"), tr("Description"), tr("Type"),
+             tr("Target"), tr("Status"), tr("Action")])
         self.table_mcp.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table_mcp.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
         self.table_mcp.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
@@ -61,14 +69,16 @@ class McpSectionMixin:
         self.table_mcp.cellDoubleClicked.connect(self._on_mcp_double_clicked)
         layout.addWidget(self.table_mcp)
 
-        self.lbl_mcp_hint = QLabel(
-            "💡 <i>Changes to MCP servers require clicking the blue 'Save Settings & Verify' button below to take effect.</i>")
+        self.lbl_mcp_hint = QLabel(tr(
+            "💡 <i>Changes to MCP servers require clicking the blue 'Save Settings & Verify' button below to take effect.</i>"))
         layout.addWidget(self.lbl_mcp_hint)
 
         self.layout.addWidget(group)
 
     # ---------- Status ----------
     def _refresh_mcp_status(self):
+        if not hasattr(self, 'table_mcp'):
+            return  # 区块被功能开关隐藏，无表格可刷新
         try:
 
             tm = ThemeManager()
@@ -95,28 +105,29 @@ class McpSectionMixin:
                     # 分支 1: 处理 Native SKILL 的状态
                     if tool_type == "SKILL":
                         if skill_mgr.is_skill_available(name):
-                            status_lbl.setText("Ready (Native)")
+                            status_lbl.setText(tr("Ready (Native)"))
                             status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: {strong_weight_css()};")
                         else:
-                            status_lbl.setText("Not Loaded")
+                            status_lbl.setText(tr("Not Loaded"))
                             status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
-                            status_lbl.setToolTip("Script not found or failed to load. Check logs.")
+                            status_lbl.setToolTip(tr("Script not found or failed to load. Check logs."))
 
                     # 分支 2: 处理 MCP 服务的状态
                     else:
                         status = mcp_mgr.get_server_status(name)
                         if status == "connected":
-                            status_lbl.setText("Connected")
+                            status_lbl.setText(tr("Connected"))
                             status_lbl.setStyleSheet(f"color: {tm.color('success')}; font-weight: {strong_weight_css()};")
                         elif "error" in status:
-                            status_lbl.setText("Error")
+                            status_lbl.setText(tr("Error"))
                             status_lbl.setStyleSheet(f"color: {tm.color('danger')};")
                             status_lbl.setToolTip(status)
                         else:
+                            # 其余状态取自 MCP 运行时（自定义字符串），保持原样展示
                             status_lbl.setText(status.capitalize())
                             status_lbl.setStyleSheet(f"color: {tm.color('warning')};")
                 else:
-                    status_lbl.setText("Disabled")
+                    status_lbl.setText(tr("Disabled"))
                     status_lbl.setStyleSheet(f"color: {tm.color('text_muted')};")
 
         except Exception as e:
@@ -130,12 +141,15 @@ class McpSectionMixin:
         name = name_item.text()
 
         if name == "builtin":
-            ToastManager().show(f"Core service '{name}' cannot be edited here.", "info")
+            ToastManager().show(
+                tr("Core service '{name}' cannot be edited here.").format(name=name), "info")
             return
 
         self._on_edit_mcp_clicked(row)
 
     def _load_mcp_servers_to_ui(self):
+        if not hasattr(self, 'table_mcp'):
+            return  # 区块被功能开关隐藏，无需加载
         self.table_mcp.setRowCount(0)
 
         servers = self.config.mcp_servers.get("mcpServers", {})
@@ -169,7 +183,7 @@ class McpSectionMixin:
             if hasattr(skill_mgr, 'reload_external_skills'):
                 skill_mgr.reload_external_skills()
 
-            ToastManager().show("Refreshing external tool states...", "info")
+            ToastManager().show(tr("Refreshing external tool states..."), "info")
             self._refresh_mcp_status()
         except Exception as e:
             self.logger.error(f"Refresh clicked failed: {e}")
@@ -190,10 +204,10 @@ class McpSectionMixin:
         if always_on or is_hardcoded:
             chk.setEnabled(False)
             if always_on:
-                chk.setToolTip("Core service must remain enabled.")
+                chk.setToolTip(tr("Core service must remain enabled."))
             if is_hardcoded:
                 chk.setChecked(True)  # 强制勾选
-                chk.setToolTip("Built-in Academic Tools cannot be disabled here.")
+                chk.setToolTip(tr("Built-in Academic Tools cannot be disabled here."))
 
         if hasattr(self, '_mark_unsaved'):
             chk.stateChanged.connect(self._mark_unsaved)
@@ -233,7 +247,7 @@ class McpSectionMixin:
             target_item.setForeground(muted_color)
         self.table_mcp.setItem(row, 4, target_item)
 
-        status_lbl = QLabel("Checking...")
+        status_lbl = QLabel(tr("Checking..."))
         status_lbl.setAlignment(Qt.AlignCenter)
         self.table_mcp.setCellWidget(row, 5, status_lbl)
 
@@ -247,7 +261,7 @@ class McpSectionMixin:
             lbl_lock = QLabel()
             lbl_lock.setPixmap(tm.icon("lock", "text_muted").pixmap(16, 16))
             lbl_lock.setAlignment(Qt.AlignCenter)
-            lbl_lock.setToolTip("Core system service (Read-only)")
+            lbl_lock.setToolTip(tr("Core system service (Read-only)"))
             al.addWidget(lbl_lock)
         else:
             btn_edit = QPushButton()
@@ -267,8 +281,9 @@ class McpSectionMixin:
                     from src.ui.components.dialog import StandardDialog
                     dlg = StandardDialog(
                         self.widget,
-                        "Confirm Delete",
-                        f"Are you sure you want to delete tool '{srv_name}'?\nThis will disconnect it immediately.",
+                        tr("Confirm Delete"),
+                        tr("Are you sure you want to delete tool '{name}'?\n"
+                           "This will disconnect it immediately.").format(name=srv_name),
                         show_cancel=True
                     )
 
@@ -292,18 +307,18 @@ class McpSectionMixin:
     # ---------- Add / Edit / Import ----------
     def _on_add_mcp_clicked(self):
         tm = ThemeManager()
-        warning_msg = (
+        warning_msg = tr(
             "<b>⚠️ Security Disclaimer for External MCP Servers</b><br><br>"
             "You are about to connect a third-party MCP server to Scholar Navis.<br>"
             "External servers are highly privileged and can execute code, read local files, or access the network on your behalf. "
-            f"<span style='color:{tm.color('danger')}; font-weight:{strong_weight_css()};'>Only connect to servers from trusted developers.</span><br><br>"
+            "<span style='color:{danger}; font-weight:{bold};'>Only connect to servers from trusted developers.</span><br><br>"
             "<i>The Scholar Navis developers are not responsible for any data loss, security breaches, or system damage caused by third-party MCP servers.</i><br><br>"
             "Do you understand the risks and wish to proceed?"
-        )
+        ).format(danger=tm.color('danger'), bold=strong_weight_css())
 
         from src.ui.components.dialog import StandardDialog, McpConfigDialog
 
-        dlg = StandardDialog(self.widget, "Security Warning", warning_msg, show_cancel=True)
+        dlg = StandardDialog(self.widget, tr("Security Warning"), warning_msg, show_cancel=True)
         if not dlg.exec():
             return
 
@@ -313,7 +328,9 @@ class McpSectionMixin:
             if not name: return
 
             if name in ["builtin", "Academic Tool","built-in"]:
-                ToastManager().show(f"The name '{name}' is reserved for core system usage.", "error")
+                ToastManager().show(
+                    tr("The name '{name}' is reserved for core system usage.").format(name=name),
+                    "error")
                 return
 
             cfg["enabled"] = True
@@ -324,21 +341,21 @@ class McpSectionMixin:
 
     def _on_import_skill_clicked(self):
         tm = ThemeManager()
-        warning_msg = (
+        warning_msg = tr(
             "<b>🚨 CRITICAL SECURITY WARNING: NATIVE SKILL IMPORT</b><br><br>"
             "You are attempting to import a Native Python Skill (`.py` script) directly into the main process of Scholar Navis.<br><br>"
-            f"<span style='color:{tm.color('danger')}; font-weight:{strong_weight_css()};'>1. ARBITRARY CODE EXECUTION:</span> These scripts run with the EXACT SAME privileges as the main application. Malicious scripts can steal your data, delete files, or compromise your system.<br>"
-            f"<span style='color:{tm.color('danger')}; font-weight:{strong_weight_css()};'>2. STRICT SANDBOXING:</span> The script MUST ONLY import Python Standard Library modules (e.g., `os`, `json`, `urllib`). Importing third-party pip packages (like `requests`, `pandas`) that are not packaged with Navis will instantly crash the agent with a `ModuleNotFoundError`.<br><br>"
+            "<span style='color:{danger}; font-weight:{bold};'>1. ARBITRARY CODE EXECUTION:</span> These scripts run with the EXACT SAME privileges as the main application. Malicious scripts can steal your data, delete files, or compromise your system.<br>"
+            "<span style='color:{danger}; font-weight:{bold};'>2. STRICT SANDBOXING:</span> The script MUST ONLY import Python Standard Library modules (e.g., `os`, `json`, `urllib`). Importing third-party pip packages (like `requests`, `pandas`) that are not packaged with Navis will instantly crash the agent with a `ModuleNotFoundError`.<br><br>"
             "<i>Only import scripts from absolutely trusted sources. Do you accept all risks and wish to proceed?</i>"
-        )
+        ).format(danger=tm.color('danger'), bold=strong_weight_css())
 
         import ast
 
-        dlg = StandardDialog(self.widget, "⚠️ HIGH RISK OPERATION", warning_msg, show_cancel=True)
+        dlg = StandardDialog(self.widget, tr("⚠️ HIGH RISK OPERATION"), warning_msg, show_cancel=True)
         if not dlg.exec():
             return
 
-        path, _ = open_file_name(self.widget, "Import Native Skill", "", "Python Files (*.py)")
+        path, _ = open_file_name(self.widget, tr("Import Native Skill"), "", "Python Files (*.py)")
         if not path: return
 
         skill_name = os.path.basename(path).replace(".py", "")
@@ -346,7 +363,7 @@ class McpSectionMixin:
             raw_code = f.read()
 
         parsed_name = skill_name
-        parsed_desc = "User Imported Native Script"
+        parsed_desc = tr("User Imported Native Script")
         try:
             tree = ast.parse(raw_code)
             for node in tree.body:
@@ -394,7 +411,9 @@ class McpSectionMixin:
         if hasattr(self, '_mark_unsaved'):
             self._mark_unsaved()
 
-        ToastManager().show(f"Skill '{final_name}' staged. Click 'Save Settings' to commit.", "info")
+        ToastManager().show(
+            tr("Skill '{name}' staged. Click 'Save Settings' to commit.").format(name=final_name),
+            "info")
 
     def _on_import_skill_finished(self, result, skill_name):
         if result.get("success"):
@@ -402,7 +421,7 @@ class McpSectionMixin:
 
             # 写入表格并标记配置未保存
             cfg = {
-                "description": "User Imported Native Script",
+                "description": tr("User Imported Native Script"),
                 "type": "SKILL",
                 "command": target_path,
                 "enabled": True
@@ -413,12 +432,15 @@ class McpSectionMixin:
             if hasattr(self, '_mark_unsaved'):
                 self._mark_unsaved()
 
-            self.import_skill_pd.show_finish_state(True, "Import Successful",
-                                                   f"Skill '{skill_name}' has been encrypted and secured.")
-            ToastManager().show(f"Skill '{skill_name}' imported successfully.", "success")
+            self.import_skill_pd.show_finish_state(
+                True, tr("Import Successful"),
+                tr("Skill '{name}' has been encrypted and secured.").format(name=skill_name))
+            ToastManager().show(
+                tr("Skill '{name}' imported successfully.").format(name=skill_name), "success")
         else:
-            self.import_skill_pd.show_finish_state(False, "Import Failed",
-                                                   result.get("msg", "Unknown error during encryption."))
+            self.import_skill_pd.show_finish_state(
+                False, tr("Import Failed"),
+                result.get("msg", tr("Unknown error during encryption.")))
 
     def _on_edit_mcp_clicked(self, row):
         name_item = self.table_mcp.item(row, 1)
@@ -441,7 +463,9 @@ class McpSectionMixin:
                 new_name, new_desc, new_path = dlg.get_data()
 
                 if new_name != old_name and new_name in ["built-in", "Academic Tool", "builtin"]:
-                    ToastManager().show(f"The name '{new_name}' is reserved for core system usage.", "error")
+                    ToastManager().show(
+                        tr("The name '{name}' is reserved for core system usage.").format(name=new_name),
+                        "error")
                     return
 
                 new_cfg = old_cfg.copy()
@@ -468,7 +492,8 @@ class McpSectionMixin:
                         else:
                             return
                     except Exception as e:
-                        ToastManager().show(f"Failed to load new script: {e}", "error")
+                        ToastManager().show(
+                            tr("Failed to load new script: {err}").format(err=e), "error")
                         return
 
                 elif new_path == old_cfg.get("command", "") and new_path.endswith(".enc") and os.path.exists(new_path):
@@ -488,7 +513,8 @@ class McpSectionMixin:
                         else:
                             return
                     except Exception as e:
-                        ToastManager().show(f"Failed to decrypt existing skill: {e}", "error")
+                        ToastManager().show(
+                            tr("Failed to decrypt existing skill: {err}").format(err=e), "error")
                         return
 
                 # 更新 UI 和内存中的数据配置
@@ -508,7 +534,9 @@ class McpSectionMixin:
                 new_name, new_server_cfg = dlg.get_config()
 
                 if new_name != old_name and new_name in ["built-in", "Academic Tool", "builtin"]:
-                    ToastManager().show(f"The name '{new_name}' is reserved for core system usage.", "error")
+                    ToastManager().show(
+                        tr("The name '{name}' is reserved for core system usage.").format(name=new_name),
+                        "error")
                     return
 
                 new_server_cfg["always_on"] = old_cfg.get("always_on", False)

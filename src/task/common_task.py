@@ -44,6 +44,10 @@ class VersionCheckTask(BackgroundTask):
     _NOT_AVAILABLE = "0.0.0"
 
     def _execute(self):
+        # 这里的 os 是**与云端 /dl 接口约定的固定字符串**（windows / darwin /
+        # linux），不要为了"统一平台判断"换成 platform_env.os_family()——后者
+        # 返回 macos，会让 macOS 的版本检查取不到产物（见 platform_env.os_family
+        # 的说明）。
         os_name = platform.system().lower()
         payload = {
             "channel": __channel__,

@@ -182,6 +182,9 @@ class ConfigManager:
             "hf_mirror": "",
             "hf_token": "",
             "theme": "auto",
+            # 界面语言："auto" 跟随系统（既非简体中文也非英语时回退英文）；
+            # 亦可显式设为 "en" / "zh_CN"。取值与解析规则见 src/core/i18n.py。
+            "language": "auto",
             "log_level": "INFO",
             "is_first_run": True,
             "ncbi_email": "",

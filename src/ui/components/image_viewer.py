@@ -13,6 +13,7 @@ SVG 通过 ``QSvgRenderer`` 以 2x 分辨率栅格化显示，保存时保留
 """
 import logging
 import os
+import shutil
 
 from PySide6.QtCore import Qt, QSize, QPointF, QPoint
 from PySide6.QtGui import QImageReader, QPainter, QPixmap, QDesktopServices
@@ -20,6 +21,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QPushButton)
 
+from src.core.platform_env import open_with_system
 from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme
 from src.ui.components.file_dialogs import save_file_name
 from src.ui.components.toast import ToastManager
@@ -180,6 +182,9 @@ class ImageViewerDialog(QDialog):
             b.setIcon(tm.icon(icon_key, "text_main"))
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(slot)
+            # 按钮同时带图标和文字时，宽度不足 Qt 会把文字整段隐去（只留图标），
+            # 观感就是"文字按钮不见了"。这里锁定最小宽度，保证文案始终可见。
+            b.setMinimumWidth(b.sizeHint().width())
             return b
 
         btn_bar.addWidget(_btn(" Zoom In", "search", lambda: self.set_scale(self._scale * 1.25)))
@@ -354,7 +359,12 @@ class ImageViewerDialog(QDialog):
             ToastManager().show(f"Failed to save image: {e}", "error")
 
     def open_externally(self):
-        """用系统默认程序打开（需要本地路径或先落盘临时文件）。"""
+        """用系统默认程序打开（需要本地路径或先落盘临时文件）。
+
+        ``QDesktopServices.openUrl`` 在部分 Linux 桌面环境（无注册的 xdg-open /
+        桌面项、沙箱内运行）会直接返回 False 且静默失败，用户观感是"点了没反应"。
+        这里补一条命令行兜底链，并对最终失败给出提示——不再让点击变成无声空操作。
+        """
         path = self.source_path
         if not path and self.raw_bytes is not None:
             import hashlib
@@ -370,11 +380,29 @@ class ImageViewerDialog(QDialog):
                 ToastManager().show(f"Failed to open externally: {e}", "error")
                 return
 
-        if path and os.path.exists(path):
-            from PySide6.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-        else:
+        if not path or not os.path.exists(path):
             ToastManager().show("Image file not found.", "error")
+            return
+
+        from PySide6.QtCore import QUrl
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+            logger.debug("Opened externally via QDesktopServices: %s", path)
+            return
+        if self._open_externally_fallback(path):
+            return
+        logger.warning("No usable system viewer found for: %s", path)
+        ToastManager().show(
+            f"Cannot open with system viewer: {os.path.basename(path)}", "error")
+
+    @staticmethod
+    def _open_externally_fallback(path: str) -> bool:
+        """命令行兜底打开：``QDesktopServices`` 静默失败时交给系统打开器。
+
+        平台差异（Windows ``os.startfile`` / macOS ``open`` / Linux
+        ``xdg-open`` → ``gio open`` → ``kde-open``）统一由
+        :func:`src.core.platform_env.open_with_system` 处理，本模块不再自行分叉。
+        """
+        return open_with_system(path)
 
 
 def open_image_viewer(image_path=None, parent=None, raw_bytes=None, svg_bytes=None):

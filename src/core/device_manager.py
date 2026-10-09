@@ -8,13 +8,9 @@ from src.core.onnx_provider import (
     list_available_providers, probe_provider, resolve_provider,
     tensorrt_runtime_available,
 )
-
-
-def _no_window_flags() -> int:
-    """子进程无控制台窗口标志（仅 Windows 有意义）。"""
-    if sys.platform == "win32":
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return 0
+from src.core.platform_env import (
+    PLATFORM_LINUX, PLATFORM_MACOS, PLATFORM_WINDOWS, no_window_flags, os_family,
+)
 
 
 class DeviceManager:
@@ -32,12 +28,12 @@ class DeviceManager:
 
     def get_gpu_info(self):
         gpus = []
-        system = platform.system()
+        system = os_family()
         try:
-            if system == "Windows":
+            if system == PLATFORM_WINDOWS:
                 cmd = ["powershell", "-NoProfile", "-Command",
                        "Get-CimInstance -ClassName Win32_VideoController | Select-Object Name, AdapterRAM | ConvertTo-Json"]
-                output = subprocess.check_output(cmd, text=True, creationflags=subprocess.CREATE_NO_WINDOW).strip()
+                output = subprocess.check_output(cmd, text=True, creationflags=no_window_flags()).strip()
                 if output:
                     import json
                     data = json.loads(output)
@@ -58,7 +54,7 @@ class DeviceManager:
                 try:
                     smi_out = subprocess.check_output(
                         ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
-                        text=True, creationflags=subprocess.CREATE_NO_WINDOW
+                        text=True, creationflags=no_window_flags()
                     )
                     nvidia_vrams = {}
                     for line in smi_out.strip().split('\n'):
@@ -76,13 +72,13 @@ class DeviceManager:
                 except (OSError, ValueError, subprocess.SubprocessError):
                     pass
 
-            elif system == "Darwin":
+            elif system == PLATFORM_MACOS:
                 output = subprocess.check_output(["system_profiler", "SPDisplaysDataType"], text=True)
                 for line in output.split('\n'):
                     if "Chipset Model:" in line:
                         gpus.append({"name": line.split(":")[1].strip(), "vram": "Unified Memory"})
 
-            elif system == "Linux":
+            elif system == PLATFORM_LINUX:
                 # 两条信息源互补：驱动接口（nvidia-smi/NVML）能给出显存，
                 # PCI 总线（lspci）才能看到 AMD/Intel 集显。只取其一都会漏。
                 gpus.extend(self._nvidia_gpus())
@@ -115,7 +111,7 @@ class DeviceManager:
             proc = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
                 capture_output=True, text=True, timeout=10,
-                creationflags=_no_window_flags(),
+                creationflags=no_window_flags(),
             )
             for line in (proc.stdout or "").strip().splitlines():
                 parts = [p.strip() for p in line.split(",")]
@@ -219,7 +215,7 @@ class DeviceManager:
         if has_coreml:
             devices.append({"id": "coreml", "name": "Apple Silicon (CoreML)"})
 
-        sys_name = platform.system()
+        sys_name = os_family()
 
         # 解绑 WMI 索引，修正笔记本 DXGI/CUDA 真实序号映射
         cuda_idx = 0
@@ -257,7 +253,7 @@ class DeviceManager:
                             "name": f"{gpu_name} (CUDA Accelerated)"})
                     cuda_idx += 1
                     trt_idx += 1
-                elif sys_name == "Windows" and has_dml:
+                elif sys_name == PLATFORM_WINDOWS and has_dml:
                     # DirectML 环境下，双显卡笔记本的独显大概率被 DXGI 分配在 Adapter 1
                     target_id = 1 if is_hybrid else 0
                     devices.append({"id": f"dml:{target_id}", "name": f"{gpu_name} (DirectML Fallback)"})
@@ -274,7 +270,7 @@ class DeviceManager:
                         "Install the 'onnxruntime-gpu' package (Linux) to accelerate this GPU."))
 
             elif "amd" in gpu_lower or "radeon" in gpu_lower:
-                if sys_name == "Windows":
+                if sys_name == PLATFORM_WINDOWS:
                     if has_dml:
                         # 启发式判断：若是双显卡且包含英伟达，AMD就是核显(0)，否则为独显
                         target_id = 0 if is_hybrid and any("nvidia" in g.get("name", "").lower() for g in gpu_info_list) else (1 if is_hybrid else 0)
@@ -284,7 +280,7 @@ class DeviceManager:
                             gpu_name, "DirectML not installed",
                             "Install 'onnxruntime-directml' to accelerate this GPU on Windows, "
                             "or select CPU."))
-                elif sys_name == "Linux":
+                elif sys_name == PLATFORM_LINUX:
                     if has_rocm:
                         devices.append({"id": f"rocm:{i}", "name": f"{gpu_name} (ROCm)"})
                     else:
@@ -299,7 +295,7 @@ class DeviceManager:
                             "This GPU has no ONNX Runtime accelerator on this platform. Select CPU."))
 
             elif "intel" in gpu_lower or "uhd" in gpu_lower or "iris" in gpu_lower:
-                if sys_name == "Windows" and has_dml:
+                if sys_name == PLATFORM_WINDOWS and has_dml:
                     # Intel 核显在 DXGI 中永远是 Adapter 0
                     devices.append({"id": "dml:0", "name": f"{gpu_name} (DirectML)"})
                 else:

@@ -11,6 +11,7 @@ import zlib
 
 from src.core.core_task import TaskManager, TaskMode
 from src.core.encryption_service import SystemEncryptionService
+from src.core.i18n import tr
 from src.task.config_task import ExportConfigTask, ImportConfigTask
 from src.ui.components.dialog import (ExportPasswordDialog, ImportPasswordDialog,
                                       ProgressDialog, StandardDialog)
@@ -38,7 +39,7 @@ class ConfigTransferMixin:
         # 2. 选择保存路径
         import os
         path, _ = save_file_name(
-            self.widget, "Save Config", "scholar_navis_config.json", "JSON (*.json)"
+            self.widget, tr("Save Config"), "scholar_navis_config.json", "JSON (*.json)"
         )
         if not path:
             return
@@ -77,7 +78,8 @@ class ConfigTransferMixin:
         }
 
         self.btn_export.setEnabled(False)
-        pd = ProgressDialog(self.widget, "Security Export", "Performing compression, encryption & serialization...")
+        pd = ProgressDialog(self.widget, tr("Security Export"),
+                            tr("Performing compression, encryption & serialization..."))
         pd.show()
 
         # 4. 启动异步导出任务，统一使用 export_task_mgr
@@ -100,11 +102,16 @@ class ConfigTransferMixin:
             try:
                 with open(path, 'w', encoding='utf-8') as f:
                     json.dump(result, f, indent=4, ensure_ascii=False)
-                pd.show_finish_state(True, "Export Successful", f"Configuration bundle has been securely saved to:\n{path}")
+                pd.show_finish_state(
+                    True, tr("Export Successful"),
+                    tr("Configuration bundle has been securely saved to:\n{path}").format(path=path))
             except Exception as e:
-                pd.show_finish_state(False, "Write Error", f"Failed to write file to disk: {e}")
+                pd.show_finish_state(False, tr("Write Error"),
+                                     tr("Failed to write file to disk: {err}").format(err=e))
         else:
-            pd.show_finish_state(False, "Export Failed", result.get("msg", "An analytical error occurred during encryption."))
+            pd.show_finish_state(
+                False, tr("Export Failed"),
+                result.get("msg", tr("An analytical error occurred during encryption.")))
 
     # ---------- Import ----------
     def on_import_clicked(self, auto_path=None):
@@ -116,7 +123,7 @@ class ConfigTransferMixin:
         # Support retry flow without opening file dialog twice
         path = auto_path
         if not path:
-            path, _ = open_file_name(self.widget, "Import Config Bundle", "", "JSON (*.json)")
+            path, _ = open_file_name(self.widget, tr("Import Config Bundle"), "", "JSON (*.json)")
         if not path: return
 
         # Quick Format Check
@@ -125,7 +132,8 @@ class ConfigTransferMixin:
                 preview_bundle = json.load(f)
             is_encrypted = "payload" in preview_bundle and "salt" in preview_bundle
         except Exception as e:
-            StandardDialog(self.widget, "Import Error", f"Invalid JSON file: {e}").exec()
+            StandardDialog(self.widget, tr("Import Error"),
+                           tr("Invalid JSON file: {err}").format(err=e)).exec()
             return
 
         password = None
@@ -137,7 +145,7 @@ class ConfigTransferMixin:
             password = pwd_dlg.password
 
         self.btn_import.setEnabled(False)
-        pd = ProgressDialog(self.widget, "Importing", "Reading and decrypting...")
+        pd = ProgressDialog(self.widget, tr("Importing"), tr("Reading and decrypting..."))
         pd.show()
 
         self.import_task_mgr = TaskManager()
@@ -155,14 +163,16 @@ class ConfigTransferMixin:
                 from src.ui.components.dialog import StandardDialog
                 dlg = StandardDialog(
                     self.widget,
-                    "Decryption Failed",
-                    "Incorrect password or corrupted file.\nWould you like to try entering the password again?",
+                    tr("Decryption Failed"),
+                    tr("Incorrect password or corrupted file.\n"
+                       "Would you like to try entering the password again?"),
                     show_cancel=True
                 )
                 if dlg.exec():
                     self.on_import_clicked(auto_path=path)
             else:
-                pd.show_finish_state(False, "Import Failed", result.get("msg", "Unknown error"))
+                pd.show_finish_state(False, tr("Import Failed"),
+                                     result.get("msg", tr("Unknown error")))
             return
 
         try:
@@ -198,7 +208,9 @@ class ConfigTransferMixin:
                     except Exception as e:
                         self.logger.error(f"💥 CRITICAL: Failed to decompress and stage skill '{s_name}': {e}")
                         from src.ui.components.toast import ToastManager
-                        ToastManager().show(f"Failed to restore skill {s_name}: {e}", "error")
+                        ToastManager().show(
+                            tr("Failed to restore skill {name}: {err}").format(name=s_name, err=e),
+                            "error")
 
             if "settings" in final_data:
                 imported_settings = final_data.get("settings", {}).copy()
@@ -213,7 +225,8 @@ class ConfigTransferMixin:
                     imported_settings["inference_device"] = fallback_dev
                     from src.ui.components.toast import ToastManager
                     ToastManager().show(
-                        f"Imported device '{imported_device}' is unavailable. Defaulting to {fallback_dev.upper()}.",
+                        tr("Imported device '{device}' is unavailable. Defaulting to {fallback}.")
+                        .format(device=imported_device, fallback=fallback_dev.upper()),
                         "warning"
                     )
 
@@ -230,13 +243,17 @@ class ConfigTransferMixin:
             mode = result.get("mode", "unknown")
             pd.show_finish_state(
                 True,
-                "Import Successful",
-                f"Configuration bundle ({mode}) has been loaded into the interface.\n\n"
-                "Please click 'Save Settings' at the bottom to apply these changes permanently."
+                tr("Import Successful"),
+                tr("Configuration bundle ({mode}) has been loaded into the interface.\n\n"
+                   "Please click 'Save Settings' at the bottom to apply these changes permanently.")
+                .format(mode=mode)
             )
             from src.ui.components.toast import ToastManager
-            ToastManager().show(f"Configuration imported to UI ({mode}). Please save to apply.", "success")
+            ToastManager().show(
+                tr("Configuration imported to UI ({mode}). Please save to apply.").format(mode=mode),
+                "success")
         except Exception as e:
             self.logger.error(f"Import application failed: {e}")
             from src.ui.components.dialog import StandardDialog
-            StandardDialog(self.widget, "Import Error", f"Failed to apply settings to UI:\n{e}").exec()
+            StandardDialog(self.widget, tr("Import Error"),
+                           tr("Failed to apply settings to UI:\n{err}").format(err=e)).exec()

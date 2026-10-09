@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from src.core.core_task import TaskState
 from src.core.follow_ups import split_follow_ups
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.toast import ToastManager
@@ -45,6 +46,12 @@ class ChatResponseFlowMixin:
 
             if hasattr(self.input_container, 'chk_academic_agent'):
                 self.input_container.chk_academic_agent.setEnabled(enabled)
+
+            # Deep Mode 与上面两个开关同属"轮次级配置"：三者必须一起禁用，
+            # 否则界面会出现"同类控件两个灰、一个可点"的不一致，用户还会以为
+            # 中途切换能改变正在跑的这轮（实际只对下一轮生效）。
+            if hasattr(self.input_container, 'chk_deep_mode'):
+                self.input_container.chk_deep_mode.setEnabled(enabled)
 
             if hasattr(self.input_container, 'btn_mcp_tags'):
                 self.input_container.btn_mcp_tags.setEnabled(enabled)
@@ -204,6 +211,32 @@ class ChatResponseFlowMixin:
             bubble = getattr(self, "current_ai_bubble", None)
             if bubble is not None and hasattr(bubble, "attach_ask_user_card"):
                 bubble.attach_ask_user_card(payload.get("data") or {})
+        elif isinstance(payload, dict) and payload.get("event") == "references":
+            # 参考文献结构化数据（cite_references 工具产出）：同步进引用信息存储，
+            # 供正文 [n] 的悬停卡 / 详情面板查询著录与支撑原文。
+            data = payload.get("data") or []
+            bubble = getattr(self, "current_ai_bubble", None)
+            msg_index = getattr(bubble, "index", -1) if bubble is not None else -1
+            from src.ui.components.citation_popup import CitationPopupController
+            CitationPopupController.instance().merge_references(data, msg_index)
+            logger.debug("Reference data synced to citation popup store: %d item(s) for message #%s.",
+                         len(data), msg_index)
+        elif isinstance(payload, dict) and payload.get("event") == "answer_final":
+            # 正文引用编号收口：任务端已把 [key]/[n] 按首次出现顺序改写为 [n]，
+            # 这里用"已编号"版本整体替换气泡累计文本（而非追加），保证正文编号与
+            # 参考文献列表严格一致——修正"模型先写正文、编号靠猜"导致的对不上。
+            text = payload.get("text") or ""
+            if text:
+                self.current_ai_text = text
+                self._is_rendering_dirty = True
+                self._throttled_render()
+            data = payload.get("references") or []
+            bubble = getattr(self, "current_ai_bubble", None)
+            msg_index = getattr(bubble, "index", -1) if bubble is not None else -1
+            from src.ui.components.citation_popup import CitationPopupController
+            CitationPopupController.instance().merge_references(data, msg_index)
+            logger.debug("Final answer (renumbered citations) applied: %d chars, %d reference(s) "
+                         "for message #%s.", len(text), len(data), msg_index)
         elif isinstance(payload, dict) and payload.get("event") == "await_user":
             # deep-plan 等待确认：同样进入等待状态锁定通用发送。
             self._awaiting_user_input = True
@@ -219,7 +252,7 @@ class ChatResponseFlowMixin:
         if not self.current_ai_bubble:
             return
 
-        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setText(tr("Stop"))
         self.input_container.btn_stop.setEnabled(True)
         awaiting = getattr(self, '_awaiting_user_input', False)
 
@@ -233,15 +266,20 @@ class ChatResponseFlowMixin:
             self._awaiting_user_input = False
             self.input_container.btn_stop.setVisible(False)
             self.input_container.btn_send.setVisible(True)
+            # 发送按钮在生成期间被真正禁用（防止回车重入），取消路径必须解锁。
+            self.input_container.set_send_locked(False)
 
             if self.current_ai_bubble:
                 self.current_ai_bubble.is_interrupted = True
-            StandardDialog(self.widget, "Task Cancelled", "The AI generation has been stopped by the user.",
+            StandardDialog(self.widget, tr("Task Cancelled"),
+                           tr("The AI generation has been stopped by the user."),
                            show_cancel=False).exec()
             if hasattr(self, '_restore_last_input'):
                 self._restore_last_input()
 
-            self.history.append({"role": "assistant", "content": self.current_ai_text, "status": "interrupted"})
+            entry = {"role": "assistant", "content": self.current_ai_text, "status": "interrupted"}
+            self._attach_references(entry)
+            self.history.append(entry)
             self.current_ai_bubble = None
             self.scroll_to_bottom(force=False)
             return
@@ -292,9 +330,32 @@ class ChatResponseFlowMixin:
         if questions:
             self.render_follow_up_buttons(questions)
 
-        self.history.append({"role": "assistant", "content": self.current_ai_text})
+        entry = {"role": "assistant", "content": self.current_ai_text}
+        self._attach_references(entry)
+        self.history.append(entry)
         self.current_ai_bubble = None
         self.logger.info("AI response generation finished and UI updated.")
+
+    def _attach_references(self, entry: dict):
+        """把当前 AI 气泡的引用条目写入历史条目（导出无损留存的唯一写入点）。
+
+        引用条目此前只存在于 :class:`CitationPopupController` 的内存缓存里，
+        导出再导入后便会全部丢失（正文 ``[n]`` 仍在，悬停却只剩占位文案）。
+        故在收尾落历史时按气泡编号取出并挂到该条 ``references`` 字段上：
+        ``ExportChatTask`` 的无损导出会原样序列化，导入 / 编辑重发再整批回灌。
+        """
+        bubble = getattr(self, "current_ai_bubble", None)
+        idx = getattr(bubble, "index", -1) if bubble is not None else -1
+        try:
+            from src.ui.components.citation_popup import CitationPopupController
+            refs = CitationPopupController.instance().references_for(idx)
+        except Exception as e:  # pragma: no cover - 纯防御
+            self.logger.debug("Reference snapshot for message #%s skipped: %s", idx, e)
+            return
+        if refs:
+            entry["references"] = refs
+            self.logger.debug("Attached %d reference(s) to history message #%s.",
+                              len(refs), idx)
 
     @staticmethod
     def _build_error_marker(msg):
@@ -338,7 +399,7 @@ class ChatResponseFlowMixin:
             self._render_timer.stop()
         self.set_controls_enabled(True)
 
-        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setText(tr("Stop"))
         self.input_container.btn_stop.setEnabled(True)
         if getattr(self, '_awaiting_user_input', False):
             # 提问卡已渲染但本轮后续流程失败：保持等待锁定，
@@ -349,6 +410,8 @@ class ChatResponseFlowMixin:
         else:
             self.input_container.btn_stop.setVisible(False)
             self.input_container.btn_send.setVisible(True)
+            # 报错路径同样要解锁发送（生成期间按钮被真正禁用）。
+            self.input_container.set_send_locked(False)
 
         if self.current_ai_bubble:
             self.current_ai_bubble.set_loading(False)
@@ -369,16 +432,18 @@ class ChatResponseFlowMixin:
             final_html = self._format_response(self.current_ai_text, idx)
             self.current_ai_bubble.set_content(final_html)
 
-        # 记录到历史避免上下文结构断裂
-        self.history.append({
+        # 记录到历史避免上下文结构断裂（已同步的引用同样随历史留存）
+        entry = {
             "role": "assistant",
             "content": self.current_ai_text,
             "status": "error"
-        })
+        }
+        self._attach_references(entry)
+        self.history.append(entry)
 
         self.current_ai_bubble = None
         # 完整原始错误（含 JSON payload 中的 details）写入日志
         self.logger.error("Chat task failed.\n%s", msg)
-        ToastManager().show("Generation failed due to an error.", "error")
+        ToastManager().show(tr("Generation failed due to an error."), "error")
         # 报错同样不强制拉回底部（错误已在气泡内呈现）
         self.scroll_to_bottom(force=False)

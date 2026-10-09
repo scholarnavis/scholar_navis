@@ -13,6 +13,8 @@ from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
+from src.core.references import FOOTER_RULE_HTML, ReferenceItem, ReferenceRegistry
+from src.core.evidence import EvidenceStore
 from src.core import plot_styles
 from src.core.theme_manager import strong_weight_css
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
@@ -55,6 +57,125 @@ def _source_dedupe_key(meta):
         year = str(meta.get("year") or "").strip()
         return f"{title}|{year}"
     return None
+
+
+def _registry_item_from_source(index, meta):
+    """把 sources_map 的来源元数据规整为参考文献条目（单一映射定义）。
+
+    本地 KB 文档（本地 path）与在线来源（path 为 http(s) URL）走同一入口，
+    避免"来源 -> 条目"的转换散落多处造成字段不一致。
+    """
+    meta = meta or {}
+    path = str(meta.get("path") or "")
+    name = str(meta.get("name") or "")
+    snippet = str(meta.get("search_text") or meta.get("snippet") or "")
+    if path.lower().startswith(("http://", "https://")):
+        title = re.sub(r"^\[Online\]\s*", "", name).strip() or path
+        return ReferenceItem(index=index, title=title, url=path,
+                             snippet=snippet, kind="web")
+    return ReferenceItem(index=index, path=path,
+                         page=int(meta.get("page") or 1),
+                         title=name or os.path.basename(path) or "Local document",
+                         snippet=snippet, kind="local_document")
+
+
+def _seed_registry_from_sources(registry, sources_map, evidence_store=None):
+    """把 sources_map 中尚未登记的来源补录进注册表（幂等）。
+
+    Deep 模式在合并阶段才把子任务来源写回 sources_map，故注册表同步不能只在
+    检索后做一次；渲染前调用本函数，保证编号与来源一一对应。同时把来源原文
+    （完整 chunk / 摘要）采集进逐字证据库，供 cite_references 的 snippet 校验。
+    """
+    if not sources_map:
+        return
+    if evidence_store is not None:
+        # 证据采集先于注册表循环：即使来源已注册过（幂等跳过），原文仍需入库。
+        for meta in sources_map.values():
+            meta = meta or {}
+            text = str(meta.get("search_text") or meta.get("snippet") or "")
+            if text.strip():
+                evidence_store.add_source(
+                    text,
+                    url=str(meta.get("path") or meta.get("url") or ""),
+                    title=str(meta.get("name") or meta.get("title") or ""))
+    for rid, meta in sources_map.items():
+        if not isinstance(rid, int) or rid in registry:
+            continue
+        registry.seed(rid, _registry_item_from_source(rid, meta))
+
+
+#: 模型自拟引用 key 的常见形态：姓氏/单词 + 四位年份（如 ``christie2017``）。
+#: 仅用于"未登记来源、无法解析"时的兜底清理，不参与正常解析。
+_CITE_KEY_YEAR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]*?(?:19|20)\d{2}[a-z]?$")
+
+
+def _seed_registry_from_history(registry, messages):
+    """把历史回答里已登记过的引用补录进本轮注册表（跨轮连续性）。
+
+    注册表在每轮任务内新建，但模型在追问轮里会**复用上一条回答的引用**：
+    或复述编号（``[1]``），或复用自拟 key（``[christie2017]``）。若不回灌，
+    本轮注册表为空，这些 token 既解析不出编号、也渲染不出参考文献列表——正是
+    "正文残留 [key]、末尾没有 References"的来源。
+
+    历史条目的 ``references`` 字段就是"该轮已登记条目"的无损快照（由 UI 收尾时
+    写入，见 ``ChatResponseFlowMixin._attach_references``）。此处按消息**从新到旧**
+    回灌：key 始终登记；编号仅在未被占用时沿用（最近一次回答的编号优先），
+    与 KB/在线来源已有的编号冲突时退化为新编号，避免占用既有编号空间。
+
+    :return: 回灌的条目数（供日志）。
+    """
+    if not messages:
+        return 0
+    seeded_keys = set()
+    seeded = 0
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        refs = msg.get("references")
+        if not isinstance(refs, list):
+            continue
+        for entry in refs:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("key") or "").strip().lower()
+            if key and key in seeded_keys:
+                continue
+            item = ReferenceItem.from_dict(entry)
+            if not (item.title or item.url or item.doi or item.path):
+                continue
+            if key:
+                seeded_keys.add(key)
+            try:
+                idx = int(entry.get("index") or 0)
+            except (TypeError, ValueError):
+                idx = 0
+            if idx > 0 and idx not in registry:
+                registry.seed(idx, item)
+            else:
+                registry.add(item)
+            seeded += 1
+    return seeded
+
+
+def _strip_unresolved_cite_keys(text, unresolved):
+    """移除正文里"无法解析"的引用 key（姓氏+年份形态），返回 ``(text, removed)``。
+
+    这类 token 是模型自拟的引用别名，但本轮与历史都没有对应来源登记，既不能编号
+    也无著录可渲染，留在正文只会呈现为 ``[christie2017]`` 这样的坏标记。数字型
+    token 不动（可能是正文自身的编号用法），纯净短缩写（如 ``[EC]``）也不动，
+    只清理能明确判定为引用 key 的形态。
+    """
+    keys = {str(t) for t in (unresolved or []) if _CITE_KEY_YEAR_RE.match(str(t))}
+    if not keys:
+        return text, []
+    pattern = re.compile(r"\[(" + "|".join(re.escape(k) for k in sorted(keys)) + r")\]")
+    removed = []
+
+    def _drop(match):
+        removed.append(match.group(1))
+        return ""
+
+    return pattern.sub(_drop, text), removed
 
 
 def _trim_history_for_budget(history, token_budget):
@@ -180,7 +301,8 @@ def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="")
             "path": doc['metadata'].get('file_path', ''),
             "page": doc['metadata'].get('page', 1),
             "name": doc['metadata'].get('source', 'Local DB'),
-            "search_text": doc['content'][:100],
+            # 完整 chunk 原文（不再截断）：引用条目的 snippet 必须是来源逐字内容。
+            "search_text": doc['content'],
         }
         chunk = doc['content']
         if len(chunk) > _KB_CHUNK_MAX_CHARS:
@@ -276,7 +398,8 @@ class ChatGenerationTask(BackgroundTask):
                 f"only accept English (e.g. academic literature search, NCBI, Semantic Scholar), "
                 f"internally translate the user's intent into an accurate English query in your tool "
                 f"arguments, while the final prose answer remains in {reply_lang}. Structural protocol "
-                f"tokens, in-text citation markers ([1]/[101]) and code blocks remain ASCII unchanged.\n"
+                f"tokens, in-text citation markers ([key] or [1]) and code blocks remain ASCII "
+                f"unchanged.\n"
             )
         return (
             f"### OUTPUT LANGUAGE (MANDATORY):\n"
@@ -284,7 +407,7 @@ class ChatGenerationTask(BackgroundTask):
             f"retrieval, but the user originally wrote in {reply_lang}. You MUST compose "
             f"your final answer in {reply_lang} (do NOT reply in English), and use that "
             f"language's native punctuation. Structural protocol tokens, in-text citation "
-            f"markers ([1]/[101]) and code blocks remain ASCII and unchanged.\n"
+            f"markers ([key] or [1]) and code blocks remain ASCII and unchanged.\n"
         )
 
     def cancel(self):
@@ -568,6 +691,13 @@ class ChatGenerationTask(BackgroundTask):
         domain = "General Academic"
         context_str = ""
         sources_map = {}
+        # 本轮回答的参考文献注册表：本地 KB 文档 / 在线来源 / cite_references 工具
+        # 提交的条目共用同一编号空间，正文 [n] 与文献列表恒一一对应。任务每轮新建，
+        # 历史已登记条目在渲染前由 _seed_registry_from_history 回灌（跨轮连续性）。
+        reference_registry = ReferenceRegistry()
+        # 会话级逐字证据库：收集工具结果 / KB chunk / 附件中的原文，强制
+        # cite_references 提交的 snippet 为来源逐字内容（见 runtime 的校验逻辑）。
+        evidence_store = EvidenceStore()
 
         # ---- Human-in-the-loop 协议轮：deep plan 确认 / 跳过哨兵解析 ----
         deep_plan_confirmed = None
@@ -656,6 +786,8 @@ class ChatGenerationTask(BackgroundTask):
                 self._emit_token(
                     "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Loading local vector model and retrieving literature...</div>\n\n")
                 context_str, sources_map, domain = self._run_kb_retrieval(search_query, domain)
+                # KB 文档编号（1..N）统一进注册表：与 cite_references 的编号空间合并。
+                _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
 
         if not context_str.strip():
             context_str = "No local database documents provided."
@@ -664,6 +796,12 @@ class ChatGenerationTask(BackgroundTask):
         images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
             IMAGE_EXTENSIONS)]
         docs = [c for c in external_chunks if c not in images]
+
+        # 附件文档正文同样进入逐字证据库：模型引用用户上传文件内容时可校验。
+        for d in docs:
+            content = str(d.get("content") or "")
+            if content.strip():
+                evidence_store.add_source(content, title=str(d.get("name") or ""))
 
         llm_content = []
 
@@ -832,6 +970,8 @@ class ChatGenerationTask(BackgroundTask):
         combined_tools.append(dict(_ALWAYS_TOOLS)["ask_user"])
         # 追问建议改为结构化产出（工具调用），不再依赖模型输出固定文本 + 正则解析
         combined_tools.append(dict(_ALWAYS_TOOLS)["suggest_follow_ups"])
+        # 参考文献改为结构化产出：模型只提交条目，编号与文献列表由程序生成
+        combined_tools.append(dict(_ALWAYS_TOOLS)["cite_references"])
 
         # R 可视化属于**默认能力**：不再作为可勾选的独立技能，也不受技能标签筛选
         # 影响——始终把 plot_chart 交给模型，由它自行判断本次是否需要画图。
@@ -911,9 +1051,9 @@ class ChatGenerationTask(BackgroundTask):
             "Also ask before any costly or hard-to-reverse operation. After calling ask_user the runtime pauses "
             "the run automatically; the user's answer arrives as the next user message.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
-            "1. IN-TEXT GROUNDING (For UI Tracking): You MUST use bracketed numbers (e.g., [1], [101]) immediately after a claim to cite the Context or Tool Results. This automatically generates a UI 'Cited Sources' block. NEVER claim facts without these bracketed numbers.\n"
-            "2. FORMAL BIBLIOGRAPHY (For the User): If the user explicitly requests 'references', 'citations', or a 'review', you MUST ALSO generate a standalone 'References' section at the very end of your main text (but BEFORE the [FOLLOW_UPS] section). \n"
-            "3. STRICT FORMATTING: The standalone 'References' section must strictly follow academic formatting (e.g., APA/Nature style: Authors. (Year). Title. Journal. DOI). DO NOT include conversational fluff like 'Cited for the role of...' in this formal list. List purely the bibliographic data.\n\n"
+            "1. IN-TEXT KEYS (For UI Tracking): For EVERY source you cite, first choose a short, unique ASCII KEY (e.g. [lariguet2004]) and attach it inline IMMEDIATELY after the claim; reuse that SAME key everywhere the source is cited. Local knowledge-base documents are already numbered in the Context as '--- [Document n] ---' — cite those with [n]. If a tool result already carries a numeric id (e.g. '_mcp_cite_id'), you may cite that number directly. NEVER claim facts without an inline citation.\n"
+            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'). Registration is PER REPLY: keys registered in an earlier turn remain resolvable, but any source you cite that has NOT been registered before MUST be registered again in THIS reply — never write an inline key that has no matching cite_references entry (an unregistered key is dropped from the text and produces no reference list). The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself; use only keys (or the pre-assigned numbers above).\n"
+            "3. NEVER WRITE A REFERENCES SECTION YOURSELF: do NOT output a 'References' / 'Bibliography' heading or a manually numbered citation list in your answer text. The app generates that list from your cite_references call; writing one yourself duplicates it and can contradict it.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
             "### PUNCTUATION LOCALIZATION (STRICT):\n"
             "The user's input may already have been translated to English for retrieval, so do NOT infer "
@@ -921,7 +1061,7 @@ class ChatGenerationTask(BackgroundTask):
             "ACTUALLY writing each passage in:\n"
             "   - When writing in Chinese: use FULL-WIDTH punctuation — Chinese commas（，）, periods（。）, semicolons（；）, colons（：）, question/exclamation marks（？！）, Chinese ellipsis（……）, and Chinese parentheses（）for parenthetical remarks. Use Chinese curly quotes（“” and ‘’）for quotations instead of straight or half-width quotes.\n"
             "   - When writing in English or other languages: follow that language's standard punctuation conventions (half-width punctuation and straight quotes for English).\n"
-            "2. CRITICAL EXCEPTION — do NOT modify these machine-parsed ASCII tokens under any circumstance: in-text citation markers written as [1]/[101], the literal [FOLLOW_UPS] header, JSON blocks, code fences (```...```), mermaid code blocks, tool names, identifiers, and URLs. Keep those exactly half-width ASCII.\n\n"
+            "2. CRITICAL EXCEPTION — do NOT modify these machine-parsed ASCII tokens under any circumstance: in-text citation markers written as [key] or [1], the literal [FOLLOW_UPS] header, JSON blocks, code fences (```...```), mermaid code blocks, tool names, identifiers, and URLs. Keep those exactly half-width ASCII.\n\n"
             "### FOLLOW-UP SUGGESTIONS (MANDATORY):\n"
             "At the very end of your response — after ALL other content — you MUST call the "
             "suggest_follow_ups tool with exactly 6 follow-up questions, each carrying the tag of "
@@ -975,15 +1115,16 @@ class ChatGenerationTask(BackgroundTask):
         def _cite_collector(source_meta: dict):
             """Register an online MCP source for the 'Cited Sources' UI block.
 
-            按归一键去重：同一来源被多次工具调用重复收集时复用既有引用号，
-            参考文献列表不虚增、引用块更省 token。
+            编号统一由参考文献注册表分配（不再单独用 100+ 偏移），因此在线来源
+            与 KB 文档、模型登记的文献共享同一编号空间，绝不会出现"两个来源同一个
+            号"。按归一键去重：同一来源重复收集时复用既有引用号，列表不虚增。
             """
             key = _source_dedupe_key(source_meta)
             if key:
                 for rid, registered in sources_map.items():
                     if _source_dedupe_key(registered) == key:
                         return rid
-            ref_id = max((k for k in sources_map if isinstance(k, int)), default=100) + 1
+            ref_id = reference_registry.add(_registry_item_from_source(0, source_meta))
             sources_map[ref_id] = source_meta
             return ref_id
 
@@ -997,6 +1138,8 @@ class ChatGenerationTask(BackgroundTask):
                 log_fn=self.send_log,
                 plot_registry=getattr(self, "_plot_registry_cache", None),
                 plot_seq=getattr(self, "_plot_seq_cache", 0),
+                reference_registry=reference_registry,
+                evidence_store=evidence_store,
             )
             if self.deep_mode or deep_plan_confirmed is not None:
                 # 深度研究：分解为并行子任务 -> 用户确认计划 -> 独立 Agent 执行
@@ -1098,22 +1241,58 @@ class ChatGenerationTask(BackgroundTask):
                 "elapsed_ms": self._turn_elapsed_ms(),
             })
 
-        # Phase 6: Dynamic Citation Mounting
-        has_citation = bool(re.search(r'\[\d+\]', self.full_response_cache))
-        if sources_map and has_citation:
-            ref_html = "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'><b>📚 Cited Sources:</b><br>"
-            used_indices = set(int(ref) for ref in re.findall(r'\[(\d+)\]', self.full_response_cache))
-            displayed = 0
-            for rid, info in sources_map.items():
-                if rid in used_indices:
-                    from urllib.parse import quote
-                    safe_path, safe_text, safe_name = quote(info['path']), quote(info['search_text']), quote(
-                        info['name'])
-                    link = f"cite://view?path={safe_path}&page={info['page']}&text={safe_text}&name={safe_name}"
-                    ref_html += f"<div style='margin-bottom: 5px;'>▪ <a style='color:#05B8CC; text-decoration:none;' href='{link}'><b>[{rid}]</b> {info['name']}</a></div>"
-                    displayed += 1
-            if displayed > 0:
-                self._emit_token(ref_html)
+        # Phase 6: 参考文献与正文引用编号的统一收口（程序生成，单一事实来源）
+        # 正文里的 [key]（模型自拟别名）与 [n]（KB 文档号 / 工具结果 id）由注册表
+        # 按"首次出现顺序"统一重新编号，并就地改写正文。因此：
+        #   * 模型不必猜数字，先写正文还是先调 cite_references 都不会编号错位；
+        #   * 列表顺序 = 正文首次引用顺序（符合学术惯例）。
+        _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
+        # 跨轮引用连续性：回灌历史回答里已登记的引用，使追问轮复用 [n]/[key] 也能
+        # 解析、并渲染出参考文献列表（见 _seed_registry_from_history 说明）。
+        restored = _seed_registry_from_history(reference_registry, self.messages)
+        if restored:
+            self.send_log(
+                "INFO",
+                f"Historical references restored for cross-turn continuity: {restored} item(s).")
+        # Agent 的返回缓存里混有 UI 控制标记（[CLEAR_SEARCH]/[START_LLM_NETWORK] 等，
+        # 由 AgentRuntime._emit 一并计入）；作为"上屏正文"前必须先剥离，否则这些
+        # 字面量会在整段替换时漏成正文。
+        display_text = re.sub(
+            r"\[(?:CLEAR_SEARCH|START_LLM_NETWORK)\]", "", self.full_response_cache or "")
+        new_text, ordered, unresolved = reference_registry.resolve_citations(display_text)
+        # 兜底清理：仍无法解析的引用 key（姓氏+年份形态）从正文移除，避免呈现为
+        # 坏标记 [christie2017]；数字型与短缩写形态不动。
+        new_text, dropped_keys = _strip_unresolved_cite_keys(new_text, unresolved)
+        if dropped_keys:
+            self.send_log(
+                "WARNING",
+                "Unregistered citation key(s) removed from the answer text: "
+                f"{', '.join(dict.fromkeys(dropped_keys))[:200]}")
+        elif unresolved:
+            self.send_log(
+                "WARNING",
+                "Unresolved inline citations (not registered, left as-is): "
+                f"{', '.join(dict.fromkeys(unresolved))[:200]}")
+        if ordered:
+            self.full_response_cache = new_text + reference_registry.render_items(ordered)
+            self.send_log(
+                "INFO",
+                f"References rendered: {len(reference_registry)} registered, "
+                f"{len(ordered)} cited (ordered by first appearance).")
+        elif dropped_keys:
+            # 无条目可渲染，但正文已因清理而变化：仍需回传，保证上屏与落历史一致。
+            self.full_response_cache = new_text
+        else:
+            self.full_response_cache = display_text
+            if len(reference_registry):
+                self.send_log("INFO", "No cited reference matched the registry; reference block skipped.")
+        if ordered or dropped_keys:
+            # 结构化收口：用"已编号/已清理"正文替换上屏，并把引用数据直达悬停卡/详情面板。
+            self._emit_state(TaskState.PROCESSING, -1, "", payload={
+                "event": "answer_final",
+                "text": self.full_response_cache,
+                "references": [it.to_dict() for it in ordered],
+            })
 
         # Phase 7: Persist Provenance evidence chain + show summary to user
         self._emit_provenance()
@@ -1238,8 +1417,8 @@ class ChatGenerationTask(BackgroundTask):
                 )
 
             ref_html = (
-                "\n<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
-                "<b>📊 Provenance (trace log):</b><br>"
+                "\n" + FOOTER_RULE_HTML
+                + "<b>📊 Provenance (trace log):</b><br>"
                 f"<div style='margin-top:6px; font-size:13px;'>"
                 f"{len(records)} tool call(s) this round, "
                 f"{ok_count} succeeded, {fail_count} failed:<br>"
@@ -1338,9 +1517,12 @@ class ChatGenerationTask(BackgroundTask):
         # ---- 并行执行各子任务 ----
         # 子 Agent 无法触达用户：从其工具池剔除 ask_user，避免子任务发起
         # 无人应答的暂停式提问。
+        # 同时剔除 cite_references：子任务的编号需要在合并阶段重映射到全局编号，
+        # 而重映射只覆盖工具来源（sources_map）；子任务自行登记的文献编号会与全局
+        # 冲突，故统一由主流程/合成阶段负责文献登记。
         sub_candidate_tools = [
             t for t in (candidate_tools or [])
-            if (t or {}).get("function", {}).get("name") != "ask_user"
+            if (t or {}).get("function", {}).get("name") not in ("ask_user", "cite_references")
         ]
         results = [None] * len(sub_tasks)
 
@@ -1379,6 +1561,7 @@ class ChatGenerationTask(BackgroundTask):
             sub_agent = AgentRuntime(
                 self.main_llm, skill_mgr, mcp_mgr, planner=planner,
                 cite_collector=_local_cite, log_fn=self.send_log,
+                evidence_store=evidence_store,
             )
             buffer = []
             try:
@@ -1963,8 +2146,8 @@ class ImportChatHistoryTask(BackgroundTask):
             msg["content"] = ""
         else:
             msg["content"] = str(content)
-        # 保留供气泡渲染的富字段
-        for key in ("display_text", "context_html", "external_files", "status"):
+        # 保留供气泡渲染的富字段（references 为引用条目，回灌后恢复 [n] 悬停著录）
+        for key in ("display_text", "context_html", "external_files", "status", "references"):
             if key in raw:
                 msg[key] = raw[key]
         return msg

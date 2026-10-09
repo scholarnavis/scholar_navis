@@ -2,6 +2,7 @@ import os
 import platform
 import logging
 import base64
+import re
 import subprocess
 import keyring
 from typing import Optional, Tuple
@@ -12,15 +13,60 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
 
 from src.core import BASE_DIR
+from src.core.platform_env import (
+    PLATFORM_LINUX, PLATFORM_MACOS, PLATFORM_WINDOWS, no_window_flags, os_family,
+)
 
-SYSTEM = platform.system()
-if SYSTEM == "Windows":
+#: 平台标识统一取自 ``platform_env``，本模块不再自行比较 ``platform.system()``
+SYSTEM = os_family()
+IS_WINDOWS = SYSTEM == PLATFORM_WINDOWS
+
+if IS_WINDOWS:
     try:
         import win32crypt  # Used for hardware/user-bound DPAPI encryption
     except ImportError:
         win32crypt = None
 else:
     win32crypt = None
+
+
+def _windows_machine_uuid() -> str:
+    """Windows 机器 UUID。
+
+    ``wmic`` 自 Windows 11 24H2 起已从系统移除（降级为按需安装的功能），保留
+    原有 wmic 取值是为了让既有密文仍能派生同一密钥——顺序不可调换，只能"取不到
+    再回退"到 CIM（PowerShell）。
+    """
+    try:
+        out = subprocess.check_output(
+            "wmic csproduct get uuid", shell=True,
+            creationflags=no_window_flags()).decode()
+        uuid = out.splitlines()[1].strip()
+        if uuid:
+            return uuid
+    except (OSError, IndexError, subprocess.SubprocessError) as e:
+        logging.getLogger("EncryptionService").debug(f"wmic unavailable: {e}")
+
+    out = subprocess.check_output(
+        ["powershell", "-NoProfile", "-Command",
+         "(Get-CimInstance -ClassName Win32_ComputerSystemProduct).UUID"],
+        creationflags=no_window_flags()).decode()
+    return out.strip()
+
+
+def _macos_machine_uuid() -> str:
+    """macOS 机器 UUID（``IOPlatformUUID``）。
+
+    直接解析 ``ioreg`` 输出，不再 ``shell=True`` 管道给 ``grep``：后者依赖外部
+    命令，且 ``grep -E '(UUID)'`` 会匹配任意含 UUID 的行再取最后一个引号串，
+    取值不确定。正则提取与旧行为在标准机器上结果一致。
+    """
+    out = subprocess.check_output(
+        ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]).decode(errors="replace")
+    match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', out)
+    if not match:
+        raise ValueError("IOPlatformUUID not found in ioreg output")
+    return match.group(1)
 
 
 class SystemEncryptionService:
@@ -31,22 +77,22 @@ class SystemEncryptionService:
         self._master_fernet: Optional[Fernet] = None
 
     def _get_machine_id(self) -> str:
-        """Generates a hardware-specific identifier for the current machine."""
+        """生成与本机绑定的硬件标识（主密钥派生的输入之一）。
+
+        该值参与密钥派生：同一台机器上取到的值一旦变化，历史密文将无法解密。
+        因此各平台都必须"先取既有来源，取不到才回退"，不能为了适配新系统而
+        调整优先级（见 :func:`_windows_machine_uuid`）。
+        """
         try:
-            if SYSTEM == "Windows":
-                import subprocess
-                cmd = 'wmic csproduct get uuid'
-                uuid = subprocess.check_output(cmd, shell=True).decode().split('\n')[1].strip()
-                return uuid
-            elif SYSTEM == "Linux":
+            if SYSTEM == PLATFORM_WINDOWS:
+                return _windows_machine_uuid()
+            if SYSTEM == PLATFORM_LINUX:
                 with open("/etc/machine-id", "r") as f:
                     return f.read().strip()
-            elif SYSTEM == "Darwin":
-                import subprocess
-                cmd = "ioreg -rd1 -c IOPlatformExpertDevice | grep -E '(UUID)'"
-                uuid = subprocess.check_output(cmd, shell=True).decode().split('"')[-2]
-                return uuid
-        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            if SYSTEM == PLATFORM_MACOS:
+                return _macos_machine_uuid()
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+            self.logger.warning(f"Machine id lookup failed, using hostname: {e}")
             return platform.node()
         return "fallback-id"
 
@@ -92,13 +138,13 @@ class SystemEncryptionService:
     @staticmethod
     def _protect(raw: bytes) -> bytes:
         """Windows 上用 DPAPI 再包一层；其他平台原样返回。"""
-        if SYSTEM == "Windows" and win32crypt:
+        if IS_WINDOWS and win32crypt:
             return win32crypt.CryptProtectData(raw, "ScholarNavis Key", None, None, None, 0)
         return raw
 
     @staticmethod
     def _unprotect(blob: bytes) -> bytes:
-        if SYSTEM == "Windows" and win32crypt:
+        if IS_WINDOWS and win32crypt:
             return win32crypt.CryptUnprotectData(blob, None, None, None, 0)[1]
         return blob
 

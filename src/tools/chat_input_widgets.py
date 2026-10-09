@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QSizePolicy, QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.image_utils import IMAGE_EXTENSIONS
+from src.core.feature_flags import EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED
+from src.core.file_types import is_attachable
+from src.core.i18n import tr
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
@@ -66,7 +68,7 @@ class _ImageChip(QWidget):
             "border-radius: 8px; font-size: 10px; font-weight: "
             + strong_weight_css() + "; }")
         self.btn_remove.setCursor(Qt.PointingHandCursor)
-        self.btn_remove.setToolTip("Remove this image")
+        self.btn_remove.setToolTip(tr("Remove this image"))
         self.btn_remove.mousePressEvent = self._on_remove
         self.btn_remove.move(self.width() - 10, -2)
         self.btn_remove.raise_()
@@ -107,6 +109,86 @@ class _ImageChip(QWidget):
         event.ignore()
 
 
+class _FileChip(QWidget):
+    """输入区附件预览条中的文档附件芯片（PDF / DOCX / MD / TXT ...）。
+
+    单击打开：复用气泡内 ``cite://`` 链接的统一路由（PDF / 文本走内部查看器，
+    其余扩展名交由系统默认程序），保证"发送前预览"与"发送后点击链接"行为一致；
+    右侧内嵌 "x" 按钮移除该附件。
+    """
+    sig_remove = Signal(object)
+    #: (path, name)
+    sig_open = Signal(str, str)
+
+    #: 文件名展示的最大像素宽度（超出中间省略）
+    NAME_MAX_WIDTH = 180
+
+    def __init__(self, info, parent=None):
+        super().__init__(parent)
+        self.info = info
+        self.file_path = info.get("path", "")
+        self.file_name = info.get("name") or os.path.basename(self.file_path)
+
+        self.setObjectName("AttachFileChip")
+        self.setFixedHeight(24)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(tr("{name}\n{path}\nClick to open").format(
+            name=self.file_name, path=self.file_path))
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 0, 4, 0)
+        layout.setSpacing(6)
+
+        self.lbl_icon = QLabel()
+        self.lbl_icon.setFixedSize(14, 14)
+
+        self.lbl_name = QLabel()
+        self.lbl_name.setText(self.lbl_name.fontMetrics().elidedText(
+            self.file_name, Qt.ElideMiddle, self.NAME_MAX_WIDTH))
+
+        # 图标 / 文件名对鼠标透明：点击落到芯片自身（mousePressEvent 打开附件），
+        # 保证点在文字或图标上都能触发打开，而不依赖 QLabel 的事件透传行为。
+        for child in (self.lbl_icon, self.lbl_name):
+            child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self.btn_remove = QLabel("x", self)
+        self.btn_remove.setFixedSize(14, 14)
+        self.btn_remove.setAlignment(Qt.AlignCenter)
+        self.btn_remove.setCursor(Qt.PointingHandCursor)
+        self.btn_remove.setToolTip(tr("Remove this attachment"))
+        self.btn_remove.mousePressEvent = self._on_remove
+
+        layout.addWidget(self.lbl_icon)
+        layout.addWidget(self.lbl_name)
+        layout.addWidget(self.btn_remove)
+
+        self._apply_theme()
+        ThemeManager().theme_changed.connect(self._apply_theme)
+
+    def _apply_theme(self):
+        # 用 objectName 限定选择器：避免子孙 QLabel 继承到芯片的底色与描边
+        tm = ThemeManager()
+        self.setStyleSheet(
+            f"QWidget#AttachFileChip {{ background-color: {hex_to_rgba(tm.color('accent'), 0.12)}; "
+            f"border: 1px solid {tm.color('accent')}; border-radius: 4px; }}")
+        self.lbl_icon.setPixmap(tm.icon("file-text", "accent").pixmap(14, 14))
+        self.lbl_name.setStyleSheet(
+            f"QLabel {{ color: {tm.color('accent')}; font-size: 12px; border: none; "
+            f"background: transparent; font-family: {tm.font_family()}; }}")
+        self.btn_remove.setStyleSheet(
+            f"QLabel {{ color: {tm.color('text_muted')}; font-size: 10px; border: none; "
+            f"background: transparent; font-weight: {strong_weight_css()}; }}")
+
+    def _on_remove(self, event):
+        if event.button() == Qt.LeftButton:
+            self.sig_remove.emit(self.info)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.sig_open.emit(self.file_path, self.file_name)
+        super().mousePressEvent(event)
+
+
 class ChatDropTargetWidget(QWidget):
     """支持全局拖拽上传文件的容器，并带有视觉叠加层"""
     sig_files_dropped = Signal(list)
@@ -116,7 +198,7 @@ class ChatDropTargetWidget(QWidget):
         self.setAcceptDrops(True)
         self.config = ConfigManager()
 
-        self.overlay = QLabel("Drop files here to attach", self)
+        self.overlay = QLabel(tr("Drop files here to attach"), self)
         self.overlay.setAlignment(Qt.AlignCenter)
         self.overlay.setStyleSheet(f"""
             background-color: rgba(5, 184, 204, 0.85);
@@ -149,17 +231,17 @@ class ChatDropTargetWidget(QWidget):
     def dropEvent(self, event):
         self.overlay.hide()
 
-        # 文档 + 图片附件（图片同样进入多模态对话链路）
-        supported_exts = ('.pdf', '.md', '.txt', '.docx') + IMAGE_EXTENSIONS
+        # 文档 + 图片附件（图片同样进入多模态对话链路）。可接受的类型统一由
+        # core.file_types 判定，与文件选择器、内部查看器共用同一份清单。
         paths = [
             url.toLocalFile() for url in event.mimeData().urls()
-            if url.isLocalFile() and url.toLocalFile().lower().endswith(supported_exts)
+            if url.isLocalFile() and is_attachable(url.toLocalFile())
         ]
 
         if paths:
             self.sig_files_dropped.emit(paths)
         else:
-            ToastManager().show("Unsupported file format.", "warning")
+            ToastManager().show(tr("Unsupported file format."), "warning")
 
         event.acceptProposedAction()
 
@@ -173,7 +255,9 @@ class AutoResizingTextEdit(QPlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText("Ask a question... (Recommend English or enabling translator for best results. Enter to send, Shift+Enter for new line)")
+        self.setPlaceholderText(tr(
+            "Ask a question... (Recommend English or enabling translator for best results. "
+            "Enter to send, Shift+Enter for new line)"))
         self.setStyleSheet("""
             QPlainTextEdit { background-color: transparent; border: none; font-size: 14px; }
         """)
@@ -194,20 +278,21 @@ class AutoResizingTextEdit(QPlainTextEdit):
         return super().canInsertFromMimeData(source)
 
     def insertFromMimeData(self, source):
-        """粘贴路由：位图/图片文件转附件链路，其余保持默认文本插入。
+        """粘贴路由：本地文件 / 位图转附件链路，其余保持默认文本插入。
 
-        优先级：本地图片 URL（资源管理器复制文件）> 纯位图（截图工具、
-        浏览器"复制图片"，均无纯文本伴生）> 文本。Excel 等同时携带
-        文本+位图的场景仍按文本粘贴，避免误吞表格数据。
+        优先级：本地文件 URL（资源管理器复制文件，类型由
+        :func:`core.file_types.is_attachable` 判定，与拖拽、文件选择器一致）
+        > 纯位图（截图工具、浏览器"复制图片"，均无纯文本伴生）> 文本。
+        Excel 等同时携带文本+位图的场景仍按文本粘贴，避免误吞表格数据；
+        浏览器复制的链接是 http(s) URL（非本地文件），同样落回文本粘贴。
         """
         if source.hasUrls():
-            img_paths = [
+            paths = [
                 url.toLocalFile() for url in source.urls()
-                if url.isLocalFile()
-                and url.toLocalFile().lower().endswith(IMAGE_EXTENSIONS)
+                if url.isLocalFile() and is_attachable(url.toLocalFile())
             ]
-            if img_paths:
-                self.sig_paste_files.emit(img_paths)
+            if paths:
+                self.sig_paste_files.emit(paths)
                 return
 
         if source.hasImage() and not source.hasText():
@@ -233,6 +318,9 @@ class ChatInputContainer(QFrame):
     sig_clear_context_clicked = Signal()
     sig_remove_image = Signal(object)
     sig_open_image = Signal(str)
+    #: 文档附件芯片：sig_open_file 携带 (path, name)
+    sig_remove_file = Signal(object)
+    sig_open_file = Signal(str, str)
     sig_paste_image = Signal()
     sig_paste_files = Signal(list)
 
@@ -258,7 +346,7 @@ class ChatInputContainer(QFrame):
         self.banner_layout.setContentsMargins(8, 4, 8, 4)
 
         self.lbl_context_icon = QLabel()
-        self.lbl_context_info = QLabel("Context Attached")
+        self.lbl_context_info = QLabel(tr("Context Attached"))
 
         self.btn_clear_context = QPushButton("")
         self.btn_clear_context.setCursor(Qt.PointingHandCursor)
@@ -273,50 +361,63 @@ class ChatInputContainer(QFrame):
         self.mcp_toolbar = QHBoxLayout()
         use_academic = self.config.user_settings.get("chat_use_academic_agent", True)
         use_external = self.config.user_settings.get("chat_use_external_tools", False)
+        # 功能开关关闭时强制停用外部工具（见 src/core/feature_flags.py）：
+        # 入口隐藏的同时把状态置 False，避免"入口看不见、功能却仍在生效"。
+        # 若旧配置为 True，这里的 setChecked(False) 会触发一次保存，清掉残留状态。
+        if not EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED:
+            use_external = False
 
         # 1. 学术 Agent 开关
-        self.chk_academic_agent = QCheckBox("Academic Agent")
+        self.chk_academic_agent = QCheckBox(tr("Academic Agent"))
         self.chk_academic_agent.setChecked(use_academic)
-        self.chk_academic_agent.setToolTip("Enable built-in native academic skills (Zero Latency)")
+        self.chk_academic_agent.setToolTip(tr("Enable built-in native academic skills (Zero Latency)"))
         self.chk_academic_agent.toggled.connect(lambda c: self._save_agent_state("chat_use_academic_agent", c))
 
         # 2. 外部 Tools 开关
-        self.chk_external_tools = QCheckBox("External Tools")
+        self.chk_external_tools = QCheckBox(tr("External Tools"))
         self.chk_external_tools.setChecked(use_external)
-        self.chk_external_tools.setToolTip("Enable external MCP servers and custom Python scripts")
+        self.chk_external_tools.setToolTip(tr("Enable external MCP servers and custom Python scripts"))
         self.chk_external_tools.toggled.connect(lambda c: self._save_agent_state("chat_use_external_tools", c))
 
         # 3. 深度研究开关：分解为并行子任务，分节汇总（默认关闭）
         use_deep = self.config.user_settings.get("agent_deep_mode", False)
-        self.chk_deep_mode = QCheckBox("Deep Mode")
+        self.chk_deep_mode = QCheckBox(tr("Deep Mode"))
         self.chk_deep_mode.setChecked(use_deep)
-        self.chk_deep_mode.setToolTip(
+        self.chk_deep_mode.setToolTip(tr(
             "Deep research mode.\n"
             "Off (default): single-agent answer, faster.\n"
             "On: decompose the query into parallel sub-investigations, "
             "then synthesize a section-by-section answer (broader coverage, "
-            "higher cost)")
+            "higher cost)"))
         self.chk_deep_mode.toggled.connect(lambda c: self._save_agent_state("agent_deep_mode", c))
 
         self.btn_mcp_tags = QToolButton()
-        self.btn_mcp_tags = QPushButton("Tools Filter", self)
+        self.btn_mcp_tags = QPushButton(tr("Tools Filter"), self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
 
         self.menu_mcp_tags = QMenu(self)
         self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
 
-        self.lbl_tool_hint = QLabel(" (Tip: Selecting fewer tools improves accuracy)")
+        self.lbl_tool_hint = QLabel(tr(" (Tip: Selecting fewer tools improves accuracy)"))
 
         self.tag_actions = {}
         self.user_deselected_tags = set()
         self.known_tags = set()
 
         self.mcp_toolbar.addWidget(self.chk_academic_agent)
-        self.mcp_toolbar.addWidget(self.chk_external_tools)
+        if EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED:
+            self.mcp_toolbar.addWidget(self.chk_external_tools)
         self.mcp_toolbar.addWidget(self.chk_deep_mode)
-        self.mcp_toolbar.addWidget(self.btn_mcp_tags)
-        self.mcp_toolbar.addWidget(self.lbl_tool_hint)  # 新增：将标签加入水平布局
+        if EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED:
+            self.mcp_toolbar.addWidget(self.btn_mcp_tags)
+            self.mcp_toolbar.addWidget(self.lbl_tool_hint)
+        else:
+            # 控件仍需存在（send_flow / response_flow / _apply_theme 会读取），
+            # 但不进布局且显式隐藏——带父控件者否则会悬浮在父窗口角落
+            self.chk_external_tools.hide()
+            self.btn_mcp_tags.hide()
+            self.lbl_tool_hint.hide()
         self.mcp_toolbar.addStretch()
         main_layout.insertLayout(1, self.mcp_toolbar)
 
@@ -327,22 +428,22 @@ class ChatInputContainer(QFrame):
 
         # 底部工具按钮：配色统一在 _apply_theme 注入，构造期不设样式，
         # 避免浅色主题下首帧闪出硬编码深色。
-        self.btn_export = QPushButton("Export")
+        self.btn_export = QPushButton(tr("Export"))
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self.sig_export_clicked.emit)
 
-        self.btn_import = QPushButton("Import")
+        self.btn_import = QPushButton(tr("Import"))
         self.btn_import.setCursor(Qt.PointingHandCursor)
-        self.btn_import.setToolTip(
+        self.btn_import.setToolTip(tr(
             "Load a previously exported chat history (.schat / .json lossless, "
-            "or best-effort .md / .txt / .csv)")
+            "or best-effort .md / .txt / .csv)"))
         self.btn_import.clicked.connect(self.sig_import_clicked.emit)
 
-        self.btn_clear = QPushButton("Clear")
+        self.btn_clear = QPushButton(tr("Clear"))
         self.btn_clear.setCursor(Qt.PointingHandCursor)
         self.btn_clear.clicked.connect(self.sig_clear_clicked.emit)
 
-        self.btn_attach = QPushButton("Attach")
+        self.btn_attach = QPushButton(tr("Attach"))
         self.btn_attach.setCursor(Qt.PointingHandCursor)
         self.btn_attach.clicked.connect(self.sig_attach_clicked.emit)
         self.bottom_bar.insertWidget(0, self.btn_attach)
@@ -352,12 +453,12 @@ class ChatInputContainer(QFrame):
         self.bottom_bar.addWidget(self.btn_clear)
         self.bottom_bar.addStretch()
 
-        self.btn_send = QPushButton("Send")
+        self.btn_send = QPushButton(tr("Send"))
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.setFixedSize(90, 32)  # 加宽以防止文字截断
         self.bottom_bar.addWidget(self.btn_send)
 
-        self.btn_stop = QPushButton("Stop")
+        self.btn_stop = QPushButton(tr("Stop"))
         self.btn_stop.setCursor(Qt.PointingHandCursor)
         self.btn_stop.setFixedSize(90, 32)
         self.btn_stop.setVisible(False)
@@ -375,9 +476,10 @@ class ChatInputContainer(QFrame):
 
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
-        QTimer.singleShot(100, self.refresh_mcp)
-        if self.chk_external_tools.isChecked():
-            self.refresh_mcp()
+        if EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED:
+            QTimer.singleShot(100, self.refresh_mcp)
+            if self.chk_external_tools.isChecked():
+                self.refresh_mcp()
 
     def _save_agent_state(self, key, checked):
         self.config.user_settings[key] = checked
@@ -443,19 +545,19 @@ class ChatInputContainer(QFrame):
                      QPushButton:hover {{ background-color: {tm.color('btn_hover')}; border: 1px solid {tm.color('border')}; color: {tm.color('text_main')};}}
                  """
 
-        self.btn_export.setText("Export")
+        self.btn_export.setText(tr("Export"))
         self.btn_export.setIcon(tm.icon("upload", "text_muted"))
         self.btn_export.setStyleSheet(tool_btn_style)
 
-        self.btn_import.setText("Import")
+        self.btn_import.setText(tr("Import"))
         self.btn_import.setIcon(tm.icon("download", "text_muted"))
         self.btn_import.setStyleSheet(tool_btn_style)
 
-        self.btn_clear.setText("Clear")
+        self.btn_clear.setText(tr("Clear"))
         self.btn_clear.setIcon(tm.icon("delete", "text_muted"))
         self.btn_clear.setStyleSheet(tool_btn_style)
 
-        self.btn_attach.setText("Attach")
+        self.btn_attach.setText(tr("Attach"))
         self.btn_attach.setIcon(tm.icon("link", "text_muted"))
         self.btn_attach.setStyleSheet(tool_btn_style)
 
@@ -483,7 +585,7 @@ class ChatInputContainer(QFrame):
             self.lbl_context_info.setStyleSheet(f"color: {tm.color('accent')}; font-size: 12px; border: none;")
 
         self.btn_clear_context.setIcon(tm.icon("close", "danger"))
-        self.btn_clear_context.setToolTip("Clear all attached contexts")
+        self.btn_clear_context.setToolTip(tr("Clear all attached contexts"))
         self.btn_clear_context.setStyleSheet(f"""
                     QPushButton {{ border: none; background: transparent; padding: 4px; border-radius: 4px; }} 
                     QPushButton:hover {{ background: {hex_to_rgba(tm.color('danger'), 0.2)}; }}
@@ -526,7 +628,7 @@ class ChatInputContainer(QFrame):
         self.btn_send.setEnabled(not is_uploading)
         self.btn_attach.setEnabled(not is_uploading)
         if is_uploading:
-            self.btn_send.setToolTip("Please wait for file upload to complete...")
+            self.btn_send.setToolTip(tr("Please wait for file upload to complete..."))
             # 禁用态取主题色（原硬编码 #555/#888 在浅色主题下观感突兀）
             self.btn_send.setStyleSheet(
                 self.btn_send.styleSheet()
@@ -565,7 +667,7 @@ class ChatInputContainer(QFrame):
             self.refresh_mcp()
 
     def _show_filter_menu(self):
-        self.btn_mcp_tags.setText("Tools Filter: Fetching...")
+        self.btn_mcp_tags.setText(tr("Tools Filter: Fetching..."))
         QApplication.processEvents()
 
         self.refresh_mcp()
@@ -621,9 +723,9 @@ class ChatInputContainer(QFrame):
             self.known_tags.clear()
 
             if not available_tags:
-                self.btn_mcp_tags.setText("🏷️ Tools Filter: None")
+                self.btn_mcp_tags.setText(tr("🏷️ Tools Filter: None"))
                 from PySide6.QtGui import QAction
-                dummy = QAction("⏳ No active skills or MCP servers...", self)
+                dummy = QAction(tr("⏳ No active skills or MCP servers..."), self)
                 dummy.setEnabled(False)
                 self.menu_mcp_tags.addAction(dummy)
                 return
@@ -659,17 +761,17 @@ class ChatInputContainer(QFrame):
 
         except Exception as e:
             self.logger.error(f"Error refreshing skill and tool tags: {e}", exc_info=True)
-            self.btn_mcp_tags.setText("Tools Filter: Error")
+            self.btn_mcp_tags.setText(tr("Tools Filter: Error"))
 
     def _update_tag_button_text(self):
         selected = self.get_selected_tags()
         total = len(self.tag_actions)
         if total == 0:
-            self.btn_mcp_tags.setText("Tools Filter: None")
+            self.btn_mcp_tags.setText(tr("Tools Filter: None"))
         elif len(selected) == total:
-            self.btn_mcp_tags.setText("Tools Filter: All")
+            self.btn_mcp_tags.setText(tr("Tools Filter: All"))
         else:
-            self.btn_mcp_tags.setText(f"Tools Filter: {len(selected)} selected")
+            self.btn_mcp_tags.setText(tr("Tools Filter: {n} selected").format(n=len(selected)))
 
     def get_selected_tags(self) -> list:
         try:
@@ -689,7 +791,7 @@ class ChatInputContainer(QFrame):
         self.btn_send.setEnabled(not locked)
         if locked:
             self.btn_send.setToolTip(
-                reason or "Answer the pending question card in the chat first.")
+                reason or tr("Answer the pending question card in the chat first."))
         else:
             self.btn_send.setToolTip("")
 
@@ -710,28 +812,33 @@ class ChatInputContainer(QFrame):
         self.text_edit.setFocus()
 
     def lock_input(self):
-        self.text_edit.setPlaceholderText("Knowledge base updated. Clear history to resume chat.")
-        tip = "The linked knowledge base or model has changed. Continuing may cause context inconsistency. Please click 'Clear' to reset history."
+        self.text_edit.setPlaceholderText(
+            tr("Knowledge base updated. Clear history to resume chat."))
+        tip = tr("The linked knowledge base or model has changed. Continuing may cause "
+                 "context inconsistency. Please click 'Clear' to reset history.")
         self.text_edit.setToolTip(tip)
         self.btn_send.setToolTip(tip)
 
     def unlock_input(self):
         self.text_edit.setEnabled(True)
-        self.text_edit.setPlaceholderText(
-            "Ask a question... (Recommend English or enabling translator for best results. Enter to send, Shift+Enter for new line)")
+        self.text_edit.setPlaceholderText(tr(
+            "Ask a question... (Recommend English or enabling translator for best results. "
+            "Enter to send, Shift+Enter for new line)"))
         self.btn_send.setEnabled(True)
 
     def show_context_preview(self, text_info):
         """显示输入框上方的附件预览条"""
-        self.lbl_context_info.setText(f"📎 Attached: {text_info}")
+        self.lbl_context_info.setText(tr("📎 Attached: {name}").format(name=text_info))
         self.context_banner.setVisible(True)
         self._has_attachments = True
 
     def hide_context_preview(self):
-        """隐藏输入框上方的附件预览条"""
+        """隐藏输入框上方的附件预览条，并清空全部附件芯片。"""
         self.context_banner.setVisible(False)
-        self.lbl_context_info.setText("📎 Context Attached")
+        self.lbl_context_info.setText(tr("📎 Context Attached"))
         self._has_attachments = False
+        self.set_image_thumbs([])
+        self.set_file_chips([])
 
     def set_image_thumbs(self, image_infos):
         """同步输入区预览条中的图片缩略图芯片。
@@ -759,4 +866,32 @@ class ChatInputContainer(QFrame):
             chip.sig_open.connect(self.sig_open_image.emit)
             self.banner_layout.insertWidget(insert_pos, chip)
             self._image_chips.append(chip)
+            insert_pos += 1
+
+    def set_file_chips(self, file_infos):
+        """同步输入区预览条中的文档附件芯片（可点击打开 / 移除）。
+
+        :param file_infos: 当前待发送的非图片附件 dict 列表（需含 path / name）。
+        """
+        # 清理旧芯片
+        for chip in getattr(self, '_file_chips', []):
+            try:
+                chip.setParent(None)
+                chip.deleteLater()
+            except RuntimeError:
+                pass
+        self._file_chips = []
+
+        if not file_infos:
+            return
+
+        self.context_banner.setVisible(True)
+        # 插入到 stretch 与清除按钮之前，保证布局顺序稳定
+        insert_pos = max(0, self.banner_layout.count() - 2)
+        for info in file_infos:
+            chip = _FileChip(info)
+            chip.sig_remove.connect(self.sig_remove_file.emit)
+            chip.sig_open.connect(self.sig_open_file.emit)
+            self.banner_layout.insertWidget(insert_pos, chip)
+            self._file_chips.append(chip)
             insert_pos += 1

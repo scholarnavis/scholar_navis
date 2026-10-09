@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
+from src.core.i18n import tr
 from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
@@ -42,8 +43,8 @@ class ChatSendFlowMixin:
         #     全部入口），防止与交互卡的作答流程互相干扰造成重复发送。
         if getattr(self, '_awaiting_user_input', False):
             ToastManager().show(
-                "Please answer the pending question card above first "
-                "(or press Stop to dismiss it).", "warning")
+                tr("Please answer the pending question card above first "
+                   "(or press Stop to dismiss it)."), "warning")
             self.logger.debug("Send blocked: turn is waiting for an interactive-card answer.")
             return
 
@@ -117,25 +118,8 @@ class ChatSendFlowMixin:
 
             self.external_files = list(files) if files else []
             self.external_context_html = html if html else ""
-
-            if self.external_files:
-                names = []
-                for c in self.external_files:
-                    if c['name'] not in names:
-                        names.append(c['name'])
-                display_text = f"{names[0]}, {names[1]} and {len(names) - 2} more" if len(names) > 2 else ", ".join(
-                    names)
-                self.input_container.show_context_preview(display_text)
-                self._sync_image_thumbs()
-            else:
-                self.input_container.hide_context_preview()
-                self._sync_image_thumbs()
-
-    def _sync_image_thumbs(self):
-        """将当前待发送附件中的图片同步到输入区预览条。"""
-        image_files = [c for c in getattr(self, 'external_files', []) if c.get("type") == "image"]
-        if hasattr(self.input_container, 'set_image_thumbs'):
-            self.input_container.set_image_thumbs(image_files)
+            # 预览条（文本横幅 + 图片/文档芯片）统一由 attachments mixin 重建
+            self._refresh_attachment_preview()
 
     def _on_query_translated(self, translated_text):
         for i in range(self.chat_layout.count() - 1, -1, -1):
@@ -206,9 +190,14 @@ class ChatSendFlowMixin:
         self.current_ai_bubble.set_loading(True)
 
         self.input_container.btn_send.setVisible(False)
+        # 必须"真正禁用"而不只是隐藏：_emit_send() 唯一的拦截条件就是
+        # btn_send.isEnabled()，只隐藏不禁用时生成过程中按回车会再次触发发送，
+        # 新任务会 disconnect 掉正在运行任务的信号——旧任务继续消耗 token 却
+        # 不再上屏，成为不可见也不可控的孤儿任务。
+        self.input_container.set_send_locked(True, "Generating a response, please wait...")
         self.input_container.btn_stop.setVisible(True)
         self.input_container.btn_stop.setEnabled(True)
-        self.input_container.btn_stop.setText("Stop")
+        self.input_container.btn_stop.setText(tr("Stop"))
         self.input_container.btn_stop.setToolTip("")
         self.set_controls_enabled(False)
 
@@ -267,13 +256,12 @@ class ChatSendFlowMixin:
 
         self.external_files = []
         self.external_context_html = ""
+        # hide_context_preview 会一并清空图片 / 文档芯片
         self.input_container.hide_context_preview()
-        if hasattr(self.input_container, 'set_image_thumbs'):
-            self.input_container.set_image_thumbs([])
 
     def handle_edit_resend(self, index, new_text):
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot edit: The current library has been modified. Please clear chat."), "warning")
             old_msg = self.history[index]
             for i in range(self.chat_layout.count()):
                 item = self.chat_layout.itemAt(i)
@@ -290,7 +278,7 @@ class ChatSendFlowMixin:
                 break
 
         if index != last_user_idx:
-            ToastManager().show("You can only edit your most recent message.", "warning")
+            ToastManager().show(tr("You can only edit your most recent message."), "warning")
             return
 
         old_msg = self.history[index]
@@ -299,31 +287,41 @@ class ChatSendFlowMixin:
 
         self.history = self.history[:index]
 
-        v_bar = self.scroll_area.verticalScrollBar()
-        current_scroll = v_bar.value()
+        # 重放期间抑制每个气泡各自的自动滚动（否则每加一条都会被拉走一次），
+        # 视图定位统一留到重放结束后交给"发送"路径处理，见下方 _is_editing 复位。
         self._is_editing = True
 
         self.clear_layout(self.chat_layout)
         temp_history = list(self.history)
         self.history = []
 
+        # 重放会重建气泡并重置编号空间：引用缓存跟随重建，历史条目携带的引用
+        # 按新气泡编号逐条回灌，保证被截断前那些回答的 [n] 仍可溯源。
+        from src.ui.components.citation_popup import CitationPopupController
+        CitationPopupController.instance().clear_store()
+
         for msg in temp_history:
             display_text = msg.get('display_text', msg['content'])
             ctx_html = msg.get('context_html')
             msg_images = [c for c in msg.get('external_files', []) if c.get("type") == "image"]
-            self.add_bubble(display_text, is_user=(msg['role'] == 'user'), context_html=ctx_html,
-                            image_files=msg_images)
+            bubble = self.add_bubble(display_text, is_user=(msg['role'] == 'user'),
+                                     context_html=ctx_html, image_files=msg_images)
+            self._restore_message_references(bubble, msg)
             self.history.append(msg)
 
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
 
+        # 重放完成、恢复常规滚动策略后再挂新气泡：新气泡走"用户发送"同一条路径
+        # （add_bubble 延迟定位到该气泡顶端），与普通发送行为一致。
+        #
+        # 不能再沿用"清空前快照 scrollBar.value()、重建后 setValue 还原"的旧做法：
+        # clear_layout 会把内容高度清零，重建后的气泡高度又由 _schedule_height_sync
+        # 延后一帧才收敛，此刻的 scrollBar.maximum 仍是未收敛的偏小值，还原值被夹取
+        # 到 0；待高度真正收敛后视图仍停在 0，于是表现为"编辑重发后总是跳到顶部"。
+        self._is_editing = False
         old_images = [c for c in old_files if c.get("type") == "image"]
         self.add_bubble(new_text, is_user=True, context_html=old_context_html, image_files=old_images)
-
-        QApplication.processEvents()
-        v_bar.setValue(current_scroll)
-        self._is_editing = False
 
         llm_text = new_text
         if old_files:
@@ -345,16 +343,9 @@ class ChatSendFlowMixin:
         })
 
         self.external_files = old_files
-        # 附件保持挂载（供后续追问继续引用）：同步输入区预览条与图片芯片
-        if old_files:
-            names = []
-            for c in old_files:
-                if c.get('type') != 'image' and c['name'] not in names:
-                    names.append(c['name'])
-            display_text = (f"{names[0]}, {names[1]} and {len(names) - 2} more"
-                            if len(names) > 2 else (", ".join(names) if names else f"{len(old_files)} attachment(s)"))
-            self.input_container.show_context_preview(display_text)
-        self._sync_image_thumbs()
+        # 附件保持挂载（供后续追问继续引用）：预览条（文本横幅 + 图片/文档芯片）
+        # 统一由 attachments mixin 重建，避免此处重复展示逻辑。
+        self._refresh_attachment_preview()
         self.start_ai_response(kb_id)
 
     def handle_plot_plan_confirm(self, final_requirement: str):
@@ -366,10 +357,10 @@ class ChatSendFlowMixin:
         feed it through the normal send path.
         """
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         if not final_requirement or not final_requirement.strip():
-            ToastManager().show("Empty plotting requirement.", "warning")
+            ToastManager().show(tr("Empty plotting requirement."), "warning")
             return
 
         text = final_requirement.strip()
@@ -383,11 +374,11 @@ class ChatSendFlowMixin:
         模型凭历史中的工具调用即可将答案与其问题对上，继续任务。
         """
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         answer = (answer or "").strip()
         if not answer:
-            ToastManager().show("Empty answer.", "warning")
+            ToastManager().show(tr("Empty answer."), "warning")
             return
         # 卡片作答即本轮继续：解除等待锁定，走正常发送管线。
         self._awaiting_user_input = False
@@ -402,11 +393,11 @@ class ChatSendFlowMixin:
             plan_text: 卡片中编辑后的编号计划文本（一行一个子问题）。
         """
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         plan_text = (plan_text or "").strip()
         if not plan_text:
-            ToastManager().show("The plan is empty.", "warning")
+            ToastManager().show(tr("The plan is empty."), "warning")
             return
         # 计划确认即本轮继续：解除等待锁定。
         self._awaiting_user_input = False
@@ -419,7 +410,7 @@ class ChatSendFlowMixin:
     def handle_deep_plan_skip(self, original_query: str):
         """用户跳过深度拆解：本轮按普通单 Agent 直接作答。"""
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: the current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         original_query = (original_query or "").strip()
         if not original_query:
@@ -442,11 +433,11 @@ class ChatSendFlowMixin:
             self.input_container.btn_stop.setVisible(False)
             self.input_container.btn_send.setVisible(True)
             self.logger.info("Waiting state dismissed by user; normal chat restored.")
-            ToastManager().show("Waiting dismissed. You can chat normally now.", "info")
+            ToastManager().show(tr("Waiting dismissed. You can chat normally now."), "info")
             return
 
         self.input_container.btn_stop.setEnabled(False)
-        self.input_container.btn_stop.setText("Stopping...")
+        self.input_container.btn_stop.setText(tr("Stopping..."))
 
         if hasattr(self, '_render_timer'):
             self._render_timer.stop()
@@ -464,13 +455,14 @@ class ChatSendFlowMixin:
 
     def _trigger_follow_up(self, text):
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot send: The current library has been modified. Please clear chat.", "warning")
+            # 与上面四处统一为同一译文键（原大小写不一致会造成键分裂）
+            ToastManager().show(tr("Cannot send: the current library has been modified. Please clear chat."), "warning")
             return
         self.process_send(text)
 
     def _edit_follow_up(self, text):
         if getattr(self, 'is_locked', False):
-            ToastManager().show("Cannot edit: The current library has been modified. Please clear chat.", "warning")
+            ToastManager().show(tr("Cannot edit: The current library has been modified. Please clear chat."), "warning")
             return
         self.input_container.set_text(text)
 

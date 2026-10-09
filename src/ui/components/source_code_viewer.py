@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.theme_manager import ThemeManager, strong_weight_css
+from src.ui.components.copy_button import CopyButton
 from src.ui.components.text_formatter import mono_font_family_css
 
 logger = logging.getLogger(__name__)
@@ -115,10 +116,11 @@ class SourceCodeViewer(QFrame):
         self._title_label = QLabel(self._title)
         self._title_label.setProperty("scvRole", "title")
 
-        self._btn_copy = QPushButton(" Copy")
+        # 复制按钮为项目统一的 CopyButton（provider 每次点击取编辑器当前内容，
+        # 复制成功在按钮上闪现 "Copied"）。
+        self._btn_copy = CopyButton(" Copy", copied_text=" Copied",
+                                    provider=lambda: self._editor.toPlainText())
         self._btn_copy.setProperty("scvRole", "btn")
-        self._btn_copy.setCursor(Qt.PointingHandCursor)
-        self._btn_copy.clicked.connect(self._copy_code)
 
         self._btn_collapse = QPushButton()
         self._btn_collapse.setProperty("scvRole", "btn")
@@ -317,16 +319,8 @@ class SourceCodeViewer(QFrame):
 
     # --------------------------------------------------------- internal ---
     def _copy_code(self):
-        text = self._editor.toPlainText()
-        from PySide6.QtWidgets import QApplication
-
-        QApplication.clipboard().setText(text)
-        old = self._btn_copy.text()
-        self._btn_copy.setText(" Copied")
-        self._btn_copy.setEnabled(False)
-        QTimer.singleShot(1200, lambda: (self._btn_copy.setText(old),
-                                         self._btn_copy.setEnabled(True)))
-        logger.debug(f"Source code copied to clipboard ({len(text)} chars)")
+        """兼容入口：交由 CopyButton 统一处理（保留供外部历史接线调用）。"""
+        self._btn_copy.copy_now()
 
     def _update_collapse_icon(self):
         if not hasattr(self, "_btn_collapse"):

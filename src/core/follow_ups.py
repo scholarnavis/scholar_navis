@@ -23,6 +23,8 @@ import logging
 import re
 from typing import List, NamedTuple, Optional
 
+from src.core.references import FOOTER_RULE_HTML
+
 logger = logging.getLogger(__name__)
 
 # 单个追问的长度边界（过短多为空内容噪声，过长多为正文段落）
@@ -33,16 +35,14 @@ _MAX_BLOCK_NOISE = 250
 # 追问数量上限（提示词要求 6 条，留冗余）
 _MAX_QUESTIONS = 8
 
-# ---- UI 页脚块（Cited Sources / Provenance）剥离 ----
-#    这些块由 chat_tasks 的 Phase 6/7 以 <br><hr ...> 起始追加到回复末尾，
-#    与模型生成的正文/追问建议不同源，须整体剥离并原样拼回。
-_UI_FOOTER_START = "<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
+# ---- UI 页脚块（参考文献 / Provenance）剥离 ----
+#    这些块由 chat_tasks 的 Phase 6/7 追加到回复末尾（文献块由 References
+#    注册表渲染），与模型生成的正文/追问建议不同源，须整体剥离并原样拼回。
+#    起始标记的唯一事实来源在 src.core.references，避免多处各写一份字面量。
+_UI_FOOTER_START = FOOTER_RULE_HTML
 
 # 兼容旧式 Only-Cited 匹配（保留引用链接文本）
-_CITES_RE = re.compile(
-    r"<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
-    r"<b>.*?Cited Sources:</b><br>"
-)
+_CITES_RE = re.compile(re.escape(FOOTER_RULE_HTML) + r"<b>.*?Cited Sources:</b><br>")
 
 
 def _split_ui_footer(text: str) -> tuple[str, str]:
@@ -91,7 +91,31 @@ _ITEM_LINE_RE = re.compile(
 # ---- 无 bullet 的粗体 tag 行：**Tag**: question（仅当以问号结尾时视为追问行）----
 _BOLD_ITEM_RE = re.compile(r"^\*\*([^*]{1,30})\*\*\s*[:：]?\s*(.+)$")
 
-# ---- tag 规范化：与 FollowUpGroupWidget 的配色映射对齐 ----
+# ---- tag 规范化 + 配色：单一事实来源 ----
+#    canonical tag -> (主题色角色, 图标名)
+#    UI（FollowUpGroupWidget）直接消费此表；"规范名"与"配色"定义在同一处，
+#    避免出现"core 认可某个 tag、UI 却不认识 → 落到灰色 fallback（看起来像
+#    被禁用）"的不一致。
+FOLLOW_UP_TAG_STYLES: dict[str, tuple[str, str]] = {
+    "Deep Dive": ("warning", "search"),
+    "Critical": ("danger", "warning"),
+    "Method": ("accent_hover", "test"),
+    "Data": ("title_blue", "database"),
+    "Broader": ("success", "explore"),
+    "Brainstorm": ("accent", "lightbulb"),
+    "Similar": ("accent_hover", "link"),
+    "Application": ("title_blue", "rocket"),
+    "General": ("text_muted", "help"),
+}
+
+#: 未登记 tag 的确定性配色池：任何新 tag 都有稳定、且非"禁用灰"的外观。
+FOLLOW_UP_TAG_FALLBACK_STYLES: tuple[tuple[str, str], ...] = (
+    ("accent", "tag"),
+    ("success", "explore"),
+    ("warning", "lightbulb"),
+    ("title_blue", "article"),
+)
+
 _CANONICAL_TAGS = {
     "deep dive": "Deep Dive", "deepdive": "Deep Dive", "deep": "Deep Dive",
     "critical": "Critical", "limitation": "Critical", "weakness": "Critical",
@@ -100,8 +124,26 @@ _CANONICAL_TAGS = {
     "similar": "Similar", "parallel": "Similar", "related": "Similar",
     "application": "Application", "applied": "Application", "practical": "Application",
     "general": "General", "explore": "General", "explore more": "General",
-    "methodology": "Critical", "next steps": "Application",
+    "method": "Method", "methods": "Method", "methodology": "Method",
+    "methodological": "Method", "experimental": "Method", "experiment": "Method",
+    "protocol": "Method", "analysis": "Method", "pipeline": "Method",
+    "statistical": "Data", "data": "Data", "dataset": "Data", "datasets": "Data",
+    "statistics": "Data", "validation": "Data", "benchmark": "Data",
+    "next steps": "Application",
 }
+
+
+def tag_style(tag: str) -> tuple[str, str]:
+    """返回 tag 的 (主题色角色, 图标名)，供 UI 渲染胶囊按钮。
+
+    未登记的 tag 用文本哈希取模挑配色：同一 tag 恒定同色（不会每次刷新都变），
+    且不会退化成"看起来被禁用"的灰色。
+    """
+    style = FOLLOW_UP_TAG_STYLES.get(tag)
+    if style is not None:
+        return style
+    idx = sum(tag.encode("utf-8")) % len(FOLLOW_UP_TAG_FALLBACK_STYLES)
+    return FOLLOW_UP_TAG_FALLBACK_STYLES[idx]
 
 
 class FollowUpSplit(NamedTuple):

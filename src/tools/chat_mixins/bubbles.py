@@ -7,6 +7,7 @@ import logging
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from src.core.i18n import tr
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.pill_button import FollowUpGroupWidget
 from src.ui.components.toast import ToastManager
@@ -79,6 +80,25 @@ class ChatBubblesMixin:
                 QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True, force=False))
         return bubble
 
+    def _restore_message_references(self, bubble, msg):
+        """把历史条目携带的引用整批回灌引用缓存（按该气泡的新编号）。
+
+        历史重放（导入 / 编辑重发）会重建气泡并重新分配编号，编号空间与原文
+        一致，故直接以新气泡编号写入即可让正文 ``[n]`` 重新可悬停、可溯源。
+        引用条目由 :meth:`ChatResponseFlowMixin._attach_references` 在收尾时写入
+        ``history``，此处为其对称的读取侧。
+        """
+        refs = msg.get("references") if isinstance(msg, dict) else None
+        if not refs or bubble is None:
+            return
+        idx = getattr(bubble, "index", -1)
+        try:
+            from src.ui.components.citation_popup import CitationPopupController
+            CitationPopupController.instance().merge_references(refs, idx)
+            logger.debug("Restored %d reference(s) for message #%s.", len(refs), idx)
+        except Exception as e:  # pragma: no cover - 纯防御
+            logger.warning("Failed to restore references for message #%s: %s", idx, e)
+
     def show_dev_note(self, text):
         """Show a display-only note bubble (left-aligned, gray) to the user.
 
@@ -97,7 +117,7 @@ class ChatBubblesMixin:
         QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True, force=False))
         return bubble
 
-    def inject_dev_demo(self, user_text, ai_text):
+    def inject_dev_demo(self, user_text, ai_text, references=None):
         """Inject a fake user+AI bubble pair (developer render preview).
 
         Used by the Developer Mode "Render Preview" test to showcase the
@@ -107,9 +127,13 @@ class ChatBubblesMixin:
           never leaks into the LLM context of later real turns.
         * The AI bubble goes through the same final rendering pipeline as a
           real answer (``_format_response``: Markdown / LaTeX degradation /
-          identifier auto-linking / file links / Mermaid cards).
+          identifier auto-linking / file links / Mermaid cards / inline
+          ``[n]`` citations).
         * The user bubble has editing disabled so the demo text cannot be
           accidentally re-sent through the real generation pipeline.
+        * ``references`` (optional) are written into the citation popup cache
+          keyed by this bubble's index, so hovering / clicking the demo's
+          ``[n]`` markers opens the real compact card and detail panel.
         """
         self._ensure_chat_ui()
         user_bubble = self.add_bubble(user_text, is_user=True)
@@ -117,6 +141,15 @@ class ChatBubblesMixin:
         ai_bubble = self.add_bubble("", is_user=False)
         # 记住原始文本：演示气泡不进 history，主题切换时只能靠这里回源重渲染
         ai_bubble._raw_source = ai_text
+        if references:
+            try:
+                from src.ui.components.citation_popup import CitationPopupController
+                CitationPopupController.instance().merge_references(
+                    references, ai_bubble.index)
+                logger.info("Dev render preview: %d citation(s) seeded for message #%d.",
+                            len(references), ai_bubble.index)
+            except Exception as e:
+                logger.warning("Failed to seed demo citations: %s", e)
         ai_bubble.set_content(self._format_response(ai_text, ai_bubble.index))
         logger.info("Dev render preview injected (2 bubbles, no history, no LLM call).")
         return ai_bubble
@@ -244,6 +277,10 @@ class ChatBubblesMixin:
         self.cancel_generation()
         self.current_ai_bubble = None
         self.history.clear()
+        # 引用缓存与对话同生命周期：清空后编号空间重置，必须一并清掉，
+        # 否则新会话尚未登记的 [n] 会命中上一会话残留的旧条目。
+        from src.ui.components.citation_popup import CitationPopupController
+        CitationPopupController.instance().clear_store()
         self.clear_layout(self.chat_layout)
 
         self.clear_follow_up_shelf()
@@ -253,7 +290,7 @@ class ChatBubblesMixin:
         self.input_container.clear_text()
         self.clear_attached_context()
         self.is_locked = False
-        ToastManager().show("Chat history cleared.", "success")
+        ToastManager().show(tr("Chat history cleared."), "success")
 
     def clear_layout(self, layout):
         while layout.count() > 0:

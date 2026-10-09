@@ -1,20 +1,24 @@
 import hashlib
 import logging
+import math
 import os
 import re
-import sys
 import tempfile
 import time
 
 logger = logging.getLogger(__name__)
 
-from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize, QRect
 from PySide6.QtGui import (QGuiApplication, QPixmap, QTextBlockFormat,
                            QTextCursor, QFont)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
+from src.core.chat_typography import read as read_typography, scope_values
+from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
+from src.core.platform_env import is_windows
+from src.core.signals import GlobalSignals
 # hex_to_rgba 由核心层统一实现（全应用唯一来源，避免各 UI 模块各自复制）
 from src.core.theme_manager import (ThemeManager, hex_to_rgba, overlay_scrollbar_qss,
                                     strong_weight_css)
@@ -23,14 +27,13 @@ from src.ui.components.text_formatter import (TextFormatter, qt_font_family_css,
                                               resolve_qt_font_families,
                                               naturalize_table_html)
 from src.ui.components.toast import ToastManager
+from src.ui.components.copy_button import CopyButton
 from src.ui.components.image_viewer import open_image_viewer
 
 
-#: 行距（按字体高度的百分比，100 为单倍行高）。
-_LINE_HEIGHT_PERCENT = 150
-#: 段落间距（设备逻辑像素，用于拉开段落/列表项间距）。
-_BLOCK_BOTTOM_MARGIN = 8.0
-_BLOCK_TOP_MARGIN = 4.0
+# 字号 / 字符间距 / 行距 / 段前距 / 段后距全部改为**用户可调**，其规格、默认值与
+# 配置键统一定义在 src/core/chat_typography.py（设置面板与气泡渲染共用同一份），
+# 本模块不再保留硬编码常量——否则"面板显示的值"与"实际渲染的值"会各成一套。
 
 #: 独立滚动块的高度上限（逻辑像素）。取值兼顾「一次能看到足够内容」与
 #: 「不让单个块吃掉整屏」：思考链约 20 行、代码块约 24 行、引用约 18 行。
@@ -40,9 +43,56 @@ _QUOTE_MAX_HEIGHT = 300
 
 #: 正文浏览器高度相对文档高度的额外余量（px）。旧实现固定 +15 并叠加"预测会出现
 #: 横向滚动条"的预留，气泡会比内容高出一行以上且不回落。
-_BROWSER_HEIGHT_SLACK = 6
+#:
+#: 浏览器的 QSS 已把 ``margin`` 归零（见 ``_browser_qss``），因此视口比控件只矮
+#: 2px（浏览器自身的边框）；再加 2px 就恰好等于文档高度——这个余量**留在气泡末尾
+#: 会逐条累加**，用户能看到"整页内容还能上下轻微滚动"，所以只保留抗裁切所需的
+#: 最小量（实测 ``ceil(文档高)+0`` 在纯文本/标题/表格/代码/图片五类内容下均不裁切，
+#: 这里仍留 2px 作为字体差异的缓冲）。
+_BROWSER_HEIGHT_SLACK = 2
 #: 滚动条与内容之间的呼吸间距（避免滚动条紧贴表格边框/代码底色）。
 _BLOCK_SCROLL_GAP = 8
+
+# 气泡内部控件的 objectName。用于把自有 QSS 的选择器提升到"含 id"级别
+# （特异性 0,0,1,1），从而稳定压住宿主容器样式表里等优先级的通用规则：
+# Qt 的层叠在**特异性相同时是祖先样式优先**，而气泡正文是 QTextBrowser
+# （QTextEdit 的子类），会被对话框样式表里的 ``QTextEdit { background/border/
+# padding }`` 这类通用输入框规则误伤——表现为正文外凭空多出一层带边框和内边距的
+# 底色块（"底纹"）。正文/滚动块都是可复用组件，必须在任何宿主里都保持同一外观，
+# 因此不依赖宿主"恰好没写冲突规则"。
+_BROWSER_OBJECT_NAME = "BubbleText"
+#: 气泡内滚动块（表格 / 代码 / 引用 / 思考链）容器，用于限定滚动条样式作用域。
+_BLOCK_OBJECT_NAME = "BubbleBlock"
+#: 用户气泡的行内编辑框。
+_EDIT_OBJECT_NAME = "BubbleEdit"
+
+#: 上述控件的**带 id 选择器**：QSS 与开发者模式自检共用同一份，避免别处硬拼
+#: 选择器字符串后与 objectName 对不上（对不上就会静默退回"被宿主样式盖住"）。
+_BROWSER_SELECTOR = f"QTextBrowser#{_BROWSER_OBJECT_NAME}"
+_BLOCK_SELECTOR = f"QScrollArea#{_BLOCK_OBJECT_NAME}"
+_EDIT_SELECTOR = f"QTextEdit#{_EDIT_OBJECT_NAME}"
+
+# 气泡的**结构性容器**：只承担布局，不该绘制任何背景。
+# 全局样式表里有一条裸 ``QWidget { background: ... }``（qdarktheme 下发，深色下
+# 是 #202124）：所有纯 QWidget 容器都会命中它，被 Qt 打开 ``WA_StyledBackground``
+# 并填上一块与气泡无关的底色——表现为正文外多一层"底纹"、按钮行变色、气泡旁边
+# 多一条暗带、滚动块外面多一圈框。只能靠**带 id 的透明规则**压住：改
+# ``WA_StyledBackground`` 属性没用，下一次 polish 会被重新打开（实测如此）。
+_BLOCKS_OBJECT_NAME = "BubbleBlocks"
+_ACTIONS_OBJECT_NAME = "BubbleActions"
+_SPACER_OBJECT_NAME = "BubbleSpacer"
+
+#: 结构性容器的统一规则（唯一一份，QSS 与自检共用）。
+#: 覆盖：正文宿主、按钮行、弹簧占位、表格/代码/引用等滚动块容器。
+#: 滚动块容器另外要显式清掉外框与内边距：全局样式表里有一条裸
+#: ``QAbstractScrollArea { margin: 1px }``（qdarktheme 下发），会让每个滚动容器的
+#: **视口**四边各缩进 2px——视口比内容矮 4px，于是每个块都能"莫名地上下轻微滚动"，
+#: AsNeeded 策略下还会凭这 4px 弹出一条多余的滚动条。
+_STRUCTURAL_QSS = (
+    f"QWidget#{_BLOCKS_OBJECT_NAME}, QWidget#{_ACTIONS_OBJECT_NAME}, "
+    f"QWidget#{_SPACER_OBJECT_NAME} {{ background-color: transparent; }}"
+    f"QScrollArea#{_BLOCK_OBJECT_NAME} {{ background-color: transparent; "
+    f"border: none; margin: 0px; padding: 0px; }}")
 
 #: 等待回复（尚无正文）时的动态提示词。任务下发到首个 token 之间可能间隔数秒
 #: 至数十秒（模型加载、翻译、知识库检索、连接 provider 等），一直显示静态文案
@@ -64,13 +114,106 @@ _LOADING_PHRASE_TICKS = 6
 
 
 class ImageAwareTextBrowser(QTextBrowser):
-    """支持双击激活内联图片的 QTextBrowser。
+    """支持双击激活内联图片、悬停探测行内引用的 QTextBrowser。
 
-    QTextBrowser 默认把图片当作不可交互的富文本元素；本子类在双击
-    时探测光标下是否为图片，并发出 ``sig_image_activated``（携带本地
-    路径），供外层打开内部查看器。
+    * 双击：探测光标下是否为图片，发出 ``sig_image_activated``（携带本地路径）；
+    * 悬停/离开：探测光标下是否为行内引用锚点（``ref://``），发出
+      ``sig_citation_hover``（编号 + 锚点全局矩形；编号 -1 表示离开），供外层
+      弹出引用悬停卡。QTextBrowser 本身不提供锚点悬停事件，故用鼠标跟踪实现。
     """
     sig_image_activated = Signal(str)
+    #: (引用编号, 锚点全局矩形)；编号 <= 0 表示鼠标已离开引用锚点。
+    sig_citation_hover = Signal(int, object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self._hover_ref_index = -1
+
+    # ---- 行内引用悬停 ----
+    @staticmethod
+    def _ref_index(href: str) -> int:
+        """从 ``ref://cite?n=N`` 解析引用编号；非引用链接返回 -1。"""
+        if not href or not str(href).startswith("ref://"):
+            return -1
+        try:
+            from urllib.parse import parse_qs, urlparse
+            values = parse_qs(urlparse(str(href)).query).get("n", [])
+            return int(values[0]) if values else -1
+        except (ValueError, TypeError, IndexError):
+            return -1
+
+    def _anchor_global_rect(self, pos):
+        """把光标所在的**整个引用编号**（``[n]``）换算为全局坐标矩形。
+
+        为什么不能直接用 ``cursorForPosition(pos)`` 的 caret 矩形：它返回的是
+        "光标"位置（一竖条），会随鼠标落在编号字符的左半/右半而在编号**前**与
+        **后**跳变，也会把 ``[12]`` 这种多字符编号只算成其中一个字符——这正是
+        "同一个 [n] 弹窗位置忽左忽右、落点不固定"的根因。
+
+        这里改为：先用 ``anchorHref`` 把锚点扩展到属于同一链接的连续字符区间，
+        再取区间首尾两个 caret 矩形的并集，得到编号整体的包围盒。
+        """
+        try:
+            href = self.anchorAt(pos)
+            if not href:
+                return QRect()
+            doc = self.document()
+            total = max(0, doc.characterCount() - 1)
+
+            def href_at(index):
+                """第 ``index`` 个字符的链接地址（越界返回空串）。
+
+                用"位置 index+1 处光标的前一个字符"取格式，避开
+                ``charFormat()`` 在文本块首返回后一个字符的特殊情形。
+                """
+                if index < 0 or index >= total:
+                    return ""
+                probe = QTextCursor(doc)
+                probe.setPosition(min(index + 1, doc.characterCount() - 1))
+                return probe.charFormat().anchorHref()
+
+            anchor_pos = self.cursorForPosition(pos).position()
+            if href_at(anchor_pos) != href and href_at(anchor_pos - 1) == href:
+                anchor_pos -= 1                      # 光标落在编号右端之后
+
+            start = anchor_pos
+            while start > 0 and href_at(start - 1) == href:
+                start -= 1
+            end = anchor_pos + 1
+            while end < total and href_at(end) == href:
+                end += 1
+
+            first = QTextCursor(doc)
+            first.setPosition(start)
+            last = QTextCursor(doc)
+            last.setPosition(end)
+            rect = self.cursorRect(first).united(self.cursorRect(last))
+            top_left = self.viewport().mapToGlobal(rect.topLeft())
+            return QRect(top_left, rect.size())
+        except Exception as e:  # pragma: no cover - 纯防御
+            logger.debug("Anchor rect resolution failed: %s", e)
+            return QRect()
+
+    def _update_citation_hover(self, pos):
+        index = self._ref_index(self.anchorAt(pos))
+        if index == self._hover_ref_index:
+            return
+        self._hover_ref_index = index
+        if index > 0:
+            self.sig_citation_hover.emit(index, self._anchor_global_rect(pos))
+        else:
+            self.sig_citation_hover.emit(-1, None)
+
+    def mouseMoveEvent(self, event):
+        self._update_citation_hover(event.pos())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self._hover_ref_index > 0:
+            self._hover_ref_index = -1
+            self.sig_citation_hover.emit(-1, None)
+        super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         cursor = self.cursorForPosition(event.pos())
@@ -96,7 +239,7 @@ class ImageAwareTextBrowser(QTextBrowser):
                 path = unquote(urlparse(src).path)
             except ValueError:
                 return ""
-            if sys.platform == "win32" and path.startswith("/"):
+            if is_windows() and path.startswith("/"):
                 path = path.lstrip("/")
             return path
         if src.startswith("data:image"):
@@ -157,6 +300,8 @@ class OverflowBlock(QScrollArea):
         self.setFrameShape(QFrame.NoFrame)
         self.setWidgetResizable(False)
         self.setFocusPolicy(Qt.NoFocus)
+        # objectName 供 _scrollbar_qss 的作用域化选择器使用（见模块顶部说明）
+        self.setObjectName(_BLOCK_OBJECT_NAME)
         self.setHorizontalScrollBarPolicy(
             Qt.ScrollBarAsNeeded if horizontal else Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(
@@ -165,6 +310,7 @@ class OverflowBlock(QScrollArea):
         self.setViewportMargins(0, 0, _BLOCK_SCROLL_GAP if horizontal else 0, 0)
 
         self.browser = ImageAwareTextBrowser()
+        self.browser.setObjectName(_BROWSER_OBJECT_NAME)
         self.browser.setFrameShape(QFrame.NoFrame)
         self.browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -257,7 +403,11 @@ class OverflowBlock(QScrollArea):
 
             size = doc.size()
             content_w = max(1, int(size.width()))
-            content_h = max(1, int(size.height()) + 1)
+            # 浏览器自身的边框/内边距（QSS chrome）同样占掉它自己的视口高度：
+            # 不预留的话文档最后一行会被裁掉 1~2px（且浏览器内部多出一个隐藏的
+            # 滚动范围，滚轮能把它滚走）。frameWidth() 已含 QSS 的 border/margin。
+            content_h = max(1, int(math.ceil(size.height()))
+                            + 2 * self.browser.frameWidth())
             if not can_fit_width:
                 content_w = max(content_w, vw)
 
@@ -266,9 +416,15 @@ class OverflowBlock(QScrollArea):
             needs_h_scroll = self._horizontal and content_w > vw + 1
             self.browser.setFixedSize(content_w, content_h)
 
+            # 容器自身的边框 / 内边距（QSS chrome）不承载内容，但会占掉视口高度：
+            # 不计入的话视口永远比内容矮几个像素，于是"没溢出的块也能上下轻微
+            # 滚动"（AsNeeded 下还会凭这点差值弹出一条多余滚动条）。frameWidth()
+            # 已包含 QSS 的 border / margin，故按上下各一份计入。
+            chrome = 2 * self.frameWidth()
             outer_h = content_h
             if self._max_height is not None:
-                outer_h = min(content_h, self._max_height)
+                outer_h = min(outer_h, self._max_height)
+            outer_h += chrome
             if needs_h_scroll:
                 outer_h += self.horizontalScrollBar().sizeHint().height()
 
@@ -476,15 +632,56 @@ class ChatBubbleWidget(QWidget):
         self._extra_blocks = []
         self._lbl_last_height = -1
         self._height_sync_pending = False
+        #: 最近一次悬停的行内引用锚点全局矩形：点击展开详情面板时用于定位。
+        self._last_citation_rect = None
+
+        #: 本气泡作用域（LLM / 用户）下的排版参数。必须在 init_ui 之前读取：
+        #: init_ui 末尾的 set_content 就会用到字号 / 行距 / 段距。
+        self._typo = self._resolve_typography()
 
         self.init_ui()
         ThemeManager().theme_changed.connect(self._apply_theme)
         # 主题切换后富文本必须重渲染：代码块底色、行内代码、链接色等主题色
         # 以 HTML 内联样式固化在文档里，仅刷 QSS 无法更新（详见 _rerender_on_theme）。
         ThemeManager().theme_changed.connect(self._rerender_on_theme)
+        # 排版参数被保存后，已存在的气泡就地重排（无需重建消息 / 重发请求）
+        GlobalSignals().chat_typography_changed.connect(self.refresh_typography)
         self._apply_theme()
         # "Thinking" 等纯文本 setText 不经过 set_content，提前固化文档默认字体
         self._ensure_document_font()
+
+    # --- 3.0 排版参数（字号 / 字符间距 / 行距 / 段距） ---
+    def _resolve_typography(self, values: dict = None) -> dict:
+        """取本气泡作用域下的排版参数。
+
+        :param values: 全量参数字典（设置面板传入的**草稿值**，用于实时预览）；
+                       缺省时从 :class:`ConfigManager` 现读。
+        """
+        all_values = (read_typography(ConfigManager().user_settings)
+                      if values is None else values)
+        return scope_values(all_values, "user" if self.is_user else "ai")
+
+    def refresh_typography(self, values: dict = None):
+        """重新读取排版配置并就地生效（不重建气泡、不重发请求）。
+
+        设置面板会传入草稿值，使"面板预览"与"最终落地"走同一条渲染路径——
+        预览所见即保存后的效果。
+
+        必须**重跑一遍渲染管线**：标题（H1–H6）的字号与段距不是块格式，而是
+        markdown 阶段派生后写进 HTML 内联样式的（见
+        ``TextFormatter.markdown_to_html``），只改块格式影响不到它们。这里复用
+        主题切换的同一条重渲染链路（卡片 / 图片均有去重与缓存保护）。
+        """
+        try:
+            self._typo = self._resolve_typography(values)
+            # 1) 先刷 QSS（字号）：文档随后按新字号解析
+            self._apply_theme()
+            # 2) 再用"原始文本"重渲染：标题层级偏移量与正文段距随之重算；
+            #    set_content 内部会为每个浏览器落实字距与行距
+            self._rerender_on_theme()
+            self.force_resync_height()
+        except Exception as e:
+            logger.warning(f"Failed to apply chat typography: {e}")
 
     # --- 3. 完整的 init_ui 方法 ---
     def init_ui(self):
@@ -495,6 +692,8 @@ class ChatBubbleWidget(QWidget):
         self.main_layout.setSpacing(10)
 
         self.spacer = QWidget()
+        # objectName 供结构性容器的透明规则使用（见 _STRUCTURAL_QSS）
+        self.spacer.setObjectName(_SPACER_OBJECT_NAME)
         self.spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self.content_container = QWidget()
@@ -535,12 +734,14 @@ class ChatBubbleWidget(QWidget):
         # 作为独立滚动控件追加在同一竖直布局里，从而在文档内部获得"按块滚动"
         # 的能力（Qt 富文本自身无法为单个元素加滚动条）。
         self.blocks_host = QWidget()
+        self.blocks_host.setObjectName(_BLOCKS_OBJECT_NAME)
         self.blocks_host.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.blocks_layout = QVBoxLayout(self.blocks_host)
         self.blocks_layout.setContentsMargins(0, 0, 0, 0)
         self.blocks_layout.setSpacing(6)
 
         self.lbl_text = ImageAwareTextBrowser()
+        self.lbl_text.setObjectName(_BROWSER_OBJECT_NAME)
         self.lbl_text.setOpenExternalLinks(False)
         self.lbl_text.setOpenLinks(False)
         self.lbl_text.setFrameShape(QFrame.NoFrame)
@@ -549,9 +750,11 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.lbl_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
-        self.lbl_text.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
+        self.lbl_text.anchorClicked.connect(self._on_anchor_clicked)
         # 双击内联图片（AI 生成 / 工具产图）时打开内部查看器
         self.lbl_text.sig_image_activated.connect(self.open_image_viewer)
+        # 行内引用 [n] 的悬停探测：弹出引用预览卡（编号 -1 表示已离开锚点）
+        self.lbl_text.sig_citation_hover.connect(self._on_citation_hover)
         self.blocks_layout.addWidget(self.lbl_text)
 
         # 文档尺寸变化只做"合并调度"：流式期间 documentSizeChanged 会高频触发，
@@ -579,6 +782,7 @@ class ChatBubbleWidget(QWidget):
         self.set_content(self.original_text, msg_type=self.msg_type)
 
         self.edit_input = QTextEdit()
+        self.edit_input.setObjectName(_EDIT_OBJECT_NAME)
         self.edit_input.setVisible(False)
         self.edit_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.edit_input.installEventFilter(self)
@@ -588,21 +792,24 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.addWidget(self.edit_input)
 
         self.btn_widget = QWidget()
+        self.btn_widget.setObjectName(_ACTIONS_OBJECT_NAME)
         self.btn_layout = QHBoxLayout(self.btn_widget)
         self.btn_layout.setContentsMargins(0, 0, 5, 0)
         self.btn_layout.setSpacing(10)
         self.btn_layout.setAlignment(btn_alignment)
 
-        self.btn_copy = QPushButton(" Copy")
+        # 复制按钮统一用 CopyButton：provider 每次点击求值（流式增长的内容也能
+        # 复制到最新一版），且复制成功会在按钮上给出可见反馈。
+        self.btn_copy = CopyButton(" Copy", copied_text=" Copied",
+                                   provider=self._plain_copy_text,
+                                   toast="Plain text successfully copied to clipboard.")
         self.btn_copy.setIcon(tm.icon("copy", "text_muted"))
-        self.btn_copy.setCursor(Qt.PointingHandCursor)
-        self.btn_copy.clicked.connect(self.copy_plain_text)
         self.btn_layout.addWidget(self.btn_copy)
 
-        self.btn_copy_md = QPushButton(" Copy MD")
+        self.btn_copy_md = CopyButton(" Copy MD", copied_text=" Copied",
+                                      provider=self._markdown_copy_text,
+                                      toast="Markdown successfully copied to clipboard.")
         self.btn_copy_md.setIcon(tm.icon("markdown_copy", "text_muted"))
-        self.btn_copy_md.setCursor(Qt.PointingHandCursor)
-        self.btn_copy_md.clicked.connect(self.copy_markdown)
         self.btn_layout.addWidget(self.btn_copy_md)
 
         if not self.is_user and self.msg_type != self.MSG_ERROR:
@@ -674,11 +881,51 @@ class ChatBubbleWidget(QWidget):
         self.content_layout.insertWidget(min(insert_idx, self.content_layout.count()), strip)
 
     def open_image_viewer(self, image_path):
-        """用内部查看器打开本地图片（含 SVG）。"""
-        if image_path and os.path.exists(image_path):
-            open_image_viewer(image_path, parent=self)
-        else:
+        """用内部查看器打开本地图片（含 SVG）。
+
+        查看器必须挂在**顶层窗口**上：气泡会在流式渲染 / 重建（``set_content``）
+        时被回收，若把查看器作为气泡的子对象，气泡一重建窗口就被连带销毁，
+        表现为"图片预览点开一闪就没了"。挂到顶层窗口后，查看器与气泡生命周期
+        解耦，实例仍缓存在宿主窗口的 ``_image_viewers`` 中（同图不重复弹窗）。
+        """
+        if not image_path or not os.path.exists(image_path):
             ToastManager().show(f"Image file not found: {os.path.basename(str(image_path))}", "error")
+            return
+        host = self.window() or self
+        logger.debug("Open image viewer for %s (host=%s)", image_path, type(host).__name__)
+        open_image_viewer(image_path, parent=host)
+
+    # --- 3.1b 行内引用交互（悬停预览卡 / 点击详情面板） ---
+    def _on_citation_hover(self, index, anchor_rect):
+        """正文 ``[n]`` 悬停 / 离开：驱动引用卡片的悬停意图与位置。
+
+        ``index <= 0`` 表示鼠标已离开锚点，转告控制器取消/收尾；
+        引用弹窗自身是否真正关闭由控制器按"锚点 + 卡片"的区域轮询决定，
+        因此鼠标可以从锚点平滑移入卡片继续操作。
+        """
+        from src.ui.components.citation_popup import CitationPopupController
+        controller = CitationPopupController.instance()
+        if index and index > 0 and anchor_rect is not None:
+            self._last_citation_rect = anchor_rect
+            # 带上本消息编号：每轮回答的引用编号都从 1 重新开始，必须按
+            # (消息, 引用号) 定位，历史气泡才不会被新回答的数据覆盖。
+            # 同时传入所在窗口：浮层是该窗口的子控件（Wayland 下位置/拖拽才受控）。
+            controller.hover(self.index, index, anchor_rect, host=self.window())
+        else:
+            controller.leave_hover()
+
+    def _on_anchor_clicked(self, url):
+        """锚点点击统一入口：行内引用展开详情面板，其余链接照旧路由。"""
+        text = url.toString() if hasattr(url, "toString") else str(url)
+        if text.startswith("ref://"):
+            from src.ui.components.citation_popup import CitationPopupController
+            index = ImageAwareTextBrowser._ref_index(text)
+            if index > 0:
+                rect = self._last_citation_rect or QRect()
+                CitationPopupController.instance().expand(
+                    self.index, index, rect, host=self.window())
+                return
+        self.sig_link_clicked.emit(text)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -764,31 +1011,67 @@ class ChatBubbleWidget(QWidget):
 
     # --- 3.2 富文本浏览器 / 滚动块的统一样式（随主题刷新） ---
     def _browser_qss(self) -> str:
-        """正文浏览器 / 块内浏览器的 QSS：透明底 + 主题文字色 + 全局字体。"""
+        """正文浏览器 / 块内浏览器的 QSS：透明底 + 主题文字色 + 全局字体。
+
+        字号来自用户可调排版参数（``self._typo``）；这里只管字号与字体栈，
+        字符间距由文档默认字体下发（QSS 的 ``letter-spacing`` 不被支持，
+        见 :meth:`_ensure_document_font`）。
+
+        选择器带 ``#BubbleText``：不加 id 的话，宿主容器样式表里等优先级的
+        ``QTextEdit { background/border/padding }``（对话框的通用输入框规则）
+        会盖住这里——Qt 在特异性相同时祖先样式优先，于是正文外多出一层"底纹"。
+
+        ``margin: 0`` 同样必要：全局样式表里有一条裸 ``QAbstractScrollArea
+        { margin: 1px }``（qdarktheme 下发），会让浏览器的**视口**四边内缩，正文
+        被吃掉几像素，也把气泡的整体高度余量算错（见 ``_BROWSER_HEIGHT_SLACK``）。
+        """
         tm = ThemeManager()
         # 字体栈与 HTML 内联样式同源（西文族优先、CJK 族回退），见
         # text_formatter.qt_font_family_css 的说明。
         css_family = qt_font_family_css()
         return f"""
-            QTextBrowser {{
+            {_BROWSER_SELECTOR} {{
                 background-color: transparent; color: {tm.color('text_main')};
-                border: none; padding: 0px;
-                font-size: 14px; font-family: {css_family};
+                border: none; padding: 0px; margin: 0px;
+                font-size: {self._typo['font_size']:.0f}px; font-family: {css_family};
             }}
         """
 
     def _scrollbar_qss(self) -> str:
         """气泡内滚动块（表格/引用/代码/思考链）的滚动条样式。
 
-        与聊天滚动区共用一套 overlay 样式：滑块常态全透明，鼠标移到滚动条上或
-        拖动时才显形——正文与长表格里不再出现常显竖线。
+        与聊天滚动区共用同一套 overlay 样式（唯一实现在 theme_manager）：
+        滑块常态即为浅色可见，鼠标移入或拖动时加深。常态必须可见——宽表格 /
+        长代码行下方的横向滚动条若常态透明，用户看不出内容还能左右滚动。
+
+        作用域限定在 ``#BubbleBlock`` 内：否则宿主容器的 ``QScrollBar { ... }``
+        会以同样的"祖先优先"规则把气泡内的滚动条换掉（粗细、滑块色全变），
+        预览与聊天页就不再一致。
         """
-        return overlay_scrollbar_qss(thickness=8)
+        return overlay_scrollbar_qss(thickness=8, prefix=_BLOCK_SELECTOR)
 
     def _style_block(self, block: "OverflowBlock"):
-        """给独立滚动块套上当前主题的滚动条与浏览器样式。"""
-        block.setStyleSheet(self._scrollbar_qss())
+        """给独立滚动块套上当前主题的滚动条、整块底纹与浏览器样式。"""
+        block.setStyleSheet(self._scrollbar_qss() + self._block_chrome_qss(block))
         block.browser.setStyleSheet(self._browser_qss())
+
+    def _block_chrome_qss(self, block: "OverflowBlock") -> str:
+        """代码块的**整体底纹 + 边框**；其余块类型返回空串。
+
+        代码块必须由**承载它的容器**画底纹与边框，不能靠 ``<pre>``：Qt 富文本不
+        支持块级 ``border``（被静默忽略），``background-color`` 又是**逐
+        QTextBlock** 绘制的——行距产生的行间间隙不被覆盖，视觉上就成了一排断开的
+        灰条（"每行一条底纹"）。把底色与边框放到容器上，行间间隙由容器底色补齐，
+        整块自然连成一片；容器内 ``<pre>`` 的底色用的是同一个 ``code_bg``，因此
+        不会叠出第二层。
+        """
+        if getattr(block, '_block_kind', '') != 'code':
+            return ""
+        tm = ThemeManager()
+        return (f"\nQScrollArea#{_BLOCK_OBJECT_NAME} {{"
+                f" background-color: {tm.color('code_bg')};"
+                f" border: 1px solid {tm.color('code_border')};"
+                f" border-radius: 4px; }}")
 
     def _apply_theme(self):
         tm = ThemeManager()
@@ -821,6 +1104,12 @@ class ChatBubbleWidget(QWidget):
                 }}
             """)
 
+        # 结构性容器（正文宿主 / 按钮行 / 弹簧占位 / 滚动块）必须显式透明：全局
+        # 样式表里那条裸 ``QWidget`` 背景规则会把它们逐个填成与气泡无关的底色
+        # （见 _STRUCTURAL_QSS 的说明）。规则挂在气泡本体上，因此对
+        # content_container 的兄弟节点（弹簧占位）同样生效。
+        self.setStyleSheet(_STRUCTURAL_QSS)
+
         self.lbl_text.setStyleSheet(self._browser_qss() + self._scrollbar_qss())
 
         # 拆分出的滚动块（表格 / 引用 / 代码块 / 思考链）同步刷新配色
@@ -828,9 +1117,9 @@ class ChatBubbleWidget(QWidget):
             self._style_block(block)
 
         self.edit_input.setStyleSheet(f"""
-            QTextEdit {{ 
+            {_EDIT_SELECTOR} {{ 
                 background-color: {tm.color('bg_input')}; color: {tm.color('text_main')}; border: 1px solid {tm.color('accent')}; 
-                border-radius: 6px; padding: 6px 10px; font-family: {css_family}; font-size: 14px;
+                border-radius: 6px; padding: 6px 10px; font-family: {css_family}; font-size: {self._typo['font_size']:.0f}px;
             }}
         """)
 
@@ -1328,6 +1617,17 @@ class ChatBubbleWidget(QWidget):
                         f.setFamily(ordered[0])
                 else:
                     f.setFamily(ordered[0])
+
+            # 字符间距：QTextDocument 的富文本 CSS 不支持 letter-spacing，只能
+            # 通过**文档默认字体**下发；显式指定 font-family 的片段（代码块）会
+            # 退化为等宽字体自身的字距，属预期。0 时显式复位为百分比 100%——
+            # 否则「调大后再调回 0」会残留上一次的绝对字距。
+            spacing = float(self._typo.get('letter_spacing', 0.0))
+            if spacing:
+                f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+            else:
+                f.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100)
+
             # 流式渲染会高频调用本方法；字体未变化时跳过写回，避免触发
             # 文档字体变更信号与随之而来的整篇重排。
             if doc.defaultFont() != f:
@@ -1351,10 +1651,17 @@ class ChatBubbleWidget(QWidget):
             logger.debug(f"Failed to set document default font: {e}")
 
     def _apply_typography(self, browser=None):
-        """逐块拉大行距与段落/列表项间距（在 setText 之后调用）。
+        """逐块应用**行距**（在 setText 之后调用）。
 
-        字体族由 ``_ensure_document_font`` 在 setText 前设置；本方法只负责
-        排版密度，改善长时间阅读的舒适度。
+        字体族与字符间距由 ``_ensure_document_font`` 在 setText 前设置；段前 /
+        段后距由渲染管线以**内联 margin** 注入正文段落
+        （见 :meth:`TextFormatter.markdown_to_html`），本方法不再插手——Qt 对
+        ``<p>`` 有内置默认段距（实测上下各 12px），在块格式里只能"抬高、不能
+        压低"，会把"把段落调紧"这个最常见的方向整体堵死。
+
+        行距反过来只能靠块格式下发：内联 ``line-height`` 需要给每个元素都写一遍，
+        还要顾虑嵌套继承；而逐块写块格式一次覆盖正文/标题/表格/列表所有块，且
+        优先级最高、不会被任何内联样式盖掉。
         """
         browser = browser if browser is not None else getattr(self, 'lbl_text', None)
         if browser is None:
@@ -1364,14 +1671,16 @@ class ChatBubbleWidget(QWidget):
             if doc is None:
                 return
 
+            line_height = float(self._typo.get('line_height', 150.0))
+            # heightType 形参按 **int** 校验：PySide6 6.10 起不再接受枚举对象，
+            # 直接传 QTextBlockFormat.ProportionalHeight 会抛 TypeError，取枚举的
+            # ``.value`` 在 IntEnum / 纯 Enum 两种形态下都成立。
+            height_type = QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
+
             block = doc.begin()
             while block.isValid():
                 fmt = block.blockFormat()
-                fmt.setLineHeight(_LINE_HEIGHT_PERCENT, QTextBlockFormat.ProportionalHeight)
-                if fmt.topMargin() < _BLOCK_TOP_MARGIN:
-                    fmt.setTopMargin(_BLOCK_TOP_MARGIN)
-                if fmt.bottomMargin() < _BLOCK_BOTTOM_MARGIN:
-                    fmt.setBottomMargin(_BLOCK_BOTTOM_MARGIN)
+                fmt.setLineHeight(line_height, height_type)
                 cur = QTextCursor(block)
                 cur.setBlockFormat(fmt)
                 block = block.next()
@@ -1379,7 +1688,13 @@ class ChatBubbleWidget(QWidget):
             # QTextBrowser 会根据视口宽度自动决定换行，无需手动 setTextWidth，
             # 避免固定过宽导致横向溢出。
         except Exception as e:
-            logger.debug(f"Failed to apply bubble typography: {e}")
+            # 这里曾经是 logger.debug：上面那个 TypeError 让整段排版静默失效，
+            # 用户只看到"滑块怎么调都没反应"，日志里连一行痕迹都没有。失败必须
+            # 可见；只报一次——流式渲染会高频调用本方法，避免刷屏。
+            if not getattr(self, '_typography_failed_logged', False):
+                logger.warning("Failed to apply bubble typography: %s", e,
+                               exc_info=True)
+                self._typography_failed_logged = True
 
     # --- 5. 完整的 set_content 方法 ---
     def set_content(self, text, msg_type=None):
@@ -1411,7 +1726,16 @@ class ChatBubbleWidget(QWidget):
             # 表格/表头/单元格的主题化样式已统一由 TextFormatter.markdown_to_html
             # 注入（theme_key 决定配色），此处不再二次替换：消费方（气泡、PDF
             # 导出等）拿到的是同一套样式，避免"某一方漏主题化"。
-            html = TextFormatter.markdown_to_html(text)
+            # 三个排版参数在渲染管线里落地：字号参与派生**标题层级**的大小与段距
+            # （面板只给正文字参，H1–H6 的偏移量自动套用，否则字号调到 21px 以上
+            # 时 h1 会比正文还小）；段前/段后距还会注入正文 ``<p>`` 的内联 margin
+            # （见 TextFormatter.markdown_to_html）。行距不经 HTML，见
+            # :meth:`_apply_typography`。
+            html = TextFormatter.markdown_to_html(
+                text,
+                base_font_px=self._typo['font_size'],
+                space_before=self._typo['space_before'],
+                space_after=self._typo['space_after'])
             tm = ThemeManager()
             _accent = tm.color('accent')
             _danger = tm.color('danger')
@@ -1489,7 +1813,7 @@ class ChatBubbleWidget(QWidget):
                         from urllib.parse import urlparse, unquote
                         parsed = urlparse(src_url)
                         local_path = unquote(parsed.path)
-                        if sys.platform == "win32" and local_path.startswith("/"):
+                        if is_windows() and local_path.startswith("/"):
                             local_path = local_path.lstrip("/")
                         lower = local_path.lower()
                     except (ValueError, ImportError):
@@ -1685,8 +2009,9 @@ class ChatBubbleWidget(QWidget):
         browser.setOpenLinks(False)
         browser.setContextMenuPolicy(Qt.CustomContextMenu)
         browser.customContextMenuRequested.connect(self.show_context_menu)
-        browser.anchorClicked.connect(lambda url: self.sig_link_clicked.emit(url.toString()))
+        browser.anchorClicked.connect(self._on_anchor_clicked)
         browser.sig_image_activated.connect(self.open_image_viewer)
+        browser.sig_citation_hover.connect(self._on_citation_hover)
 
         self._style_block(block)
         return block
@@ -1697,7 +2022,11 @@ class ChatBubbleWidget(QWidget):
         if self._height_sync_pending:
             return
         self._height_sync_pending = True
-        QTimer.singleShot(0, self._sync_heights)
+        # 必须把 self 作为**上下文**传入：气泡可能在定时器触发前就被销毁
+        # （清空对话、关闭设置面板都会带走还挂着的排队请求），没有上下文时 Qt 仍会
+        # 调用已析构对象上的 Python 方法，抛出 "Internal C++ object already deleted"
+        # 这类异常（在 eventFilter 里表现为一整片红色 traceback）。
+        QTimer.singleShot(0, self, self._sync_heights)
 
     def _sync_heights(self):
         self._height_sync_pending = False
@@ -1821,7 +2150,9 @@ class ChatBubbleWidget(QWidget):
         if not self.lbl_text.isVisible():
             return
         doc = self.lbl_text.document()
-        doc_height = int(doc.size().height())
+        # 向上取整：文档高度是浮点的，截断会让最后一行被吃掉不到 1px（并且浏览器
+        # 内部多出一个隐藏滚动范围）。
+        doc_height = int(math.ceil(doc.size().height()))
         sb = self.lbl_text.horizontalScrollBar()
         sb_height = sb.height() if sb.isVisible() else 0
         target = doc_height + sb_height + _BROWSER_HEIGHT_SLACK
@@ -2001,19 +2332,25 @@ class ChatBubbleWidget(QWidget):
 
         return cleaned
 
+    def _plain_copy_text(self) -> str:
+        """CopyButton 的纯文本来源（会话被打断时不复制）。"""
+        if getattr(self, 'is_interrupted', False):
+            return ""
+        return self._extract_content_for_copy(is_markdown=False)
+
+    def _markdown_copy_text(self) -> str:
+        """CopyButton 的 Markdown 来源（会话被打断时不复制）。"""
+        if getattr(self, 'is_interrupted', False):
+            return ""
+        return self._extract_content_for_copy(is_markdown=True)
+
     def copy_plain_text(self):
-        if getattr(self, 'is_interrupted', False): return
-        clipboard = QGuiApplication.clipboard()
-        cleaned = self._extract_content_for_copy(is_markdown=False)
-        clipboard.setText(cleaned)
-        ToastManager().show("Plain text successfully copied to clipboard.", "success")
+        """兼容入口：交由 CopyButton 统一处理（右键菜单仍走此处）。"""
+        self.btn_copy.copy_now()
 
     def copy_markdown(self):
-        if getattr(self, 'is_interrupted', False): return
-        clipboard = QGuiApplication.clipboard()
-        cleaned = self._extract_content_for_copy(is_markdown=True)
-        clipboard.setText(cleaned)
-        ToastManager().show("Markdown successfully copied to clipboard.", "success")
+        """兼容入口：交由 CopyButton 统一处理（右键菜单仍走此处）。"""
+        self.btn_copy_md.copy_now()
 
 
     def toggle_edit(self):

@@ -2,7 +2,6 @@ import re
 import logging
 import markdown
 import os
-import sys
 import tempfile
 import shutil
 import hashlib
@@ -13,10 +12,21 @@ from html.parser import HTMLParser
 from urllib.parse import urlparse, parse_qs
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
+from src.core.chat_typography import (PARAM_BY_NAME as _TYPO_PARAMS,
+                                      clamp, clamp_font_size, heading_metrics)
+from src.core.file_types import TEXT_VIEWER_EXTS, file_extension
+from src.core.platform_env import is_windows
 from src.core.theme_manager import ThemeManager, installed_font_families
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
+
+#: 标题字号的等比基准 = 聊天气泡的默认正文字号。H1–H6 的 px 取值与段距倍数都
+#: 以该基准标定（唯一来源见 :mod:`src.core.chat_typography` 的 ``HEADING_OFFSETS``
+#: 与 :func:`~src.core.chat_typography.heading_metrics`），因此把正文字号调到
+#: 21px 以上时 h1 不会反而比正文小。
+_BASE_FONT_PX = _TYPO_PARAMS["font_size"].default
+
 
 def _rgba(hex_color: str, alpha: float) -> str:
     """``#RRGGBB`` → ``rgba(r, g, b, a)``；非 hex 值原样返回。
@@ -783,8 +793,12 @@ class TextFormatter:
     #: 调用点把 ``_format_response(...)`` 的输出再送进 ``set_content``），主题
     #: 切换后的重渲染只会保留固化在旧 HTML 里的主题色——典型症状是浅色主题
     #: 下标题仍是深色主题的浅灰、代码块仍是深色底、表格仍是深色边框。
-    _STYLE_OWNED_TAGS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'th', 'td',
-                         'ul', 'ol', 'li', 'blockquote', 'hr', 'pre', 'code')
+    #:
+    #: ``p`` 也在此列：正文段前/段后距由本管线以**内联 margin** 注入（见
+    #: :meth:`markdown_to_html`），必须同样先清后注入，否则重复渲染会把同一
+    #: 属性叠加成一长串声明。
+    _STYLE_OWNED_TAGS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'table', 'th',
+                         'td', 'ul', 'ol', 'li', 'blockquote', 'hr', 'pre', 'code')
 
     #: 上一次渲染注入的外层样式 div 的签名（font-family + color 组合，双引号）。
     #: 命中后降级为无样式 div，避免其 color 继续影响正文，同时保留配对的
@@ -853,6 +867,11 @@ class TextFormatter:
             return text
 
         text = cls._WRAPPER_SIGN_RE.sub('<div>', text)
+
+        # 行内引用锚点（ref://）由本管线按主题注入强调色/底色：先还原为裸 ``[n]``，
+        # 后续链接化规则会用当前主题重新建链，避免旧主题色被固化在文档里。
+        text = re.sub(r"<a\b[^>]*href=['\"]ref://[^'\"]*['\"][^>]*>(.*?)</a>",
+                      r"\1", text, flags=re.DOTALL | re.IGNORECASE)
 
         def _clean(match):
             tag, attrs = match.group(1), match.group(2)
@@ -1283,13 +1302,26 @@ class TextFormatter:
         return '\n'.join(lines)
 
     @staticmethod
-    def markdown_to_html(text, theme_key=None):
+    def markdown_to_html(text, theme_key=None, base_font_px=None,
+                         space_before=None, space_after=None):
         """Markdown → Qt 富文本 HTML。
 
         :param theme_key: 显式指定取色主题（如 PDF 导出固定 "light"）；
                           None 时跟随 ThemeManager 当前主题。主题色以
                           HTML 内联样式固化进文档，调用方（气泡层）需在
                           theme_changed 时重渲染以刷新内联主题色。
+        :param base_font_px: 正文字号（逻辑像素），缺省取排版参数的默认值。
+        :param space_before: 正文段前距，缺省取排版参数的默认值。
+        :param space_after: 正文段后距，缺省取排版参数的默认值。
+
+        后三个参数用于：
+        * **标题层级**（H1–H6）的字号与段距——由
+          :func:`~src.core.chat_typography.heading_metrics` 自动派生；
+        * ``space_before`` / ``space_after`` **显式传入时**，还会注入正文
+          ``<p>`` 的段前/段后距（不传则不动 ``<p>``，沿用 Qt 默认段距）。
+
+        因此 PDF 导出、渲染预览等"不传参"的消费方输出完全不变（标题推导结果
+        即历史硬编码外观），只有气泡这条会传参的链路才带上正文段距。
         """
         # 幂等前提：先清掉上一次渲染注入的主题样式，再重新注入当前主题的样式。
         # 入参既可能是原始 Markdown，也可能是已渲染过的 HTML（气泡重渲染路径）。
@@ -1372,11 +1404,18 @@ class TextFormatter:
         #    优先级更高（与上面的 font-size 同理），可压掉过重的 Bold(700)。
         _text_main = _tm.color('text_main', theme_key)
         _border = _tm.color('border', theme_key)
-        for _lvl, _size in ((1, 21), (2, 18), (3, 16), (4, 15), (5, 14), (6, 13)):
-            _h_style = (f"color:{_text_main}; font-size:{_size}px; {_emph_css}"
-                        f"margin-top:12px; margin-bottom:4px;")
+        # 各级标题的字号 / 段前距 / 段后距**由正文字参自动派生**（见
+        # chat_typography.HEADING_OFFSETS）：面板只有 5 个正文字参，标题不需要
+        # 单独的控件，但"H1 > H2 > … > 正文"的层级关系在任何设置下都成立。
+        _scale = clamp_font_size(base_font_px) / _BASE_FONT_PX
+        _h_underline_pad = max(1, int(round(4 * _scale)))
+        for _lvl in (1, 2, 3, 4, 5, 6):
+            _px, _mt, _mb = heading_metrics(_lvl, base_font_px, space_before, space_after)
+            _h_style = (f"color:{_text_main}; font-size:{_px}px; {_emph_css}"
+                        f"margin-top:{_mt}px; margin-bottom:{_mb}px;")
             if _lvl <= 2:
-                _h_style += f" border-bottom:1px solid {_border}; padding-bottom:4px;"
+                _h_style += (f" border-bottom:1px solid {_border}; "
+                             f"padding-bottom:{_h_underline_pad}px;")
             html = html.replace(f'<h{_lvl}>', f'<h{_lvl} style="{_h_style}">')
 
         # 4) 引用块：主题色左边条 + 弱化文字色（Qt 忽略不支持的属性，无害）
@@ -1410,6 +1449,25 @@ class TextFormatter:
                 merged = f"{existing}; {extra}" if existing else extra
                 return f'<{tag} style="{merged}">'
             return _repl
+
+        # 正文段落段距。必须走**内联 margin**，不能事后用 QTextBlockFormat 补：
+        # Qt 对 <p> 有内置默认段距（实测上下各 12px），解析出的块格式里读到的就是
+        # 这个 12px，"取较大值"式的补丁只能抬高、无法压低——用户把段距调到 12px
+        # 以下时会发现"怎么改都没反应"。内联样式优先级最高，上下都能生效，且
+        # 表格 / 引用 / 列表等自带版式的元素各保留自己的 margin，互不干扰。
+        # 只在调用方**显式传入**段距时注入：PDF 导出、文本查看器等不传参的消费方
+        # 输出保持原样（继续沿用 Qt 默认段距）。
+        if space_before is not None or space_after is not None:
+            _sb_param = _TYPO_PARAMS["space_before"]
+            _sa_param = _TYPO_PARAMS["space_after"]
+            _sb = clamp(_sb_param,
+                        _sb_param.default if space_before is None else space_before)
+            _sa = clamp(_sa_param,
+                        _sa_param.default if space_after is None else space_after)
+            html = re.sub(
+                r'<p(?:\s+style="([^"]*)")?\s*>',
+                _merge_style('p', f"margin-top:{_sb:g}px; margin-bottom:{_sa:g}px;"),
+                html)
 
         html = re.sub(r'<th(?:\s+style="([^"]*)")?\s*>',
                       _merge_style('th', f"color:{_text_main}; background-color:{_th_bg}; "
@@ -1457,7 +1515,17 @@ class TextFormatter:
         html = re.sub(url_pattern, url_repl, html)
 
         # 3. 匹配常见科研数据库/论文 ID 及其它标识，自动挂载官方解析链接
+        #    行内引用标记 [n] 优先建链（置于首位）：链接化为内部 ref:// 协议，
+        #    由气泡层渲染为"可悬停预览、可点开溯源"的参考文献入口（悬浮卡 /
+        #    详情面板）。外观按超链接处理（主题强调色 + 下划线 + 手型光标），
+        #    让用户一眼看出可点；写成带 style 的 <a>，通用链接色规则会跳过它，
+        #    且后续标识符规则因 <a>...</a> 被 skip_pattern 保护而不会误伤编号。
+        _cite_accent = _tm.color('accent', theme_key)
+        _cite_style = (f"color:{_cite_accent}; background-color:{_rgba(_cite_accent, 0.12)}; "
+                       f"text-decoration:underline; font-weight:{_emph_value}; {_emph_family_decl}")
         replacements = [
+            # 正文行内引用标记：[1] / [12] / [101]（模板中的 \1 即 group(2)）
+            (r'\[(\d{1,3})\]', '<a href="ref://cite?n=\\1" style="' + _cite_style + '">[\\1]</a>'),
             # 棉花基因 ID（CottonGen feature 页；置于首位优先建链获得 skip 保护）。
             # 覆盖多套命名体系（[AD]=亚基因组，\d{2}=染色体号）：
             #   Ghir_[AD]xxGxxxx / Gxxxxx（4-5 位，可带 .x 版本号，TM-1 参考基因组）
@@ -1803,13 +1871,13 @@ class TextFormatter:
         if not text:
             return text
         # Markdown 形态的内部链接 → 保留锚文本（锚文本本身可能含 []，如 [[1]](cite://…)）
-        text = re.sub(r"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\((?:cite|mermaid|think)://[^)]*\)",
+        text = re.sub(r"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\((?:cite|mermaid|think|ref)://[^)]*\)",
                       r"\1", text, flags=re.IGNORECASE)
-        # HTML 形态的内部链接 → 保留锚文本
-        text = re.sub(r"<a\b[^>]*?href=['\"](?:cite|mermaid|think)://[^'\"]*['\"][^>]*>(.*?)</a>",
+        # HTML 形态的内部链接 → 保留锚文本（含行内引用 ref://，还原为 [n]）
+        text = re.sub(r"<a\b[^>]*?href=['\"](?:cite|mermaid|think|ref)://[^'\"]*['\"][^>]*>(.*?)</a>",
                       r"\1", text, flags=re.DOTALL | re.IGNORECASE)
         # 裸露的内部协议 URL
-        text = re.sub(r"(?:cite|mermaid|think)://[^\s)\"'<>]+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?:cite|mermaid|think|ref)://[^\s)\"'<>]+", "", text, flags=re.IGNORECASE)
         return text
 
     @staticmethod
@@ -1856,10 +1924,14 @@ class TextFormatter:
             citations_text = "\n\n📚 Reference:\n"
             if len(parts) > 1:
                 raw_cites = parts[1]
-                matches = re.findall(r"<b>\[(\d+)\]</b>\s*(.*?)\s*\(Page (\d+)\)", raw_cites)
-                for m in matches:
-                    idx, name, page = m
-                    citations_text += f"[{idx}] {name.strip()} (第 {page} 页)\n"
+                # 参考文献行统一形态：`▪ [<a…>]<b>[n]</b> 著录文本[</a>]</div>`。
+                # 旧版本地文档行末尾带 "(Page N)"，此处一并用同一正则吞掉末尾的
+                # `</div>`，再剥标签——两种历史格式都能正确还原为 `[n] 著录`。
+                matches = re.findall(r"<b>\[(\d+)\]</b>\s*(.*?)</div>",
+                                     raw_cites, flags=re.DOTALL)
+                for idx, label in matches:
+                    label = re.sub(r"<[^>]+>", "", label).strip()
+                    citations_text += f"[{idx}] {label}\n"
             text = main_text + citations_text
         else:
             text = _strip(text)
@@ -1932,6 +2004,11 @@ class TextFormatter:
         scheme = url.scheme()
         query = QUrlQuery(url)
 
+        # 0. 行内引用（ref://cite?n=N）：由气泡层就地弹出悬停卡 / 详情面板处理，
+        #    此处显式拦截，避免落到最后的 QDesktopServices 打开无效协议。
+        if scheme == "ref":
+            return
+
         # 1. 处理 Mermaid 图表
         if scheme == "mermaid":
             code_hash = query.queryItemValue("hash")
@@ -1980,7 +2057,10 @@ class TextFormatter:
             source_name = query.queryItemValue("name", fully_decoded)
 
             if os.path.exists(file_path):
-                ext = source_name.lower().split('.')[-1] if '.' in source_name else ""
+                # 扩展名以文件路径为准；部分生产方只提供 display_name，故再回退到
+                # name。旧实现只取 name 的"最后一段"，名字里没有点时会把整个名字
+                # 当扩展名，导致本可内部打开的文件被误判为"未知"而交给系统程序。
+                ext = file_extension(file_path) or file_extension(source_name)
 
                 if ext == 'pdf':
                     from src.ui.components.pdf_viewer import InternalPDFViewer
@@ -1988,8 +2068,9 @@ class TextFormatter:
                         parent_widget.pdf_viewer = InternalPDFViewer(qt_parent)
                     parent_widget.pdf_viewer.load_document(file_path, 0, text_snippet, display_name=source_name)
 
-                elif ext in ['md', 'txt', 'csv', 'json']:
-                    from src.ui.components.pdf_viewer import InternalTextViewer
+                elif ext in TEXT_VIEWER_EXTS:
+                    # 能力清单与查看器渲染共用同一份定义（见 core.file_types）
+                    from src.ui.components.text_viewer import InternalTextViewer
                     if getattr(parent_widget, 'text_viewer', None) is None:
                         parent_widget.text_viewer = InternalTextViewer(qt_parent)
                     parent_widget.text_viewer.load_document(file_path, text_snippet, display_name=source_name)
@@ -2014,7 +2095,7 @@ class TextFormatter:
                 if not file_path:
                     from urllib.parse import unquote, urlparse
                     file_path = unquote(urlparse(url.toString()).path)
-                    if sys.platform == "win32" and file_path.startswith("/"):
+                    if is_windows() and file_path.startswith("/"):
                         file_path = file_path.lstrip("/")
 
                 from src.core.image_utils import is_image_file

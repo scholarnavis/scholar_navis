@@ -95,7 +95,7 @@ def search_web(query: str, engine: Literal["duckduckgo", "google", "bing", "baid
 
                 if link and not link.startswith(('/', 'duckduckgo.com')):
                     results.append(
-                        {"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
+                        {"cite_link": link, "title": title, "url": link,
                          "snippet": snippet})
 
         elif engine == "bing":
@@ -112,7 +112,7 @@ def search_web(query: str, engine: Literal["duckduckgo", "google", "bing", "baid
                 link = a.get('href')
                 snippet_div = li.find('div', class_='b_caption') or li.find('p')
                 snippet = snippet_div.get_text(separator=" ", strip=True) if snippet_div else "No abstract."
-                results.append({"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
+                results.append({"cite_link": link, "title": title, "url": link,
                                 "snippet": snippet})
 
 
@@ -131,7 +131,7 @@ def search_web(query: str, engine: Literal["duckduckgo", "google", "bing", "baid
                 snippet_div = div.find('div', class_='VwiC3b') or div.find('div',
                                                                            style=re.compile(r'-webkit-line-clamp'))
                 snippet = snippet_div.get_text(separator=" ", strip=True) if snippet_div else "No abstract."
-                results.append({"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
+                results.append({"cite_link": link, "title": title, "url": link,
                                 "snippet": snippet})
 
         elif engine == "baidu":
@@ -148,7 +148,7 @@ def search_web(query: str, engine: Literal["duckduckgo", "google", "bing", "baid
                 link = a.get('href')
                 snippet_div = div.find('div', class_=re.compile(r'c-abstract'))
                 snippet = snippet_div.get_text(separator=" ", strip=True) if snippet_div else "No abstract."
-                results.append({"_mcp_cite_id": str(101 + len(results)), "cite_link": link, "title": title, "url": link,
+                results.append({"cite_link": link, "title": title, "url": link,
                                 "snippet": snippet})
 
         if not results:

@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QFrame, QLabel, QHBoxLayout, QSizePolicy, QWidget,
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor
 
+from src.core.follow_ups import tag_style
 from src.core.theme_manager import ThemeManager
 
 
@@ -16,7 +17,8 @@ class FollowUpGroupWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 10, 0, 0)
+        # 底部留白：追问块通常是会话最后一项，贴底会与输入框/悬浮按钮挤在一起。
+        layout.setContentsMargins(0, 10, 0, 10)
         layout.setSpacing(6)
 
         tm = ThemeManager()
@@ -28,22 +30,13 @@ class FollowUpGroupWidget(QWidget):
         grid.setSpacing(8)
         grid.setContentsMargins(0, 0, 0, 0)
 
-        color_map = {
-            "Deep Dive": ("warning", "search"),
-            "Critical": ("danger", "warning"),
-            "Broader": ("success", "explore"),
-            "Brainstorm": ("accent", "lightbulb"),
-            "Similar": ("accent_hover", "link"),
-            "Application": ("title_blue", "rocket"),
-            "General": ("text_muted", "help")
-        }
-
         for i, q_obj in enumerate(questions):
             tag = q_obj.get("tag", "General") if isinstance(q_obj, dict) else "General"
             raw_text = q_obj.get("text", q_obj) if isinstance(q_obj, dict) else q_obj
             clean_text = re.sub(r'\[\s*\d+\s*(?:,\s*\d+\s*)*\]', '', raw_text).replace('**', '').strip()
 
-            color_key, icon_name = color_map.get(tag, ("text_muted", "help"))
+            # 配色/图标来自 core.follow_ups 的统一标签表，未知 tag 也有确定性配色
+            color_key, icon_name = tag_style(tag)
 
             btn = FollowUpPillButton(tag, clean_text, color_key, icon_name)
 

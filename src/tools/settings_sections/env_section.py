@@ -5,12 +5,13 @@
 """
 
 import logging
-import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QFormLayout, QHBoxLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QVBoxLayout)
 
+from src.core.i18n import AUTO, LANGUAGE_NATIVE_NAMES, tr
+from src.core.platform_env import is_windows
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
@@ -23,11 +24,11 @@ class EnvSectionMixin:
 
     # ---------- Hardware ----------
     def init_hardware_section(self):
-        self.group_hw = QGroupBox("System Hardware Info")
+        self.group_hw = QGroupBox(tr("System Hardware Info"))
         self.group_hw.setObjectName("group_hw")
         layout = QVBoxLayout(self.group_hw)
 
-        self.lbl_hw_info = QLabel("Scanning hardware info... Please wait.")
+        self.lbl_hw_info = QLabel(tr("Scanning hardware info... Please wait."))
         self.lbl_hw_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_hw_info.setTextFormat(Qt.RichText)
         layout.addWidget(self.lbl_hw_info)
@@ -96,10 +97,10 @@ class EnvSectionMixin:
         gpu_info_list = info.get('gpu_info', [])
 
         gpu_str = "<br>".join([
-            f"&nbsp;&nbsp;• {g.get('name', 'Unknown')} <span style='color:{tm.color('accent')};'>[{g.get('vram', 'N/A')}]</span>"
+            f"&nbsp;&nbsp;• {g.get('name', tr('Unknown'))} <span style='color:{tm.color('accent')};'>[{g.get('vram', 'N/A')}]</span>"
             for g in gpu_info_list
         ])
-        if not gpu_str: gpu_str = "None detected"
+        if not gpu_str: gpu_str = tr("None detected")
 
         # 判定是否真的在加速：优先用"运行期真实可用"的探测结果；旧版本/异常时
         # 回退到构建期列表（避免字段缺失导致显示异常）。
@@ -109,18 +110,19 @@ class EnvSectionMixin:
                          "ROCmExecutionProvider"])
 
         status_color = tm.color("success") if has_accel else tm.color("warning")
-        accel_status = "Hardware Accelerated" if has_accel else "CPU Fallback"
+        accel_status = tr("Hardware Accelerated") if has_accel else tr("CPU Fallback")
 
         clean_providers = [p.replace("ExecutionProvider", "") for p in info.get('ort_providers', [])]
+        unknown = tr("Unknown")
 
         html = f"""
         <div style='font-family: {tm.mono_font_family()}; font-size: 13px; color: {tm.color("text_main")}; line-height: 1.6;'>
-            <b>OS:</b> {info.get('os', 'Unknown')}<br>
-            <b>CPU:</b> {info.get('cpu', 'Unknown')} ({info.get('cpu_cores', 'Unknown')})<br>
-            <b>RAM:</b> {info.get('ram_available', 'Unknown')} / {info.get('ram_total', 'Unknown')}<br>
-            <b>GPU(s):</b><br>{gpu_str}<br>
-            <b>ONNX Engine:</b> v{info.get('ort_version', 'N/A')} <span style='color:{status_color}'>[{accel_status}]</span><br>
-            <b>Providers:</b> {", ".join(clean_providers)}
+            <b>{tr('OS:')}</b> {info.get('os', unknown)}<br>
+            <b>{tr('CPU:')}</b> {info.get('cpu', unknown)} ({info.get('cpu_cores', unknown)})<br>
+            <b>{tr('RAM:')}</b> {info.get('ram_available', unknown)} / {info.get('ram_total', unknown)}<br>
+            <b>{tr('GPU(s):')}</b><br>{gpu_str}<br>
+            <b>{tr('ONNX Engine:')}</b> v{info.get('ort_version', 'N/A')} <span style='color:{status_color}'>[{accel_status}]</span><br>
+            <b>{tr('Providers:')}</b> {", ".join(clean_providers)}
         </div>
         """
         self.lbl_hw_info.setText(html)
@@ -130,12 +132,12 @@ class EnvSectionMixin:
         """Detect and configure the R runtime (used by the visualization engine)."""
         from src.core.r_engine import get_r_engine, R_DOWNLOAD_URL
 
-        self.group_r = QGroupBox("R Environment (Visualization)")
+        self.group_r = QGroupBox(tr("R Environment (Visualization)"))
         self.group_r.setObjectName("group_r")
         layout = QVBoxLayout(self.group_r)
 
         # Status label
-        self.lbl_r_status = QLabel("Detecting R environment...")
+        self.lbl_r_status = QLabel(tr("Detecting R environment..."))
         self.lbl_r_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_r_status.setTextFormat(Qt.RichText)
         layout.addWidget(self.lbl_r_status)
@@ -143,16 +145,16 @@ class EnvSectionMixin:
         # Path selection row
         path_layout = QHBoxLayout()
         self.edit_r_path = QLineEdit()
-        if sys.platform == "win32":
+        if is_windows():
             self.edit_r_path.setPlaceholderText(
-                "Rscript path, e.g. C:\\Program Files\\R\\R-4.3.1\\bin\\Rscript.exe")
+                tr("Rscript path, e.g. C:\\Program Files\\R\\R-4.3.1\\bin\\Rscript.exe"))
         else:
             self.edit_r_path.setPlaceholderText(
-                "Rscript path, e.g. /usr/bin/Rscript (leave empty to auto-detect from PATH)")
+                tr("Rscript path, e.g. /usr/bin/Rscript (leave empty to auto-detect from PATH)"))
         self.edit_r_path.textChanged.connect(self._on_r_path_edited)
         path_layout.addWidget(self.edit_r_path, stretch=1)
 
-        self.btn_r_browse = QPushButton("Browse...")
+        self.btn_r_browse = QPushButton(tr("Browse..."))
         self.btn_r_browse.clicked.connect(self._on_browse_r_path)
         path_layout.addWidget(self.btn_r_browse)
         layout.addLayout(path_layout)
@@ -181,24 +183,25 @@ class EnvSectionMixin:
         info = engine.detect()
         if info.get("available"):
             status_color = tm.color("success")
-            status_text = "R detected"
+            status_text = tr("R detected")
             detail = (
-                f"<b>Rscript:</b> {info.get('executable', '')}<br>"
-                f"<b>Version:</b> R {info.get('version', 'Unknown')}"
+                f"<b>{tr('Rscript:')}</b> {info.get('executable', '')}<br>"
+                f"<b>{tr('Version:')}</b> R {info.get('version', tr('Unknown'))}"
             )
             detail += self._r_packages_html(engine)
         else:
             status_color = tm.color("warning")
-            status_text = "R not detected"
-            detail = (
+            status_text = tr("R not detected")
+            # 下载链接以占位符注入，避免把 URL 混进翻译键
+            detail = tr(
                 "Visualization requires R.<br>"
-                f"Download and install it from <a href='{R_DOWNLOAD_URL}'>{R_DOWNLOAD_URL}</a>, "
+                "Download and install it from <a href='{url}'>{url}</a>, "
                 "then specify the Rscript path above or add it to PATH."
-            )
+            ).format(url=R_DOWNLOAD_URL)
 
         html = (
             f"<div style='font-size:13px; line-height:1.6;'>"
-            f"<b>Status:</b> <span style='color:{status_color};'>{status_text}</span><br>"
+            f"<b>{tr('Status:')}</b> <span style='color:{status_color};'>{status_text}</span><br>"
             f"{detail}</div>"
         )
         self.lbl_r_status.setText(html)
@@ -232,8 +235,8 @@ class EnvSectionMixin:
 
         missing = [p for p in CORE_R_PACKAGES if not status.get(p)]
         if not missing:
-            return (f"<br><b>R packages:</b> "
-                    f"<span style='color:{tm.color('success')};'>all core packages available</span>")
+            return (f"<br><b>{tr('R packages:')}</b> "
+                    f"<span style='color:{tm.color('success')};'>{tr('all core packages available')}</span>")
 
         from src.core.r_engine import package_install_guidance
 
@@ -245,7 +248,7 @@ class EnvSectionMixin:
             if line.strip()
         )
         return (
-            f"<br><b>R packages missing:</b> "
+            f"<br><b>{tr('R packages missing:')}</b> "
             f"<span style='color:{tm.color('warning')};'>{', '.join(missing)}</span><br>"
             f"{guidance_html}"
         )
@@ -255,43 +258,45 @@ class EnvSectionMixin:
 
         # 过滤器按平台给首选项：Windows 的可执行文件是 *.exe，POSIX 上
         # Rscript 无扩展名（旧的 *.exe 优先过滤在 Linux 上会让用户以为选不中）。
-        if sys.platform == "win32":
+        if is_windows():
             filters = "Rscript executable (*.exe);;All Files (*)"
         else:
             filters = "Rscript executable (Rscript);;All Files (*)"
 
         path, _ = open_file_name(
-            self.widget, "Select Rscript executable", "", filters)
+            self.widget, tr("Select Rscript executable"), "", filters)
         if path:
             self.edit_r_path.setText(path)
 
     # ---------- Network ----------
     def init_network_section(self):
-        group = QGroupBox("Network Proxy")
+        group = QGroupBox(tr("Network Proxy"))
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
         self.combo_proxy_mode = BaseComboBox()
 
-        self.combo_proxy_mode.addItems(["Disable Proxy (Direct)", "Enable Proxy (Custom)"])
+        # 代理模式按**索引**取值（mode_map: off=0 / custom=1），
+        # 与显示文本无关，因此可以安全地本地化选项文本。
+        self.combo_proxy_mode.addItems([tr("Disable Proxy (Direct)"), tr("Enable Proxy (Custom)")])
 
         current_mode = self.config.user_settings.get("proxy_mode", "off")
         mode_map = {"off": 0, "custom": 1}
         self.combo_proxy_mode.setCurrentIndex(mode_map.get(current_mode, 0))
 
         self.input_proxy = QLineEdit()
-        self.input_proxy.setPlaceholderText("e.g. http://127.0.0.1:7890")
+        self.input_proxy.setPlaceholderText(tr("e.g. http://127.0.0.1:7890"))
         self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
 
         self.input_mirror = QLineEdit()
-        self.input_mirror.setPlaceholderText("Leave empty for default (huggingface.co)")
+        self.input_mirror.setPlaceholderText(tr("Leave empty for default (huggingface.co)"))
         self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
 
         self.combo_proxy_mode.currentIndexChanged.connect(self._on_proxy_mode_changed)
 
-        layout.addRow("Proxy Mode:", self.combo_proxy_mode)
-        layout.addRow("Proxy URL:", self.input_proxy)
-        layout.addRow("HF Mirror:", self.input_mirror)
+        layout.addRow(tr("Proxy Mode:"), self.combo_proxy_mode)
+        layout.addRow(tr("Proxy URL:"), self.input_proxy)
+        layout.addRow(tr("HF Mirror:"), self.input_mirror)
 
         self.layout.addWidget(group)
 
@@ -301,10 +306,13 @@ class EnvSectionMixin:
 
     # ---------- System ----------
     def init_system_section(self):
-        group = QGroupBox("System Preferences")
+        group = QGroupBox(tr("System Preferences"))
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
+        # 主题 / 日志级别：其**选项文本即配置值本身**（保存流程直接取
+        # currentText 写入 settings，见 save_flow 与 ThemeManager），
+        # 一旦随界面语言变化就会破坏取值，故这两项保持英文。
         self.combo_theme = BaseComboBox()
         self.combo_theme.addItems(["Dark", "Light", "Auto"])
         self.combo_theme.setCurrentText(self.config.user_settings.get("theme", "Dark"))
@@ -313,34 +321,71 @@ class EnvSectionMixin:
         self.combo_log.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.combo_log.setCurrentText(self.config.user_settings.get("log_level", "INFO"))
 
-        layout.addRow("Theme:", self.combo_theme)
-        layout.addRow("Log Level:", self.combo_log)
+        # 界面语言：显示名用各语言的原生写法（English / 简体中文），
+        # 真实配置值放在 userData，避免"显示文本即配置值"在翻译后失效。
+        # 切换后需重启才生效（界面在启动时一次性构建）。
+        self.combo_language = BaseComboBox()
+        self.combo_language.addItem(tr("Follow System"), AUTO)
+        for lang_code in ("en", "zh_CN"):
+            self.combo_language.addItem(LANGUAGE_NATIVE_NAMES[lang_code], lang_code)
+        saved_language = self.config.user_settings.get("language", AUTO)
+        idx_lang = self.combo_language.findData(saved_language)
+        self.combo_language.setCurrentIndex(idx_lang if idx_lang >= 0 else 0)
+
+        layout.addRow(tr("Theme:"), self.combo_theme)
+        layout.addRow(tr("Log Level:"), self.combo_log)
+        layout.addRow(tr("Interface Language:"), self.combo_language)
+
+        # 聊天气泡排版（字号 / 字符间距 / 行距 / 段前距 / 段后距）：参数较多且需要
+        # 实时预览，放在**独立的模态小面板**里编辑（含确认 / 取消 / 修改标记 /
+        # 未保存退出确认）。该面板自管保存，不参与本页的 Save / Revert 流程。
+        self.btn_chat_typography = QPushButton(tr(" Adjust..."))
+        self.btn_chat_typography.setCursor(Qt.PointingHandCursor)
+        self.btn_chat_typography.setToolTip(
+            tr("Adjust font size, letter spacing, line spacing and paragraph spacing "
+               "for LLM and user chat bubbles (with live preview)."))
+        self.btn_chat_typography.clicked.connect(self._open_chat_typography)
+        layout.addRow(tr("Chat text:"), self.btn_chat_typography)
+
         self.layout.addWidget(group)
+
+    def _open_chat_typography(self):
+        """打开聊天气泡排版面板。
+
+        惰性导入：面板会拉起 ``ChatBubbleWidget``（连带 chat_tasks / 知识库等
+        依赖），不能挂在设置页的导入链上，否则首次进入设置就要多等数秒。
+        """
+        from src.ui.components.dialogs.chat_typography_dialog import ChatTypographyDialog
+
+        dialog = ChatTypographyDialog(self.widget)
+        dialog.exec()
+        # 面板是临时窗口且带 parent，不显式回收会在反复打开时持续堆积 C++ 对象
+        dialog.deleteLater()
 
     # ---------- API Keys ----------
     def init_api_keys_section(self):
-        group = QGroupBox("Application Interface (API Keys)")
+        group = QGroupBox(tr("Application Interface (API Keys)"))
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
         self.input_ncbi_email = QLineEdit()
-        self.input_ncbi_email.setPlaceholderText("Required for NCBI Tools: e.g. user@university.edu")
+        self.input_ncbi_email.setPlaceholderText(tr("Required for NCBI Tools: e.g. user@university.edu"))
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
 
         self.input_ncbi_api_key = HoverRevealLineEdit()
-        self.input_ncbi_api_key.setPlaceholderText("NCBI API Key (Optional but recommended)")
+        self.input_ncbi_api_key.setPlaceholderText(tr("NCBI API Key (Optional but recommended)"))
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))
 
         self.input_openalex_api_key = HoverRevealLineEdit()
-        self.input_openalex_api_key.setPlaceholderText("OpenAlex Premium API Key (Optional)")
+        self.input_openalex_api_key.setPlaceholderText(tr("OpenAlex Premium API Key (Optional)"))
         self.input_openalex_api_key.setText(self.config.user_settings.get("openalex_api_key", ""))
 
         self.input_s2_api_key = HoverRevealLineEdit()
-        self.input_s2_api_key.setPlaceholderText("Semantic Scholar Key (Prevents 429 Errors)")
+        self.input_s2_api_key.setPlaceholderText(tr("Semantic Scholar Key (Prevents 429 Errors)"))
         self.input_s2_api_key.setText(self.config.user_settings.get("s2_api_key", ""))
 
         self.input_s2_rate_limit = QLineEdit()
-        self.input_s2_rate_limit.setPlaceholderText("S2 Rate Limit (requests/sec, default: 1.0)")
+        self.input_s2_rate_limit.setPlaceholderText(tr("S2 Rate Limit (requests/sec, default: 1.0)"))
 
         from PySide6.QtGui import QDoubleValidator
         validator = QDoubleValidator(0.01, 1000.0, 2, self.input_s2_rate_limit)
@@ -356,7 +401,7 @@ class EnvSectionMixin:
         self.input_s2_rate_limit.setText(str(val))
 
         self.input_github_token = HoverRevealLineEdit()
-        self.input_github_token.setPlaceholderText("GitHub Personal Access Token (Prevents rate limiting)")
+        self.input_github_token.setPlaceholderText(tr("GitHub Personal Access Token (Prevents rate limiting)"))
         self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
 
         self.lbl_api_hint = QLabel()
@@ -365,56 +410,64 @@ class EnvSectionMixin:
         ThemeManager().apply_class(self.lbl_api_hint, "hint")
         self._update_api_keys_html()
 
-        layout.addRow("NCBI Email:", self.input_ncbi_email)
-        layout.addRow("NCBI API Key:", self.input_ncbi_api_key)
-        layout.addRow("OpenAlex Key:", self.input_openalex_api_key)
-        layout.addRow("S2 API Key:", self.input_s2_api_key)
-        layout.addRow("S2 Rate Limit (req/s):", self.input_s2_rate_limit)
-        layout.addRow("GitHub Token:", self.input_github_token)
+        layout.addRow(tr("NCBI Email:"), self.input_ncbi_email)
+        layout.addRow(tr("NCBI API Key:"), self.input_ncbi_api_key)
+        layout.addRow(tr("OpenAlex Key:"), self.input_openalex_api_key)
+        layout.addRow(tr("S2 API Key:"), self.input_s2_api_key)
+        layout.addRow(tr("S2 Rate Limit (req/s):"), self.input_s2_rate_limit)
+        layout.addRow(tr("GitHub Token:"), self.input_github_token)
         layout.addRow("", self.lbl_api_hint)
 
         self.layout.addWidget(group)
 
+    #: API 密钥说明的 HTML 模板：颜色与字重以 ``{占位符}`` 注入，
+    #: 使整段文案成为**单一稳定翻译键**（不含随主题变化的色值）。
+    _API_HINT_TEMPLATE = (
+        "<div style='line-height: 1.5;'>"
+        "<span style='color:{warning}; font-weight:{bold};'>⚠️ NCBI RATE LIMITS:</span> "
+        "You MUST provide a valid email address to use NCBI tools. An API Key is "
+        "<span style='color:{success}; font-weight:{bold};'>optional but highly recommended</span>. "
+        "Without a key, tools will still function but under strict rate limits, which may slow down massive literature retrieval.<br><br>"
+        "<span style='color:{accent}; font-weight:{bold};'>INFO & API Keys:</span><br>"
+        "• <b>NCBI PubMed:</b> Email is mandatory. Adding an API key increases rate limits from 3 to 10 requests/sec. "
+        "<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{accent}; text-decoration:none;'>[Apply for NCBI Key]</a><br>"
+        "• <b>OpenAlex:</b> Works without a key, but <span style='color:{warning};'>the daily quota is low and 429 Too Many Requests is common</span>. A <b>free</b> API key (sign in with an email, no payment) raises the daily quota 10&times;; paid plans raise it further. "
+        "<a href='https://openalex.org/settings/api-key' style='color:{accent}; text-decoration:none;'>[Get OpenAlex API Key]</a><br>"
+        "• <b>Semantic Scholar:</b> An API Key severely prevents '429 Too Many Requests' errors during massive literature retrieval. "
+        "<a href='https://www.semanticscholar.org/product/api' style='color:{accent}; text-decoration:none;'>[Apply for S2 Key]</a><br>"
+        "• <b>GitHub Token:</b> Increases search limits from 10/min to 30/min. "
+        "<a href='https://github.com/settings/tokens?type=beta' style='color:{accent}; text-decoration:none;'>[Generate Token]</a>"
+        "</div>"
+    )
+
     def _update_api_keys_html(self):
         if not hasattr(self, 'lbl_api_hint'): return
         tm = ThemeManager()
-        self.lbl_api_hint.setText(
-            f"<div style='line-height: 1.5;'>"
-            f"<span style='color:{tm.color('warning')}; font-weight:{strong_weight_css()};'>⚠️ NCBI RATE LIMITS:</span> "
-            f"You MUST provide a valid email address to use NCBI tools. An API Key is <span style='color:{tm.color('success')}; font-weight:{strong_weight_css()};'>optional but highly recommended</span>. Without a key, tools will still function but under strict rate limits, which may slow down massive literature retrieval.<br><br>"
-            f"<span style='color:{tm.color('accent')}; font-weight:{strong_weight_css()};'>INFO & API Keys:</span><br>"
-            f"• <b>NCBI PubMed:</b> Email is mandatory. Adding an API key increases rate limits from 3 to 10 requests/sec. "
-            f"<a href='https://account.ncbi.nlm.nih.gov/settings/' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for NCBI Key]</a><br>"
-            f"• <b>OpenAlex:</b> Works without a key, but <span style='color:{tm.color('warning')};'>the daily quota is low and 429 Too Many Requests is common</span>. A <b>free</b> API key (sign in with an email, no payment) raises the daily quota 10&times;; paid plans raise it further. "
-            f"<a href='https://openalex.org/settings/api-key' style='color:{tm.color('accent')}; text-decoration:none;'>[Get OpenAlex API Key]</a><br>"
-            f"• <b>Semantic Scholar:</b> An API Key severely prevents '429 Too Many Requests' errors during massive literature retrieval. "
-            f"<a href='https://www.semanticscholar.org/product/api' style='color:{tm.color('accent')}; text-decoration:none;'>[Apply for S2 Key]</a><br>"
-            f"• <b>GitHub Token:</b> Increases search limits from 10/min to 30/min. "
-            f"<a href='https://github.com/settings/tokens?type=beta' style='color:{tm.color('accent')}; text-decoration:none;'>[Generate Token]</a>"
-            f"</div>"
-        )
+        self.lbl_api_hint.setText(tr(self._API_HINT_TEMPLATE).format(
+            warning=tm.color('warning'), success=tm.color('success'),
+            accent=tm.color('accent'), bold=strong_weight_css()))
 
     # ---------- API Server ----------
     def init_api_server_section(self):
-        group = QGroupBox("Local API Server (OpenAI Compatible)")
+        group = QGroupBox(tr("Local API Server (OpenAI Compatible)"))
         layout = QFormLayout(group)
         layout.setLabelAlignment(Qt.AlignRight)
 
         self.input_api_host = QLineEdit()
-        self.input_api_host.setPlaceholderText("e.g., 127.0.0.1 or 0.0.0.0")
+        self.input_api_host.setPlaceholderText(tr("e.g., 127.0.0.1 or 0.0.0.0"))
 
         self.input_api_port = QLineEdit()
-        self.input_api_port.setPlaceholderText("Default: 8000")
+        self.input_api_port.setPlaceholderText(tr("Default: 8000"))
 
         self.input_api_key = HoverRevealLineEdit()
-        self.input_api_key.setPlaceholderText("Set a custom API Key to secure your local endpoint (Optional)")
+        self.input_api_key.setPlaceholderText(tr("Set a custom API Key to secure your local endpoint (Optional)"))
 
-        layout.addRow("Host Address:", self.input_api_host)
-        layout.addRow("Server Port:", self.input_api_port)
-        layout.addRow("Access Key:", self.input_api_key)
+        layout.addRow(tr("Host Address:"), self.input_api_host)
+        layout.addRow(tr("Server Port:"), self.input_api_port)
+        layout.addRow(tr("Access Key:"), self.input_api_key)
 
-        hint = QLabel(
-            "💡 <i>API Server runs in the background. It shares all active models, RAG, and MCP settings with the GUI. Restart the application to apply port/host changes.</i>")
+        hint = QLabel(tr(
+            "💡 <i>API Server runs in the background. It shares all active models, RAG, and MCP settings with the GUI. Restart the application to apply port/host changes.</i>"))
         ThemeManager().apply_class(hint, "hint")
         hint.setWordWrap(True)
         layout.addRow("", hint)

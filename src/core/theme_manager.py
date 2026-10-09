@@ -6,8 +6,8 @@ from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon, Qt
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtSvg import QSvgRenderer
 
-from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
+from src.core.platform_env import app_resource_root, is_windows
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def apply_native_titlebar_theme(window, is_dark: bool) -> bool:
 
     非 Windows 平台直接返回 False，调用方无需自行判断平台。
     """
-    if sys.platform != "win32":
+    if not is_windows():
         return False
 
     global _win_titlebar_warned
@@ -477,16 +477,13 @@ class ThemeManager(QObject):
 
     @staticmethod
     def get_resource_path(*paths):
-        if '__compiled__' in globals():
-            base_dir = BASE_DIR
+        """解析打包 / 源码两种布局下的资源绝对路径。
 
-            if sys.platform == "darwin" and ".app/Contents/MacOS" in base_dir:
-                base_dir = os.path.abspath(os.path.join(base_dir, "..", "Resources"))
-
-        elif getattr(sys, 'frozen', False):
-            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
-        else:
-            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        布局判断（PyInstaller 的 ``sys._MEIPASS``、macOS ``.app`` 包内
+        ``Contents/Resources`` 等）统一由 :mod:`src.core.platform_env` 负责，
+        此处不再自行区分平台。
+        """
+        base_dir = app_resource_root()
 
         target = os.path.join(base_dir, *paths)
         if not paths or os.path.exists(target):
@@ -652,7 +649,7 @@ class ThemeManager(QObject):
         return QIcon(pixmap)
 
     def get_app_icon(self) -> QIcon:
-        if sys.platform == "win32":
+        if is_windows():
             ico_path = self.get_resource_path("Assets", "icon.ico")
             if os.path.exists(ico_path):
                 return QIcon(ico_path)
@@ -710,47 +707,32 @@ class ThemeManager(QObject):
             outline: none;
         }}
 
-        QScrollBar:vertical {{
-            background: {self.color('bg_main')};
-            width: 8px;
-            border-left: 1px solid {self.color('border')};
-            margin: 0px;
-        }}
-        QScrollBar::handle:vertical {{
-            background: {self.color('text_muted')};
-            min-height: 20px;
-            border-radius: 4px;
-        }}
-        QScrollBar::handle:vertical:hover {{
-            background: {self.color('accent')};
-        }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-            height: 0px; 
-        }}
-
-        QScrollBar:horizontal {{
-            background: {self.color('bg_main')};
-            height: 8px;
-            border-top: 1px solid {self.color('border')};
-            margin: 0px;
-        }}
-        QScrollBar::handle:horizontal {{
-            background: {self.color('text_muted')};
-            min-width: 20px;
-            border-radius: 4px;
-        }}
-        QScrollBar::handle:horizontal:hover {{
-            background: {self.color('accent')};
-        }}
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-            width: 0px;
-        }}
+        /* 滚动条外观：唯一来源是 overlay_scrollbar_qss（轨道底色 + 滑块常态/交互态
+           + 箭头不占位都在那里定义）。这里直接复用，不再手写第二份——否则应用里
+           会同时存在"应用基线一套、聊天气泡/滚动区另一套"的两种滚动条，用户看到的
+           就是"有的滚动条认得出来、有的完全看不出来"。 */
+        {overlay_scrollbar_qss()}
 
         QLineEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, 
         QLineEdit:read-only, QPlainTextEdit:read-only {{
             background-color: {self.color('bg_main')} !important;
             color: {self.color('text_muted')} !important;
             border: 1px dashed {self.color('border')} !important;
+        }}
+
+        /* 工具提示：qdarktheme 的样式表里也有一条 QToolTip 规则，只按"它自己"
+           的主题取色。本样式表追加在它之后（同特异性时后声明者胜），因此在这里
+           按应用主题再声明一次，提示条底色/文字永远与应用主题同源——否则浅色界面
+           里会出现"深底 + 浅字"或"浅底 + 深字"的错配提示条（如气泡内图片的
+           "Click to view full image"）。 */
+        QToolTip {{
+            background-color: {self.color('bg_card')};
+            color: {self.color('text_main')};
+            border: 1px solid {self.color('border')};
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-family: {self.font_family()};
+            font-size: 13px;
         }}
 
         QLabel[cssClass="hint"] {{ color: {self.color('text_muted')}; font-size: 11px; }}
@@ -807,40 +789,82 @@ def title_weight_css() -> str:
     return title_font_weight() or "bold"
 
 
-def overlay_scrollbar_qss(thickness: int = 8, handle_color: str = None) -> str:
-    """Overlay 风格滚动条：不操作时不可见，鼠标移到滚动条上才显形。
+def overlay_scrollbar_qss(thickness: int = 8, handle_color: str = None,
+                          idle_alpha: float = 1.0, prefix: str = "",
+                          groove_alpha: float = 0.18) -> str:
+    """滚动条样式：**不透明滑块 + 可见轨道**，悬停/拖动切换到强调色。
 
-    常显滚动条会在图文流里留下一条贯穿整屏的竖线（对话区、代码块、长表格尤其
-    明显）。这里把滑块常态设为**完全透明**，鼠标进入滚动条区域或按住拖动时才上色，
-    轨道与箭头始终不占视觉空间——与 macOS / 现代 Web 的 overlay 滚动条一致。
+    这个外观前后迭代了三轮，每轮都是被实测数据推着走的：
+
+    * **第一轮：滑块常态完全透明**（理由是"常显滚动条会在图文流里留下一条贯穿
+      整屏的竖线"）。但滑块是**短圆角条**、并非整条轨道，完全透明带来的问题更
+      严重：横向溢出的宽表格 / 长代码行下方那条横向滚动条与背景毫无区分度，用户
+      根本看不出内容还能横向滚动——一个只在悬停时才存在的提示，等于没有提示。
+    * **第二轮：滑块半透明（0.4 → 0.6）+ 轨道一层淡底（0.18）**。方向对了但仍不
+      够：取用户截图实测，浅色主题下**轨道 #919191、滑块 #777777，对比度只有
+      1.3:1**，肉眼依旧分不出哪一截是滑块。
+    * **第三轮（当前）：滑块改为不透明**的 ``text_muted``（浅色 #666666 / 深色
+      #888888），与轨道的对比度升到 **3.3~4.5:1**，两套主题下都一眼可辨；悬停 /
+      按压切到 ``accent`` / ``accent_hover``，反馈不再依赖"深浅变化"而是明确的
+      颜色切换。**不透明是刻意的**：滑块只有 8px 宽，任何半透明都会让它的实际
+      颜色随内容底（代码块 / 表格 / 面板）浮动，同一主题下不同位置深浅不一。
+      另外删掉了 ``QScrollBar:hover::handle`` 那条"扩大命中范围"的规则——见下面
+      QSS 内的注释，Qt 会把它画到轨道上，把对比度重新抹平。
+
+    * **滑块盒必须自己定**（``margin: 0``）：qdarktheme 的样式表给滑块设了
+      ``margin: 14px 4px``，这条声明会让 Qt 切到"自算滑块盒"的分支——实测结果是
+      **滑块被画满整条滚动条**（样式算出的滑块高 150px，画出来却是 420px）。于是
+      无论内容溢出多少，用户看到的永远是一根通长的灰棒。归零 margin 后盒模型回到
+      我们自己手里，滑块长度恢复正常。
+
+    箭头保持不占位、不显形；``idle_alpha=0`` 仍可回退到"完全隐形"的旧行为，
+    ``groove_alpha=0`` 则得到"只有滑块、没有轨道"的外观。
 
     :param thickness: 滚动条粗细（px），横竖一致。
     :param handle_color: 滑块颜色，缺省取当前主题的 ``text_muted``。
+    :param idle_alpha: 非交互状态下滑块的透明度（0~1），默认 ``1.0``（不透明，
+        对比度最高）。传 ``0`` 可恢复"完全隐形、移入滚动条区域才显形"的旧行为。
+    :param prefix: 选择器作用域前缀（如 ``"QScrollArea#BubbleBlock"``）。用于把
+        本样式的优先级抬到"含 id"级别，压住宿主容器样式表里等优先级的
+        ``QScrollBar { ... }`` 规则——Qt 在特异性相同时是**祖先样式优先**，因此
+        组件若被放进带通用滚动条规则的对话框，不加固就会被"换皮"。
+        缺省空串 = 全局选择器，与历史行为一致。
+    :param groove_alpha: 轨道底色的透明度（0~1）。传 ``0`` 得到"只有滑块、没有
+        轨道"的极简外观。
     """
     tm = ThemeManager()
     color = handle_color or tm.color('text_muted')
+    idle = max(0.0, min(1.0, float(idle_alpha)))
+    groove = max(0.0, min(1.0, float(groove_alpha)))
+    pre = f"{prefix.strip()} " if prefix and prefix.strip() else ""
     return f"""
-        QScrollBar:vertical, QScrollBar:horizontal {{
-            background: transparent; border: none; margin: 0px;
+        {pre}QScrollBar:vertical, {pre}QScrollBar:horizontal {{
+            background: {hex_to_rgba(color, groove)}; border: none; margin: 0px;
+            border-radius: {thickness // 2}px;
         }}
-        QScrollBar:vertical {{ width: {thickness}px; }}
-        QScrollBar:horizontal {{ height: {thickness}px; }}
-        QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
-            background: transparent; border: none; border-radius: {thickness // 2}px;
+        {pre}QScrollBar:vertical {{ width: {thickness}px; }}
+        {pre}QScrollBar:horizontal {{ height: {thickness}px; }}
+        {pre}QScrollBar::handle:vertical, {pre}QScrollBar::handle:horizontal {{
+            background: {hex_to_rgba(color, idle)}; border: none; margin: 0px;
+            border-radius: {thickness // 2}px;
         }}
-        QScrollBar::handle:vertical {{ min-height: 28px; }}
-        QScrollBar::handle:horizontal {{ min-width: 28px; }}
-        /* 鼠标进入滚动条区域 → 滑块显形（扩大命中范围；个别平台若不识别该组合，
-           仍有下面的标准 :hover 规则兜底） */
-        QScrollBar:hover::handle:vertical, QScrollBar:hover::handle:horizontal {{
-            background: {hex_to_rgba(color, 0.35)};
+        {pre}QScrollBar::handle:vertical {{ min-height: 28px; }}
+        {pre}QScrollBar::handle:horizontal {{ min-width: 28px; }}
+        /* 悬停 / 拖动切到强调色：滑块常态已不透明，靠透明度"加深"没有余量；颜色
+           切换也比深浅变化明显得多。
+
+           注：**不要**用 ``QScrollBar:hover::handle`` 那种"鼠标进入滚动条区域就
+           变深"的写法。Qt 会把该声明的背景画到**轨道（page 区域）**上而不是滑块
+           上——实测浅色下轨道被涂成 accent ``#005a9e``、深色下被涂成 ``#58a6ff``，
+           整条滚动条变蓝，同时"轨道 vs 滑块"的对比度被这层涂色抹平（这正是
+           "滚动条和背景差异太小、必须悬停才认得出"的直接来源）。只用标准的
+           ``::handle:hover`` / ``::handle:pressed`` 子控件伪状态。 */
+        {pre}QScrollBar::handle:vertical:hover, {pre}QScrollBar::handle:horizontal:hover {{
+            background: {tm.color('accent')};
         }}
-        QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
-            background: {hex_to_rgba(color, 0.5)};
+        {pre}QScrollBar::handle:vertical:pressed, {pre}QScrollBar::handle:horizontal:pressed {{
+            background: {tm.color('accent_hover')};
         }}
-        QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed {{
-            background: {hex_to_rgba(color, 0.7)};
-        }}
-        QScrollBar::add-line, QScrollBar::sub-line {{ height: 0px; width: 0px; border: none; }}
-        QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+        {pre}QScrollBar::add-line, {pre}QScrollBar::sub-line {{ height: 0px; width: 0px; border: none; }}
+        {pre}QScrollBar::add-page, {pre}QScrollBar::sub-page {{ background: transparent; }}
     """
