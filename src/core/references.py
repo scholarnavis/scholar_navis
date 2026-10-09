@@ -33,6 +33,8 @@ import threading
 from dataclasses import dataclass, asdict, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
+from src.core.think_tags import strip as strip_think_blocks
+
 logger = logging.getLogger("Core.References")
 
 # --------------------------------------------------------------------------- #
@@ -41,9 +43,15 @@ logger = logging.getLogger("Core.References")
 #: 参考文献块起始的分隔线（历史格式，``follow_ups`` 依赖该字面量做页脚分离）。
 FOOTER_RULE_HTML = "<br><hr style='border:0; height:1px; background:#444; margin:15px 0;'>"
 #: 参考文献块标题（保留历史字面量，兼容既有导出/复制解析）。
-CITES_HEADER_HTML = "<b>📚 Cited Sources:</b><br>"
+CITES_TITLE = "📚 Cited Sources:"
+CITES_HEADER_HTML = f"<b>{CITES_TITLE}</b><br>"
 #: 页脚整体起始标记：正文/追问与参考文献块的分界点。
 FOOTER_MARKER = FOOTER_RULE_HTML + CITES_HEADER_HTML
+
+#: Provenance（运行追溯日志）块标题。它由 chat_tasks 追加在同一段页脚末尾，
+#: 属于**本机运行信息**：导出/复制时随页脚整体丢弃，只有参考文献行会被回收。
+PROVENANCE_TITLE = "📊 Provenance (trace log):"
+PROVENANCE_HEADER_HTML = f"<b>{PROVENANCE_TITLE}</b><br>"
 
 #: 正文行内引用标记 ``[n]``（n 为 1~3 位数字；本地 KB 文档等已编号来源使用）。
 INLINE_CITE_RE = re.compile(r"\[(\d{1,3})\]")
@@ -59,12 +67,8 @@ INLINE_TOKEN_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9._:-]{0,63}|\d{1,3})\]")
 #: key 合法性校验（与 _KEY_TOKEN_RE 同形，整串匹配）。
 _VALID_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]{0,63}$")
 
-#: 思维链 / 工具过程块：统计"首次出现顺序"时排除，避免模型在 <think> 里的
-#: 示例编号抢占正文的首次出现位置。
-_THINK_BLOCK_RE = re.compile(
-    r"<(?:think|mcp_process)\b[^>]*>.*?</(?:think|mcp_process)>"
-    r"|<(?:think|mcp_process)\b[^>]*>.*$",
-    re.DOTALL | re.IGNORECASE)
+#: 思维链 / 工具过程块的识别口径统一在 src/core/think_tags.py（见 strip()）：
+#: 统计"首次出现顺序"时排除，避免模型在思考里的示例编号抢占正文的首次出现位置。
 
 #: 条目文本的展示上限（超出仅用于展示截断，原始数据不丢）。
 _SNIPPET_DISPLAY_MAX = 2000
@@ -532,9 +536,9 @@ class ReferenceRegistry:
         if not text:
             return text or "", [], []
         with self._lock:
-            # 统计首次出现顺序时排除 <think>/<mcp_process>：模型可能在其中
-            # 写"用 [x] 引用"这类示意，不应参与正文编号。
-            scan_text = _THINK_BLOCK_RE.sub(" ", text)
+            # 统计首次出现顺序时排除思考块/工具过程块：模型可能在其中写
+            # "用 [x] 引用"这类示意，不应参与正文编号。
+            scan_text = strip_think_blocks(text)
             order: Dict[int, int] = {}
             unresolved: List[str] = []
 
@@ -605,3 +609,137 @@ class ReferenceRegistry:
                 f"<b>{number}</b> {label}</a></div>"
             )
         return f"<div style='margin-bottom: 6px;'>▪ <b>{number}</b> {label}</div>"
+
+
+# --------------------------------------------------------------------------- #
+#  导出 / 复制：把页脚参考文献收回成结构化条目并按目标格式重排版
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class FooterReference:
+    """从消息页脚解析回来的一条参考文献（供导出 / 复制重排版）。
+
+    与 :class:`ReferenceItem` 的区别是只保留"能确切还原"的字段：编号、
+    纯文本著录、可点击地址。页脚里的著录文本已经是拼装好的字符串，反推
+    authors / year / journal 只会制造臆测数据，因此不还原为完整条目。
+    """
+
+    index: int
+    text: str
+    link: str
+
+
+#: 页脚单条参考文献行：以行首的 ``▪`` 为锚，可选锚点链接，内容到本行 ``</div>``。
+#: **刻意不锚定**编号的包裹标签（原始 ``<b>``、渲染管线改写出的 ``<span>``）与
+#: 容器内联样式——只认某个具体标签时，"复制渲染结果"会因为标签被改写而漏掉全部
+#: 条目（页脚在渲染后就是这种形态）。
+FOOTER_ENTRY_RE = re.compile(
+    r"▪\s*(?:<a\b[^>]*?href=['\"](?P<link>[^'\"]*)['\"][^>]*>)?(?P<body>.*?)</div>",
+    re.DOTALL | re.IGNORECASE)
+
+#: 剥标签后条目文本开头的编号 ``[n]``。
+_ENTRY_NUMBER_RE = re.compile(r"^\s*\[(\d{1,3})\]\s*")
+
+#: 可出现在导出文件里的地址：仅保留 http(s)，应用内路由（cite://）与本地路径
+#: 换机器即失效，写进导出文件只会成为噪声。
+_EXPORTABLE_LINK_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+#: 参考文献段落标题（按目标格式取用）。
+REFERENCE_HEADINGS = {
+    "markdown": "## References",
+    "plain": "REFERENCES",
+}
+
+
+def parse_footer_entries(footer_html: str) -> List[FooterReference]:
+    """解析页脚 HTML 里的参考文献行；无行返回空列表。"""
+    found: List[FooterReference] = []
+    for m in FOOTER_ENTRY_RE.finditer(footer_html or ""):
+        body = _html.unescape(re.sub(r"<[^>]+>", "", m.group("body") or ""))
+        body = " ".join(body.split())
+        number = _ENTRY_NUMBER_RE.match(body)
+        if not number:
+            # 页脚里还有 Provenance 一类同样带 ▪ 的行（工具调用统计），跳过。
+            continue
+        label = body[number.end():].strip()
+        if not label:
+            continue
+        link = (m.group("link") or "").strip()
+        if link and not _EXPORTABLE_LINK_RE.match(link):
+            link = ""
+        found.append(FooterReference(index=int(number.group(1)), text=label, link=link))
+    return found
+
+
+#: 页脚分隔线的宽松形态：原始 ``FOOTER_RULE_HTML``，或渲染管线改写后的裸 ``<hr …>``
+#: （markdown 会吃掉前缀 ``<br>`` 并重写内联样式）。
+_FOOTER_RULE_RE = re.compile(r"<br\s*/?>\s*<hr\b[^>]*>|<hr\b[^>]*>", re.IGNORECASE)
+
+#: 标题锚点与它前面的分隔线之间的最大间距：超过则不认为该分隔线属于页脚，
+#: 避免把正文里正常的分隔线误划进页脚。
+_FOOTER_RULE_GAP_MAX = 240
+
+
+def _footer_start(text: str) -> int:
+    """页脚起点：各页脚标记中最早的位置，并把紧邻其前的分隔线一并纳入。
+
+    渲染管线会把 ``FOOTER_RULE_HTML``（``<br><hr style='…'>``）改写成裸
+    ``<hr style='…'>``，因此不能只按字面量找；标题文字是稳定锚点，再向前回吞
+    一条紧邻的分隔线——否则复制/导出会在正文末尾留下一条孤立的 ``---``。
+    """
+    positions = [i for i in (text.find(FOOTER_RULE_HTML), text.find(CITES_TITLE),
+                             text.find(PROVENANCE_TITLE)) if i != -1]
+    if not positions:
+        return -1
+    start = min(positions)
+    rule = None
+    for m in _FOOTER_RULE_RE.finditer(text, 0, start):
+        rule = m
+    if rule is not None and start - rule.start() <= _FOOTER_RULE_GAP_MAX:
+        return rule.start()
+    return start
+
+
+def split_footer(text: str) -> Tuple[str, List[FooterReference]]:
+    """把一条消息拆成 ``(正文, 参考文献条目)``。
+
+    页脚（参考文献块 + Provenance 追溯日志）一律位于回复末尾，因此取**各页脚
+    标记中最早出现的位置**作为切点。这里不能只认 :data:`FOOTER_RULE_HTML` 一个字面
+    量：渲染管线会把 ``<hr>`` 前的 ``<br>`` 吃掉并重写内联样式，渲染结果的页脚
+    分隔线已不是原始字符串；标题文字（:data:`CITES_TITLE` /
+    :data:`PROVENANCE_TITLE`）才是稳定的锚点。
+
+    页脚中**只回收参考文献行**：Provenance 等运行追溯内容整体丢弃。
+    """
+    if not text:
+        return "", []
+    start = _footer_start(text)
+    if start == -1:
+        return text, []
+    rest = text[start:]
+    # 参考文献区间止于 Provenance 标题：它同样带 ▪ 行（工具调用统计），
+    # 不截断会被误解析成参考文献条目。
+    prov_at = rest.find(PROVENANCE_TITLE)
+    region = rest[:prov_at] if prov_at != -1 else rest
+    return text[:start], parse_footer_entries(region)
+
+
+def render_footer_references(refs: Sequence[FooterReference], target: str = "plain") -> str:
+    """按目标格式渲染参考文献段落；无条目返回空串。
+
+    ``target`` 取 ``"markdown"`` / ``"plain"``：
+
+    * ``markdown`` —— 地址写成 Markdown 自动链接 ``<https://…>``，渲染出来是
+      可点击链接（导出 .md、复制 Markdown 用）；
+    * ``plain`` —— 直接给出裸地址，纯文本环境里也能复制（导出 .txt 用）。
+    """
+    items = [r for r in (refs or []) if r.text]
+    if not items:
+        return ""
+    heading = REFERENCE_HEADINGS.get(target, REFERENCE_HEADINGS["plain"])
+    lines = [heading, ""]
+    for ref in items:
+        line = f"[{ref.index}] {ref.text}"
+        if ref.link:
+            line += f" <{ref.link}>" if target == "markdown" else f" {ref.link}"
+        lines.append(line)
+    return "\n".join(lines).strip()

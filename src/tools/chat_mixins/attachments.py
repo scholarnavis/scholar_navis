@@ -429,7 +429,7 @@ class ChatAttachmentsMixin:
         act_txt = menu.addAction(tm.icon("file-text", "text_main"), tr("Export as TXT"))
         menu.addSeparator()
         act_json = menu.addAction(tm.icon("archive", "text_main"),
-                                  tr("Export as JSON (Lossless, for re-import)"))
+                                  tr("Export as Archive (.schat, lossless, for re-import)"))
 
         # 在鼠标位置弹出菜单
         action = menu.exec(QCursor.pos())
@@ -441,7 +441,7 @@ class ChatAttachmentsMixin:
         elif action == act_md:
             filter_str, default_ext = tr("Markdown File (*.md)"), ".md"
         elif action == act_json:
-            filter_str, default_ext = tr("Scholar Navis History (*.schat *.json)"), ".schat"
+            filter_str, default_ext = tr("Scholar Navis Archive (*.schat)"), ".schat"
         else:
             filter_str, default_ext = tr("Text File (*.txt)"), ".txt"
 
@@ -453,7 +453,12 @@ class ChatAttachmentsMixin:
         if not path:
             return
 
-        if not path.endswith(default_ext):
+        if default_ext == ".schat":
+            # 无损导出是 ZIP 压缩容器，扩展名必须与容器一致：用户若把名字写成
+            # .json，会出现"名为 JSON 实为压缩包"的文件，jq/编辑器都会解析失败。
+            if not path.endswith(".schat"):
+                path = os.path.splitext(path)[0] + ".schat"
+        elif not path.endswith(default_ext):
             path += default_ext
 
         def _get_colored_svg_base64(icon_name, color_hex):
@@ -510,9 +515,14 @@ class ChatAttachmentsMixin:
 
     def _on_export_result(self, result):
         if result and result.get("success"):
-            self.export_pd.show_finish_state(
-                True, tr("Export Complete"),
-                tr("Saved to {name}").format(name=os.path.basename(result.get('path', ''))))
+            detail = tr("Saved to {name}").format(name=os.path.basename(result.get('path', '')))
+            stats = result.get("stats") or {}
+            if stats.get("attachments"):
+                detail += "\n" + tr("{n} attachment(s) embedded.").format(n=stats["attachments"])
+            missing = stats.get("missing_attachments") or []
+            if missing:
+                detail += "\n" + tr("{n} attachment(s) not found (original path kept).").format(n=len(missing))
+            self.export_pd.show_finish_state(True, tr("Export Complete"), detail)
             ToastManager().show(tr("Document successfully exported."), "success")
             self.logger.info(f"Chat history successfully exported to: {result.get('path')}")
         else:
