@@ -248,3 +248,7 @@ _internal
 *.lnk
 _tmp_*
 
+# 本地打包过程的日志与临时 runtime hook（由 build_app.py 生成）
+pack_log.txt
+torch_runtime_hook.py
+
