@@ -299,7 +299,7 @@ filelock==3.25.0 \
     #   huggingface-hub
     #   torch
     #   transformers
-flatbuffers==25.12.19 \
+flatbuffers==25.12.19 ; sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32' \
     --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
     # via
     #   onnxruntime
@@ -724,15 +724,9 @@ onnx==1.22.0 \
     # via
     #   optimum-onnx
     #   scholar-navis
-onnxruntime==1.24.4 \
-    --hash=sha256:0d640eb9f3782689b55cfa715094474cd5662f2f137be6a6f847a594b6e9705c \
-    --hash=sha256:1a5c5a544b22f90859c88617ecb30e161ee3349fcc73878854f43d77f00558b5 \
-    --hash=sha256:535b29475ca42b593c45fbb2152fbf1cdf3f287315bf650e6a724a0a1d065cdb \
-    --hash=sha256:cad1c2b3f455c55678ab2a8caa51fb420c25e6e3cf10f4c23653cdabedc8de78 \
-    --hash=sha256:e6214096e14b7b52e3bee1903dc12dc7ca09cb65e26664668a4620cc5e6f9a90
-    # via
-    #   chromadb
-    #   scholar-navis
+onnxruntime==1.24.4 ; sys_platform == 'darwin' \
+    --hash=sha256:cad1c2b3f455c55678ab2a8caa51fb420c25e6e3cf10f4c23653cdabedc8de78
+    # via scholar-navis
 onnxruntime-directml==1.24.4 ; sys_platform == 'win32' \
     --hash=sha256:f2ecb68b7b7b259d2ef3112ae760149f9b5a1e7c0fbb73d539da6250a648a614
     # via scholar-navis

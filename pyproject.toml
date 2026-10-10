@@ -87,11 +87,33 @@ torchvision = { index = "pytorch-cpu" }
 
 
 [tool.uv]
-# chromadb 会间接拉入 CPU 版 onnxruntime，与平台加速包（linux: onnxruntime-gpu /
-# win32: onnxruntime-directml）并存。两个发行包写入同一目录，版本一致时覆盖是
-# 幂等的、无害的；不一致时则会破坏环境。这里统一钉死版本，避免解析器为不同平台
-# 选出不同构建。
-override-dependencies = ["onnxruntime==1.24.4"]
+# 依赖锁定用到两项较新的能力：exclude-dependencies 的作用域形式，以及 lock
+# revision 5。两者都需要 uv >= 0.13，这里显式声明最低版本——旧版 uv 会直接拒绝
+# 运行整个项目并给出可读提示，而不是抛出难懂的 TOML / lockfile 解析错误。
+required-version = ">=0.13.0"
+
+# chromadb 无条件依赖 onnxruntime（CPU 版），而本项目在 Windows / Linux 上用的是
+# 加速发行包（onnxruntime-directml / onnxruntime-gpu）。三者提供**同一个**
+# ``onnxruntime`` 包目录，安装时按同名文件互相覆盖：实测 Windows 上 CPU 版的
+# ``capi/onnxruntime.dll``（16119840 B）会盖掉 DirectML 版的（21111832 B），
+# ``get_available_providers()`` 随之只剩 ``AzureExecutionProvider`` /
+# ``CPUExecutionProvider``——设备页把 RTX 5060 与 Radeon 610M 一律标成
+# "unavailable"，GPU 加速实际从未生效。
+exclude-dependencies = [
+    # 作用域限定在 chromadb 自己（作用域形式需要 uv >= 0.13）：Windows / Linux 上
+    # 只保留加速发行包，macOS 仍按 [project.dependencies] 装 CPU 版。
+    { package = { name = "chromadb" }, dependencies = ["onnxruntime"] },
+]
+
+# 这里**不要**再用 override-dependencies 钉 onnxruntime：uv 对带平台标记的依赖在
+# override 生效时会无条件替换（marker 被忽略），`onnxruntime==... ; sys_platform ==
+# 'darwin'` 会被当成三平台都要装，Windows 上重新引入 CPU 版并与 DirectML 版互相覆盖。
+# 版本由 [project.dependencies] 的 `==` 直接钉死，无需 override。
+#
+# 迁移：环境里若残留过 CPU 版，uv 卸载它会连带删掉两个发行包共享的同名文件
+# （onnxruntime/capi/*.dll），补一次
+# `uv sync --reinstall-package onnxruntime-directml` 即可（或删除 .venv 重装）。
+# 全新环境不受影响。
 
 # ---- 安全下限（Dependabot 告警修复）----
 # 这些是传递依赖，没法在 [project.dependencies] 里写下限。用 constraint-dependencies
