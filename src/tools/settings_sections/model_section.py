@@ -179,9 +179,6 @@ class ModelSectionMixin:
             return
 
         detail = tr("Testing inference device '{device}'...").format(device=device_id)
-        if str(device_id).startswith(("trt", "tensorrt")):
-            detail = tr("Testing TensorRT device; the first run compiles engines "
-                        "(may take tens of seconds), later runs reuse the cache...")
 
         self.test_dev_pd = ProgressDialog(self.widget, tr("Device Connection Test"), detail)
         self.test_dev_pd.show()

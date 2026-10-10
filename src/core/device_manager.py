@@ -6,7 +6,6 @@ import sys
 from src.core.onnx_provider import (
     AUTO_PRIORITY, HINT_ID_PREFIX, PROVIDER_CPU, ir_version_mismatch,
     list_available_providers, probe_provider, resolve_provider,
-    tensorrt_runtime_available,
 )
 from src.core.platform_env import (
     PLATFORM_LINUX, PLATFORM_MACOS, PLATFORM_WINDOWS, no_window_flags, os_family,
@@ -175,8 +174,8 @@ class DeviceManager:
         ``CUDAExecutionProvider``，而实际建会话会静默回退 CPU。
 
         只探测本应用认识的加速提供者（见 ``AUTO_PRIORITY``）：构建里额外携带的
-        提供者（如 TensorRT）不在自动选择范围内，逐个建会话探测既无收益，
-        又会产生大段无意义的 ORT 报错。
+        提供者不在自动选择范围内，逐个建会话探测既无收益，又会产生大段无意义的
+        ORT 报错。
         """
         usable = [p for p in AUTO_PRIORITY if probe_provider(p)]
         return [PROVIDER_CPU] + usable
@@ -192,8 +191,8 @@ class DeviceManager:
         （id ``unsupported_N``），用户既能选中、又能保存，点"Test Compute Device"
         还会得到"不是可识别的加速器"这种无法行动的提示。
 
-        可选设备顺序：Auto → CPU → 各加速器（同款 GPU 的 TensorRT 排在 CUDA 前，
-        因为 TRT 更快）；``unavailable`` 说明项统一排在最后，避免混在可选项之间。
+        可选设备顺序：Auto → CPU → 各加速器；``unavailable`` 说明项统一排在最后，
+        避免混在可选项之间。
         """
         providers = self.get_onnx_providers()
         gpu_info_list = self.get_gpu_info()
@@ -208,9 +207,6 @@ class DeviceManager:
         has_dml = "DmlExecutionProvider" in providers and probe_provider("DmlExecutionProvider")
         has_coreml = "CoreMLExecutionProvider" in providers and probe_provider("CoreMLExecutionProvider")
         has_rocm = "ROCmExecutionProvider" in providers and probe_provider("ROCmExecutionProvider")
-        # TensorRT 用轻量判断（构建期 + libnvinfer 存在）：真实探测会构建引擎，
-        # 放在设备枚举路径上代价过高。
-        has_trt = tensorrt_runtime_available()
 
         if has_coreml:
             devices.append({"id": "coreml", "name": "Apple Silicon (CoreML)"})
@@ -219,7 +215,6 @@ class DeviceManager:
 
         # 解绑 WMI 索引，修正笔记本 DXGI/CUDA 真实序号映射
         cuda_idx = 0
-        trt_idx = 0
         is_hybrid = len(gpu_info_list) > 1  # 判断是否为双显卡环境
 
         def _hint(gpu_name: str, detail: str, advice: str) -> dict:
@@ -240,19 +235,12 @@ class DeviceManager:
             gpu_lower = gpu_name.lower()
 
             if "nvidia" in gpu_lower:
-                if has_trt or has_cuda:
-                    if has_trt:
-                        devices.append({
-                            "id": f"trt:{trt_idx}",
-                            "name": (f"{gpu_name} (TensorRT - fastest; first run "
-                                     f"compiles engines, then cached)")})
-                    if has_cuda:
-                        # CUDA 环境下，NVIDIA 独显永远从 0 开始算
-                        devices.append({
-                            "id": f"cuda:{cuda_idx}",
-                            "name": f"{gpu_name} (CUDA Accelerated)"})
+                if has_cuda:
+                    # CUDA 环境下，NVIDIA 独显永远从 0 开始算
+                    devices.append({
+                        "id": f"cuda:{cuda_idx}",
+                        "name": f"{gpu_name} (CUDA Accelerated)"})
                     cuda_idx += 1
-                    trt_idx += 1
                 elif sys_name == PLATFORM_WINDOWS and has_dml:
                     # DirectML 环境下，双显卡笔记本的独显大概率被 DXGI 分配在 Adapter 1
                     target_id = 1 if is_hybrid else 0
@@ -401,9 +389,6 @@ class DeviceManager:
         self.logger.info(f"GPUs: {', '.join(info['gpus'])}")
         self.logger.info(f"ONNX Providers (build): {', '.join(info['ort_providers'])}")
         self.logger.info(f"ONNX Providers (usable): {', '.join(info.get('ort_providers_active', []))}")
-        self.logger.info(
-            f"TensorRT: build={'yes' if 'TensorrtExecutionProvider' in info['ort_providers'] else 'no'} | "
-            f"runtime libs={'yes' if tensorrt_runtime_available() else 'no'}")
         # onnx 与 onnxruntime 独立升级：IR 版本能力脱节时 GPU 会被误判不可用
         # （详见 onnx_provider.ir_version_mismatch）。这里把结论写进启动日志，
         # 让同类问题一眼可见，而不是等到"CUDA 又炸了"才发现。

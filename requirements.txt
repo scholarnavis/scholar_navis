@@ -201,6 +201,10 @@ colorama==0.4.6 ; (os_name != 'nt' and sys_platform == 'win32') or (os_name == '
     #   build
     #   tqdm
     #   uvicorn
+coloredlogs==15.0.1 ; platform_machine == 'x86_64' and sys_platform == 'darwin' \
+    --hash=sha256:612ee75c546f53e92e70049c9dbfcc18c935a2b9a53b66085ce9ef6a6e5c0934 \
+    --hash=sha256:7c991aa71a4577af2f82600d8f8f3a89f936baeaf9b50a9c197da014e5bf16b0
+    # via onnxruntime
 cryptography==50.0.1 \
     --hash=sha256:01f41478cf33fc605a6a089cd56d28b45c6c0b45a1928b61797f2621a04bac71 \
     --hash=sha256:05ba322c4da95b262a212c345af888ef2c37c88c0509756ea00a0e6d68850f23 \
@@ -299,7 +303,7 @@ filelock==3.25.0 \
     #   huggingface-hub
     #   torch
     #   transformers
-flatbuffers==25.12.19 ; sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32' \
+flatbuffers==25.12.19 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or sys_platform == 'linux' or sys_platform == 'win32' \
     --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
     # via
     #   onnxruntime
@@ -418,6 +422,10 @@ huggingface-hub==0.36.2 \
     #   optimum
     #   tokenizers
     #   transformers
+humanfriendly==10.0 ; platform_machine == 'x86_64' and sys_platform == 'darwin' \
+    --hash=sha256:1697e1a8a8f550fd43c2865cd84542fc175a61dcb779b6fee18cf6b6ccba1477 \
+    --hash=sha256:6b0b831ce8f15f7300721aa49829fc4e83921a9a301cc7f606be6686a2288ddc
+    # via coloredlogs
 idna==3.18 \
     --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2 \
     --hash=sha256:ffb385a7e039654cef1ab9ef32c6fafe283c0c0467bba1d9029738ce4a14a848
@@ -724,13 +732,19 @@ onnx==1.22.0 \
     # via
     #   optimum-onnx
     #   scholar-navis
-onnxruntime==1.24.4 ; sys_platform == 'darwin' \
-    --hash=sha256:cad1c2b3f455c55678ab2a8caa51fb420c25e6e3cf10f4c23653cdabedc8de78
+onnxruntime==1.23.2 ; platform_machine == 'x86_64' and sys_platform == 'darwin' \
+    --hash=sha256:218295a8acae83905f6f1aed8cacb8e3eb3bd7513a13fe4ba3b2664a19fc4a6b
     # via scholar-navis
-onnxruntime-directml==1.24.4 ; sys_platform == 'win32' \
+onnxruntime==1.24.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'ARM64' and sys_platform == 'win32') \
+    --hash=sha256:1a5c5a544b22f90859c88617ecb30e161ee3349fcc73878854f43d77f00558b5 \
+    --hash=sha256:535b29475ca42b593c45fbb2152fbf1cdf3f287315bf650e6a724a0a1d065cdb \
+    --hash=sha256:cad1c2b3f455c55678ab2a8caa51fb420c25e6e3cf10f4c23653cdabedc8de78 \
+    --hash=sha256:e6214096e14b7b52e3bee1903dc12dc7ca09cb65e26664668a4620cc5e6f9a90
+    # via scholar-navis
+onnxruntime-directml==1.24.4 ; platform_machine != 'ARM64' and sys_platform == 'win32' \
     --hash=sha256:f2ecb68b7b7b259d2ef3112ae760149f9b5a1e7c0fbb73d539da6250a648a614
     # via scholar-navis
-onnxruntime-gpu==1.24.4 ; sys_platform == 'linux' \
+onnxruntime-gpu==1.24.4 ; platform_machine != 'aarch64' and sys_platform == 'linux' \
     --hash=sha256:eb0e38f0c1ef3b76ae0081c8e51eed20dd8925aa916f0fc6f9b8b17d05610e99
     # via scholar-navis
 openai==2.24.0 \
@@ -1310,12 +1324,12 @@ tokenizers==0.22.2 \
     #   chromadb
     #   litellm
     #   transformers
-torch==2.14.0 ; platform_machine != 's390x' and sys_platform == 'darwin' \
+torch==2.14.0 ; platform_machine == 'arm64' and sys_platform == 'darwin' \
     --hash=sha256:ab7e226c18d3cbc134dfa952d18ab1df202055dd33446837c8fd050ad449e6f5
     # via
     #   optimum
     #   scholar-navis
-torch==2.14.0+cpu ; platform_machine == 's390x' or sys_platform != 'darwin' \
+torch==2.14.0+cpu ; platform_machine != 'arm64' or sys_platform != 'darwin' \
     --hash=sha256:07aefe1a437b6f1b41b0cba15e16583e2f43549ec9d062fcea8e7981a78e014a \
     --hash=sha256:420e7dbed969bbd045b34105fa90d1ccf3e5c09c4e9b0d0a5f9df25df9d02d2e \
     --hash=sha256:738cd9237bf63443a5e5f9652e5115f7b0510b089636a43d4011e9fccede714f \

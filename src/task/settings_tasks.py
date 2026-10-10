@@ -56,7 +56,6 @@ class TestDeviceTask(BackgroundTask):
     _PROVIDER_LABELS = {
         "CPUExecutionProvider": "CPU",
         "CUDAExecutionProvider": "CUDA",
-        "TensorrtExecutionProvider": "TensorRT",
         "DmlExecutionProvider": "DirectML",
         "ROCmExecutionProvider": "ROCm",
         "CoreMLExecutionProvider": "CoreML",
@@ -92,15 +91,6 @@ class TestDeviceTask(BackgroundTask):
             label = self._PROVIDER_LABELS.get(provider, provider)
             provider_options = resolved.provider_options
 
-            if provider == "TensorrtExecutionProvider":
-                # TensorRT 首次运行要为每个（子）图编译引擎，耗时从数秒到数十秒，
-                # 之后走引擎缓存，因此必须提前告知，避免用户以为卡死。
-                self.send_log(
-                    "INFO",
-                    "TensorRT selected: engines are compiled on first use and cached "
-                    "afterwards; this first test may take a while.")
-                self.update_progress(20, "Compiling TensorRT engines (first run only)...")
-
             self.send_log("INFO", "Generating native dummy ONNX model in memory...")
             # 复用 onnx_provider 的探针模型（IR 版本已在那里钉住，见 _PROBE_IR_VERSION）。
             # 历史上这里自己造了一份，于是"onnx 包比 onnxruntime 新 -> 模型被 ORT 拒绝"
@@ -133,20 +123,10 @@ class TestDeviceTask(BackgroundTask):
             test_input = np.random.randn(1, 3).astype(np.float32)
             session.run(None, {"X": test_input})
 
-            extra = ""
-            if provider == "TensorrtExecutionProvider":
-                try:
-                    from src.core.onnx_provider import tensorrt_engine_cache_dir
-
-                    extra = (f"\n\nTensorRT engines are cached at:\n"
-                             f"{tensorrt_engine_cache_dir()}")
-                except Exception:
-                    extra = ""
-
             return {
                 "success": True,
                 "msg": (f"Success!\n\nThe device '{device_id}' works with {label} "
-                        f"acceleration.{extra}")
+                        f"acceleration.")
             }
 
         except Exception as e:

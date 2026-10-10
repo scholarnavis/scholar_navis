@@ -29,14 +29,25 @@ dependencies = [
     "chardet<6.0",
     "hf-xet>=1.2.0",
     "optimum-onnx>=0.1.0",
-    # ONNX Runtime 的 CPU / CUDA / DirectML 是三个独立发行包，但提供同一个
-    # onnxruntime 包目录。三者版本必须严格一致（见 [tool.uv] override-dependencies）：
-    # 版本不一致时后安装者覆盖前者的文件，会出现"元数据版本 ≠ 实际模块版本"的
-    # 隐性损坏，且 CUDA/DirectML 运行库缺失时更难定位。1.24.4 是三个包同时存在的
-    # 最新公共版本（DirectML 版更新较慢，是版本上限的约束方）。
-    "onnxruntime-directml==1.24.4 ; sys_platform == 'win32'",
-    "onnxruntime-gpu==1.24.4 ; sys_platform == 'linux'",
-    "onnxruntime==1.24.4 ; sys_platform == 'darwin'",
+    # ONNX Runtime 的 CPU / CUDA / DirectML 是三个独立发行包，却提供同一个
+    # ``onnxruntime`` 包目录：同时安装会让同名文件互相覆盖，加速提供者随之消失。
+    # 因此**每个平台 + 架构只声明一个发行包**，并由 [tool.uv] 的
+    # exclude-dependencies 掐掉 chromadb 带进来的那一个。
+    # 加速路径按平台划分：Windows x64 用 DirectML（唯一不要求额外运行库的方案，
+    # NVIDIA/AMD/Intel 全覆盖）、Linux x86_64 用 CUDA、macOS 用官方包内置的 CoreML EP
+    # （arm64 与 x86_64 两个包均已确认编译了该 EP）。
+    # 官方未发布加速包的架构（Windows ARM64、Linux aarch64）退回 CPU 包，功能不受影响。
+    # macOS x86_64 停在 1.23.2：官方 1.24 起停发 Intel wheel，1.23.2 仍带 CoreML EP。
+    # 非 ARM 分支写成 `!= '<ARM 架构名>'`：Windows x64 的 platform_machine 在 CPython
+    # 下是 ``AMD64``，而 uv 的部分代码路径按 ``x86_64`` 推导，写等值会在其中一侧落空
+    # （表现为该平台被解析成"没有 onnxruntime"）。`!=` 对两种取值都成立，且 ARM 分支
+    # 由紧随其后的等值判断精确接住。
+    "onnxruntime-directml==1.24.4 ; sys_platform == 'win32' and platform_machine != 'ARM64'",
+    "onnxruntime==1.24.4 ; sys_platform == 'win32' and platform_machine == 'ARM64'",
+    "onnxruntime-gpu==1.24.4 ; sys_platform == 'linux' and platform_machine != 'aarch64'",
+    "onnxruntime==1.24.4 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "onnxruntime==1.24.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "onnxruntime==1.23.2 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "python-docx>=1.2.0",
     "email-validator>=2.3.0",
     "disposable-email-domains>=0.0.167",
@@ -46,11 +57,14 @@ dependencies = [
     "uvicorn>=0.41.0",
     "langchain-core>=1.3.3",
     # ONNX 的 IR 版本必须落在 onnxruntime 能解析的范围内，否则**内存里新造的
-    # 模型**（提供者探针、硬件测试）会被 ORT 直接拒绝，表现为"CUDA 不可用"而被
-    # 静默降级到 CPU（与 CUDA 本身无关）。实测：onnx 1.22 -> IR 13、
-    # onnx 1.23 -> IR 14，而 onnxruntime 1.24.4 的上限是 IR 13
-    # （DirectML 版更新较慢，是三平台共同版本的上界，见下方 override-dependencies）。
-    # 解除条件：三个 onnxruntime 发行包都提供支持 IR 14 的版本。
+    # 模型**（提供者探针、硬件测试）会被 ORT 直接拒绝，表现为"加速器不可用"而被
+    # 静默降级到 CPU（与加速器本身无关）。实测：onnx 1.22 -> IR 13、
+    # onnx 1.23 -> IR 14，而 onnxruntime 1.24.4 的上限是 IR 13。
+    # 这里按各平台在用 onnxruntime 中最旧的那个取（macOS Intel 固定在 1.23.2，
+    # 官方 1.24 起停发 Intel wheel，比 1.24.4 更旧）。运行时真实上限由
+    # onnx_provider.onnxruntime_max_ir_version() 动态问出并写进启动日志，与这里互为
+    # 校验；一旦脱节，探针会退回"信任构建期列表"而不是误杀可用加速器。
+    # 解除条件：各平台在用的 onnxruntime 都能解析 IR 14 时放宽此上限。
     "onnx>=1.22.0,<1.23",
     "aiohttp>=3.14.3",
     "requests>=2.33.0",
@@ -100,8 +114,8 @@ required-version = ">=0.13.0"
 # ``CPUExecutionProvider``——设备页把 RTX 5060 与 Radeon 610M 一律标成
 # "unavailable"，GPU 加速实际从未生效。
 exclude-dependencies = [
-    # 作用域限定在 chromadb 自己（作用域形式需要 uv >= 0.13）：Windows / Linux 上
-    # 只保留加速发行包，macOS 仍按 [project.dependencies] 装 CPU 版。
+    # 作用域限定在 chromadb 自己（作用域形式需要 uv >= 0.13）：于是每个平台 + 架构
+    # 都只保留 [project.dependencies] 里声明的那一个 onnxruntime 发行包。
     { package = { name = "chromadb" }, dependencies = ["onnxruntime"] },
 ]
 

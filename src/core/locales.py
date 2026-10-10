@@ -134,8 +134,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "该设备仅作说明展示，无法使用。",
         "Device Connection Test": "设备连接测试",
         "Testing inference device '{device}'...": "正在测试推理设备 '{device}'…",
-        "Testing TensorRT device; the first run compiles engines (may take tens of seconds), later runs reuse the cache...":
-            "正在测试 TensorRT 设备；首次运行需要编译引擎（可能需要数十秒），后续运行复用缓存…",
         "Test Passed": "测试通过",
         "Test Failed": "测试失败",
         "Model configuration not found for {model}": "未找到模型配置：{model}",

@@ -174,22 +174,35 @@ offers accelerators that were verified on this machine at startup:
 | :--- | :--- | :--- |
 | Auto Detect | — | CUDA → DirectML → ROCm → CoreML, CPU as final fallback |
 | CPU | — | Always available; slowest but never fails |
-| TensorRT | `onnxruntime-gpu` + TensorRT (`libnvinfer`) + CUDA 12 + cuDNN 9 | Fastest NVIDIA path. Engines are compiled on first use (tens of seconds) and cached in `models/tensorrt_cache`, so later runs start instantly |
-| CUDA | `onnxruntime-gpu` + CUDA 12 + cuDNN 9 | No engine compilation; good default for NVIDIA |
-| DirectML | `onnxruntime-directml` (Windows) | Works on AMD/Intel/NVIDIA without CUDA |
-| ROCm | ROCm-enabled onnxruntime (Linux) | AMD GPUs |
-| CoreML | macOS build | Apple Silicon |
+| CUDA | `onnxruntime-gpu` (Linux x86_64) + CUDA 12 + cuDNN 9 | The NVIDIA path on Linux |
+| DirectML | `onnxruntime-directml` (Windows x64) | Works on AMD/Intel/NVIDIA with no extra runtime libraries |
+| ROCm | ROCm-enabled onnxruntime (Linux) | AMD GPUs; needs a third-party build |
+| CoreML | built into the macOS `onnxruntime` wheel | Apple Silicon and Intel Macs |
+
+Each platform installs exactly **one** ONNX Runtime distribution, chosen by
+platform markers in `pyproject.toml`. Installing two of them is not merely
+redundant: they ship the same `onnxruntime/capi/*` files, overwrite each other
+during installation, and the accelerator silently disappears from
+`get_available_providers()`.
+
+| Platform | Distribution | Accelerator |
+| :--- | :--- | :--- |
+| Windows x64 | `onnxruntime-directml` | DirectML |
+| Windows on ARM | `onnxruntime` | CPU only — no DirectML wheel exists |
+| Linux x86_64 | `onnxruntime-gpu` | CUDA |
+| Linux aarch64 | `onnxruntime` | CPU only — no official GPU wheel |
+| macOS Apple Silicon | `onnxruntime` 1.24.4 | CoreML |
+| macOS Intel | `onnxruntime` 1.23.2 | CoreML (1.24 dropped Intel wheels) |
 
 GPUs that exist but cannot be used are still listed — greyed out and not
 selectable — with the reason (e.g. *"unavailable - CUDA runtime missing"*) and a
 tooltip explaining how to enable them, so the situation is visible instead of
-silently degrading. `TensorRT` is never picked by *Auto Detect*: its first run
-compiles engines, and hiding that cost inside "auto" would look like a hang.
+silently degrading.
 
-`TensorRT` and `CUDA` need the matching runtime libraries; when they are absent
-the application falls back to CPU, logs the reason, and *Test Compute Device*
-reports exactly what is missing (results are identical, only throughput changes).
-Override the engine cache location with `SCHOLAR_NAVIS_TRT_CACHE` if needed.
+`CUDA` needs the matching runtime libraries (CUDA 12 + cuDNN 9); when they are
+absent the application falls back to CPU, logs the reason, and *Test Compute
+Device* reports exactly what is missing (results are identical, only throughput
+changes).
 
 ### Packaging
 

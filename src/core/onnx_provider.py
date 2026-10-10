@@ -39,7 +39,6 @@ from typing import Optional
 logger = logging.getLogger("Core.ONNXProvider")
 
 PROVIDER_CPU = "CPUExecutionProvider"
-PROVIDER_TENSORRT = "TensorrtExecutionProvider"
 
 #: 提示项设备标识前缀（GPU 存在但当前 ONNX Runtime 用不了）。
 #: 这类条目只在 UI 中作为"不可选说明"展示，绝不能作为推理设备保存/传递。
@@ -48,8 +47,6 @@ HINT_ID_PREFIX = "unavailable"
 #: 设备标识前缀 → ORT 执行提供者名称
 PROVIDER_BY_PREFIX = {
     "cuda": "CUDAExecutionProvider",
-    "trt": PROVIDER_TENSORRT,
-    "tensorrt": PROVIDER_TENSORRT,
     "dml": "DmlExecutionProvider",
     "rocm": "ROCmExecutionProvider",
     "coreml": "CoreMLExecutionProvider",
@@ -58,9 +55,8 @@ PROVIDER_BY_PREFIX = {
 
 #: ``auto`` 模式的探测优先级（CPU 恒为兜底，不列入此表）。
 #
-# TensorRT 刻意**不在**其中：TRT 首次建会话要构建引擎（秒级到分钟级）并写缓存，
-# 让 auto 隐式选中它会让首次索引出现难以解释的长时间等待。需要极致速度的用户
-# 在"Compute Device"里显式选择 TensorRT 即可（见 device_manager 的选项）。
+# 表内只放"建会话开销可忽略"的提供者：auto 会对每个候选做一次真实探测，
+# 任一候选若需要预编译（引擎缓存）就会让首次索引出现难以解释的长等待。
 AUTO_PRIORITY = (
     "CUDAExecutionProvider",
     "DmlExecutionProvider",
@@ -135,85 +131,6 @@ class ResolvedProvider:
 
 def _skip_probe() -> bool:
     return os.environ.get("SCHOLAR_NAVIS_SKIP_PROVIDER_PROBE", "").strip().lower() in _TRUTHY
-
-
-def _shared_library_present(*names: str) -> bool:
-    """系统里是否存在指定共享库（``ctypes.util.find_library`` + Windows PATH 兜底）。"""
-    import ctypes.util
-
-    for name in names:
-        try:
-            if ctypes.util.find_library(name):
-                return True
-        except (OSError, TypeError):
-            pass
-
-    # Windows 上 find_library 依赖注册表/搜索路径，常见情形容错率偏高，补扫 PATH
-    prefixes = tuple(n.lower() for n in names)
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        if not directory:
-            continue
-        try:
-            for entry in os.listdir(directory):
-                low = entry.lower()
-                if low.endswith(".dll") and any(low.startswith(p) for p in prefixes):
-                    return True
-        except OSError:
-            continue
-    return False
-
-
-def tensorrt_engine_cache_dir() -> str:
-    """TensorRT 引擎/计时缓存目录。
-
-    TRT 会把每个（子）图编译成引擎，构建开销极大（秒级到分钟级），必须跨会话
-    复用：开启 ``trt_engine_cache_enable`` 并把路径固定到模型缓存目录下。
-    可用环境变量 ``SCHOLAR_NAVIS_TRT_CACHE`` 覆盖。
-    """
-    override = os.environ.get("SCHOLAR_NAVIS_TRT_CACHE", "").strip()
-    if override:
-        cache_dir = os.path.expanduser(override)
-    else:
-        try:
-            from src.core.models_registry import _get_hf_home
-
-            cache_dir = os.path.join(_get_hf_home(), "tensorrt_cache")
-        except Exception:  # 缓存根目录不可知时的静态兜底
-            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "scholar_navis", "tensorrt")
-
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-    except OSError as e:
-        logger.warning(f"Cannot create TensorRT cache dir '{cache_dir}': {e}")
-    return cache_dir
-
-
-def _tensorrt_provider_options(device_id: int) -> dict:
-    """TensorRT 提供者选项（引擎缓存 + FP16）。
-
-    FP16 是 TRT 路线的主要收益来源，且对嵌入/重排这类模型精度影响可忽略；
-    引擎与计时缓存落在 :func:`tensorrt_engine_cache_dir`，避免每次启动重编译。
-    """
-    return {
-        "device_id": device_id,
-        "trt_engine_cache_enable": True,
-        "trt_engine_cache_path": tensorrt_engine_cache_dir(),
-        "trt_timing_cache_enable": True,
-        "trt_fp16_enable": True,
-    }
-
-
-def tensorrt_runtime_available() -> bool:
-    """轻量判断 TensorRT 是否可用（不建会话）。
-
-    枚举设备时不使用 :func:`probe_provider`：TRT 建会话会触发引擎构建，放在
-    设备枚举路径上会明显拖慢设置页与聊天头部。这里只做"构建期含 TRT 提供者 +
-    关键运行库存在"的静态判断；真正使用前由 :func:`resolve_provider`
-    （``probe=True``）做一次实测。
-    """
-    if PROVIDER_TENSORRT not in list_available_providers():
-        return False
-    return _shared_library_present("nvinfer", "nvinfer_10", "nvinfer_plugin")
 
 
 def list_available_providers() -> list:
@@ -382,7 +299,7 @@ def probe_provider(provider: str, provider_options: Optional[dict] = None) -> bo
 
 def _probe_impl(provider: str, provider_options: Optional[dict]) -> bool:
     # 整个探测（含可用性查询）都在静默窗口内：查询本身就会让 ORT 尝试加载
-    # CUDA/TensorRT 提供者库，从而打印整段 C++ 报错与 Python 层 EP Error。
+    # 加速器提供者库，从而打印整段 C++ 报错与 Python 层 EP Error。
     with _probe_log_quiet():
         available = list_available_providers()
         if provider not in available:
@@ -434,7 +351,7 @@ def _probe_impl(provider: str, provider_options: Optional[dict]) -> bool:
 def _probe_log_quiet():
     """屏蔽 ORT 的整段噪声（C++ 层 stderr + Python 层 stdout），**可重入**。
 
-    两个噪声源（在缺少 CUDA/TensorRT 运行库的机器上每次启动都会出现）：
+    两个噪声源（在缺少 CUDA 等加速运行库的机器上每次启动都会出现）：
 
     1. **C++ 层**：提供者库（或 ``get_available_providers()`` 内部的提供者信息
        查询）加载失败时直接向 stderr 打印整段报错，例如
@@ -501,8 +418,8 @@ def _probe_log_quiet():
 def resolve_provider(device_str: Optional[str], probe: bool = True) -> ResolvedProvider:
     """把设备标识解析为实际可用的执行提供者，不可用时降级到 CPU。
 
-    :param device_str: ``auto`` / ``cpu`` / ``cuda:0`` / ``trt:0`` / ``dml:1`` /
-        ``rocm:0`` / ``coreml`` 等；空值与 ``auto`` 等价。
+    :param device_str: ``auto`` / ``cpu`` / ``cuda:0`` / ``dml:1`` / ``rocm:0`` /
+        ``coreml`` 等；空值与 ``auto`` 等价。
     :param probe: False 时只做名称映射（用于纯展示场景，避免任何运行时开销）。
 
     已知前缀但运行期不可用（如 Linux 缺 CUDA 运行库）时返回 CPU 并提供
@@ -542,18 +459,10 @@ def resolve_provider(device_str: Optional[str], probe: bool = True) -> ResolvedP
     if provider == PROVIDER_CPU:
         return ResolvedProvider(PROVIDER_CPU, None, raw, False)
 
-    # TensorRT 必须携带引擎缓存等选项，否则每次启动都要重新编译引擎
-    if provider == PROVIDER_TENSORRT:
-        options = _tensorrt_provider_options(device_id)
-    else:
-        options = {"device_id": device_id} if suffix.isdigit() else None
+    options = {"device_id": device_id} if suffix.isdigit() else None
 
     if probe and not probe_provider(provider, options):
-        if provider == PROVIDER_TENSORRT:
-            detail = ("missing TensorRT/CUDA runtime libraries "
-                      "(libnvinfer, CUDA, cuDNN)")
-        else:
-            detail = "missing driver/CUDA or cuDNN libraries"
+        detail = "missing driver/accelerator runtime or framework libraries"
         reason = (
             f"Requested '{raw}' but {provider} is not usable at runtime "
             f"({detail}). Falling back to CPU; "
