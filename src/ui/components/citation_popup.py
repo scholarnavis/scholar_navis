@@ -9,8 +9,8 @@
   不重建），额外展示该引用对应的**支撑原文片段**（按文本实际高度自适应，
   过长才滚动）与引用理由，便于溯源。
 * **详情面板**支持三种关闭方式：卡片自身持有键盘焦点时按 Esc、点击标题栏关闭
-  按钮、或点击程序内卡片以外的任意位置（应用级按下过滤）。面板可通过标题栏或
-  卡片空白处拖动（限制在宿主窗口内）。
+  按钮、或点击宿主窗口内卡片以外的任意位置。面板可通过标题栏或卡片空白处拖动
+  （限制在宿主窗口内）。
 
 它是"窗口内的浮层"，不是独立窗口
 --------------------------------
@@ -875,9 +875,10 @@ class CitationPopupController(QObject):
         except Exception as e:  # pragma: no cover - 主题连接失败不影响功能
             logger.debug("Theme hook for citation popup skipped: %s", e)
 
-        # 详情面板"点程序其他位置即关闭"：浮层是宿主子控件，收不到其它控件的
-        # 点击，故在应用级装一个按下过滤器（只处理 MouseButtonPress，开销极低）。
-        self._install_app_filter()
+        # 详情面板"点卡片外即关闭"：挂宿主窗口子树的按下过滤，挂载/摘除跟随
+        # 面板可见性（见 _install_press_watch / _release_press_watch）。
+        #: 当前挂着本控制器按下过滤的控件；面板收起时逐个摘除。
+        self._press_watch: List[QWidget] = []
 
     @classmethod
     def instance(cls) -> "CitationPopupController":
@@ -886,24 +887,55 @@ class CitationPopupController(QObject):
         return cls._instance
 
     # ------------------------------------------------------------------ #
-    #  应用级事件过滤（点击卡片外即关闭）
+    #  宿主窗口内的按下过滤（点击卡片外即关闭）
     # ------------------------------------------------------------------ #
-    def _install_app_filter(self):
-        app = QApplication.instance()
-        if app is None:
+    def _install_press_watch(self, host) -> None:
+        """在宿主窗口的控件子树上挂按下过滤，实现"点卡片外关闭详情面板"。
+
+        挂在这一棵控件树上、而不是 ``QApplication`` 上，有两个硬理由：
+
+        1. 只对宿主窗口内的点击作出反应，语义更准——用户去别的窗口看资料时
+           详情面板不该被抢走；
+        2. 应用级过滤器会让 PySide 为**每一个**事件接收者构造 Python 包装对象，
+           而 QtWebEngine（Chromium 侧编译，``-fno-rtti``）的内部对象没有 RTTI
+           信息，PySide 取动态类型名时空指针解引用直接崩进程（栈顶端
+           ``PySide::getWrapperForQObject``）。挂在控件上时接收者恒为 QWidget
+           派生类，不会走到那条路径。
+
+        只覆盖挂载时刻可见的控件：鼠标按下只可能落在可见控件上；面板可见期间
+        新出现的控件不属于"用户此刻正在看的这一屏"，不追求覆盖。
+        """
+        self._release_press_watch()
+        if host is None:
             return
-        try:
-            app.installEventFilter(self)
-        except Exception as e:  # pragma: no cover - 极端环境兜底
-            logger.debug("Citation popup app filter install skipped: %s", e)
+        targets = [host] + [w for w in host.findChildren(QWidget) if w.isVisible()]
+        for widget in targets:
+            try:
+                widget.installEventFilter(self)
+            except RuntimeError:        # 控件已销毁：跳过，不影响其余挂载
+                continue
+            self._press_watch.append(widget)
+        logger.debug("Press watch installed on %d widget(s), host=%s.",
+                     len(self._press_watch), host)
+
+    def _release_press_watch(self) -> None:
+        """摘除全部按下过滤（详情面板收起、或换宿主窗口时调用）。"""
+        for widget in self._press_watch:
+            try:
+                widget.removeEventFilter(self)
+            except RuntimeError:        # 宿主被关闭时整棵子树已销毁
+                pass
+        self._press_watch = []
 
     def eventFilter(self, obj, event):
         """鼠标按下落在卡片之外时收起面板；其余事件一律放行（返回 False）。
 
-        只关心 ``MouseButtonPress`` 且仅在浮层可见时动作，不影响既有交互。
+        过滤只在详情面板可见期间挂载（见 :meth:`_install_press_watch`）；概览卡
+        由光标轮询收尾，不走这里。
         """
         try:
             if (event.type() == QEvent.MouseButtonPress
+                    and self._mode == CitationPopup.MODE_FULL
                     and self._popup is not None and self._popup.isVisible()):
                 self._dismiss_on_outside_press(_event_global_pos(event))
         except Exception:  # pragma: no cover - 过滤链异常不得外泄
@@ -1065,12 +1097,15 @@ class CitationPopupController(QObject):
         popup.set_reference(data, mode)
         popup.show_with_animation(anchor, mode, from_rect=from_rect)
         self._outside_ticks = 0
+        # 两种形态的收起机制互斥且在此收口：详情面板靠宿主窗口内的按下过滤
+        # （鼠标可移开去别处看资料，面板不消失）；概览卡靠光标轮询。
         if mode == CitationPopup.MODE_FULL:
-            # 详情面板不参与"离开即收起"的轮询（否则鼠标一移开就消失）；改由
-            # 应用级按下过滤处理"点击卡片外关闭"，并保留 Esc 与标题栏关闭按钮。
+            self._install_press_watch(popup.parentWidget())
             self._watch_timer.stop()
-        elif not self._watch_timer.isActive():
-            self._watch_timer.start()
+        else:
+            self._release_press_watch()
+            if not self._watch_timer.isActive():
+                self._watch_timer.start()
         logger.debug("Citation popup shown: message=#%d ref=[%d] mode=%s", msg_index, index, mode)
 
     def _ensure_popup(self) -> CitationPopup:
@@ -1109,7 +1144,8 @@ class CitationPopupController(QObject):
     def _watch_cursor(self):
         """轮询光标：概览卡在鼠标离开锚点与卡片后自动收起。
 
-        详情面板不参与该轮询（由应用级按下过滤实现"点击卡片外关闭"），因此这里
+        详情面板不参与该轮询（收起由宿主窗口内的按下过滤负责，见
+        :meth:`_install_press_watch`），因此这里
         直接返回，避免"用户去看别的窗口时面板被抢走"。
         """
         popup = self._popup
@@ -1130,6 +1166,7 @@ class CitationPopupController(QObject):
     def dismiss(self):
         self._watch_timer.stop()
         self._intent_timer.stop()
+        self._release_press_watch()
         self._pending_key = None
         self._active_key = None
         self._mode = CitationPopup.MODE_COMPACT
