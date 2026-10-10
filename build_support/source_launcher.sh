@@ -51,7 +51,19 @@ if ! command -v uv >/dev/null 2>&1; then
      (or: pipx install uv; see https://docs.astral.sh/uv/ )"
 fi
 
-log "uv $(uv --version 2>&1 | awk '{print $2}')"
+# uv.lock 是 revision 5，且 pyproject.toml 用了作用域形式的 exclude-dependencies，
+# 两者都需要 uv >= 0.13。旧版 uv 会在此处抛出难懂的 lockfile 解析错误，先拦下来
+# 并给出可执行的升级命令。（sort -V 是 GNU 扩展，本启动器只在 Linux 上分发。）
+UV_MIN="0.13.0"
+UV_VERSION="$(uv --version 2>&1 | awk '{print $2}')"
+if [ "$(printf '%s\n%s\n' "$UV_MIN" "$UV_VERSION" | sort -V | head -n 1)" != "$UV_MIN" ]; then
+    die "uv $UV_VERSION is too old; uv >= $UV_MIN is required.
+     uv.lock uses lockfile revision 5 and pyproject.toml scopes a dependency
+     exclusion to chromadb, neither of which older uv can read.
+     Upgrade with: uv self update"
+fi
+
+log "uv $UV_VERSION"
 log "Syncing runtime dependencies from uv.lock (first run downloads several GB)..."
 uv sync --locked --no-dev
 

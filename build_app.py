@@ -77,6 +77,20 @@ def platform_tag() -> str:
         platform.system(), "unknown")
 
 
+#: onnxruntime 的**发行包名**随平台不同（与 pyproject.toml 的平台矩阵一致），
+#: 而 PyInstaller 的 ``--copy-metadata`` 是按 distribution 名查找的。
+_ONNXRUNTIME_DISTRIBUTION = {
+    "Windows": "onnxruntime-directml",
+    "Linux": "onnxruntime-gpu",
+    "Darwin": "onnxruntime",
+}
+
+
+def onnxruntime_distribution_name(sys_os: str) -> str:
+    """当前平台的 onnxruntime 发行包名（distribution 名，非 import 名）。"""
+    return _ONNXRUNTIME_DISTRIBUTION.get(sys_os, "onnxruntime")
+
+
 def sync_pyproject_version():
     toml_path = "pyproject.toml"
     if not os.path.exists(toml_path):
@@ -430,7 +444,12 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
     cmd.extend(["--copy-metadata", "torch"])
     cmd.extend(["--copy-metadata", "tiktoken"])
     cmd.extend(["--copy-metadata", "onnx"])
-    cmd.extend(["--copy-metadata", "onnxruntime"])
+    # 按 distribution 名取：Windows 上只有 DirectML 包，写死 "onnxruntime" 会让
+    # PyInstaller 抛 PackageNotFoundError 直接构建失败（见该映射的说明）。
+    # 附带影响：DirectML 包的 distribution 名不是 onnxruntime，冻结产物里
+    # ``importlib.metadata.version("onnxruntime")`` 不可用——已扫描确认 optimum /
+    # transformers / huggingface_hub / sentence_transformers / chromadb 均不读它。
+    cmd.extend(["--copy-metadata", onnxruntime_distribution_name(sys_os)])
     cmd.extend(["--copy-metadata", "optimum"])
 
     # --add-data 的分隔符是平台相关的：Windows 为 ';'，POSIX 为 ':'。
