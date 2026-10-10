@@ -128,7 +128,7 @@ For a permanent system-wide alternative (no `steam-run`), add the libraries to
 ### Running from source
 
 ```bash
-uv sync                # Python 3.12 is required
+uv sync                # Python 3.12 and uv >= 0.13 are required
 uv run main.py
 ```
 
@@ -144,6 +144,12 @@ unzip scholar_navis_linux_*.zip && cd scholar_navis
 The first run creates `.venv/` **inside the unzipped folder** (several GB), so
 unzip it somewhere with room to spare. `run.sh` refuses to guess: if `uv` is
 missing it exits with code 3 and prints the install command.
+
+`uv >= 0.13` is required (`uv self update`). The lockfile uses revision 5 and
+`pyproject.toml` scopes a dependency exclusion to `chromadb` — that exclusion is
+what keeps a single ONNX Runtime distribution per platform (without it the CPU
+build shadows `onnxruntime-directml` / `onnxruntime-gpu` and GPU acceleration
+silently disappears). Older `uv` cannot read either construct and refuses to run.
 
 ### R runtime (visualization)
 
