@@ -1,16 +1,21 @@
 import logging
 import os
-import socket
+import signal
 import sys
 import threading
 from datetime import datetime
 from PySide6.QtCore import QObject, Signal
 
 from src.core import BASE_DIR
-from src.core.theme_manager import ThemeManager
 
 
 log_dir = os.path.join(BASE_DIR,"logs")
+
+#: 保留引用：Qt 侧对传入的消息处理器只持弱引用，被 GC 后崩溃现场会静默消失。
+_qt_message_handler_ref = None
+
+#: 致命信号转储文件句柄，必须活到进程结束（提前关闭会让 faulthandler 失效）。
+_faulthandler_file = None
 
 class QtLogHandler(QObject, logging.Handler):
     new_log_signal = Signal(str, str, str, int)
@@ -39,6 +44,91 @@ _qt_handler = QtLogHandler()
 _early_formatter = logging.Formatter('%(asctime)s | %(name)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
 _qt_handler.setFormatter(_early_formatter)
 logging.getLogger().addHandler(_qt_handler)
+
+def _flush_root_handlers():
+    """把根 logger 的所有 handler 立即刷盘（致命路径上必须先把证据落盘）。"""
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:          # noqa: BLE001 - 刷盘失败不能反过来影响崩溃路径
+            pass
+
+
+def _install_qt_message_handler():
+    """把 Qt 自身的消息并入应用日志。
+
+    Qt 的 ``qDebug`` / ``qWarning`` / ``qCritical`` / ``qFatal`` 默认只写 stderr，
+    从不进日志文件。于是 QtWebEngine 的原生崩溃（例如
+    ``Release of profile requested but WebEnginePage still not deleted``、
+    ``Failed to create shared context``）在事后复盘时**完全不存在**——这正是
+    "打开 Mermaid 阅读器后闪退却没有任何日志"的直接原因。
+
+    ``qFatal`` 之后 Qt 会直接 abort，因此这里对每条消息都强制刷盘。
+    """
+    global _qt_message_handler_ref
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    level_map = {
+        QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtMsgType.QtInfoMsg: logging.INFO,
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+    qt_logger = logging.getLogger("Qt")
+    state = threading.local()
+
+    def _handler(mode, context, message):
+        # 递归保护：日志 handler 自身若再触发 Qt 消息，会无限套娃。
+        if getattr(state, "active", False):
+            return
+        state.active = True
+        try:
+            where = ""
+            if context is not None and getattr(context, "file", None):
+                where = f" ({context.file}:{context.line})"
+            qt_logger.log(level_map.get(mode, logging.INFO), "%s%s", message, where)
+            _flush_root_handlers()
+        finally:
+            state.active = False
+
+    _qt_message_handler_ref = _handler
+    qInstallMessageHandler(_handler)
+
+
+def _enable_faulthandler():
+    """开启致命信号转储，返回转储文件路径。
+
+    原生崩溃（SIGSEGV / SIGABRT / SIGBUS …）不会经过 ``sys.excepthook``，日志里
+    只会毫无预兆地断掉。``faulthandler`` 在信号处理函数里把各线程的 Python 栈写
+    进 ``logs/crash_*.log``，是这类"闪退无痕"唯一的取证手段。
+    """
+    global _faulthandler_file
+    if _faulthandler_file is not None:
+        return getattr(_faulthandler_file, "name", "")
+
+    path = os.path.join(log_dir, f"crash_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    try:
+        import faulthandler
+
+        os.makedirs(log_dir, exist_ok=True)
+        _faulthandler_file = open(path, "a", encoding="utf-8")   # noqa: SIM115 - 需活到进程结束
+        faulthandler.enable(file=_faulthandler_file, all_threads=True)
+        # chain=True：转储后仍执行原处理器，保留系统的 core dump / 退出码语义。
+        for name in ("SIGSEGV", "SIGABRT", "SIGBUS", "SIGFPE", "SIGILL"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                faulthandler.register(sig, file=_faulthandler_file,
+                                      all_threads=True, chain=True)
+            except (ValueError, OSError):
+                pass
+        return path
+    except Exception as e:          # noqa: BLE001 - 取证失败绝不能阻断启动
+        _faulthandler_file = None
+        return f"<failed: {e}>"
+
 
 def setup_logger():
     """Configure global logging"""
@@ -86,6 +176,10 @@ def setup_logger():
 
     sys.excepthook = global_exception_handler
     root_logger.info(f"Logger initialized. Log file: {log_path}")
+
+    # 取证能力必须在任何 GUI / QtWebEngine 代码之前就位，否则原生闪退不留痕迹。
+    _install_qt_message_handler()
+    root_logger.info(f"Crash diagnostics enabled. Signal dump: {_enable_faulthandler()}")
     return root_logger
 
 def get_qt_log_handler():
