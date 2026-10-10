@@ -10,7 +10,7 @@ from base64 import b64decode as _b64decode
 from functools import lru_cache
 from html import escape as _html_escape
 from html.parser import HTMLParser
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from src.core.chat_typography import (PARAM_BY_NAME as _TYPO_PARAMS,
@@ -23,6 +23,7 @@ from src.core.think_tags import (
     normalize as normalize_think_tags,
     strip as strip_think_blocks,
 )
+from src.core.tool_call_leak import strip as strip_tool_call_leaks
 from src.core.theme_manager import ThemeManager, installed_font_families
 from src.ui.components.toast import ToastManager
 
@@ -1795,63 +1796,6 @@ class TextFormatter:
         return "".join(out)
 
     @staticmethod
-    def _strip_tool_json(text: str) -> str:
-        """从导出文本剥离"工具调用"形态的 JSON/JSONL，避免中间产物混入。
-
-        agent 流式（reasoning 模型无原生 function-calling 时）可能把 fallback 的
-        工具调用 JSON（``{"name": ..., "arguments": ...}``）当作正文 token 输出，
-        造成"正文中断后跟着一段工具调用 JSONL"。这里只删明确是工具调用的对象
-        （含 ``name`` 且 ``arguments``/``parameters``/``input`` 键），保留正文里
-        合法的 JSON 示例/表格数据。
-        """
-        import json as _json
-
-        def _is_tool_call(obj):
-            return (isinstance(obj, dict)
-                    and "name" in obj
-                    and any(k in obj for k in ("arguments", "parameters", "input")))
-
-        # 1) ```json ... ``` 围栏块：整块是工具调用则删除
-        def _fence_repl(m):
-            block = m.group(1)
-            try:
-                data = _json.loads(block)
-                return "" if _is_tool_call(data) else m.group(0)
-            except Exception:
-                return m.group(0)
-
-        text = re.sub(r"```json[ \t]*\r?\n(.*?)```",
-                      _fence_repl, text, flags=re.DOTALL | re.IGNORECASE)
-
-        # 2) 独立的裸 JSON 工具调用（含 JSONL，每行一个对象）：括号平衡扫描
-        out = []
-        i, n = 0, len(text)
-        while i < n:
-            if text[i] == "{":
-                depth = 0
-                j = i
-                while j < n:
-                    if text[j] == "{":
-                        depth += 1
-                    elif text[j] == "}":
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    j += 1
-                if depth == 0:
-                    candidate = text[i:j + 1]
-                    try:
-                        data = _json.loads(candidate)
-                        if _is_tool_call(data):
-                            i = j + 1
-                            continue
-                    except Exception:
-                        pass
-            out.append(text[i])
-            i += 1
-        return "".join(out).strip()
-
-    @staticmethod
     def html_to_markdown(html: str) -> str:
         """把 HTML 片段转成 Markdown：能转的转，转不了的保留精简 HTML。
 
@@ -1957,9 +1901,10 @@ class TextFormatter:
             sections.append(references.strip())
         text = "\n\n".join(s for s in sections if s)
 
-        # 兜底：剥离混入正文的工具调用 JSON/JSONL（reasoning fallback 常见泄漏），
-        # 避免导出里出现"正文中断后跟一段工具 JSON"。
-        return TextFormatter._strip_tool_json(text).strip()
+        # 兜底：剥离混入正文的文本工具调用 JSON/JSONL（reasoning fallback 常见泄漏），
+        # 避免导出里出现"正文中断后跟一段工具 JSON"。口径与显示侧共用，
+        # 定义在 src/core/tool_call_leak.py（唯一事实来源）。
+        return strip_tool_call_leaks(text)
 
     @staticmethod
     def hide_think_tags(text, for_display=False):
@@ -1984,6 +1929,13 @@ class TextFormatter:
     @staticmethod
     def format_response(text, index, expanded_indices, user_toggled_thinks, mermaid_cache):
         """统一处理包含 Mermaid 图表和 Think 面板的对话渲染"""
+        if not text:
+            return ""
+
+        # 显示侧兜底：剥离混入正文的文本工具调用（口径见 src/core/tool_call_leak.py）。
+        # 主防线在 emit 侧（AgentRuntime 的流式暂扣过滤器）；这里再兜一次，覆盖
+        # 历史消息重渲染，以及 emit 侧因超出暂扣上限而放行的极端情况。
+        text = strip_tool_call_leaks(text)
         if not text:
             return ""
 

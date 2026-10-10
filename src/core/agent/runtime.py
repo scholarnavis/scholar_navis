@@ -35,13 +35,15 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from src.core import plot_styles
 from src.core.evidence import EvidenceStore
 from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
+from src.core.tool_call_leak import (ToolCallStreamFilter, iter_tool_call_objects,
+                                     tool_call_fingerprint)
 
 
 def _html_escape(text) -> str:
@@ -688,10 +690,13 @@ class AgentRuntime:
           阶段用户可见，消除非流式整块等待的干等感；
         - content delta 实时 emit（真流式）：LLM 产出的正文 token 逐段透传
           给 UI，最终答案生成期间用户实时可见，不再等待整轮结束后假打字机
-          回放。SILENT EXECUTION 协议下模型在工具轮次原则上不产出正文，
-          故中间轮的额外 emit 极少；协议违规文本（如 plot 参数泄漏）会
-          可见，属可接受的透明化。流结束后调用方按 ``_live_streamed``
-          标记跳过重复回放；
+          回放。透传前先经 :class:`src.core.tool_call_leak.ToolCallStreamFilter`
+          暂扣"文本形态工具调用"——没有原生 function-calling 的推理模型按提示词
+          把工具调用写成 ```` ```json {"name": ..., "arguments": {...}} ``` ````，
+          这类片段一旦照直上屏就会永久留在气泡里（表现为"每轮回答末尾夹着一段
+          JSON"）。**只有显示被扣下**：``content_parts`` 照旧累积，仍交给
+          :meth:`_extract_tool_calls` 解析执行。流结束后调用方按
+          ``_live_streamed`` 标记跳过重复回放；
         - 返回与 chat() 结构一致的完整 response dict。
         """
         reasoning_parts: List[str] = []
@@ -700,6 +705,8 @@ class AgentRuntime:
         think_open = False
         truncated = False
         live_text = False
+        # 显示侧暂扣器：文本形态的工具调用不上屏（缓冲内容不受影响）。
+        leak_filter = ToolCallStreamFilter()
         try:
             for ev in self.main_llm.stream_chat_events(**kwargs):
                 ev_type = ev.get("type")
@@ -724,14 +731,22 @@ class AgentRuntime:
                         if think_open:
                             emit_token("\n" + THINK_CLOSE_TAG + "\n\n")
                             think_open = False
-                        emit_token(text)
-                        live_text = True
+                        released = leak_filter.feed(text)
+                        if released:
+                            emit_token(released)
+                            live_text = True
                 elif ev_type == "final":
                     response = ev.get("response") or {}
         finally:
             # 任何异常路径都保证闭合思考块，避免 UI 残留未闭合块
             if think_open:
                 emit_token("\n" + THINK_CLOSE_TAG + "\n\n")
+            # 轮末必须放出暂扣内容：确认是工具调用的已被丢弃，其余（含收尾仍未
+            # 闭合的片段）原样上屏——暂扣只能是延迟显示，绝不能吞掉正文。
+            tail = leak_filter.flush()
+            if tail:
+                emit_token(tail)
+                live_text = True
 
         content = "".join(content_parts)
         # 流式错误文本转统一错误面板（与 _final_stream 相同的处理路径）
@@ -811,59 +826,107 @@ class AgentRuntime:
         return bool(re.search(r"\[\s*\{.*?\}\s*\]", text, re.DOTALL))
 
     def _extract_tool_calls(self, response: Dict) -> List[Dict]:
-        """Native tool calls first; then structured fallbacks (JSON / XML / DSML)."""
-        raw = (response or {}).get("tool_calls")
-        if raw:
-            calls = []
-            for tc in raw:
-                if hasattr(tc, "model_dump"):
-                    calls.append(tc.model_dump())
-                elif isinstance(tc, dict):
-                    calls.append(tc)
-                else:
-                    calls.append({
-                        "id": getattr(tc, "id", f"call_{uuid.uuid4().hex[:8]}"),
-                        "type": getattr(tc, "type", "function"),
-                        "function": {
-                            "name": getattr(getattr(tc, "function", None), "name", "unknown"),
-                            "arguments": getattr(getattr(tc, "function", None), "arguments", "{}"),
-                        },
-                    })
-            return calls
+        """收集本轮要执行的工具调用：原生调用 + 正文里的文本形态调用。
 
+        两者**同时**收，按 (工具名, 参数) 去重合并。早期实现一旦发现原生调用就直接
+        返回，把同一响应正文里的文本形态调用整段丢掉：它不会执行（引用注册不上、
+        正文里的内联 key 被当作未注册 key 删掉），却仍会留在气泡里——这正是
+        "别的引用都正常、只有某一条不对"的来源。
+        """
+        native = self._collect_native_tool_calls(response)
         content = (response or {}).get("content", "") or ""
-        # Structured JSON block.
-        json_calls = self._parse_json_tool_blocks(content)
-        if json_calls:
-            return json_calls
-        # XML / DSML invoke tags (reasoning models).
-        xml_calls = self._parse_xml_tool_blocks(content)
-        if xml_calls:
-            return xml_calls
-        # Raw / HTML-escaped JSON tool call (reasoning models may emit
-        # {"name": "...", "arguments": {...}} as plain, possibly escaped text).
-        raw_calls = self._parse_raw_json_tool_blocks(content)
-        if raw_calls:
-            return raw_calls
-        return []
+        # 文本形态（fallback 协议）：正文里的 JSON / JSONL。
+        text_calls = self._parse_text_tool_calls(content)
+        if not text_calls:
+            # XML / DSML invoke tags (reasoning models)。
+            text_calls = self._parse_xml_tool_blocks(content)
+        if not native:
+            return text_calls
+        if not text_calls:
+            return native
+        merged, extra = self._merge_tool_calls(native, text_calls)
+        logger.debug(
+            "Tool calls: %d native + %d text-form -> %d to execute (%d deduped).",
+            len(native), len(text_calls), len(merged), len(text_calls) - len(extra),
+        )
+        return merged
 
     @staticmethod
-    def _parse_json_tool_blocks(content: str) -> List[Dict]:
+    def _collect_native_tool_calls(response: Dict) -> List[Dict]:
+        """把 provider 返回的原生 ``tool_calls`` 归一化成内部结构。"""
+        raw = (response or {}).get("tool_calls")
+        if not raw:
+            return []
         calls = []
-        for block in re.findall(r"```json\s*\n?(.*?)\n?\s*```", content, re.DOTALL):
-            try:
-                data = json.loads(block)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(data, dict) and "name" in data:
-                args = data.get("arguments", {})
-                if not isinstance(args, dict):
-                    args = {}
+        for tc in raw:
+            if hasattr(tc, "model_dump"):
+                calls.append(tc.model_dump())
+            elif isinstance(tc, dict):
+                calls.append(tc)
+            else:
                 calls.append({
-                    "id": f"call_{uuid.uuid4().hex[:12]}",
-                    "type": "function",
-                    "function": {"name": data["name"], "arguments": json.dumps(args, ensure_ascii=False)},
+                    "id": getattr(tc, "id", f"call_{uuid.uuid4().hex[:8]}"),
+                    "type": getattr(tc, "type", "function"),
+                    "function": {
+                        "name": getattr(getattr(tc, "function", None), "name", "unknown"),
+                        "arguments": getattr(getattr(tc, "function", None), "arguments", "{}"),
+                    },
                 })
+        return calls
+
+    @classmethod
+    def _merge_tool_calls(cls, native: List[Dict], text_calls: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+        """原生调用在前，追加正文里未被原生覆盖的调用。
+
+        Returns:
+            ``(合并结果, 新追加的调用)``。
+        """
+        seen = {cls._tool_call_fingerprint(call) for call in native}
+        extra: List[Dict] = []
+        for call in text_calls:
+            fingerprint = cls._tool_call_fingerprint(call)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            extra.append(call)
+        return native + extra, extra
+
+    @staticmethod
+    def _tool_call_fingerprint(call: Dict) -> str:
+        """调用指纹：``arguments`` 在原生调用里是 JSON 字符串，先解析再归一化。"""
+        function = call.get("function") or {}
+        arguments = function.get("arguments", "{}")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return tool_call_fingerprint({"name": function.get("name"), "arguments": arguments})
+
+    @staticmethod
+    def _parse_text_tool_calls(content: str) -> List[Dict]:
+        """正文里的文本形态工具调用（fallback 协议）。
+
+        边界判定与剥离口径共用 ``src/core/tool_call_leak.py``：``snippet`` 里出现
+        ``{}`` 乃至 ```` ``` ```` 都不会再截断该调用。
+        """
+        calls: List[Dict] = []
+        for data in iter_tool_call_objects(content):
+            args = data.get("arguments")
+            if args is None:
+                args = data.get("parameters", data.get("input"))
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            calls.append({
+                "id": f"call_{uuid.uuid4().hex[:12]}",
+                "type": "function",
+                "function": {"name": data["name"], "arguments": json.dumps(args, ensure_ascii=False)},
+            })
         return calls
 
     @staticmethod
@@ -884,92 +947,6 @@ class AgentRuntime:
                 "id": f"call_{uuid.uuid4().hex[:12]}",
                 "type": "function",
                 "function": {"name": name, "arguments": json.dumps(arg_dict, ensure_ascii=False)},
-            })
-        return calls
-
-    @staticmethod
-    def _iter_json_objects(text: str):
-        """Yield candidate JSON object substrings via balanced-brace matching."""
-        n = len(text)
-        i = 0
-        while i < n:
-            start = text.find("{", i)
-            if start == -1:
-                return
-            depth = 0
-            in_str = False
-            escaped = False
-            j = start
-            while j < n:
-                ch = text[j]
-                if in_str:
-                    if escaped:
-                        escaped = False
-                    elif ch == "\\":
-                        escaped = True
-                    elif ch == '"':
-                        in_str = False
-                else:
-                    if ch == '"':
-                        in_str = True
-                    elif ch == "{":
-                        depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                        if depth == 0:
-                            yield text[start:j + 1]
-                            break
-                j += 1
-            i = start + 1
-
-    @staticmethod
-    def _parse_raw_json_tool_blocks(content: str) -> List[Dict]:
-        """Detect raw (possibly HTML-escaped) tool-call JSON in model output.
-
-        Reasoning models sometimes emit ``{"name": "...", "arguments": {...}}``
-        directly as content, and the JSON may be HTML-escaped (``&quot;``,
-        ``&amp;``). This parser unescapes and extracts any JSON object carrying
-        a ``name`` key so the runtime executes it instead of printing it.
-        """
-        if not content:
-            return []
-        text = _html_mod.unescape(content)
-        candidates = []
-        stripped = text.strip()
-        if stripped.startswith("{"):
-            candidates.append(stripped)
-        for obj in AgentRuntime._iter_json_objects(text):
-            if obj not in candidates:
-                candidates.append(obj)
-
-        calls: List[Dict] = []
-        seen = set()
-        for candidate in candidates:
-            try:
-                data = json.loads(candidate)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(data, dict) or "name" not in data:
-                continue
-            name = data.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            args = data.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, ValueError):
-                    args = {}
-            if not isinstance(args, dict):
-                args = {}
-            key = json.dumps({"name": name, "arguments": args}, ensure_ascii=False, sort_keys=True)
-            if key in seen:
-                continue
-            seen.add(key)
-            calls.append({
-                "id": f"call_{uuid.uuid4().hex[:12]}",
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
             })
         return calls
 
@@ -2086,11 +2063,19 @@ class AgentRuntime:
         5ms 时 2000 字回答约 0.3s 回放完毕；旧实现（5 字符 / 15ms）会
         引入约 6s 的固定空转延迟，是纯浪费。
         """
+        # 回放同样要过暂扣器：非流式回退路径拿到的 content 里也可能夹着文本
+        # 形态的工具调用（口径见 src/core/tool_call_leak.py）。
+        leak_filter = ToolCallStreamFilter()
         for i in range(0, len(content), 32):
             if is_cancelled():
                 break
-            emit_token(content[i:i + 32])
+            chunk = leak_filter.feed(content[i:i + 32])
+            if chunk:
+                emit_token(chunk)
             time.sleep(0.005)
+        tail = leak_filter.flush()
+        if tail:
+            emit_token(tail)
 
     @staticmethod
     def _emit_cancel_notice(emit_token: Callable[[str], None]):
