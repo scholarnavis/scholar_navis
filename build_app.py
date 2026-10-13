@@ -178,7 +178,7 @@ def _lock_root_dist_name(package_dir: str) -> str:
 def _uv_normalized_version(uv: str, package_dir: str) -> str:
     """用 ``uv version --short`` 取根项目的 **PEP 440 规范版本**（离线、不解析依赖）。
 
-    ``pyproject.toml`` 里写的是 ``2.0.6-dev-3``，lockfile 记的是规范化的 ``2.0.6.dev3``；
+    ``pyproject.toml`` 里写的是 ``2.0.7-dev-1``，lockfile 记的是规范化的 ``2.0.7.dev1``；
     两者不能混用，所以规范形态必须由 uv 给出，而不是自己拼。
     """
     try:

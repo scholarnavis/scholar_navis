@@ -16,7 +16,7 @@
 
 支持的写法：``2.0.6``、``2.0.6-dev-1``、``2.0.6-dev``、``2.0.6-dev1``、``2.2.4-beta-2``、``2.0``。
 
-本项目统一用 **``a.b.c-dev-N``**（如 ``2.0.6-dev-1``）：``-dev`` 决定通道，尾部
+本项目统一用 **``a.b.c-dev-N``**（如 ``2.0.7-dev-1``）：``-dev`` 决定通道，尾部
 ``N`` 参与比较。序号是必需的——没有它，同一主版本内连发多轮 dev 会得到完全相同的
 版本号与产物文件名，应用端判定"相等即无更新"，后上传的包还会直接覆盖前一个。
 """
@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 
-__version__ = "2.0.6"
+__version__ = "2.0.7-dev-1"
 __app_name__ = "Scholar Navis"
 __description__ = "AI-Powered Research Assistant"
 __company__ = "Scholar Navis Studio"
@@ -48,7 +48,7 @@ __changelog__ = f"{__website__}/changelog"
 #: 版本后缀 → 阶段权重。dev 与 alpha 同级（都低于 beta），比未知后缀高。
 _STAGE_WEIGHTS = {"dev": 1, "alpha": 1, "beta": 2, "rc": 3, "final": 4}
 
-#: ``a.b.c`` 主版本 + 可选 ``-stage[-]n``（本项目用 ``2.0.6-dev-1``；连字符与序号
+#: ``a.b.c`` 主版本 + 可选 ``-stage[-]n``（本项目用 ``2.0.7-dev-1``；连字符与序号
 #: 都可省略，``2.0.6-dev`` / ``2.0.6-dev1`` 同样能解析，只是不推荐）。
 _VERSION_RE = re.compile(
     r"^(?P<main>\d+(?:\.\d+)*)"
