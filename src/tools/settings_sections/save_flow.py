@@ -17,6 +17,7 @@ from src.core.mcp_manager import MCPManager
 from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
+from src.core.skill_store import write_skill_source
 from src.core.theme_manager import ThemeManager
 from src.task.settings_tasks import EmailVerifyTask
 from src.task.common_task import VerifyModelsTask
@@ -128,18 +129,16 @@ class SaveFlowMixin:
 
                 if cfg.get("type") == "SKILL":
                     active_skill_names.add(name)
-                    if "_pending_bytes" in cfg:
-                        workspace_dir = os.path.join(BASE_DIR, 'tools', 'skill')
-                        os.makedirs(workspace_dir, exist_ok=True)
-                        target_path = os.path.join(workspace_dir, f"{name}.enc")
+                    if "_pending_code" in cfg:
                         try:
-                            with open(target_path, 'wb') as f:
-                                f.write(cfg["_pending_bytes"])
-                            cfg["command"] = target_path
+                            # 明文 0o600 落盘；口径见 src/core/skill_store.py（唯一入口）
+                            cfg["command"] = write_skill_source(
+                                os.path.join(BASE_DIR, 'tools', 'skill'), name,
+                                cfg["_pending_code"])
                         except Exception as e:
                             self.logger.error(f"Failed to write skill '{name}' to disk: {e}")
 
-                        for temp_key in ["_pending_bytes", "_is_new", "_is_edited"]:
+                        for temp_key in ["_pending_code", "_is_new", "_is_edited"]:
                             cfg.pop(temp_key, None)
 
                     new_external_skills[name] = cfg

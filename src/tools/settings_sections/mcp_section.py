@@ -394,15 +394,13 @@ class McpSectionMixin:
 
         final_name, final_desc, final_path = config_dlg.get_data()
 
-        enc_service = SystemEncryptionService()
-        encrypted_bytes = enc_service.encrypt(final_code)
-
         cfg = {
             "description": final_desc,
             "type": "SKILL",
             "command": f"<Pending Edit: {final_name}>",
             "enabled": True,
-            "_pending_bytes": encrypted_bytes,
+            # 明文源码暂存；save_flow 负责写入 tools/skill/<name>.py（0o600）
+            "_pending_code": final_code,
             "_is_new": True
         }
 
@@ -414,33 +412,6 @@ class McpSectionMixin:
         ToastManager().show(
             tr("Skill '{name}' staged. Click 'Save Settings' to commit.").format(name=final_name),
             "info")
-
-    def _on_import_skill_finished(self, result, skill_name):
-        if result.get("success"):
-            target_path = result.get("target_path")
-
-            # 写入表格并标记配置未保存
-            cfg = {
-                "description": tr("User Imported Native Script"),
-                "type": "SKILL",
-                "command": target_path,
-                "enabled": True
-            }
-
-            self._add_mcp_row(skill_name, cfg)
-
-            if hasattr(self, '_mark_unsaved'):
-                self._mark_unsaved()
-
-            self.import_skill_pd.show_finish_state(
-                True, tr("Import Successful"),
-                tr("Skill '{name}' has been encrypted and secured.").format(name=skill_name))
-            ToastManager().show(
-                tr("Skill '{name}' imported successfully.").format(name=skill_name), "success")
-        else:
-            self.import_skill_pd.show_finish_state(
-                False, tr("Import Failed"),
-                result.get("msg", tr("Unknown error during encryption.")))
 
     def _on_edit_mcp_clicked(self, row):
         name_item = self.table_mcp.item(row, 1)
@@ -472,21 +443,18 @@ class McpSectionMixin:
                 new_cfg["description"] = new_desc  # 更新 Description
 
                 from src.ui.components.dialog import SkillPreviewDialog
-                from src.core.encryption_service import SystemEncryptionService
+                from src.core.skill_store import read_skill_source
 
 
                 if new_path != old_cfg.get("command", "") and new_path.endswith(".py"):
                     try:
-                        with open(new_path, 'r', encoding='utf-8') as f:
-                            raw_code = f.read()
+                        raw_code = read_skill_source(new_path)
 
                         preview_dlg = SkillPreviewDialog(self.widget, new_name, raw_code, is_importing=True)
                         if preview_dlg.exec():
                             final_code = preview_dlg.get_edited_code()
-                            enc_service = SystemEncryptionService()
-                            encrypted_bytes = enc_service.encrypt(final_code)
-
-                            new_cfg["_pending_bytes"] = encrypted_bytes
+                            # 源码以明文暂存，落盘由 save_flow 统一处理（0o600 .py）
+                            new_cfg["_pending_code"] = final_code
                             new_cfg["_is_edited"] = True
                             new_path = f"<Pending Edit: {new_name}>"
                         else:
@@ -496,25 +464,22 @@ class McpSectionMixin:
                             tr("Failed to load new script: {err}").format(err=e), "error")
                         return
 
-                elif new_path == old_cfg.get("command", "") and new_path.endswith(".enc") and os.path.exists(new_path):
+                elif new_path == old_cfg.get("command", "") and os.path.exists(new_path):
                     try:
-                        enc_service = SystemEncryptionService()
-                        with open(new_path, 'rb') as f:
-                            decrypted_code = enc_service.decrypt(f.read())
+                        # .py 明文与历史 .enc 密文统一走同一读取入口
+                        raw_code = read_skill_source(new_path)
 
-                        preview_dlg = SkillPreviewDialog(self.widget, new_name, decrypted_code, is_importing=True)
+                        preview_dlg = SkillPreviewDialog(self.widget, new_name, raw_code, is_importing=True)
                         if preview_dlg.exec():
                             final_code = preview_dlg.get_edited_code()
-                            encrypted_bytes = enc_service.encrypt(final_code)
-
-                            new_cfg["_pending_bytes"] = encrypted_bytes
+                            new_cfg["_pending_code"] = final_code
                             new_cfg["_is_edited"] = True
                             new_path = f"<Pending Edit: {new_name}>"
                         else:
                             return
                     except Exception as e:
                         ToastManager().show(
-                            tr("Failed to decrypt existing skill: {err}").format(err=e), "error")
+                            tr("Failed to load existing skill: {err}").format(err=e), "error")
                         return
 
                 # 更新 UI 和内存中的数据配置

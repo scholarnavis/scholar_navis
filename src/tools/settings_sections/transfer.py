@@ -10,8 +10,8 @@ import os
 import zlib
 
 from src.core.core_task import TaskManager, TaskMode
-from src.core.encryption_service import SystemEncryptionService
 from src.core.i18n import tr
+from src.core.skill_store import read_skill_source
 from src.task.config_task import ExportConfigTask, ImportConfigTask
 from src.ui.components.dialog import (ExportPasswordDialog, ImportPasswordDialog,
                                       ProgressDialog, StandardDialog)
@@ -37,7 +37,6 @@ class ConfigTransferMixin:
         password = pwd_dlg.password
 
         # 2. 选择保存路径
-        import os
         path, _ = save_file_name(
             self.widget, tr("Save Config"), "scholar_navis_config.json", "JSON (*.json)"
         )
@@ -45,11 +44,6 @@ class ConfigTransferMixin:
             return
 
         # 3. 准备数据束
-        from src.core.encryption_service import SystemEncryptionService
-        import zlib
-        import base64
-
-        enc_service = SystemEncryptionService()
         exported_skills_data = {}
 
         for name, cfg in self.config.mcp_servers.get("external_skills", {}).items():
@@ -57,18 +51,14 @@ class ConfigTransferMixin:
             skill_path = cfg.get("command", "")
             if skill_path and os.path.exists(skill_path):
                 try:
-                    with open(skill_path, 'rb') as f:
-                        decrypted_data = enc_service.decrypt(f.read())
+                    # .py 明文与历史 .enc 密文共用同一读取入口（src/core/skill_store.py）
+                    code = read_skill_source(skill_path).encode('utf-8')
+                    compressed_bytes = zlib.compress(code, level=9)
+                    b64_str = base64.b64encode(compressed_bytes).decode('utf-8')
 
-                        if isinstance(decrypted_data, str):
-                            decrypted_data = decrypted_data.encode('utf-8')
-
-                        compressed_bytes = zlib.compress(decrypted_data, level=9)
-                        b64_str = base64.b64encode(compressed_bytes).decode('utf-8')
-
-                        exported_skills_data[name] = b64_str
+                    exported_skills_data[name] = b64_str
                 except Exception as e:
-                    self.logger.warning(f"Failed to decrypt and compress skill {name} for export: {e}")
+                    self.logger.warning(f"Failed to read and compress skill {name} for export: {e}")
 
         bundle = {
             "settings": self.config.user_settings,
@@ -179,34 +169,22 @@ class ConfigTransferMixin:
             final_data = result.get("data", {})
 
             if "skill_files_zlib_b64" in final_data:
-                from src.core.encryption_service import SystemEncryptionService
-                import zlib
-                import base64
-
-                enc_service = SystemEncryptionService()
-
                 for s_name, b64_str in final_data["skill_files_zlib_b64"].items():
                     try:
                         compressed_bytes = base64.b64decode(b64_str)
-                        plain_code_bytes = zlib.decompress(compressed_bytes)
-
-                        plain_code_str = plain_code_bytes.decode('utf-8')
-                        encrypted_data = enc_service.encrypt(plain_code_str)
-
-                        if isinstance(encrypted_data, str):
-                            encrypted_bytes = encrypted_data.encode('utf-8')
-                        else:
-                            encrypted_bytes = encrypted_data
+                        plain_code_str = zlib.decompress(compressed_bytes).decode('utf-8')
 
                         if "mcp_servers" in final_data and "external_skills" in final_data["mcp_servers"]:
                             if s_name in final_data["mcp_servers"]["external_skills"]:
-                                final_data["mcp_servers"]["external_skills"][s_name]["_pending_bytes"] = encrypted_bytes
+                                # 源码明文暂存；落盘由 save_flow 写成 0o600 的 .py
+                                final_data["mcp_servers"]["external_skills"][s_name]["_pending_code"] = plain_code_str
                                 final_data["mcp_servers"]["external_skills"][s_name]["_is_new"] = True
                                 final_data["mcp_servers"]["external_skills"][s_name][
                                     "command"] = f"<Pending Edit: {s_name}>"
 
                     except Exception as e:
-                        self.logger.error(f"💥 CRITICAL: Failed to decompress and stage skill '{s_name}': {e}")
+                        self.logger.error(
+                            f"Failed to decompress and stage skill '{s_name}': {e}")
                         from src.ui.components.toast import ToastManager
                         ToastManager().show(
                             tr("Failed to restore skill {name}: {err}").format(name=s_name, err=e),

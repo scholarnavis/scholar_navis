@@ -43,7 +43,7 @@ class FetchRSSTask(BackgroundTask):
         results = {}
         try:
             from src.core.config_manager import ConfigManager
-            loaded_data = ConfigManager().load_json(save_path, encrypt=False)
+            loaded_data = ConfigManager().load_json(save_path)
             if loaded_data and isinstance(loaded_data, dict):
                 results = loaded_data
             self.send_log("INFO", f"Data loaded via ConfigManager from: {save_path}")
@@ -440,7 +440,7 @@ class ExportRssTask(BackgroundTask):
         try:
             self.update_progress(50, "Exporting feeds to file...")
             from src.core.config_manager import ConfigManager
-            ConfigManager().save_json(export_path, feeds, encrypt=False)
+            ConfigManager().save_json(export_path, feeds)
             return {"success": True, "path": export_path}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -453,7 +453,7 @@ class ImportRssTask(BackgroundTask):
         try:
             self.update_progress(50, "Reading feeds from file...")
             from src.core.config_manager import ConfigManager
-            imported_feeds = ConfigManager().load_json(import_path, encrypt=False)
+            imported_feeds = ConfigManager().load_json(import_path)
 
             if not isinstance(imported_feeds, list):
                 raise ValueError("Invalid format: expected a list of feeds.")

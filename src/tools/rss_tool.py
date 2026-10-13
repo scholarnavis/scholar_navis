@@ -1299,7 +1299,7 @@ class RSSTool(BaseTool):
 
 
     def _load_config(self):
-        saved_feeds = self.config.load_json(self.feeds_file, encrypt=False) or []
+        saved_feeds = self.config.load_json(self.feeds_file) or []
 
         for feed in saved_feeds:
             if "category" not in feed:
@@ -1318,11 +1318,11 @@ class RSSTool(BaseTool):
 
 
     def _save_config(self):
-        self.config.save_json(self.feeds_file, self.feeds, encrypt=False)
+        self.config.save_json(self.feeds_file, self.feeds)
 
 
     def _load_cache(self):
-        data = self.config.load_json(self.cache_file, encrypt=False)
+        data = self.config.load_json(self.cache_file)
         if data:
             meta = data.pop("_meta", {})
             self.last_fetched_time = meta.get("last_fetched", "")

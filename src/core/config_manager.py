@@ -1,13 +1,14 @@
 import json
 import os
 import sys
+import time
+import shutil
 import logging
 import threading
 import tempfile
-import keyring
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import InvalidToken
 
-from src.core import BASE_DIR
+from src.core import BASE_DIR, secrets_store
 from src.core.encryption_service import SystemEncryptionService
 
 # 当前配置导出版本号，用于未来兼容性检查
@@ -42,73 +43,190 @@ class ConfigManager:
         self.LLM_CONFIG_PATH = os.path.join(self.CONFIG_DIR, "llm_config.json")
         self.EXTERNAL_MODELS_PATH = os.path.join(self.CONFIG_DIR, "external_models.json")
 
-        # 系统凭据管理器标识
-        self.KEYRING_SERVICE = "ScholarNavis"
-        self.KEYRING_ACCOUNT = "config_encryption_key"
-
         # 确保配置目录存在
         os.makedirs(self.CONFIG_DIR, exist_ok=True)
 
-        # 2. 初始化加密套件
+        # 2. LEGACY-CIPHERTEXT：解密套件只为"读历史密文"与"口令型导出"存在。
+        #    配置本体一律明文，因此 keyring 不可用不再阻断启动。
         self.encryption_service = SystemEncryptionService(service_name="ScholarNavis")
-        self.encryption_service._get_master_key()
+        try:
+            self.encryption_service._get_master_key()
+        except Exception as e:
+            self.logger.warning(
+                f"Master key unavailable; legacy ciphertexts stay unreadable: {e}")
 
-        # 3. 加载核心配置
+        # 3. LEGACY-CIPHERTEXT：一次性迁移，旧机器绑定密文 → 明文配置 + secrets.json
+        self._migrate_legacy_encrypted_config()
+
+        # 4. 加载核心配置
         self.load_settings()
         self.load_mcp_servers()
+        # 5. LEGACY-CIPHERTEXT：外部技能源码 .enc 密文 → .py 明文
+        self._migrate_legacy_skill_files()
 
         self._initialized = True
 
-    def _init_encryption(self):
-        """基于系统凭据管理器获取或生成唯一密钥"""
+    # ------------------------------------------------------------------ #
+    #  密钥文件 secrets.json（分级存储的读写入口）
+    # ------------------------------------------------------------------ #
+    def _secrets(self) -> dict:
+        """当前 ``secrets.json`` 内容（进程内缓存，写入后同步更新）。"""
+        cache = getattr(self, "_secrets_cache", None)
+        if cache is None:
+            cache = secrets_store.load(self.CONFIG_DIR)
+            self._secrets_cache = cache
+        return cache
+
+    def _merge_secrets(self, section: str, values: dict):
+        """把某分区的密钥写入 ``secrets.json``（空值不覆盖已有密钥）。
+
+        分层合并：``settings`` 是扁平键值，``llm`` / ``mcp`` 是"标识 → 字段"两级，
+        用一层嵌套合并即可覆盖两者，避免写两套逻辑。
+        """
+        bundle = self._secrets()
+        current = bundle.setdefault(section, {})
+        for key, value in (values or {}).items():
+            if isinstance(value, dict) and isinstance(current.get(key), dict):
+                current[key].update(value)
+            elif value not in (None, ""):
+                current[key] = value
+        secrets_store.save(self.CONFIG_DIR, bundle)
+
+    # ------------------------------------------------------------------ #
+    #  LEGACY-CIPHERTEXT 兼容层：读旧密文配置并迁移为明文
+    #  （_read_legacy_encrypted_json / _backup_file / _migrate_legacy_encrypted_config /
+    #   _migrate_legacy_skill_files 四者只服务于历史数据，最早 v2.2 删除；
+    #   见 src/core/encryption_service.py 模块顶部的删除计划）
+    # ------------------------------------------------------------------ #
+    def _read_legacy_encrypted_json(self, path: str):
+        """旧机器绑定密文 → dict；已是明文 JSON 或解不开时返回 ``None``。"""
+        if not os.path.exists(path):
+            return None
         try:
-            key = None
-            try:
-                # 单独捕获 keyring 异常，防止环境不支持时直接崩溃
-                key = keyring.get_password(self.KEYRING_SERVICE, self.KEYRING_ACCOUNT)
-            except Exception as e:
-                self.logger.warning(f"Keyring unavailable or locked, triggering fallback: {e}")
-
-            fallback_key_path = os.path.join(self.CONFIG_DIR, ".secret_fallback.key")
-
-            if not key:
-                # 检查是否存在 Fallback 密钥
-                if os.path.exists(fallback_key_path):
-                    with open(fallback_key_path, 'r', encoding='utf-8') as f:
-                        key = f.read().strip()
-                else:
-                    key = Fernet.generate_key().decode('utf-8')
-                    try:
-                        keyring.set_password(self.KEYRING_SERVICE, self.KEYRING_ACCOUNT, key)
-                        self.logger.info("New encryption key generated and stored in system keyring.")
-                    except Exception as e:
-                        # 如果系统凭据管理器不可用，回退到本地隐藏文件存储
-                        self.logger.warning(f"Keyring unavailable, falling back to local hidden file: {e}")
-                        with open(fallback_key_path, 'w', encoding='utf-8') as f:
-                            f.write(key)
-
-            # 初始化 Fernet 加密对象
-            self.fernet = Fernet(key.encode('utf-8'))
+            with open(path, "r", encoding="utf-8") as f:
+                json.load(f)
+            return None                     # 合法 JSON：本来就是明文，无需迁移
+        except (OSError, ValueError):
+            pass
+        try:
+            with open(path, "rb") as f:
+                blob = f.read()
+            plain, used_legacy = self.encryption_service.decrypt_with_mode(blob)
+            return json.loads(plain)
         except Exception as e:
-            self.logger.critical(f"Encryption initialization failed: {e}")
-            raise
+            self.logger.warning(f"Legacy ciphertext '{path}' cannot be decrypted: {e}")
+            return None
 
-    def save_json(self, path, data, encrypt=True):
-        """原子性写入 JSON 配置文件"""
+    def _backup_file(self, path: str, backup_dir: str) -> bool:
+        """迁移前把原文件备份一份；备份失败返回 False（调用方据此放弃迁移该文件）。"""
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            shutil.copy2(path, os.path.join(backup_dir, os.path.basename(path)))
+            return True
+        except OSError as e:
+            self.logger.error(f"Backup of '{path}' failed, keeping it as is: {e}")
+            return False
+
+    def _migrate_legacy_encrypted_config(self):
+        """一次性迁移：旧 Fernet 密文配置 → 明文配置 + ``secrets.json``。
+
+        判定依据是"文件不是合法 JSON"：明文一定可解析，Fernet 密文不是 UTF-8 JSON。
+        迁移前把原文件整体备份到 ``config/backup_<ts>/``；备份失败或解密失败的文件
+        保持原样（旧版代码仍能读），绝不半途改写。
+        """
+        targets = (
+            (self.SETTINGS_PATH, "settings"),
+            (self.LLM_CONFIG_PATH, "llm"),
+            (self.MCP_SERVERS_PATH, "mcp"),
+        )
+        legacy = {path: self._read_legacy_encrypted_json(path) for path, _ in targets}
+        if not any(data is not None for data in legacy.values()):
+            return
+
+        backup_dir = os.path.join(self.CONFIG_DIR, f"backup_{time.strftime('%Y%m%d_%H%M%S')}")
+        bundle = secrets_store.load(self.CONFIG_DIR)
+        migrated = []
+        for path, kind in targets:
+            data = legacy[path]
+            if data is None or not self._backup_file(path, backup_dir):
+                continue
+            if kind == "settings":
+                public, secret = secrets_store.split_settings(data)
+                bundle["settings"].update(secret)
+            elif kind == "llm":
+                public, secret = secrets_store.split_llm(data)
+                for pid, fields in secret.items():
+                    bundle["llm"].setdefault(pid, {}).update(fields)
+            else:
+                public, secret = secrets_store.split_mcp(data)
+                for group, by_name in secret.items():
+                    section = bundle["mcp"].setdefault(group, {})
+                    for name, fields in by_name.items():
+                        section.setdefault(name, {}).update(fields)
+            try:
+                self.save_json(path, public)
+            except Exception as e:
+                self.logger.error(f"Failed to write plaintext '{path}': {e}")
+                continue
+            migrated.append(os.path.basename(path))
+
+        if migrated:
+            secrets_store.save(self.CONFIG_DIR, bundle)
+            self._secrets_cache = bundle
+            self.logger.info(
+                f"Migrated legacy encrypted config to plaintext: {', '.join(migrated)}; "
+                f"originals backed up to '{backup_dir}'")
+
+    # LEGACY-CIPHERTEXT：技能源码密文迁移，随兼容层一起删除（见 _read_legacy_encrypted_json 上方）
+    def _migrate_legacy_skill_files(self):
+        """外部技能源码 ``.enc`` 密文 → 同目录 ``.py`` 明文（旧文件保留不动）。
+
+        技能代码常内嵌用户自己的 token，故按 0o600 落盘。迁移失败即保持原状：
+        ``skill_manager`` 仍能读旧密文，不影响使用。
+        """
+        skills = (self.mcp_servers or {}).get("external_skills") or {}
+        changed = False
+        for name, cfg in skills.items():
+            if not isinstance(cfg, dict):
+                continue
+            old_path = str(cfg.get("command") or "")
+            if not old_path.endswith(".enc") or not os.path.exists(old_path):
+                continue
+            new_path = os.path.splitext(old_path)[0] + ".py"
+            try:
+                with open(old_path, "rb") as f:
+                    code = self.encryption_service.decrypt(f.read())
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=os.path.dirname(new_path) or ".", prefix=".skill_", text=False)
+                os.close(fd)
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(code)
+                os.chmod(tmp_path, 0o600)
+                os.replace(tmp_path, new_path)
+            except Exception as e:
+                self.logger.warning(f"Skill '{name}' stays encrypted ('{old_path}'): {e}")
+                continue
+            cfg["command"] = new_path
+            changed = True
+            self.logger.info(f"Skill '{name}' source migrated to plaintext: {new_path}")
+        if changed:
+            self.save_mcp_servers()
+
+    def save_json(self, path, data):
+        """原子性写入明文 JSON 配置。
+
+        配置本体一律明文：托管密钥的 ``config/.secret_fallback.key`` 就在同目录、同为
+        0o600，能读密文者必能读密钥，加密只带来"换机即不可读"的代价。敏感字段的隔离
+        由 :mod:`src.core.secrets_store` 负责（单独落 ``secrets.json``）。临时文件由
+        ``mkstemp`` 创建，天然是 0o600，原子替换后权限保持。
+        """
         with self._lock:
-            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), text=False)  # 始终二进制写入
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), text=False)
             os.close(temp_fd)
             try:
-                json_str = json.dumps(data, indent=4, ensure_ascii=False)
-                if encrypt:
-                    content = self.encryption_service.encrypt(json_str)
-                    with open(temp_path, 'wb') as f:
-                        f.write(content)
-                else:
-                    with open(temp_path, 'w', encoding='utf-8') as f:
-                        f.write(json_str)
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    f.write(json.dumps(data, indent=4, ensure_ascii=False))
 
-                import time
                 for attempt in range(3):
                     try:
                         os.replace(temp_path, path)
@@ -129,47 +247,32 @@ class ConfigManager:
                 raise
 
 
-    def load_json(self, path, encrypt=True):
+    def load_json(self, path):
+        """读取明文 JSON 配置；若是历史机器绑定密文，解密一次并就地改写为明文。
+
+        解密回退只服务于**读旧数据**（旧版把 ``settings.json`` 等整体加密过），
+        改造后不再有任何写入侧产生密文，因此这里只读不写密文。
+        """
         if not os.path.exists(path):
             return None
         with self._lock:
             try:
-                if encrypt:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (OSError, ValueError) as e:
+                # LEGACY-CIPHERTEXT：只读旧密文并就地改写为明文，见本类 _read_legacy_encrypted_json 上方的删除计划
+                self.logger.warning(
+                    f"'{path}' is not plain JSON, trying legacy decryption: {e}")
+                try:
                     with open(path, 'rb') as f:
-                        raw_data = f.read()
-
-                    try:
-                        decrypted_text = self.encryption_service.decrypt(raw_data)
-                        return json.loads(decrypted_text)
-                    except Exception as e:
-                        # 处理旧版本明文迁移逻辑
-                        self.logger.warning(f"Decryption failed, trying plain text migration: {e}")
-                        try:
-                            with open(path, 'r', encoding='utf-8') as f:
-                                plain_data = json.load(f)
-                            self.save_json(path, plain_data, encrypt=True)
-                            return plain_data
-                        except (OSError, ValueError, InvalidToken, RuntimeError):
-                            return None
-                else:
-                    try:
-                        with open(path, 'r', encoding='utf-8') as f:
-                            return json.load(f)
-                    except Exception as e:
-                        # 处理之前可能被意外加密的配置文件，尝试解密并迁移至明文
-                        self.logger.warning(f"Plain text load failed, trying decryption migration: {e}")
-                        try:
-                            with open(path, 'rb') as f:
-                                raw_data = f.read()
-                            decrypted_text = self.encryption_service.decrypt(raw_data)
-                            plain_data = json.loads(decrypted_text)
-                            self.save_json(path, plain_data, encrypt=False)
-                            return plain_data
-                        except (OSError, ValueError, InvalidToken, RuntimeError):
-                            return None
-            except Exception as e:
-                self.logger.error(f"Critical error reading {path}: {e}")
-                return None
+                        plain_data = json.loads(self.encryption_service.decrypt(f.read()))
+                    self.save_json(path, plain_data)
+                    self.logger.info(f"Migrated legacy encrypted config to plaintext: {path}")
+                    return plain_data
+                except (OSError, ValueError, InvalidToken, RuntimeError) as legacy_err:
+                    self.logger.error(
+                        f"Cannot read '{path}' as plain JSON or legacy ciphertext: {legacy_err}")
+                    return None
 
 
     def load_settings(self):
@@ -227,7 +330,11 @@ class ConfigManager:
             ],
         }
 
-        current_settings = self.load_json(self.SETTINGS_PATH, encrypt=True)
+        # 明文读取；密钥单独存在 secrets.json，此处合回内存结构（读取方无需改动）
+        current_settings = self.load_json(self.SETTINGS_PATH)
+        if current_settings is not None:
+            current_settings = secrets_store.merge_settings(
+                current_settings, self._secrets().get("settings"))
 
         is_modified = False
         if current_settings is None:
@@ -254,7 +361,9 @@ class ConfigManager:
         self.apply_env_vars()
 
     def save_settings(self):
-        self.save_json(self.SETTINGS_PATH, self.user_settings)
+        public, secret = secrets_store.split_settings(self.user_settings)
+        self.save_json(self.SETTINGS_PATH, public)
+        self._merge_secrets("settings", secret)
         self.apply_env_vars()
 
     def load_llm_configs(self) -> list:
@@ -288,7 +397,10 @@ class ConfigManager:
              "api_key": "ollama"}
         ]
 
-        data = self.load_json(self.LLM_CONFIG_PATH, encrypt=True)
+        # 明文读取；各 provider 的 api_key 从 secrets.json 按 id 合回
+        data = self.load_json(self.LLM_CONFIG_PATH)
+        if data is not None:
+            data = secrets_store.merge_llm(data, self._secrets().get("llm"))
 
         if data is None:
             loaded_configs = []
@@ -348,7 +460,9 @@ class ConfigManager:
         return loaded_configs if loaded_configs else default_config
 
     def save_llm_configs(self, configs: list):
-        self.save_json(self.LLM_CONFIG_PATH, configs, encrypt=True)
+        public, secret = secrets_store.split_llm(configs)
+        self.save_json(self.LLM_CONFIG_PATH, public)
+        self._merge_secrets("llm", secret)
 
 
     def apply_env_vars(self):
@@ -434,10 +548,10 @@ class ConfigManager:
 
 
     def save_external_models(self, data):
-        self.save_json(self.EXTERNAL_MODELS_PATH, data, encrypt=False)
+        self.save_json(self.EXTERNAL_MODELS_PATH, data)
 
     def load_external_models_data(self):
-        data = self.load_json(self.EXTERNAL_MODELS_PATH, encrypt=False)
+        data = self.load_json(self.EXTERNAL_MODELS_PATH)
         return data if data else {"embedding": [], "reranker": []}
 
 
@@ -451,7 +565,11 @@ class ConfigManager:
             "deselected_external_tools": []
         }
 
-        current_servers = self.load_json(self.MCP_SERVERS_PATH, encrypt=True)
+        # 明文读取；env / headers 里名字像密钥的字段从 secrets.json 合回
+        current_servers = self.load_json(self.MCP_SERVERS_PATH)
+        if current_servers is not None:
+            current_servers = secrets_store.merge_mcp(
+                current_servers, self._secrets().get("mcp"))
 
         is_modified = False
         if not current_servers or "mcpServers" not in current_servers:
@@ -477,7 +595,9 @@ class ConfigManager:
             self.save_mcp_servers()
 
     def save_mcp_servers(self):
-        self.save_json(self.MCP_SERVERS_PATH, self.mcp_servers, encrypt=True)
+        public, secret = secrets_store.split_mcp(self.mcp_servers)
+        self.save_json(self.MCP_SERVERS_PATH, public)
+        self._merge_secrets("mcp", secret)
 
     def toggle_mcp_tag(self, tag: str, is_checked: bool):
         tags = self.mcp_servers.get("deselected_mcp_tags", [])

@@ -1,10 +1,6 @@
-import asyncio
-import os
-
 import httpx
 
 from src.core.core_task import BackgroundTask
-from src.core.encryption_service import SystemEncryptionService
 
 
 class FetchModelsTask(BackgroundTask):
@@ -197,25 +193,6 @@ class TestApiTask(BackgroundTask):
             return {"success": False, "msg": str(e)}
 
 
-class HardwareAuthTask(BackgroundTask):
-    """Background task for securely authorizing hardware identity."""
-
-    def _execute(self):
-        try:
-            from src.core.encryption_service import SystemEncryptionService
-            service = SystemEncryptionService()
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            res = loop.run_until_complete(service.verify_identity("Authorize configuration export"))
-            loop.close()
-
-            return {"success": res}
-        except Exception as e:
-            self.send_log("WARNING", f"Hardware auth error: {e}")
-            return {"success": False, "msg": str(e)}
-
-
 class EmailVerifyTask(BackgroundTask):
     """Background task for robustly verifying user email addresses without blocking the UI."""
 
@@ -262,35 +239,6 @@ class HWDetectTask(BackgroundTask):
                 "devs": [{"name": "Auto Detect", "id": "auto"}],
                 "msg": str(e)
             }
-
-
-class ImportNativeSkillTask(BackgroundTask):
-    """
-    后台处理 Native Skill 的加密与安全落盘任务
-    """
-    def _execute(self):
-        self.update_progress(10, "Initializing encryption service...")
-        skill_name = self.kwargs.get("skill_name")
-        final_code = self.kwargs.get("final_code")
-        base_dir = self.kwargs.get("base_dir")
-
-        if not all([skill_name, final_code, base_dir]):
-            raise ValueError("Missing required arguments for skill import.")
-
-        workspace_dir = os.path.join(base_dir, 'tools', 'skill')
-        os.makedirs(workspace_dir, exist_ok=True)
-        target_path = os.path.join(workspace_dir, f"{skill_name}.enc")
-
-        self.update_progress(40, "Encrypting script using system-bound key...")
-        enc_service = SystemEncryptionService()
-        encrypted_bytes = enc_service.encrypt(final_code)
-
-        self.update_progress(80, "Writing to secure storage...")
-        with open(target_path, 'wb') as f:
-            f.write(encrypted_bytes)
-
-        self.update_progress(100, "Import completed.")
-        return {"success": True, "target_path": target_path}
 
 
 class TestMcpConnectionTask(BackgroundTask):

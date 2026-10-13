@@ -5,6 +5,7 @@ from typing import Dict, Callable, get_origin, Literal, get_args
 
 from src.core import BASE_DIR
 from src.core import plot_styles
+from src.core.skill_store import read_skill_source
 
 logger = logging.getLogger("Skill.Manager")
 logger.setLevel(logging.INFO)
@@ -161,9 +162,6 @@ class SkillManager:
         import types
         import os
         import builtins
-        from src.core.encryption_service import SystemEncryptionService
-        enc_service = SystemEncryptionService()
-
 
         for skill_name, script_info in external_scripts.items():
             if isinstance(script_info, dict):
@@ -174,14 +172,12 @@ class SkillManager:
                 script_path = script_info
 
             if not os.path.exists(script_path):
-                logger.warning(f"External skill encrypted file missing: {script_path}")
+                logger.warning(f"External skill file missing: {script_path}")
                 continue
 
             try:
-                # 1. 解密代码
-                with open(script_path, 'rb') as f:
-                    encrypted_data = f.read()
-                decrypted_code = enc_service.decrypt(encrypted_data)
+                # 1. 取源码：明文 .py 与历史 .enc 密文共用同一入口（src/core/skill_store.py）
+                skill_code = read_skill_source(script_path)
 
                 workspace_dir = os.path.join(BASE_DIR, 'tools', 'skill', f"{skill_name}_workspace")
                 os.makedirs(workspace_dir, exist_ok=True)
@@ -220,7 +216,7 @@ class SkillManager:
                 module = types.ModuleType(skill_name)
                 module.__dict__.update(sandbox_globals)
 
-                exec(decrypted_code, module.__dict__)
+                exec(skill_code, module.__dict__)
 
                 if hasattr(module, 'execute') and hasattr(module, 'SCHEMA'):
                     func_name = module.SCHEMA.get("function", {}).get("name")
@@ -230,11 +226,11 @@ class SkillManager:
                         self.external_schemas[func_name] = module.SCHEMA
                         logger.info(f"Successfully loaded sandboxed skill: UI[{skill_name}] -> Func[{func_name}]")
                     else:
-                        logger.error(f"Encrypted skill '{skill_name}' SCHEMA lacks a function name.")
+                        logger.error(f"External skill '{skill_name}' SCHEMA lacks a function name.")
                 else:
-                    logger.error(f"Encrypted skill '{skill_name}' lacks 'execute' func or 'SCHEMA' dict.")
+                    logger.error(f"External skill '{skill_name}' lacks 'execute' func or 'SCHEMA' dict.")
             except Exception as e:
-                logger.error(f"Failed to load encrypted skill '{skill_name}': {e}")
+                logger.error(f"Failed to load external skill '{skill_name}': {e}")
 
     def reload_external_skills(self):
         """

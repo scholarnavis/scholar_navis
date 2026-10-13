@@ -246,11 +246,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "技能 '{name}' 已暂存。点击“保存设置”以提交。",
         "Import Successful": "导入成功",
         "Import Failed": "导入失败",
-        "Skill '{name}' has been encrypted and secured.": "技能 '{name}' 已加密并妥善保存。",
-        "Skill '{name}' imported successfully.": "技能 '{name}' 导入成功。",
-        "Unknown error during encryption.": "加密过程中出现未知错误。",
         "Failed to load new script: {err}": "加载新脚本失败：{err}",
-        "Failed to decrypt existing skill: {err}": "解密已有技能失败：{err}",
 
         # 外部 MCP 安全声明（HTML 模板；{danger}/{bold} 由调用点注入）
         "<b>⚠️ Security Disclaimer for External MCP Servers</b><br><br>"

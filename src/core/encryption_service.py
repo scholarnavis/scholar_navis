@@ -1,3 +1,34 @@
+"""配置相关加解密：生产用途只剩"口令型配置导出"，其余都是**只读**的历史兼容层。
+
+生产用途（保留）
+    口令型导出 / 导入：:meth:`SystemEncryptionService.export_data` /
+    :meth:`SystemEncryptionService.import_data` /
+    :meth:`SystemEncryptionService.derive_key_from_password`。导出文件会离开本机，
+    必须保持加密。
+
+LEGACY-CIPHERTEXT 兼容层（最早 v2.2 删除）
+    只读历史密文，**不再产生任何新密文**。旧版曾用"机器标识当 salt"（以及过渡期的
+    固定 salt）加密 ``settings.json`` / ``llm_config.json`` / ``mcp_servers.json`` 与
+    技能源码，并为此托管了一把主密钥。写入侧现已全部改为明文（配置见
+    :mod:`src.core.secrets_store`，技能见 :mod:`src.core.skill_store`）。
+
+    删除条件：现网已不存在这类密文文件（迁移后配置为明文 JSON + ``secrets.json``，
+    技能为明文 ``.py``），或用户已明确放弃这些旧数据。届时连同以下一并清理：
+
+    * 本模块：:data:`KEY_DERIVATION_SALT`、:data:`DERIVATION_ITERATIONS`、两个平台
+      标识函数、:meth:`SystemEncryptionService._get_machine_id`、两套派生、
+      :meth:`SystemEncryptionService.decrypt_with_mode`、
+      :meth:`SystemEncryptionService.decrypt`，以及主密钥托管（keyring / 回退密钥文件
+      / Windows DPAPI 包装）——即除"生产用途"三个方法外的全部内容；
+    * ``src/core/config_manager.py``：``encryption_service`` 实例、
+      ``load_json`` 的密文回退分支、``_read_legacy_encrypted_json``、``_backup_file``、
+      ``_migrate_legacy_encrypted_config``、``_migrate_legacy_skill_files``；
+    * ``src/core/skill_store.py``：``LEGACY_SUFFIX`` 与 ``read_skill_source`` 的
+      ``.enc`` 分支。
+
+    全仓搜索 ``LEGACY-CIPHERTEXT`` 即可定位所有待删点。
+"""
+
 import os
 import platform
 import logging
@@ -7,7 +38,7 @@ import subprocess
 import keyring
 from typing import Optional, Tuple
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
@@ -30,6 +61,21 @@ else:
     win32crypt = None
 
 
+#: LEGACY-CIPHERTEXT：过渡期加密用的**固定** salt（三平台一致，不含机器标识）。
+#:
+#: 旧版曾把机器标识（Windows WMIC UUID / macOS IOPlatformUUID / Linux
+#: ``/etc/machine-id``，取不到则 hostname）当 PBKDF2 的 salt，于是"重装系统只留
+#: home、容器镜像重建、克隆虚拟机"都会让密钥明明还在、密文却全部解不开。后续改为
+#: 本常量以摆脱机器绑定。两者现均只用于**解开旧密文**，见模块顶部删除计划。
+KEY_DERIVATION_SALT = b"ScholarNavis/master-key/v2"
+
+#: LEGACY-CIPHERTEXT：PBKDF2 迭代次数，供上述历史派生使用（口令型导出的迭代次数见
+#: :meth:`SystemEncryptionService.derive_key_from_password`，两处口径不同、不可混用）。
+DERIVATION_ITERATIONS = 1000
+
+
+# LEGACY-CIPHERTEXT：下面两个平台标识函数仅供"机器标识当 salt"的历史派生使用，
+# 与密钥托管、业务逻辑无关，见模块顶部的删除计划。
 def _windows_machine_uuid() -> str:
     """Windows 机器 UUID。
 
@@ -70,18 +116,28 @@ def _macos_machine_uuid() -> str:
 
 
 class SystemEncryptionService:
+    """配置相关加解密：口令型导出为现行用途，其余属于历史密文兼容层（见模块顶部）。"""
+
     def __init__(self, service_name: str = "ScholarNavis"):
         self.logger = logging.getLogger("EncryptionService")
         self.service_name = service_name
         self.account_name = "system_bound_master_key"
         self._master_fernet: Optional[Fernet] = None
+        #: 历史派生（salt = 机器标识）的 Fernet，仅为解密旧密文而存在
+        self._legacy_fernet: Optional[Fernet] = None
+        self._legacy_unavailable = False
 
+    # ------------------------------------------------------------------ #
+    #  LEGACY-CIPHERTEXT 兼容层：机器标识派生 / 两套 Fernet / 解密入口
+    #  （整段只读历史密文，最早 v2.2 删除；见模块顶部删除计划）
+    # ------------------------------------------------------------------ #
     def _get_machine_id(self) -> str:
-        """生成与本机绑定的硬件标识（主密钥派生的输入之一）。
+        """本机硬件标识——**仅用于解密历史密文**（见 :meth:`_get_legacy_fernet`）。
 
-        该值参与密钥派生：同一台机器上取到的值一旦变化，历史密文将无法解密。
-        因此各平台都必须"先取既有来源，取不到才回退"，不能为了适配新系统而
-        调整优先级（见 :func:`_windows_machine_uuid`）。
+        保留本方法的唯一理由是：旧版本用"机器标识当 salt"加密过配置与技能源码，
+        这些密文只有按当年那套 salt 才解得开，而各平台"先取既有来源、取不到才回退
+        hostname"的取值顺序也必须是当年那套，顺序不可调整（见
+        :func:`_windows_machine_uuid`）。改造后写入侧不再产生任何密文。
         """
         try:
             if SYSTEM == PLATFORM_WINDOWS:
@@ -96,31 +152,73 @@ class SystemEncryptionService:
             return platform.node()
         return "fallback-id"
 
+    def _derive_fernet(self, salt: bytes) -> Fernet:
+        """用托管的主密钥 + 给定 salt 派生 Fernet（唯一的派生实现）。"""
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=DERIVATION_ITERATIONS,
+            backend=default_backend(),
+        )
+        return Fernet(base64.urlsafe_b64encode(kdf.derive(self._get_master_key())))
+
     def _get_master_fernet(self) -> Fernet:
-        """Lazy initialization of the Fernet instance using the system-bound key."""
+        """固定 salt 派生的 Fernet：用于读"中间格式"密文（与机器标识无关）。
+
+        该派生只出现在改造前的过渡版本里，现已无写入侧使用；保留是为了让那一批
+        文件迁移时不必回退机器标识。
+        """
         if self._master_fernet is None:
-            raw_key = self._get_master_key()
-            # Derive a standard 32-byte Fernet key from the system-bound raw key
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=self._get_machine_id().encode(),
-                iterations=1000,
-                backend=default_backend()
-            )
-            derived_key = base64.urlsafe_b64encode(kdf.derive(raw_key))
-            self._master_fernet = Fernet(derived_key)
+            self._master_fernet = self._derive_fernet(KEY_DERIVATION_SALT)
         return self._master_fernet
 
-    def encrypt(self, data: str) -> bytes:
-        """Encrypts a string using the hardware-bound master key."""
-        return self._get_master_fernet().encrypt(data.encode())
+    def _get_legacy_fernet(self) -> Optional[Fernet]:
+        """历史 Fernet（salt = 机器标识）：**只用于解密旧密文**，任何写入方都不得使用。
+
+        机器标识取不到时返回 ``None``——此时历史密文本就解不开，交给调用方按
+        "读不出"处理（例如配置回落到默认值），不要让它升级成启动失败。
+        """
+        if self._legacy_fernet is None and not self._legacy_unavailable:
+            try:
+                salt = self._get_machine_id().encode()
+            except Exception as e:
+                self._legacy_unavailable = True
+                self.logger.warning(f"Legacy key derivation unavailable: {e}")
+                return None
+            try:
+                self._legacy_fernet = self._derive_fernet(salt)
+            except Exception as e:
+                self._legacy_unavailable = True
+                self.logger.warning(f"Legacy key derivation failed: {e}")
+                return None
+        return self._legacy_fernet
+
+    def decrypt_with_mode(self, encrypted_data: bytes) -> Tuple[str, bool]:
+        """解密并返回 ``(明文, 是否用了历史派生)``。
+
+        调用方据此决定要不要把文件按新格式重写（一次性迁移）；解析本身两种派生共用
+        同一份实现，避免"两处各写一遍解密"。
+        """
+        try:
+            return self._get_master_fernet().decrypt(encrypted_data).decode(), False
+        except InvalidToken:
+            legacy = self._get_legacy_fernet()
+            if legacy is None:
+                raise
+            plain = legacy.decrypt(encrypted_data).decode()
+            self.logger.warning(
+                "Decrypted a legacy machine-bound ciphertext. Rewrite the file to "
+                "migrate it to the machine-independent key.")
+            return plain, True
 
     def decrypt(self, encrypted_data: bytes) -> str:
-        """Decrypts data using the hardware-bound master key."""
-        return self._get_master_fernet().decrypt(encrypted_data).decode()
+        """Decrypts data using the master key (legacy ciphertexts still readable)."""
+        return self.decrypt_with_mode(encrypted_data)[0]
 
     # ------------------------------------------------------------------ #
+    #  LEGACY-CIPHERTEXT 兼容层：主密钥托管（只剩"解开历史密文"这一个用途，
+    #  最早 v2.2 删除；见模块顶部删除计划）
     #  Master key storage: system keyring (primary) + local file (fallback)
     # ------------------------------------------------------------------ #
 
@@ -258,6 +356,9 @@ class SystemEncryptionService:
         return new_key
 
 
+    # ------------------------------------------------------------------ #
+    #  生产用途：口令型导出 / 导入（保留，导出文件会离开本机）
+    # ------------------------------------------------------------------ #
     def derive_key_from_password(self, password: str, salt: bytes = None) -> Tuple[bytes, bytes]:
         """Derives a high-entropy key with 600,000 iterations"""
         if salt is None:
