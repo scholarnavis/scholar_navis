@@ -52,18 +52,25 @@ _ZIP_MAGIC = b"PK\x03\x04"
 #: 消息里承载附件路径的字段（``external_files`` 条目的键）。
 _ATTACHMENT_PATH_KEYS = ("path", "image_path")
 
+#: 引用条目（``references`` 的条目）里指向本机原文的字段名，见 src/core/references.py。
+_REFERENCE_PATH_KEY = "path"
+
 
 # --------------------------------------------------------------------------- #
 #  写
 # --------------------------------------------------------------------------- #
-def _sanitize(value):
-    """把任意对象降级为 JSON 可序列化结构（不可序列化的转 str）。"""
+def sanitize(value):
+    """把任意对象降级为 JSON 可序列化结构（不可序列化的转 str）。
+
+    归档写出与对话快照（:mod:`src.core.chat_session`）共用这一份实现：两处落盘的是
+    同一批消息条目，降级规则必须一致，否则会出现"导得出去、存不下来"。
+    """
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, list):
-        return [_sanitize(v) for v in value]
+        return [sanitize(v) for v in value]
     if isinstance(value, dict):
-        return {k: _sanitize(v) for k, v in value.items()}
+        return {k: sanitize(v) for k, v in value.items()}
     try:
         return str(value)
     except Exception:  # pragma: no cover - 纯防御
@@ -71,7 +78,17 @@ def _sanitize(value):
 
 
 def _collect_attachments(messages: Iterable[Dict]) -> List[str]:
-    """按出现顺序收集消息引用的附件绝对路径（去重，保持原样字符串）。"""
+    """按出现顺序收集消息引用的附件绝对路径（去重，保持原样字符串）。
+
+    三类来源都要收，缺任一都会让"导出的对话"在别的机器上缺东西：
+
+    * ``external_files``：用户附件与正文跳转链接；
+    * ``references[].path``：引用条目里指向本机原文的字段——不收，导入后引用卡还在，
+      但"打开原文"会提示文件不存在；
+    * 高级 UI 组件声明的成品文件（见 :mod:`src.ui.components.card_registry` 的
+      ``artifacts_of``，例如 R 图卡的 PNG/SVG/PDF/脚本/数据）——不收就会出现
+      "组件过去了、图没了"。
+    """
     seen: List[str] = []
     for msg in messages or []:
         for item in (msg or {}).get("external_files") or []:
@@ -81,7 +98,26 @@ def _collect_attachments(messages: Iterable[Dict]) -> List[str]:
                 raw = str(item.get(key) or "").strip()
                 if raw and raw not in seen:
                     seen.append(raw)
+        for item in (msg or {}).get("references") or []:
+            if not isinstance(item, dict):
+                continue
+            raw = str(item.get(_REFERENCE_PATH_KEY) or "").strip()
+            if raw and raw not in seen:
+                seen.append(raw)
+    for path in _card_artifact_paths(messages):
+        if path not in seen:
+            seen.append(path)
     return seen
+
+
+def _card_artifact_paths(messages: Iterable[Dict]) -> List[str]:
+    """组件依赖的成品文件路径（登记表不可用时静默退化为只收附件）。"""
+    try:
+        from src.ui.components.card_registry import artifact_paths_of
+        return artifact_paths_of(messages)
+    except Exception as e:  # pragma: no cover - 纯防御
+        logger.debug("Card artifact collection skipped: %s", e)
+        return []
 
 
 def _unique_arcname(used: set, name: str) -> str:
@@ -103,7 +139,7 @@ def write_archive(path: str, messages: Iterable[Dict]) -> Dict[str, Any]:
     附件按**内容路径**嵌入归档；读取不到的文件只告警并保留原路径，绝不因此
     中断导出（导出本身必须成功，附件缺失是次要问题）。
     """
-    msgs = [_sanitize(m) for m in (messages or [])]
+    msgs = [sanitize(m) for m in (messages or [])]
 
     # 1) 收集可嵌入的附件
     attachment_map: Dict[str, str] = {}
@@ -253,7 +289,11 @@ def remap_attachment_paths(messages: Iterable[Dict], attachment_map: Dict[str, s
 
     * ``external_files`` 的 ``path`` / ``image_path``（缩略图与文件芯片）；
     * ``context_html`` 里的 ``cite://view?path=<url-encoded>`` 链接（正文里的
-      附件跳转链接）——只改 ``external_files`` 会让这些链接指向旧机路径。
+      附件跳转链接）——只改 ``external_files`` 会让这些链接指向旧机路径；
+    * ``references[].path``（引用卡里"打开原文"指向的本机文件）；
+    * 正文里高级 UI 组件标记内的成品文件路径（R 图卡等，见
+      :func:`src.ui.components.card_registry.rewrite_card_paths`）——不改这些，
+      导入后组件虽然重建，预览与下载却都指向旧机路径。
     """
     if not attachment_map:
         return 0
@@ -270,6 +310,20 @@ def remap_attachment_paths(messages: Iterable[Dict], attachment_map: Dict[str, s
                 if new:
                     item[key] = new
                     changed += 1
+        for item in msg.get("references") or []:
+            if not isinstance(item, dict):
+                continue
+            old = str(item.get(_REFERENCE_PATH_KEY) or "")
+            new = attachment_map.get(old)
+            if new:
+                item[_REFERENCE_PATH_KEY] = new
+                changed += 1
+        content = msg.get("content")
+        if isinstance(content, str) and content:
+            new_content, hits = _rewrite_card_paths(content, attachment_map)
+            if hits:
+                msg["content"] = new_content
+                changed += hits
         ctx = msg.get("context_html")
         if isinstance(ctx, str) and ctx:
             for old, new in attachment_map.items():
@@ -282,3 +336,13 @@ def remap_attachment_paths(messages: Iterable[Dict], attachment_map: Dict[str, s
     if changed:
         logger.info("Remapped %d attachment reference(s) to extracted copies", changed)
     return changed
+
+
+def _rewrite_card_paths(text: str, attachment_map: Dict[str, str]):
+    """改写正文中组件标记内的文件路径（登记表不可用时原样返回）。"""
+    try:
+        from src.ui.components.card_registry import rewrite_card_paths
+        return rewrite_card_paths(text, attachment_map)
+    except Exception as e:  # pragma: no cover - 纯防御
+        logger.debug("Card path rewrite skipped: %s", e)
+        return text, 0

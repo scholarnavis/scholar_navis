@@ -98,6 +98,8 @@ class ChatSendFlowMixin:
             "context_html": current_html if current_html else None,
             "external_files": current_files
         })
+        # 轮次边界落盘：问题先写进快照，即使随后立刻崩溃，下次启动也能看到它
+        self._autosave_session()
 
         self.input_container.hide_context_preview()
         self.external_files = current_files
@@ -307,6 +309,7 @@ class ChatSendFlowMixin:
             bubble = self.add_bubble(display_text, is_user=(msg['role'] == 'user'),
                                      context_html=ctx_html, image_files=msg_images)
             self._restore_message_references(bubble, msg)
+            self._restore_message_cards(bubble, msg)
             self.history.append(msg)
 
         kb_data = self.combo_kb.currentData()

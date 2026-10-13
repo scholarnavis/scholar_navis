@@ -63,6 +63,9 @@ class ChatBubblesMixin:
         bubble.sig_deep_plan_confirm.connect(self.handle_deep_plan_confirm)
         bubble.sig_deep_plan_skip.connect(self.handle_deep_plan_skip)
 
+        # 交互卡 / 高级 UI 组件的状态落定：立即回写该条历史并落盘（见 card_registry）
+        bubble.sig_card_state_changed.connect(self._on_bubble_cards_changed)
+
         # 链接路由统一走气泡的 sig_link_clicked：正文块（lbl_text）与拆分出的
         # 滚动块（表格 / 引用 / 代码块 / 思考链）内部的 anchorClicked 都会转发到
         # 该信号，避免只连接 lbl_text 导致其他块里的链接（cite://、think:// 等）失效。
@@ -98,6 +101,23 @@ class ChatBubblesMixin:
             logger.debug("Restored %d reference(s) for message #%s.", len(refs), idx)
         except Exception as e:  # pragma: no cover - 纯防御
             logger.warning("Failed to restore references for message #%s: %s", idx, e)
+
+    def _restore_message_cards(self, bubble, msg):
+        """把历史条目里的组件交互结果回灌并冻结（与 :meth:`_restore_message_references` 对称）。
+
+        历史重放时组件由正文标记重建，用户当初的选择 / 确认结果存在
+        ``ui_components`` 里；这里回灌后整卡冻结为只读（文字仍可框选），使历史中的
+        卡片与"回答完就不允许修改"的线上行为完全一致。没有快照时同样执行冻结——
+        历史里的组件一律属于过去，不允许再改。
+        """
+        restore = getattr(bubble, "restore_card_states", None)
+        if not callable(restore):
+            return
+        try:
+            restore((msg or {}).get("ui_components") if isinstance(msg, dict) else None)
+        except Exception as e:  # pragma: no cover - 纯防御
+            logger.warning("Failed to restore card states for message #%s: %s",
+                           getattr(bubble, "index", -1), e)
 
     def show_dev_note(self, text):
         """Show a display-only note bubble (left-aligned, gray) to the user.
@@ -277,6 +297,8 @@ class ChatBubblesMixin:
         self.cancel_generation()
         self.current_ai_bubble = None
         self.history.clear()
+        # 清空即"不再恢复"：快照文件必须同步删除，否则下次启动会把刚清掉的对话找回来
+        self._forget_autosaved_session()
         # 引用缓存与对话同生命周期：清空后编号空间重置，必须一并清掉，
         # 否则新会话尚未登记的 [n] 会命中上一会话残留的旧条目。
         from src.ui.components.citation_popup import CitationPopupController

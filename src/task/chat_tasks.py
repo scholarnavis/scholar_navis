@@ -16,7 +16,7 @@ from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.references import (FOOTER_RULE_HTML, PROVENANCE_HEADER_HTML,
                                  ReferenceItem, ReferenceRegistry,
                                  strip_unregistered_cite_keys)
-from src.core.evidence import EvidenceStore
+from src.core.evidence import EvidenceStore, is_usable_source_text
 from src.core.prompt_rules import (CITATION_TOKEN_RULE,
                                    LANGUAGE_AND_PUNCTUATION_RULE)
 from src.core import plot_styles
@@ -70,19 +70,28 @@ def _registry_item_from_source(index, meta):
 
     本地 KB 文档（本地 path）与在线来源（path 为 http(s) URL）走同一入口，
     避免"来源 -> 条目"的转换散落多处造成字段不一致。
+
+    支撑原文（snippet）只接受达到"可引用原文"门槛的文本（判据见
+    :func:`src.core.evidence.is_usable_source_text`）：不足门槛的不是原文——典型
+    是检索列表里的占位串——登记为**无原文**，UI 会明确显示"未记录支撑原文"，
+    绝不把它当作 "Cited passage" 展示。命中门槛的原文直接来自程序持有的来源
+    （工具结果 / KB chunk），未经模型转写，故标 ``verified``（UI 标注 verbatim）。
     """
     meta = meta or {}
     path = str(meta.get("path") or "")
     name = str(meta.get("name") or "")
-    snippet = str(meta.get("search_text") or meta.get("snippet") or "")
+    snippet = str(meta.get("search_text") or meta.get("snippet") or "").strip()
+    if not is_usable_source_text(snippet):
+        snippet = ""
+    verified = bool(snippet)
     if path.lower().startswith(("http://", "https://")):
         title = re.sub(r"^\[Online\]\s*", "", name).strip() or path
         return ReferenceItem(index=index, title=title, url=path,
-                             snippet=snippet, kind="web")
+                             snippet=snippet, kind="web", verified=verified)
     return ReferenceItem(index=index, path=path,
                          page=int(meta.get("page") or 1),
                          title=name or os.path.basename(path) or "Local document",
-                         snippet=snippet, kind="local_document")
+                         snippet=snippet, kind="local_document", verified=verified)
 
 
 def _seed_registry_from_sources(registry, sources_map, evidence_store=None):
@@ -2129,8 +2138,11 @@ class ImportChatHistoryTask(BackgroundTask):
             msg["content"] = ""
         else:
             msg["content"] = str(content)
-        # 保留供气泡渲染的富字段（references 为引用条目，回灌后恢复 [n] 悬停著录）
-        for key in ("display_text", "context_html", "external_files", "status", "references"):
+        # 保留供气泡渲染的富字段：references 为引用条目（回灌后恢复 [n] 悬停著录与
+        # 引用卡），ui_components 为交互卡 / 高级 UI 组件的用户交互结果（回灌后重建
+        # 为只读组件）。两者都是"导出无损留存、导入原样恢复"的必要字段。
+        for key in ("display_text", "context_html", "external_files", "status",
+                    "references", "ui_components"):
             if key in raw:
                 msg[key] = raw[key]
         return msg

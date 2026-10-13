@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
 
 from src.core import plot_styles
-from src.core.evidence import EvidenceStore
+from src.core.evidence import EvidenceStore, is_usable_source_text
 from src.core.prompt_rules import CITATION_TOKEN_RULE
 from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
@@ -1954,8 +1954,10 @@ class AgentRuntime:
     # ------------------------------------------------------------------ #
     #  Citation extraction
     # ------------------------------------------------------------------ #
-    #: 工具结果条目中可作为"逐字原文"的字段（按优先级取第一个非空值）。
-    #: PubMed 检索列表返回 "Fetch via fetch_pubmed_abstract." 占位串，须跳过。
+    #: 工具结果条目中可作为"逐字原文"的字段（按优先级取第一个**可用**值）。
+    #: 可用性判据统一在 :func:`src.core.evidence.is_usable_source_text`：检索列表里的
+    #: 占位串（``"No abstract"`` / ``"Fetch via ..."`` 一类）长度远不及一条摘要，
+    #: 会被同一门槛挡下，无需在本处再维护一份占位串字面量清单。
     _EVIDENCE_TEXT_KEYS = ("abstract", "abstractText", "snippet", "summary", "content")
     _EVIDENCE_URL_KEYS = ("url", "pdf_url", "landing_page_url", "link")
     _EVIDENCE_TITLE_KEYS = ("title", "name")
@@ -1986,7 +1988,7 @@ class AgentRuntime:
             text = ""
             for key in self._EVIDENCE_TEXT_KEYS:
                 val = str(item.get(key) or "").strip()
-                if val and not val.startswith("Fetch via"):
+                if is_usable_source_text(val):
                     text = val
                     break
             if not text:
@@ -2029,12 +2031,19 @@ class AgentRuntime:
                         or f"Result from {tool_name}"
                     )
                     if source_url:
+                        # 逐字原文：只有达到"可引用原文"门槛的摘要才作为支撑原文。
+                        # 达不到门槛的（占位串 / "No abstract" / 三五个词的碎片）
+                        # 一律登记为**无原文**——引用卡会明确显示"未记录支撑原文"，
+                        # 绝不把不是原文的字符串放到 "Cited passage" 上。
+                        source_text = str(item.get("abstract") or "").strip()
+                        if not is_usable_source_text(source_text):
+                            source_text = ""
                         ref_id = self.cite_collector({
                             "path": source_url,
                             "page": 1,
                             "name": f"[Online] {source_title}",
                             # 完整原文（不再截断）：snippet 必须是来源逐字内容。
-                            "search_text": str(item.get("abstract") or ""),
+                            "search_text": source_text,
                         })
                         if ref_id:
                             item[self.TOOL_CITE_ID_FIELD] = ref_id

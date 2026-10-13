@@ -76,6 +76,27 @@ def _norm_title(title):
     return re.sub(r'\s+', ' ', t).strip()
 
 
+def _clean_abstract(raw):
+    """外部摘要 -> 逐字纯文本（唯一入口）。
+
+    Crossref 返回 JATS 标记（``<jats:p>`` 等），OpenAlex 由倒排索引还原，
+    S2 返回纯文本；三种形态都必须收敛成"可逐字展示的原文"，否则引用卡上的
+    "Cited passage" 会带上标签残渣。
+
+    无摘要时返回**空串**——绝不写 ``"No abstract"`` 这类占位串：占位串会被
+    引用登记链路当成原文（历史故障：引用卡的 Cited passage 显示成了
+    ``Fetch via fetch_pubmed_abstract.``）。空串的语义是"该来源没有摘要原文"，
+    由 UI 明确提示"未记录支撑原文"。
+    """
+    text = re.sub(r"<[^>]+>", " ", str(raw or ""))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _has_abstract(rec):
+    """记录是否带可展示的摘要原文（判空，不再判定占位串字面量）。"""
+    return bool(str((rec or {}).get("abstract") or "").strip())
+
+
 def _merge_records(records):
     """多来源聚合去重。
 
@@ -104,8 +125,8 @@ def _merge_records(records):
             # 引用数取各来源最大值
             existing["citation_count"] = max(
                 existing.get("citation_count", 0) or 0, rec.get("citation_count", 0) or 0)
-            # 摘要优先取非 "No abstract" 的
-            if existing.get("abstract") in (None, "", "No abstract") and rec.get("abstract") not in (None, "", "No abstract"):
+            # 摘要：已有原文时保留首次取值，否则用后到的原文补全
+            if not _has_abstract(existing) and _has_abstract(rec):
                 existing["abstract"] = rec["abstract"]
             # 期刊名补充
             if not existing.get("journal") and rec.get("journal"):
@@ -126,7 +147,7 @@ def _merge_records(records):
         n_sources = len(rec.get("source_dbs") or [])
         score += 1.0 * min(n_sources, 3)                      # 多来源覆盖
         score += 1.0 if rec.get("doi") else 0.0                # 有 DOI
-        score += 1.0 if rec.get("abstract") not in (None, "", "No abstract") else 0.0  # 有摘要
+        score += 1.0 if _has_abstract(rec) else 0.0             # 有真实摘要原文
         score += 0.5 if rec.get("journal") else 0.0            # 有期刊名
         score += 0.2 * min(float(rec.get("citation_count", 0) or 0) / 100.0, 2.0)  # 引用量
         rec["confidence"] = round(score, 2)
@@ -134,6 +155,70 @@ def _merge_records(records):
 
     ranked.sort(key=lambda r: (r.get("citation_count", 0) or 0, r.get("confidence", 0)), reverse=True)
     return ranked
+
+
+#: EFetch 单次请求的 PMID 上限（NCBI 允许更多，这里按检索页大小批量取，够用且稳）。
+_PUBMED_EFETCH_MAX_IDS = 200
+
+
+def _pubmed_abstract_text(record):
+    """从 EFetch 记录里取出逐字摘要（分段摘要用 Label 前缀拼接，保持原顺序）。"""
+    citation = record.get("MedlineCitation") if isinstance(record, dict) else None
+    article = citation.get("Article") if isinstance(citation, dict) else None
+    abstract = article.get("Abstract") if isinstance(article, dict) else None
+    if not isinstance(abstract, dict):
+        return ""
+    raw = abstract.get("AbstractText")
+    chunks = raw if isinstance(raw, list) else ([raw] if raw is not None else [])
+    parts = []
+    for chunk in chunks:
+        text = str(chunk).strip()
+        if not text:
+            continue
+        label = str((getattr(chunk, "attributes", None) or {}).get("Label") or "").strip()
+        parts.append(f"{label}: {text}" if label else text)
+    return " ".join(parts)
+
+
+def _fetch_pubmed_abstracts(pmids, ncbi_rps):
+    """用 EFetch 批量取 PubMed 摘要原文，返回 ``{pmid: abstract}``（唯一取原文入口）。
+
+    为什么必须有这一步：esummary（检索列表）**不返回摘要**。旧实现往 ``abstract``
+    字段塞占位串 ``"Fetch via fetch_pubmed_abstract."`` 提示模型再去取——该占位串
+    随后被引用登记链路当作"支撑原文"注册，引用卡上就出现了一句不是原文的
+    "Cited passage"。改为检索阶段直接用 EFetch 取回逐字摘要，占位串不存在了，
+    引用卡展示的必然来自出版社摘要本身。
+
+    容错：网络 / 解析 / 单篇无摘要都退化为"该 PMID 无摘要"，绝不影响检索结果本身；
+    调用方据缺键判定该来源没有可展示的原文。
+    """
+    ids = [str(p).strip() for p in pmids if str(p).strip()]
+    if not ids:
+        return {}
+    abstracts = {}
+    for start in range(0, len(ids), _PUBMED_EFETCH_MAX_IDS):
+        batch = ids[start:start + _PUBMED_EFETCH_MAX_IDS]
+        global_rate_limiter.acquire("ncbi", rps=ncbi_rps)
+        try:
+            handle = Entrez.efetch(db="pubmed", id=",".join(batch),
+                                   rettype="abstract", retmode="xml")
+            try:
+                records = Entrez.read(handle, validate=False)
+            finally:
+                handle.close()
+        except Exception as e:
+            logger.warning(f"PubMed EFetch failed for {len(batch)} id(s): {e}")
+            continue
+        for record in (records if isinstance(records, list) else [records]):
+            if not isinstance(record, dict):
+                continue
+            text = _pubmed_abstract_text(record)
+            citation = record.get("MedlineCitation")
+            pmid = str((citation or {}).get("PMID", "") or "").strip() if isinstance(citation, dict) else ""
+            if text and pmid:
+                abstracts[pmid] = text
+    logger.info(f"PubMed EFetch: abstracts retrieved for {len(abstracts)}/{len(ids)} record(s).")
+    return abstracts
 
 
 @simple_retry(max_attempts=2, delay=1)
@@ -178,12 +263,12 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
         for p in payload.get("results", []):
             if not isinstance(p, dict): continue
             abs_idx = p.get("abstract_inverted_index")
-            abstract_text = "No abstract"
+            abstract_text = ""
             if isinstance(abs_idx, dict):
                 words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
                          positions]
                 words.sort()
-                abstract_text = " ".join([w for pos_idx, w in words])
+                abstract_text = _clean_abstract(" ".join([w for pos_idx, w in words]))
 
             authors_raw = p.get("authorships") or []
             if not isinstance(authors_raw, list): authors_raw = []
@@ -240,8 +325,7 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
             parsed.append({"title": title,
                            "year": year,
                            "authors": authors, "citation_count": p.get("is-referenced-by-count", 0),
-                           "abstract": p.get("abstract", "No abstract").replace("<jats:p>", "").replace(
-                               "</jats:p>", ""),
+                           "abstract": _clean_abstract(p.get("abstract")),
                            "doi": p.get("DOI", ""), "url": p.get("URL", ""),
                            "source_db": "Crossref", "journal": journal})
         return parsed
@@ -265,6 +349,10 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
             doc_list = ds_set.get("DocumentSummary", []) if isinstance(ds_set, dict) else []
         if not isinstance(doc_list, list): doc_list = [doc_list]
 
+        # esummary 不带摘要，必须再走一次 EFetch 取逐字原文（见 _fetch_pubmed_abstracts）。
+        abstracts = _fetch_pubmed_abstracts(
+            [d.get("Id", "") for d in doc_list if isinstance(d, dict)], ncbi_rps)
+
         parsed = []
         for d in doc_list:
             if not isinstance(d, dict): continue
@@ -280,12 +368,15 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
                 (a.get("Value", "") for a in article_ids if isinstance(a, dict) and a.get("IdType") == "doi"),
                 "")
 
+            pmid = str(d.get("Id", "") or "").strip()
             parsed.append({"title": d.get("Title", ""), "year": d.get("PubDate", "")[:4],
-                           "authors": authors, "abstract": "Fetch via fetch_pubmed_abstract.",
-                           "pmid": d.get("Id", ""),
+                           "authors": authors,
+                           # 真实摘要；取不到就是空串（没有原文，不编造）
+                           "abstract": abstracts.get(pmid, ""),
+                           "pmid": pmid,
                            "doi": doi,
                            "journal": d.get("FullJournalName", ""),
-                           "url": f"https://pubmed.ncbi.nlm.nih.gov/{d.get('Id', '')}/", "source_db": "PubMed"})
+                           "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/", "source_db": "PubMed"})
         return parsed
 
     def _parse_s2():
@@ -314,7 +405,7 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
             parsed.append({"title": p.get("title", ""), "year": p.get("year", "Unknown"),
                            "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
                            "citation_count": p.get("citationCount", 0),
-                           "abstract": p.get("abstract") or "No abstract",
+                           "abstract": _clean_abstract(p.get("abstract")),
                            "doi": ext_ids.get("DOI", "") if isinstance(ext_ids, dict) else "",
                            "url": p.get("url", ""),
                            "journal": p.get("venue", "") or "",
@@ -483,12 +574,12 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
                 if not isinstance(p, dict): continue
 
                 abs_idx = p.get("abstract_inverted_index")
-                abstract_text = "No abstract"
+                abstract_text = ""
                 if isinstance(abs_idx, dict):
                     words = [(pos, w) for w, positions in abs_idx.items() if isinstance(positions, list) for pos in
                              positions]
                     words.sort()
-                    abstract_text = " ".join([w for pos_idx, w in words])
+                    abstract_text = _clean_abstract(" ".join([w for pos_idx, w in words]))
 
                 authors_raw = p.get("authorships") or []
                 if not isinstance(authors_raw, list): authors_raw = []
@@ -552,7 +643,7 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
                             "title": p.get("title", ""), "year": p.get("year", "Unknown"),
                             "authors": [a.get("name", "") for a in authors_raw if isinstance(a, dict)],
                             "citation_count": p.get("citationCount", 0),
-                            "abstract": p.get("abstract") or "No abstract",
+                            "abstract": _clean_abstract(p.get("abstract")),
                             "doi": doi_str,
                             "url": p.get("url", "")
                         })
@@ -599,7 +690,7 @@ def search_preprints(query: str, max_results: int = 5) -> str:
         results = [
             {"title": p.get("title", ""), "year": p.get("pubYear", "Unknown"), "authors": p.get("authorString", ""),
              "doi": p.get("doi", ""), "source": p.get("bookOrReportDetails", {}).get("publisher", "Preprint Server"),
-             "abstract": p.get("abstractText", "No abstract"),
+             "abstract": _clean_abstract(p.get("abstractText")),
              "url": f"https://doi.org/{p.get('doi')}" if p.get("doi") else ""} for p in
             res.json().get("resultList", {}).get("result", [])]
         return json.dumps({"status": "success", "results": results}, ensure_ascii=False)

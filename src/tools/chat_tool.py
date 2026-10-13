@@ -22,6 +22,7 @@ from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (QGraphicsOpacityEffect, QHBoxLayout, QLabel,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
+from src.core import chat_session
 from src.core.kb_manager import DatabaseManager, KBManager
 from src.core.core_task import TaskManager, TaskMode
 from src.core.i18n import tr
@@ -33,7 +34,7 @@ from src.tools.chat_input_widgets import (ChatDropTargetWidget,
                                           ChatInputContainer)
 from src.tools.chat_mixins import (ChatAttachmentsMixin, ChatBubblesMixin,
                                    ChatResponseFlowMixin, ChatSearchMixin,
-                                   ChatSendFlowMixin)
+                                   ChatSendFlowMixin, ChatSessionMixin)
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.model_selector import ModelSelectorWidget
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 class ChatTool(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin,
-               ChatBubblesMixin, ChatAttachmentsMixin, BaseTool):
+               ChatBubblesMixin, ChatAttachmentsMixin, ChatSessionMixin, BaseTool):
     # 由 get_ui_widget 与信号槽流程创建，仅作静态检查声明
     top_bar_wrapper: QWidget
     model_selector: ModelSelectorWidget
@@ -88,6 +89,11 @@ class ChatTool(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin,
         # Human-in-the-loop 等待状态：ask_user / deep-plan 卡等待用户操作时为
         # True，期间锁定通用输入框的发送，直到卡片提交或用户按 Stop 强制终止。
         self._awaiting_user_input = False
+
+        # 上次对话的自动快照：恢复只做一次（见 _restore_autosaved_session）；
+        # 退出 / 崩溃前的兜底落盘由 core 的钩子表统一触发，这里只登记能力。
+        self._session_restore_done = False
+        chat_session.register_flush_hook(self.flush_session_snapshot)
 
         GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
         GlobalSignals().kb_switched.connect(self.on_global_kb_switched)
@@ -289,6 +295,9 @@ class ChatTool(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin,
         # 顶栏"收起状态"按钮的配色随主题刷新（本工具无独立 _apply_theme，
         # 子控件各自订阅主题信号，这里补上本文件自有的控件）。
         ThemeManager().theme_changed.connect(self._apply_ribbon_button_style)
+
+        # 上次对话恢复：延后一拍执行，先让面板完成首帧，再回灌历史（纯渲染，不发请求）
+        QTimer.singleShot(0, self._restore_autosaved_session)
 
         return self.widget
 

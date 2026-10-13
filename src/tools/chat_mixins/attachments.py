@@ -604,11 +604,14 @@ class ChatAttachmentsMixin:
             pd.show_finish_state(False, tr("Import Error"),
                                  tr("Failed to render chat history:\n{err}").format(err=e))
 
-    def _apply_imported_history(self, messages):
+    def _apply_imported_history(self, messages, announce=True):
         """将导入的消息替换进对话：重建气泡并写回 self.history。
 
         复用编辑重发（edit-resend）同款重放逻辑，保证渲染行为与现有对话一致，
         导入后的记录可继续作为上下文追问。
+
+        :param announce: 是否弹出"已导入 N 条"提示。启动时恢复上次对话走的是同一套
+            重放逻辑，但那不是用户发起的导入动作，故传 ``False`` 静默回灌。
         """
         self._ensure_chat_ui()
 
@@ -640,6 +643,7 @@ class ChatAttachmentsMixin:
                                      image_files=msg_images)
             # 无损导入的引用条目按新气泡编号回灌，恢复 [n] 的悬停著录与支撑原文。
             self._restore_message_references(bubble, msg)
+            self._restore_message_cards(bubble, msg)
             if not is_user and bubble is not None:
                 # AI 消息必须走与正常生成流一致的渲染管线（_format_response）：
                 # 无损导出的 content 是原始 markdown，含 <think>/<mcp_process>
@@ -661,4 +665,5 @@ class ChatAttachmentsMixin:
             self.input_container.clear_text()
         self.clear_attached_context()
         self.scroll_to_bottom(smooth=True)
-        ToastManager().show(tr("Imported {n} message(s).").format(n=len(messages)), "success")
+        if announce:
+            ToastManager().show(tr("Imported {n} message(s).").format(n=len(messages)), "success")

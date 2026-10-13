@@ -42,10 +42,14 @@ def _numbered_lines(sub_tasks) -> str:
 class DeepPlanCardWidget(QFrame):
     """深度研究计划卡：查看/编辑子问题 → 确认并行执行，或跳过直接作答。"""
 
+    CARD_KIND = "deep_plan"
+
     #: 用户编辑后的编号计划文本（一行一个子问题，去空行）。
     sig_confirm = Signal(str)
     #: 跳过拆解：交回原始问题文本。
     sig_skip = Signal(str)
+    #: 交互落定（确认 / 跳过）后发出，供上层把 ``ui_components`` 回写历史条目
+    sig_state_changed = Signal()
 
     def __init__(self, data: dict, parent=None):
         super().__init__(parent)
@@ -55,6 +59,7 @@ class DeepPlanCardWidget(QFrame):
         self._query = str(self.data.get("query", "") or "").strip()
         self._sub_tasks = list(self.data.get("sub_tasks") or [])
         self._resolved = False  # 确认/跳过均只允许一次，之后整卡锁定
+        self._decision = ""     # "" | "confirm" | "skip"，用于历史快照与恢复
 
         self._build_ui()
         self._apply_theme()
@@ -179,8 +184,11 @@ class DeepPlanCardWidget(QFrame):
             logger.debug("DeepPlanCard confirm rejected: empty plan")
             return
         self._resolved = True
+        self._decision = "confirm"
         self._lock_after_decision("Executing...")
         logger.info(f"DeepPlanCard confirmed: {len(text.splitlines())} sub-task line(s); card locked.")
+        # 先冻结再发信号：上层收到时读到的一定是"已落定"的状态
+        self.sig_state_changed.emit()
         self.sig_confirm.emit(text)
 
     def _on_skip(self):
@@ -192,16 +200,56 @@ class DeepPlanCardWidget(QFrame):
             logger.debug("DeepPlanCard skip rejected: missing original query")
             return
         self._resolved = True
+        self._decision = "skip"
         self._lock_after_decision("Answering directly...")
         logger.info("DeepPlanCard skipped by user; answering directly; card locked.")
+        self.sig_state_changed.emit()
         self.sig_skip.emit(self._query)
 
     def _lock_after_decision(self, action_text: str):
-        """决策后锁定整卡：禁用按钮与编辑框，防止重复触发重复发送。"""
+        """决策后锁定整卡：按钮禁用，编辑框转为**只读**。
+
+        编辑框用 ``setReadOnly(True)`` 而不是 ``setEnabled(False)``：后者会让清单文本
+        连框选复制都做不到，而冻结后的计划文本正是用户最常需要复制的内容。
+        """
         self._btn_confirm.setText(action_text)
         for btn in (self._btn_confirm, self._btn_skip, self._btn_restore):
             btn.setEnabled(False)
-        self._edit.setEnabled(False)
+        self._edit.setEnabled(True)
+        self._edit.setReadOnly(True)
+
+    # ------------------------------------------------------------------
+    # 组件约定：冻结 / 快照 / 恢复（见 card_registry）
+    # ------------------------------------------------------------------
+    def card_key(self) -> str:
+        """去重键与快照匹配键：原始问题文本。"""
+        return self._query or "plan"
+
+    def card_state(self) -> dict:
+        """导出用户交互结果：决策类型与编辑后的计划文本。"""
+        return {
+            "decision": self._decision,
+            "action": self._btn_confirm.text() if self._resolved else "",
+            "plan": self._edit.toPlainText().strip(),
+        }
+
+    def restore_state(self, state: dict):
+        """回灌交互结果并冻结（历史重放路径）。"""
+        state = state or {}
+        plan = str(state.get("plan") or "")
+        if plan:
+            self._edit.setPlainText(plan)
+        decision = str(state.get("decision") or "")
+        if decision:
+            self._resolved = True
+            self._decision = decision
+            self._lock_after_decision(str(state.get("action") or "Resolved"))
+        self.freeze()
+
+    def freeze(self):
+        """冻结为只读：按钮禁用、计划文本只读但可框选。"""
+        self._resolved = True
+        self._lock_after_decision(self._btn_confirm.text() or "Resolved")
 
     # -------------------------------------------------------------- Theme
 

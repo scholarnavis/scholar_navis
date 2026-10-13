@@ -11,6 +11,11 @@
     工具结果 / KB chunk / 附件 --add_source()--> EvidenceStore
     模型提交的 snippet -------verify_snippet()--> 逐字命中 | 回填 | 丢弃
 
+"什么算一条可用原文"的判据同样只在本模块定义（:func:`is_usable_source_text`）：
+入库门槛与引用登记的 snippet 门槛必须是同一个，否则会出现"入库被挡下、却照样
+被当成原文展示"的裂缝——检索列表里的占位串（``"No abstract"`` 一类）正是这样
+泄漏到引用卡上，成了假的 "Cited passage"。
+
 设计原则
 --------
 * 高内聚：文本归一化与"逐字"判定只在本模块定义（同一件事只在一处定义）。
@@ -71,6 +76,22 @@ def normalize_for_match(text: str, strip_hyphens: bool = False) -> str:
     return text
 
 
+def _usable_norm(norm: str) -> bool:
+    """归一化串是否达到"可引用原文"门槛（唯一判据，入库与引用登记共用）。"""
+    return len(norm) >= _MIN_SOURCE_CHARS
+
+
+def is_usable_source_text(text: str) -> bool:
+    """文本能否作为引用条目的支撑原文（唯一判据）。
+
+    门槛取归一化后长度（不是原始长度），使全角/多空白/连字符等排版差异不改变判定。
+    真实摘要/chunk 远超该门槛，而检索列表里的占位串（``"No abstract"``、
+    ``"Fetch via fetch_pubmed_abstract."`` 一类）远不及一条摘要的长度——它们
+    **不是原文**，不得作为"Cited passage"展示；调用方据此登记为"无原文"。
+    """
+    return _usable_norm(normalize_for_match(text))
+
+
 def _title_match(a: str, b: str) -> bool:
     """标题归一化等价判断：完全相等或互为包含（容忍副标题截断）。"""
     if not a or not b:
@@ -95,10 +116,9 @@ class EvidenceStore:
         ``text`` 必须是**未经模型转写**的工具结果 / 检索 chunk 原文。
         """
         text = str(text or "").strip()
-        if len(text) < _MIN_SOURCE_CHARS or len(text) > _MAX_SOURCE_CHARS:
-            return False
         norm = normalize_for_match(text)
-        if not norm:
+        # 门槛与其他调用点共用同一判据；上限只在本处生效（大段 chunk 另有限制）。
+        if not _usable_norm(norm) or len(text) > _MAX_SOURCE_CHARS:
             return False
         entry = {
             "text": text,
@@ -187,4 +207,4 @@ class EvidenceStore:
             return len(self._sources)
 
 
-__all__ = ["EvidenceStore", "normalize_for_match"]
+__all__ = ["EvidenceStore", "normalize_for_match", "is_usable_source_text"]

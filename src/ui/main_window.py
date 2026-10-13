@@ -205,6 +205,11 @@ class MainWindow(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
 
+        # 退出兜底：让持有会话快照的工具（当前是对话面板）落盘"上一次对话"，含流式
+        # 进行中的半条。放在 super() 之前，保证保存先于任何控件销毁。
+        from src.core.chat_session import flush_hooks
+        flush_hooks()
+
         super().closeEvent(event)
 
         QApplication.quit()
@@ -443,16 +448,18 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def route_dev_render_preview(self, note_text, user_text, ai_text, references=None):
-        """Developer-mode render preview: switch to Chat and inject a fake
-        conversation (one user bubble + one AI bubble) WITHOUT any AI call.
+    def route_dev_conversation(self, note_text, user_text, ai_text, references=None):
+        """Developer-mode fake conversation: switch to Chat and inject one user
+        bubble + one AI bubble WITHOUT any AI call.
 
-        Unlike ``route_dev_test`` (which sends a real prompt to the LLM),
-        this only exercises the rendering pipeline: identifier auto-linking,
-        every internal link route (cite:// text/PDF viewer, file:// image /
-        system app, mermaid:// viewer), inline ``[n]`` citations, advanced
-        Markdown / LaTeX and Mermaid cards. The fake bubbles never enter the
-        chat history, so subsequent real turns are not affected.
+        Unlike ``route_dev_test`` (which sends a real prompt to the LLM), this
+        only exercises the rendering / interaction pipeline: identifier
+        auto-linking, every internal link route (cite:// text/PDF viewer,
+        file:// image / system app, mermaid:// viewer), inline ``[n]``
+        citations (hover card + detail panel), advanced Markdown / LaTeX and
+        Mermaid cards. Both the Render Preview and the Citation Click-Through
+        tests use this entry point. The fake bubbles never enter the chat
+        history, so subsequent real turns are not affected.
 
         :param references: optional citation entries for the injected bubble;
             they are written into the citation popup cache so hovering /

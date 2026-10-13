@@ -651,6 +651,9 @@ class ChatBubbleWidget(QWidget):
     sig_ask_user_submit = Signal(str)
     sig_deep_plan_confirm = Signal(str)
     sig_deep_plan_skip = Signal(str)
+    #: 组件（交互卡 / 高级 UI 组件）交互落定后发出，携带本气泡：上层据此把
+    #: ``ui_components`` 回写历史条目并落盘（见 card_registry 与 ChatSessionMixin）。
+    sig_card_state_changed = Signal(object)
 
     # 由 init_ui/add_translation_widget 创建，仅作静态检查声明
     main_layout: QHBoxLayout
@@ -1344,45 +1347,15 @@ class ChatBubbleWidget(QWidget):
         """检测 ``<rplot_card data="...">`` 标记并转换为 RPlotCardWidget。
 
         - 标记内为 base64 编码的 JSON（见 runtime._handle_plot_result）。
-        - ``set_content`` 会被流式调用多次，因此用 ``_rplot_rendered``
-          记录已创建卡片的 key，保证每个图只插入一次；标记本身从文本中
-          剥离，不再进入 markdown 渲染。
+        - 去重、插入与残留标记清理统一由 :meth:`_render_marker_cards` 处理（规则取自
+          :mod:`src.ui.components.card_registry`），``set_content`` 被流式多次调用也
+          只会插入一张卡。
         """
-        if "<rplot_card" not in text:
-            return text
-        if not hasattr(self, "_rplot_rendered"):
-            self._rplot_rendered = set()
+        def _create(data):
+            from src.ui.components.r_plot_card import RPlotCardWidget
+            return RPlotCardWidget(data)
 
-        import base64
-        import json
-
-        def _replace(match):
-            try:
-                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
-            except ValueError:
-                logger.warning("Malformed <rplot_card> marker dropped")
-                return ""
-            key = data.get("png_path") or data.get("svg_path") or data.get("chart_title", "")
-            if key and key not in self._rplot_rendered:
-                self._rplot_rendered.add(key)
-                try:
-                    from src.ui.components.r_plot_card import RPlotCardWidget
-
-                    card = RPlotCardWidget(data)
-                    # btn_widget 在 __init__ 末尾才创建；若尚未创建则直接追加
-                    idx = self.content_layout.indexOf(getattr(self, "btn_widget", None))
-                    if idx >= 0:
-                        self.content_layout.insertWidget(idx, card)
-                    else:
-                        self.content_layout.addWidget(card)
-                except Exception as e:
-                    logger.error(f"Failed to create R plot card: {e}")
-            return ""
-
-        text = re.sub(r'<rplot_card data="([^"]*)"></rplot_card>', _replace, text)
-        # 清理流式中可能残留的不完整标记
-        text = re.sub(r"<rplot_card[^>]*>", "", text)
-        return text
+        return self._render_marker_cards(text, "r_plot", _create)
 
     # --- 4.6 Plot 方案确认卡片提取（流式标记 → 固定 QWidget） ---
     def _extract_plot_plan_cards(self, text: str) -> str:
@@ -1391,63 +1364,40 @@ class ChatBubbleWidget(QWidget):
         - 标记内为 base64 编码的 JSON（见 runtime._handle_propose_plot_plan）。
         - 卡片允许用户查看 / 编辑 / 翻译 / 确认绘图方案；确认后通过
           ``sig_plot_plan_confirm`` 将最终需求（英文）交给 ChatTool 重新发送。
+        - 去重、插入与残留标记清理统一由 :meth:`_render_marker_cards` 处理。
         """
-        if "<plot_plan" not in text:
-            return text
-        if not hasattr(self, "_plot_plan_rendered"):
-            self._plot_plan_rendered = set()
+        def _create(data):
+            from src.ui.components.plot_plan_card import PlotPlanCardWidget
 
-        import base64
-        import json
+            card = PlotPlanCardWidget(data, translator_config=self.translator_config)
+            card.sig_confirm.connect(self.sig_plot_plan_confirm)
+            self._wire_card_state(card)
+            return card
 
-        def _replace(match):
-            try:
-                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
-            except ValueError:
-                logger.warning("Malformed <plot_plan> marker dropped")
-                return ""
-            key = data.get("plan_text") or data.get("request") or "plan"
-            if key in self._plot_plan_rendered:
-                return ""
-            self._plot_plan_rendered.add(key)
-            try:
-                from src.ui.components.plot_plan_card import PlotPlanCardWidget
-
-                card = PlotPlanCardWidget(data, translator_config=self.translator_config)
-                card.sig_confirm.connect(self.sig_plot_plan_confirm)
-                idx = self.content_layout.indexOf(getattr(self, "btn_widget", None))
-                if idx >= 0:
-                    self.content_layout.insertWidget(idx, card)
-                else:
-                    self.content_layout.addWidget(card)
-            except Exception as e:
-                logger.error(f"Failed to create plot plan card: {e}")
-            return ""
-
-        text = re.sub(r'<plot_plan data="([^"]*)"></plot_plan>', _replace, text)
-        # 清理流式中可能残留的不完整标记
-        text = re.sub(r"<plot_plan[^>]*>", "", text)
-        return text
+        return self._render_marker_cards(text, "plot_plan", _create)
 
     # --- 4.7 Ask-user 澄清卡（文本标记提取 + 结构化事件双通道） ---
-    def _create_ask_user_card(self, data) -> bool:
-        """创建 ask_user 卡并插入气泡；按问题文本去重（返回是否创建）。
-
-        卡片可能从两条通道到达：文本标记（历史持久化后备）与结构化
-        事件（runtime 暂存载荷，任务层经状态事件送达）。两路竞速，
-        以去重集保证只渲染一张。
-        """
-        if not hasattr(self, "_ask_user_rendered"):
-            self._ask_user_rendered = set()
-        key = (data or {}).get("question", "") or "question"
-        if key in self._ask_user_rendered:
-            return False
+    def _build_ask_user_card(self, data):
+        """建卡 + 接线；去重与插入由统一路径负责（见 :meth:`_render_marker_cards`）。"""
         from src.ui.components.ask_user_card import AskUserCardWidget
 
         card = AskUserCardWidget(data)
         card.sig_submit.connect(self.sig_ask_user_submit)
-        self._ask_user_rendered.add(key)
-        self._insert_card(card)
+        self._wire_card_state(card)
+        return card
+
+    def _create_ask_user_card(self, data) -> bool:
+        """创建 ask_user 卡并插入气泡（返回是否创建）。
+
+        卡片可能从两条通道到达：文本标记（历史持久化后备）与结构化
+        事件（runtime 暂存载荷，任务层经状态事件送达）。两路竞速，去重口径
+        由 :mod:`src.ui.components.card_registry` 统一给出，只会渲染一张。
+        """
+        from src.ui.components import card_registry as registry
+
+        if registry.begin_card(self, "ask_user", data or {}) is None:
+            return False
+        registry.insert_card(self, self._build_ask_user_card(data))
         return True
 
     def attach_ask_user_card(self, data):
@@ -1465,28 +1415,7 @@ class ChatBubbleWidget(QWidget):
         主通路为结构化事件（attach_ask_user_card），本提取为历史重渲染
         提供后备。
         """
-        if "<ask_user" not in text:
-            return text
-        import base64
-        import json
-
-        def _replace(match):
-            try:
-                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                logger.warning("Malformed <ask_user> marker dropped")
-                return ""
-            try:
-                self._create_ask_user_card(data)
-            except Exception as e:
-                logger.error(f"Failed to create ask-user card: {e}")
-            return ""
-
-        text = re.sub(r'<ask_user data="([^"]*)"\s*></ask_user>', _replace, text)
-        # 清理流式中可能残留的不完整标记，以及上游被 HTML 转义的标记残迹
-        text = re.sub(r"<ask_user[^>]*/?>", "", text)
-        text = re.sub(r'&lt;/?ask_user[^&]*&gt;', "", text)
-        return text
+        return self._render_marker_cards(text, "ask_user", self._build_ask_user_card)
 
     # --- 4.8 Deep-plan 计划确认卡提取（流式标记 → DeepPlanCardWidget） ---
     def _extract_deep_plan_cards(self, text: str) -> str:
@@ -1494,40 +1423,18 @@ class ChatBubbleWidget(QWidget):
 
         标记内为 base64 编码的 JSON（见 chat_tasks._propose_deep_plan）；
         用户确认/跳过后分别触发 ``sig_deep_plan_confirm`` / ``sig_deep_plan_skip``。
+        去重、插入与残留标记清理统一由 :meth:`_render_marker_cards` 处理。
         """
-        if "<deep_plan" not in text:
-            return text
-        if not hasattr(self, "_deep_plan_rendered"):
-            self._deep_plan_rendered = set()
+        def _create(data):
+            from src.ui.components.deep_plan_card import DeepPlanCardWidget
 
-        import base64
-        import json
+            card = DeepPlanCardWidget(data)
+            card.sig_confirm.connect(self.sig_deep_plan_confirm)
+            card.sig_skip.connect(self.sig_deep_plan_skip)
+            self._wire_card_state(card)
+            return card
 
-        def _replace(match):
-            try:
-                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                logger.warning("Malformed <deep_plan> marker dropped")
-                return ""
-            key = data.get("query", "") or "plan"
-            if key in self._deep_plan_rendered:
-                return ""
-            self._deep_plan_rendered.add(key)
-            try:
-                from src.ui.components.deep_plan_card import DeepPlanCardWidget
-
-                card = DeepPlanCardWidget(data)
-                card.sig_confirm.connect(self.sig_deep_plan_confirm)
-                card.sig_skip.connect(self.sig_deep_plan_skip)
-                self._insert_card(card)
-            except Exception as e:
-                logger.error(f"Failed to create deep plan card: {e}")
-            return ""
-
-        text = re.sub(r'<deep_plan data="([^"]*)"\s*></deep_plan>', _replace, text)
-        # 清理流式中可能残留的不完整标记
-        text = re.sub(r"<deep_plan[^>]*/?>", "", text)
-        return text
+        return self._render_marker_cards(text, "deep_plan", _create)
 
     def _insert_card(self, card):
         """把交互卡片插到气泡尾部按钮区之前（多种卡片共用的插入逻辑）。"""
@@ -1538,6 +1445,68 @@ class ChatBubbleWidget(QWidget):
         else:
             self.content_layout.addWidget(card)
 
+    # --- 4.8b 组件统一渲染与快照（协议见 src/ui/components/card_registry.py） ---
+    def _render_marker_cards(self, text: str, kind: str, create) -> str:
+        """内置组件的统一标记渲染：去重 → 建卡 → 插入 → 清理残留标记。
+
+        正则、去重键与清理规则一律取自 :mod:`src.ui.components.card_registry`
+        的登记表，避免各抽取器各写一份；外部注册的组件类型则走
+        ``card_registry.extract_registered_cards``（同一套机制）。
+
+        :param kind: 已登记的类型名
+        :param create: ``(data) -> widget | None``，只负责建卡与信号接线
+        """
+        from src.ui.components import card_registry as registry
+
+        spec = registry.spec(kind)
+        if spec is None or f"<{spec.tag}" not in text:
+            return text
+
+        def _replace(match):
+            data = registry.decode_payload(match.group(1))
+            if data is None:
+                return ""
+            if registry.begin_card(self, kind, data) is None:
+                return ""
+            try:
+                widget = create(data)
+                if widget is not None:
+                    registry.insert_card(self, widget)
+            except Exception as e:
+                logger.error("Failed to create '%s' card: %s", kind, e)
+            return ""
+
+        text = spec.marker.sub(_replace, text)
+        for pattern in spec.cleanup:
+            text = pattern.sub("", text)
+        return text
+
+    def _wire_card_state(self, card):
+        """把组件的"交互落定"信号接到本气泡（转发给会话层回写历史）。"""
+        sig = getattr(card, "sig_state_changed", None)
+        if sig is not None:
+            sig.connect(self._on_card_state_changed)
+
+    def _on_card_state_changed(self):
+        """中转：组件 → 气泡 → ChatTool（见 ChatSessionMixin._on_bubble_cards_changed）。"""
+        try:
+            self.sig_card_state_changed.emit(self)
+        except Exception as e:
+            logger.warning("Failed to forward card state change: %s", e)
+
+    def card_snapshots(self):
+        """气泡内全部组件的用户交互结果，写进历史条目的 ``ui_components``。"""
+        from src.ui.components import card_registry as registry
+        return registry.snapshot_cards(self)
+
+    def restore_card_states(self, snapshots):
+        """回灌历史组件的交互结果并**全部冻结**：只读，但文字仍可框选复制。"""
+        from src.ui.components import card_registry as registry
+        applied = registry.restore_cards(self, snapshots)
+        if applied:
+            logger.debug("Restored %d card state(s) on bubble #%s.", applied, self.index)
+        return applied
+
     # --- 4.9 统一错误面板提取（流式标记 → 固定 QWidget） ---
     def _extract_error_panels(self, text: str) -> str:
         """检测 ``<error_panel data="...">`` 标记并转换为 ErrorPanelWidget。
@@ -1545,42 +1514,13 @@ class ChatBubbleWidget(QWidget):
         与 ``<rplot_card>`` / ``<plot_plan>`` 相同的协议：core/task 层产出
         base64 标记（见 src/core/llm_errors.py），UI 层解码渲染为统一
         错误面板（含可折叠的 Technical Details 技术详情栏）。
+        去重、插入与残留标记清理统一由 :meth:`_render_marker_cards` 处理。
         """
-        if "<error_panel" not in text:
-            return text
-        if not hasattr(self, "_error_panel_rendered"):
-            self._error_panel_rendered = set()
+        def _create(data):
+            from src.ui.components.error_panel import ErrorPanelWidget
+            return ErrorPanelWidget(data)
 
-        import base64
-        import json
-
-        def _replace(match):
-            try:
-                data = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                logger.warning("Malformed <error_panel> marker dropped")
-                return ""
-            key = f"{data.get('title', '')}|{str(data.get('details', ''))[:128]}"
-            if key not in self._error_panel_rendered:
-                self._error_panel_rendered.add(key)
-                try:
-                    from src.ui.components.error_panel import ErrorPanelWidget
-
-                    panel = ErrorPanelWidget(data)
-                    anchor = getattr(self, "btn_widget", None)
-                    idx = self.content_layout.indexOf(anchor) if anchor is not None else -1
-                    if idx >= 0:
-                        self.content_layout.insertWidget(idx, panel)
-                    else:
-                        self.content_layout.addWidget(panel)
-                except Exception as e:
-                    logger.error(f"Failed to create error panel: {e}")
-            return ""
-
-        text = re.sub(r'<error_panel data="([^"]*)"\s*>\s*</error_panel>', _replace, text)
-        # 清理流式中可能残留的不完整标记
-        text = re.sub(r"<error_panel[^>]*/?>", "", text)
-        return text
+        return self._render_marker_cards(text, "error_panel", _create)
 
     # --- 4.8 MSG_ERROR 气泡统一渲染 ---
     def _render_error_payload(self, text: str):
@@ -1794,6 +1734,9 @@ class ChatBubbleWidget(QWidget):
         text = self._extract_plot_plan_cards(text)
         text = self._extract_ask_user_cards(text)
         text = self._extract_deep_plan_cards(text)
+        # 外部（第三方）注册的组件类型：标记协议与内置一致，建卡由各自工厂负责
+        from src.ui.components import card_registry as registry
+        text = registry.extract_registered_cards(self, text)
         self.original_text = text
         if msg_type is not None:
             self.msg_type = msg_type

@@ -44,8 +44,12 @@ def _contains_non_english(text: str) -> bool:
 class PlotPlanCardWidget(QFrame):
     """Shows the agent's English plotting proposal for review/edit/translate/confirm."""
 
+    CARD_KIND = "plot_plan"
+
     # Emitted with the final English requirement the user wants the AI to render.
     sig_confirm = Signal(str)
+    #: 交互落定（确认绘图）后发出，供上层把 ``ui_components`` 回写历史条目
+    sig_state_changed = Signal()
     # Internal: carries the translated text from the worker thread back to the GUI thread.
     _translation_done = Signal(str)
 
@@ -61,6 +65,8 @@ class PlotPlanCardWidget(QFrame):
         self._data_context = self.data.get("data_context", "")
 
         self._translating = False
+        #: 用户最终确认（可能已编辑/翻译）的方案文本；空表示尚未确认
+        self._confirmed_text = ""
         self._build_ui()
         self._apply_theme()
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -343,7 +349,44 @@ class PlotPlanCardWidget(QFrame):
             self._translate_to_english()
             return
 
+        # 确认即落定：整卡冻结为只读，历史里的这张卡不应再被改动
+        self._confirmed_text = text
+        self.freeze()
+        self.sig_state_changed.emit()
         self.sig_confirm.emit(text)
+
+    # ------------------------------------------------------- 组件约定 ---
+    def card_key(self) -> str:
+        """去重键与快照匹配键：原始方案文本（回退到需求文本）。"""
+        return self._plan_text or self._request or "plan"
+
+    def card_state(self) -> dict:
+        """导出用户交互结果：编辑后的方案文本与是否已确认。"""
+        return {
+            "plan": self._edit.toPlainText().strip() if hasattr(self, "_edit") else "",
+            "confirmed": bool(self._confirmed_text),
+        }
+
+    def restore_state(self, state: dict):
+        """回灌交互结果并冻结（历史重放路径）。"""
+        state = state or {}
+        plan = str(state.get("plan") or "")
+        if plan and hasattr(self, "_edit"):
+            self._edit.setPlainText(plan)
+        if state.get("confirmed"):
+            self._confirmed_text = plan or self._plan_text
+        self.freeze()
+
+    def freeze(self):
+        """冻结为只读：确认/翻译按钮禁用，方案文本只读但可框选。
+
+        复制按钮保留可用——它是只读动作，冻结只针对"会改变内容或状态"的控件。
+        """
+        self._btn_confirm.setEnabled(False)
+        self._btn_translate.setEnabled(False)
+        if hasattr(self, "_edit"):
+            self._edit.setEnabled(True)
+            self._edit.setReadOnly(True)
 
     def closeEvent(self, event):
         try:

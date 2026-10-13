@@ -28,6 +28,8 @@ class RPlotCardWidget(QFrame):
     深色模式自适应）就地查看。颜色随主题（深色/浅色）自适应。
     """
 
+    CARD_KIND = "r_plot"
+
     def __init__(self, data: dict, parent=None):
         super().__init__(parent)
         self.data = data or {}
@@ -49,6 +51,24 @@ class RPlotCardWidget(QFrame):
         self._load_preview()
         self._apply_theme()
         ThemeManager().theme_changed.connect(self._apply_theme)
+
+    # --------------------------------------------------------- 组件约定 ---
+    def card_key(self) -> str:
+        """去重键与快照匹配键：与标记抽取侧同口径（PNG → SVG → 标题）。"""
+        return self._png_path or self._svg_path or self._chart_title or ""
+
+    def card_state(self) -> dict:
+        """本卡没有用户交互状态，返回空状态（图形文件由归档随附件内嵌）。"""
+        return {}
+
+    def freeze(self):
+        """冻结为只读：本卡无输入控件，把标题与元信息设为可框选即可。
+
+        下载按钮的可用性由文件实际存在与否决定（见 :meth:`_apply_theme`），
+        它与"能否编辑"无关，故不随冻结改变。
+        """
+        for label in (self._title, self._meta):
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
     # ------------------------------------------------------------------ UI ---
     def _build_ui(self):

@@ -37,9 +37,18 @@ _HINT_DONE = "Answer submitted; waiting for the agent to continue."
 
 
 class AskUserCardWidget(QFrame):
-    """澄清卡：自行完成答案校验与提交后锁定，仅发出一次 sig_submit。"""
+    """澄清卡：自行完成答案校验与提交后锁定，仅发出一次 sig_submit。
+
+    组件约定（冻结 / 快照 / 恢复）见 :mod:`src.ui.components.card_registry`：提交后
+    经 :meth:`freeze` 变为只读组件（文字仍可框选），交互结果由 :meth:`card_state`
+    导出，历史重放时经 :meth:`restore_state` 回灌并冻结。
+    """
+
+    CARD_KIND = "ask_user"
 
     sig_submit = Signal(str)
+    #: 交互落定（提交）后发出，供上层把 ``ui_components`` 回写历史条目并落盘
+    sig_state_changed = Signal()
 
     def __init__(self, data, parent=None):
         super().__init__(parent)
@@ -58,6 +67,8 @@ class AskUserCardWidget(QFrame):
         self._option_widgets = []
         self._own_widget = None
         self._submitted = False
+        #: 冻结后展示"你的回答"的只读标签（延迟创建，避免空闲态多一行空白）
+        self._answer_label = None
 
         self._build_ui()
         self._update_submit_state()
@@ -70,16 +81,20 @@ class AskUserCardWidget(QFrame):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
+        self._root_layout = root
 
         q_label = QLabel(f"Question: {self._question}")
         q_label.setObjectName("askUserQuestion")
         q_label.setWordWrap(True)
+        # 冻结后整卡只读，文本一律允许框选复制
+        q_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root.addWidget(q_label)
 
         if self._context:
             c_label = QLabel(self._context)
             c_label.setObjectName("askUserContext")
             c_label.setWordWrap(True)
+            c_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             root.addWidget(c_label)
 
         # 预设选项与 "My own answer" 放入同一容器：
@@ -117,6 +132,7 @@ class AskUserCardWidget(QFrame):
         self._hint_label = QLabel(_HINT_IDLE)
         self._hint_label.setObjectName("askUserHint")
         self._hint_label.setWordWrap(True)
+        self._hint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         bottom.addWidget(self._hint_label, 1)
 
         self._btn_submit = QPushButton(" Submit Answer")
@@ -178,14 +194,80 @@ class AskUserCardWidget(QFrame):
         self._submitted = True
         self._lock_after_submit()
         logger.info(f"AskUserCard answer submitted ({len(answer)} chars); card locked against resubmit.")
+        # 先冻结再发出信号：上层收到信号时读到的一定是"已落定"的状态
+        self.sig_state_changed.emit()
         self.sig_submit.emit(answer)
 
     def _lock_after_submit(self):
-        """提交后锁定整卡：禁用全部控件并更新提示，防止重复提交重复发送。"""
+        """提交后锁定整卡（等价于 :meth:`freeze`，保留旧名以免上游调用点失效）。"""
+        self.freeze()
+
+    # ------------------------------------------------------------------
+    # 组件约定：冻结 / 快照 / 恢复（见 card_registry）
+    # ------------------------------------------------------------------
+    def card_key(self) -> str:
+        """去重键与快照匹配键：问题文本。"""
+        return self._question or "question"
+
+    def card_state(self) -> dict:
+        """导出用户交互结果（选项 + 自答文本），供历史快照与归档保存。"""
+        return {
+            "selected": [w.text().strip() for w in self._option_widgets if w.isChecked()],
+            "custom": self._edit.toPlainText().strip(),
+        }
+
+    def restore_state(self, state: dict):
+        """回灌交互结果并冻结（历史重放路径）。"""
+        state = state or {}
+        selected = {str(s) for s in (state.get("selected") or [])}
+        for w in self._option_widgets:
+            w.setChecked(w.text().strip() in selected)
+        custom = str(state.get("custom") or "")
+        if custom:
+            self._own_widget.setChecked(True)
+            self._edit.setPlainText(custom)
+        self._submitted = True
+        self.freeze()
+
+    def freeze(self):
+        """冻结为只读组件：禁用输入与按钮，文字保留可框选复制。
+
+        只读文本框必须用 ``setReadOnly(True)`` 而不是 ``setEnabled(False)`` —— 后者
+        会让文字连框选、复制都做不到，与"不可编辑但可框选"的要求相反。选项行是
+        QRadioButton / QCheckBox，文字本身无法框选，故额外用一条可选中的
+        "Your answer" 摘要把作答内容显式呈现出来。
+        """
+        self._submitted = True
         self._btn_submit.setText(" Submitted")
         self._btn_submit.setEnabled(False)
         for w in self._option_widgets:
             w.setEnabled(False)
         self._own_widget.setEnabled(False)
-        self._edit.setEnabled(False)
+        self._edit.setEnabled(True)
+        self._edit.setReadOnly(True)
         self._hint_label.setText(_HINT_DONE)
+        self._show_answer_summary()
+
+    def _answer_text(self) -> str:
+        chosen = [w.text().strip() for w in self._option_widgets if w.isChecked()]
+        parts = []
+        if chosen:
+            parts.append("; ".join(chosen))
+        if self._own_widget is not None and self._own_widget.isChecked():
+            text = self._edit.toPlainText().strip()
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+
+    def _show_answer_summary(self):
+        """把作答内容落成一条可框选的只读标签（选项行的文字无法框选）。"""
+        answer = self._answer_text()
+        if not answer:
+            return
+        if self._answer_label is None:
+            self._answer_label = QLabel(self)
+            self._answer_label.setObjectName("askUserAnswer")
+            self._answer_label.setWordWrap(True)
+            self._answer_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self._root_layout.addWidget(self._answer_label)
+        self._answer_label.setText(f"Your answer: {answer}")

@@ -78,6 +78,9 @@ class ChatResponseFlowMixin:
             self.current_ai_bubble.set_content(
                 self._format_response(split.main_text + split.cites_html, idx)
             )
+            # 半条落盘：与渲染同节拍（10~16 Hz）调用，写盘频率由 core 侧节流控制。
+            # 崩溃时这一份让"正在生成的那段"也能回来，而不是只剩上一轮。
+            self._autosave_inflight()
 
             sb = self.scroll_area.verticalScrollBar()
             if (sb.maximum() - sb.value()) <= 50:
@@ -279,7 +282,10 @@ class ChatResponseFlowMixin:
 
             entry = {"role": "assistant", "content": self.current_ai_text, "status": "interrupted"}
             self._attach_references(entry)
+            self._attach_ui_cards(entry)
             self.history.append(entry)
+            # 轮次边界落盘（取消也算一轮结束，半条已并入历史）
+            self._autosave_session()
             self.current_ai_bubble = None
             self.scroll_to_bottom(force=False)
             return
@@ -332,7 +338,10 @@ class ChatResponseFlowMixin:
 
         entry = {"role": "assistant", "content": self.current_ai_text}
         self._attach_references(entry)
+        self._attach_ui_cards(entry)
         self.history.append(entry)
+        # 轮次边界落盘：回答完整收尾，半条文件随之作废
+        self._autosave_session()
         self.current_ai_bubble = None
         self.logger.info("AI response generation finished and UI updated.")
 
@@ -356,6 +365,28 @@ class ChatResponseFlowMixin:
             entry["references"] = refs
             self.logger.debug("Attached %d reference(s) to history message #%s.",
                               len(refs), idx)
+
+    def _attach_ui_cards(self, entry: dict):
+        """把当前 AI 气泡内组件的交互结果写入历史条目（自动保存 / 导出共用的写入点）。
+
+        正文标记只记录"生成时的事实"，用户在这些卡片里做了什么（选了哪些选项、
+        是否确认绘图方案、计划被改成什么）只存在于内存里。这里在收尾落历史时导出，
+        启动恢复与归档导入再整批回灌并冻结为只读组件。
+        """
+        bubble = getattr(self, "current_ai_bubble", None)
+        snapshots_of = getattr(bubble, "card_snapshots", None)
+        if bubble is None or not callable(snapshots_of):
+            return
+        try:
+            snapshots = snapshots_of()
+        except Exception as e:      # pragma: no cover - 纯防御
+            self.logger.warning("Card snapshot skipped for message #%s: %s",
+                                getattr(bubble, "index", -1), e)
+            return
+        if snapshots:
+            entry["ui_components"] = snapshots
+            self.logger.debug("Attached %d UI card state(s) to history message #%s.",
+                              len(snapshots), getattr(bubble, "index", -1))
 
     @staticmethod
     def _build_error_marker(msg):
@@ -439,7 +470,10 @@ class ChatResponseFlowMixin:
             "status": "error"
         }
         self._attach_references(entry)
+        self._attach_ui_cards(entry)
         self.history.append(entry)
+        # 轮次边界落盘：报错同样是一轮结束，历史与快照保持一致
+        self._autosave_session()
 
         self.current_ai_bubble = None
         # 完整原始错误（含 JSON payload 中的 details）写入日志

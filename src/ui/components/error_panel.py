@@ -38,6 +38,8 @@ def _rgba(hex_color: str, alpha: float) -> str:
 class ErrorPanelWidget(QWidget):
     """错误面板：标题 / 建议 / 可折叠技术详情，全应用统一错误样式。"""
 
+    CARD_KIND = "error_panel"
+
     #: 技术详情展开区的最大高度（像素），超出后内部滚动
     MAX_DETAILS_HEIGHT = 200
 
@@ -46,6 +48,8 @@ class ErrorPanelWidget(QWidget):
         self.setObjectName("ErrorPanel")
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self._expanded = False
+        #: 去重键 / 快照匹配键（与标记抽取侧同口径：标题 + 详情前 128 字符）
+        self._key = ""
 
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(10, 8, 10, 8)
@@ -95,7 +99,28 @@ class ErrorPanelWidget(QWidget):
         details = str(payload.get('details', '') or '').strip()
         self.txt_details.setPlainText(details)
         self.btn_details.setVisible(bool(details))
+        self._key = f"{payload.get('title', '')}|{details[:128]}"
         self.set_expanded(False)
+
+    # ------------------------------------------------------------------ #
+    #  组件约定：冻结 / 快照 / 恢复（见 card_registry）
+    # ------------------------------------------------------------------ #
+    def card_key(self) -> str:
+        """去重键与快照匹配键，与标记抽取侧同口径。"""
+        return self._key
+
+    def card_state(self) -> dict:
+        """导出用户交互结果：技术详情的展开状态。"""
+        return {"expanded": self._expanded}
+
+    def restore_state(self, state: dict):
+        """回灌展开状态（历史重放路径）。"""
+        self.set_expanded(bool((state or {}).get("expanded")))
+
+    def freeze(self):
+        """冻结为只读：本卡没有输入控件，只把文字设为可框选（详情仍可复制）。"""
+        for label in (self.lbl_title, self.lbl_body):
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
     # ------------------------------------------------------------------ #
     #  折叠栏

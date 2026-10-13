@@ -706,6 +706,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "No Knowledge Base (Direct Chat)": "无知识库（直接对话）",
         "The knowledge base was modified. Chat is currently locked.": "知识库已被修改，对话当前已锁定。",
         "Chat history cleared.": "聊天记录已清空。",
+        "Restored the last conversation ({n} messages).": "已恢复上一次对话（{n} 条消息）。",
         "Please answer the pending question card above first (or press Stop to dismiss it).":
             "请先回答上方待答的问题卡（或按“停止”关闭它）。",
         "Cannot edit: The current library has been modified. Please clear chat.":

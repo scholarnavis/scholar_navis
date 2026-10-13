@@ -57,6 +57,14 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
             # 崩溃处理器内日志失败时降级输出到 stderr
             print(f"CRITICAL: Failed to log uncaught exception: {e}", file=sys.stderr)
 
+    # 崩溃兜底：本处理器最终会 sys.exit(1)，之后再也没有保存机会，故先把"上一次对话"
+    # 落盘（含流式进行中的半条）再弹窗。钩子本身失败不影响崩溃处理流程。
+    try:
+        from src.core.chat_session import flush_hooks
+        flush_hooks()
+    except Exception as e:
+        print(f"CRITICAL: Failed to flush chat session snapshot: {e}", file=sys.stderr)
+
     try:
         # 检查是否为 API 模式（非 GUI），如果是则只打印终端
         app = QCoreApplication.instance()
@@ -380,6 +388,10 @@ if __name__ == "__main__":
     # 退出前请求取消并等待仍在运行的任务线程：否则解释器清理模块全局时会回收
     # 仍在运行的 QThread，Qt 打印
     # "QThread: Destroyed while thread '' is still running"（有总时限，不阻塞退出）。
+    # 退出顺序：先同步落盘"上一次对话"（毫秒级），再等待运行中的后台任务收尾。
+    # closeEvent 已覆盖正常关闭；这里兜住其它不经过它的退出路径。
+    from src.core.chat_session import flush_hooks as flush_session_hooks
+    app.aboutToQuit.connect(flush_session_hooks)
     app.aboutToQuit.connect(lambda: wait_for_running_tasks(1500))
 
     from PySide6.QtNetwork import QLocalServer, QLocalSocket

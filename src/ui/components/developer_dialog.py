@@ -225,10 +225,51 @@ PREVIEW_NOTE = (
 
 #: 渲染预览：用户侧假问题（不进 LLM 历史，仅营造对话语境）
 PREVIEW_USER_TEXT = (
-    "Before I use this for my notes, could you show me what the rendering "
-    "supports? I'd like to check clickable scientific identifiers, local "
-    "file links, tables, code blocks and LaTeX formulas in one place."
+"Before I use this for my notes, could you show me what the rendering "
+"supports? I'd like to check clickable scientific identifiers, local "
+"file links, tables, code blocks and LaTeX formulas in one place."
 )
+
+#: 引文点击测试：注入 Chat 面板的灰色说明气泡（仅展示，不进 LLM 历史）
+CITATION_TEST_NOTE = (
+"Developer test: <b>Citation Click-Through</b> — a fake conversation injected "
+"into the real Chat panel (no AI, no network). Hover any <b>[n]</b> in the reply "
+"to preview the compact citation card, then click it to open the detail panel. "
+"Verify: (1) the hovered / clicked entry is the SAME paper as the matching list "
+"item; (2) <b>[1]</b> appears twice and opens the same entry both times; (3) "
+"<b>[3]</b> is a local document, so 'open the original file' should work; (4) "
+"<b>[4]</b> has no captured passage and must show the fallback layout instead of "
+"an empty card. Then export the chat and import it back and hover again — the "
+"same cards must still open across the round-trip."
+)
+
+#: 引文点击测试：用户侧假问题（不进 LLM 历史，仅营造对话语境）
+CITATION_TEST_USER = (
+"Could you double-check that my citations are clickable before I paste this "
+"into my manuscript? I want to click every [n] and see the source behind it."
+)
+
+#: 引文点击测试：假 AI 回答（行内 [n] + 著录列表；不调用模型）。
+#: 编号 1..4 与 _build_citation_click_references 的条目一一对应；[1] 故意重复出现，
+#: 用于验证"同一来源复用同一编号"时每一次点击都落到同一条目。
+CITATION_TEST_AI = """## Citation click-through check
+
+This bubble is injected by Developer Mode — **no AI was called**. Every `[n]` below is
+a live citation marker produced by the real rendering pipeline.
+
+- The light reactions and the Calvin-Benson cycle are regulated at several levels [1].
+- An online record without a DOI backs this claim [2].
+- A local document backs this one, so its card can open the original file [3].
+- A minimal entry shows the "no passage captured" fallback layout [4].
+- The same source cited a second time reuses its number [1].
+
+### 📚 Cited Sources
+
+1. **Jumper, J.; Evans, R.; Pritzel, A.; Green, T.** (2021). *Highly accurate protein structure prediction with AlphaFold*. Nature. https://doi.org/10.1038/s41586-021-03819-2
+2. **PubMed record 31955348** — https://pubmed.ncbi.nlm.nih.gov/31955348/
+3. **Citation click-through demo document** (local file, opened by the system viewer)
+4. **Minimal entry without a supporting passage**
+"""
 
 #: 渲染预览：假 AI 回答模板（第 1 部分）。占位符 __MD_CITE__ / __TXT_CITE__ /
 #: __YAML_CITE__ / __TOML_CITE__ / __PDF_CITE__ / __MD_FILE__ / __PDF_FILE__ /
@@ -518,9 +559,11 @@ class DeveloperDialog(BaseDialog):
         self.btn_typography = self._make_btn("Chat Typography", self._test_chat_typography)
         self.btn_refnum = self._make_btn("Reference Numbering", self._test_reference_citations)
         self.btn_refint = self._make_btn("Reference Integrity", self._test_reference_integrity)
+        # 引文点击：切到 Chat 面板注入带引用的假对话，供用户实际悬停 / 点击 [n]
+        self.btn_citeclick = self._make_btn("Citation Click-Through", self._test_citation_click)
         for b in (self.btn_filetypes, self.btn_textviewer,
                   self.btn_scrollbar, self.btn_attachwire, self.btn_typography,
-                  self.btn_refnum, self.btn_refint):
+                  self.btn_refnum, self.btn_refint, self.btn_citeclick):
             func_row3.addWidget(b)
         func_row3.addStretch()
         self.content_layout.addLayout(func_row3)
@@ -1027,6 +1070,139 @@ class DeveloperDialog(BaseDialog):
                   "Literature Trust (live) can disprove it over the network.", "WARN")
         self._log("Reference integrity test PASSED.", "OK")
 
+    def _test_citation_click(self, clear: bool = True):
+        """引文点击链路测试：离线断言 + 注入真实 Chat 面板供手动点击。
+
+        Part A（离线）逐段钉住"引用能点、点了有内容、换机器也有内容"这条链路：
+
+        1. 行内 ``[n]`` 被真实渲染管线改写成 ``ref://cite?n=`` 链接（悬停 / 点击入口），
+           且重复出现的同一编号每一处都带链接；
+        2. 悬停卡与详情面板的数据来源按 ``(气泡编号, 引用编号)`` 命中**同一条目**；
+        3. 归档序列化（sanitize + JSON）往返后条目一字不差——防"导出再导入引用卡变空"；
+        4. 导入白名单保留 ``references`` 与 ``ui_components``——这是引用被静默丢掉的
+           头号位置，专测它；
+        5. 归档会收集 ``references[].path``，并在导入时改写为解包副本——否则引用卡还在、
+           "打开原文"却指向旧机路径。
+
+        Part B（可视）把带引用的假对话注入 Chat 面板，由用户实际悬停 / 点击。与
+        Render Preview 同理**不进 Run All**：它会切换主窗口页面，批量跑时是意外副作用。
+        """
+        if clear:
+            self._clear()
+        self._log("--- Citation Click-Through (inline [n] / hover card / detail panel) ---",
+                  "INFO")
+        fails = []
+
+        # 0) [3] 的"打开原文"需要真实文件才点得动
+        local_path = ""
+        try:
+            demo_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_devtest")
+            os.makedirs(demo_dir, exist_ok=True)
+            local_path = os.path.join(demo_dir, "citation_click_demo.md")
+            with open(local_path, "w", encoding="utf-8") as f:
+                f.write("# Citation click-through demo document\n\n"
+                        "This file exists so the [3] citation card can open it.\n")
+        except OSError as e:
+            self._log(f"Demo document not written ({e}); [3] will show the fallback only.",
+                      "WARN")
+
+        refs = self._build_citation_click_references(local_path)
+
+        # 1) 行内 [n] → ref://cite?n= 链接
+        try:
+            from src.ui.components.text_formatter import TextFormatter
+            html = TextFormatter.format_response(CITATION_TEST_AI, 0, set(), set(), {})
+            missing = [n for n in (1, 2, 3, 4) if f"ref://cite?n={n}" not in html]
+            if missing:
+                fails.append(f"inline [n] not linked: {missing}")
+            if html.count("ref://cite?n=1") < 2:
+                fails.append("reused citation [1] was not linked at every occurrence")
+        except Exception as e:
+            fails.append(f"render pipeline: {e}")
+
+        # 2) 悬停卡 / 详情面板的数据来源
+        try:
+            from src.ui.components.citation_popup import CitationPopupController
+            store = CitationPopupController.instance()
+            probe = -99      # 负数编号：测试不占用真实消息编号空间
+            store.merge_references(refs, probe)
+            for entry in refs:
+                got = store.lookup(probe, int(entry["index"]))
+                if got != entry:
+                    fails.append(f"citation store mismatch at [{entry['index']}]: {got}")
+        except Exception as e:
+            fails.append(f"citation store: {e}")
+
+        # 3) 归档序列化往返
+        try:
+            import json as _json
+
+            from src.core.chat_archive import sanitize
+            round_tripped = _json.loads(
+                _json.dumps([sanitize(r) for r in refs], ensure_ascii=False))
+            if round_tripped != refs:
+                fails.append("archive sanitize/JSON round-trip altered the citation entries")
+        except Exception as e:
+            fails.append(f"sanitize round-trip: {e}")
+
+        # 4) 导入白名单必须保留 references / ui_components
+        try:
+            from src.task.chat_tasks import ImportChatHistoryTask
+            comps = [{"kind": "ask_user", "key": "probe",
+                      "state": {"selected": ["A"], "custom": ""}}]
+            norm = ImportChatHistoryTask._normalize_msg(
+                {"role": "assistant", "content": "x",
+                 "references": refs, "ui_components": comps})
+            if norm.get("references") != refs:
+                fails.append("import whitelist dropped or altered references")
+            if norm.get("ui_components") != comps:
+                fails.append("import whitelist dropped or altered ui_components")
+        except Exception as e:
+            fails.append(f"import whitelist: {e}")
+
+        # 5) 归档收集 + 导入路径改写（引用卡的"打开原文"）
+        try:
+            from src.core import chat_archive
+            probe_msgs = [{"role": "assistant", "content": "x",
+                           "references": [dict(r) for r in refs]}]
+            if local_path and local_path not in chat_archive._collect_attachments(probe_msgs):
+                fails.append("archive did not collect the citation's local file")
+            moved = local_path + ".imported"
+            hits = chat_archive.remap_attachment_paths(probe_msgs, {local_path: moved})
+            got = [r.get("path") for r in probe_msgs[0]["references"]
+                   if r.get("index") == 3]
+            if not hits or got != [moved]:
+                fails.append(f"citation path not remapped on import: hits={hits} got={got}")
+        except Exception as e:
+            fails.append(f"archive path remap: {e}")
+
+        if fails:
+            for item in fails:
+                self._log(f"FAIL: {item}", "FAIL")
+            self._log(f"Citation click-through assertions FAILED ({len(fails)}).", "FAIL")
+        else:
+            self._log("Inline [n] -> ref:// link (reused number linked everywhere): OK",
+                      "OK")
+            self._log("Hover/click store keyed by (message, citation) returns the same entry: OK",
+                      "OK")
+            self._log("Archive sanitize + JSON round-trip keeps every field: OK", "OK")
+            self._log("Import whitelist keeps references + ui_components: OK", "OK")
+            self._log("Local original file collected + path remapped on import: OK", "OK")
+
+        # Part B: 注入真实 Chat 面板（不进 history，不调用模型）
+        route = getattr(self.main_window, "route_dev_conversation", None)
+        if route is None:
+            self._log("MainWindow.route_dev_conversation missing; chat injection skipped.",
+                      "FAIL")
+            return
+        self._log("Dispatching the citation demo to the Chat panel...", "INFO")
+        try:
+            route(CITATION_TEST_NOTE, CITATION_TEST_USER, CITATION_TEST_AI, refs)
+            self._log("Citation demo injected. Hover and click the [n] markers in the "
+                      "reply to open the compact card and the detail panel.", "OK")
+        except Exception as e:
+            self._log(f"Failed to inject the citation demo: {e}", "FAIL")
+
     def _test_ui_copy_scroll(self, clear: bool = True):
         """UI 交互自检：图表文字可复制、悬停卡未核实标记、超宽块拖选自动滚动。
 
@@ -1516,15 +1692,15 @@ class DeveloperDialog(BaseDialog):
              "citation_count": 5, "abstract": "real abstract from OpenAlex",
              "source_db": "OpenAlex", "journal": "Nature Methods", "year": 2019},
             {"title": "A study on single-cell RNA-seq", "doi": "https://doi.org/10.1000/abc123",
-             "citation_count": 9, "abstract": "No abstract",
+             "citation_count": 9, "abstract": "",
              "source_db": "Crossref", "journal": "", "year": 2019},
             # No DOI -> dedup by normalized title (breadth)
             {"title": "Single-cell analysis: methods and pitfalls", "doi": "",
-             "citation_count": 2, "abstract": "No abstract",
+             "citation_count": 2, "abstract": "",
              "source_db": "PubMed", "journal": "Genome Biology", "year": 2020},
             # Distinct paper, low citations (trust: should rank lower)
             {"title": "Another unrelated preprint", "doi": "",
-             "citation_count": 0, "abstract": "No abstract",
+             "citation_count": 0, "abstract": "",
              "source_db": "Semantic Scholar", "journal": "", "year": 2021},
         ]
 
@@ -1562,8 +1738,7 @@ class DeveloperDialog(BaseDialog):
                         ex["source_dbs"] = srcs
                         ex["citation_count"] = max(ex.get("citation_count", 0) or 0,
                                                    rec.get("citation_count", 0) or 0)
-                        if ex.get("abstract") in (None, "", "No abstract") and rec.get("abstract") not in (
-                                None, "", "No abstract"):
+                        if not str(ex.get("abstract") or "").strip() and str(rec.get("abstract") or "").strip():
                             ex["abstract"] = rec["abstract"]
                         if not ex.get("journal") and rec.get("journal"):
                             ex["journal"] = rec["journal"]
@@ -1580,7 +1755,7 @@ class DeveloperDialog(BaseDialog):
                     n = len(rec.get("source_dbs") or [])
                     score += 1.0 * min(n, 3)
                     score += 1.0 if rec.get("doi") else 0.0
-                    score += 1.0 if rec.get("abstract") not in (None, "", "No abstract") else 0.0
+                    score += 1.0 if str(rec.get("abstract") or "").strip() else 0.0
                     score += 0.5 if rec.get("journal") else 0.0
                     score += 0.2 * min(float(rec.get("citation_count", 0) or 0) / 100.0, 2.0)
                     rec["confidence"] = round(score, 2)
@@ -2948,6 +3123,51 @@ class DeveloperDialog(BaseDialog):
             },
         ]
 
+    @staticmethod
+    def _build_citation_click_references(local_path: str) -> list:
+        """引文点击测试的引用条目（编号与 CITATION_TEST_AI 里的 ``[1]``..``[4]`` 对应）。
+
+        四种分支各一，便于一次点全引用卡的所有排版分支：期刊论文（DOI + URL +
+        支撑原文 + 引用理由）、在线来源（只有 URL）、本地文献（只有 path，走
+        "打开原文"）、最小条目（无支撑原文）。``local_path`` 指向测试自己写出的
+        真实文件——路径不存在就点不出"打开原文"，那这一条分支等于没测。
+        """
+        return [
+            {
+                "index": 1, "kind": "article",
+                "title": "Highly accurate protein structure prediction with AlphaFold",
+                "authors": "Jumper, J.; Evans, R.; Pritzel, A.; Green, T.",
+                "year": "2021", "journal": "Nature",
+                "doi": "10.1038/s41586-021-03819-2",
+                "url": "https://www.nature.com/articles/s41586-021-03819-2",
+                "snippet": ("The resulting system, AlphaFold, demonstrates that it is "
+                            "possible to predict protein structures with atomic accuracy "
+                            "even in cases where no similar structure is known."),
+                "note": "Cited twice in the demo: verifies number reuse.",
+            },
+            {
+                "index": 2, "kind": "web",
+                "title": "PubMed record 31955348",
+                "url": "https://pubmed.ncbi.nlm.nih.gov/31955348/",
+                "snippet": ("PubMed entry used to exercise the no-DOI online branch of "
+                            "the citation card."),
+                "note": "Online source without a DOI.",
+            },
+            {
+                "index": 3, "kind": "local_document",
+                "title": "Citation click-through demo document",
+                "path": local_path or "",
+                "snippet": ("This document exists on disk so the card's 'open the "
+                            "original file' action can actually be exercised."),
+                "note": "Local document: only a file path, no DOI / URL.",
+            },
+            {
+                "index": 4, "kind": "reference",
+                "title": "Minimal entry without a supporting passage",
+                "note": "Verifies the 'no passage captured' fallback layout.",
+            },
+        ]
+
     def _test_render_preview(self, clear: bool = True):
         """Fake-conversation render preview (no AI, no network).
 
@@ -2961,7 +3181,7 @@ class DeveloperDialog(BaseDialog):
         blocks, chemistry subscripts and the Mermaid card.
 
         Part B (visual): generate the demo files and inject a fake user+AI
-        bubble pair into the Chat panel (``route_dev_render_preview``),
+        bubble pair into the Chat panel (``route_dev_conversation``),
         together with the demo citation entries so the ``[n]`` hover card /
         detail panel can be opened right away.
 
@@ -3122,9 +3342,9 @@ class DeveloperDialog(BaseDialog):
             return
 
         # --- Part B: 注入假对话（切到 Chat 面板，不调用 AI） ---
-        route = getattr(self.main_window, "route_dev_render_preview", None)
+        route = getattr(self.main_window, "route_dev_conversation", None)
         if route is None:
-            self._log("MainWindow.route_dev_render_preview missing.", "FAIL")
+            self._log("MainWindow.route_dev_conversation missing.", "FAIL")
             return
         self._log("Dispatching fake conversation to the Chat panel...", "INFO")
         try:
