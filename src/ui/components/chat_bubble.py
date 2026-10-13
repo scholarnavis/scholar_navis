@@ -321,8 +321,23 @@ class OverflowBlock(QScrollArea):
         doc.setDocumentMargin(0)
         self.setWidget(self.browser)
 
+        # 拖选自动滚动：QTextBrowser 自身的滚动条被强制关闭（滚动由本容器提供），
+        # Qt 原生的"选区拖到视口边缘就自动滚动"因此失效——这里在浏览器视口上补回来。
+        self._edge_dir = (0, 0)
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(self._EDGE_INTERVAL_MS)
+        self._edge_timer.timeout.connect(self._auto_scroll_step)
+        self.browser.viewport().installEventFilter(self)
+
         if html:
             self.set_content(html)
+
+    #: 拖选到边缘时的自动滚动参数：触发带宽（px）、每拍最小/最大步长、节拍（约 60fps）。
+    #: 步长按"进入触发带的深度"线性插值——贴边越快，刚进带内只挪一点，避免滚过头。
+    _EDGE_BAND_PX = 28
+    _EDGE_STEP_MIN = 1
+    _EDGE_STEP_MAX = 14
+    _EDGE_INTERVAL_MS = 16
 
     # --- 内容与尺寸同步 ---
     def set_content(self, html):
@@ -439,6 +454,80 @@ class OverflowBlock(QScrollArea):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._resync(force=False)
+
+    def hideEvent(self, event):
+        self._stop_edge_scroll()
+        super().hideEvent(event)
+
+    # --- 拖选到边缘自动滚动（横向为主，纵向同理） ---
+    def eventFilter(self, obj, event):
+        """浏览器视口上的鼠标事件：把视口左右/上下边缘当作选区的自动滚动触发带。
+
+        只有"按住左键拖动选区"时才生效；事件一律不拦截（返回 False），选中行为仍由
+        QTextBrowser 自己完成——本类只负责推滚动条。
+        """
+        if obj is self.browser.viewport():
+            etype = event.type()
+            if etype == QEvent.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    pos = event.position()
+                    self._update_edge_dir(pos.x(), pos.y())
+            elif etype == QEvent.MouseMove:
+                if event.buttons() & Qt.LeftButton:
+                    pos = event.position()
+                    self._update_edge_dir(pos.x(), pos.y())
+                else:
+                    # 拖拽已在别处结束（没收到 Release 的兜底）：停表
+                    self._stop_edge_scroll()
+            elif etype in (QEvent.MouseButtonRelease, QEvent.UngrabMouse):
+                self._stop_edge_scroll()
+        return super().eventFilter(obj, event)
+
+    def _update_edge_dir(self, x, y):
+        """按指针到视口各边的距离更新自动滚动方向（0 表示该轴不滚）。"""
+        band = self._EDGE_BAND_PX
+        vp = self.browser.viewport()
+        w, h = vp.width(), vp.height()
+        dir_x = dir_y = 0
+        if self.horizontalScrollBar().maximum() > 0:
+            if x < band:
+                dir_x = -self._edge_step(band - x)
+            elif x > w - band:
+                dir_x = self._edge_step(x - (w - band))
+        if self.verticalScrollBar().maximum() > 0:
+            if y < band:
+                dir_y = -self._edge_step(band - y)
+            elif y > h - band:
+                dir_y = self._edge_step(y - (h - band))
+        self._edge_dir = (dir_x, dir_y)
+        if (dir_x or dir_y) and not self._edge_timer.isActive():
+            self._edge_timer.start()
+        elif not (dir_x or dir_y):
+            self._edge_timer.stop()
+
+    def _edge_step(self, depth_in_band):
+        """把"进入触发带的深度"换算成每拍滚动像素数（线性，越贴边越快）。"""
+        ratio = min(1.0, max(0.0, float(depth_in_band) / float(self._EDGE_BAND_PX)))
+        return int(round(self._EDGE_STEP_MIN
+                         + (self._EDGE_STEP_MAX - self._EDGE_STEP_MIN) * ratio))
+
+    def _auto_scroll_step(self):
+        """计时器每拍推进滚动条；两轴都推不动（已到边界）就停表，避免空转。"""
+        dir_x, dir_y = self._edge_dir
+        moved = False
+        for delta, bar in ((dir_x, self.horizontalScrollBar()),
+                           (dir_y, self.verticalScrollBar())):
+            if not delta:
+                continue
+            before = bar.value()
+            bar.setValue(before + delta)
+            moved = moved or bar.value() != before
+        if not moved:
+            self._edge_timer.stop()
+
+    def _stop_edge_scroll(self):
+        self._edge_dir = (0, 0)
+        self._edge_timer.stop()
 
 
 class _ImageThumb(QLabel):

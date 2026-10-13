@@ -39,6 +39,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from src.core import plot_styles
 from src.core.evidence import EvidenceStore
+from src.core.prompt_rules import CITATION_TOKEN_RULE
 from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
@@ -283,13 +284,14 @@ _ALWAYS_TOOLS = {
             "name": "cite_references",
             "description": (
                 "Register the bibliographic references you cite so the app can render a "
-                "clickable, verifiable reference list. For EVERY source you must also "
-                "choose a short, unique ASCII 'key' (e.g. 'lariguet2004') and cite it "
-                "inline as [key] in your answer. The app assigns the numbered list "
+                "clickable, verifiable reference list. Use this tool ONLY for sources that "
+                f"carry no pre-assigned number. {CITATION_TOKEN_RULE} "
+                "The app assigns the numbered list "
                 "automatically (by order of first appearance), so do NOT invent numeric "
                 "citation numbers and do NOT write a 'References' / 'Bibliography' "
                 "section — the app generates the list from this tool call. Call this ONCE, "
-                "passing EVERY source you intend to cite. Each item is an object with: "
+                "passing every source you intend to cite that has no pre-assigned number. "
+                "Each item is an object with: "
                 "'key' (required, short ASCII slug you used inline), 'title' (required), "
                 "'authors', 'year', 'journal', 'doi', 'url', 'snippet' (a VERBATIM "
                 "excerpt copied character-for-character from a tool result or the "
@@ -310,7 +312,9 @@ _ALWAYS_TOOLS = {
                                 "key": {
                                     "type": "string",
                                     "description": ("Short unique ASCII citation key you also "
-                                                    "use inline as [key], e.g. 'lariguet2004'."),
+                                                    "use inline as [key], e.g. 'lariguet2004'. "
+                                                    "Only for sources without a pre-assigned "
+                                                    "number."),
                                 },
                                 "title": {"type": "string", "description": "Title of the work."},
                                 "authors": {"type": "string",
@@ -1072,8 +1076,15 @@ class AgentRuntime:
                 if name == "plot_chart":
                     return self._handle_plot_result(result, emit_token)
                 if isinstance(result, (dict, list)):
-                    return json.dumps(result, ensure_ascii=False)
-                return str(result)
+                    result = json.dumps(result, ensure_ascii=False)
+                # 本地技能（如 search_academic_literature）返回的文献列表同样要注入引用
+                # 编号：否则模型手里只有"标题+URL"，无号可引，只能自拟 [pksreview2022]
+                # 这类别名，而登记那一步（cite_references）一旦漏做/写歪，句子就失去引文。
+                # Deep 模式的子 Agent 更无退路——cite_references 被从它的工具池里剔除，
+                # 自拟别名必然无人登记。故此处与 MCP 分支共用同一注入实现。
+                if self.cite_collector is not None and isinstance(result, str):
+                    result = self._collect_tool_citations(name, result)
+                return result if isinstance(result, str) else str(result)
             except Exception as e:
                 logger.error(f"Local Skill '{name}' execution failed: {e}")
                 self._record_provenance(name, "academic" if prefix == "[ACADEMIC]" else "external",
@@ -1087,7 +1098,7 @@ class AgentRuntime:
                 result = self.mcp_manager.call_tool_sync(name, args)
                 self._record_provenance(name, "mcp", args, "success", result)
                 if self.cite_collector is not None:
-                    result = self._collect_mcp_citations(name, result)
+                    result = self._collect_tool_citations(name, result)
                 # Instruct the LLM to explain any access/API-key failure to the user.
                 if isinstance(result, str) and ("API Key" in result or "missing" in result.lower()):
                     result = (
@@ -1712,10 +1723,10 @@ class AgentRuntime:
             "status": "success",
             "references": entries,
             "message": (
-                "Registered. Cite these sources inline using their KEYS, e.g. [lariguet2004] "
-                "(do NOT use numbers). The app assigns the numbered reference list "
-                "automatically by order of first appearance. Do NOT write a "
-                "References/Bibliography section yourself."
+                "Registered. Cite THESE sources inline using their KEYS, e.g. [lariguet2004] "
+                "(sources that already carry a pre-assigned number keep using that number). "
+                "The app assigns the numbered reference list automatically by order of first "
+                "appearance. Do NOT write a References/Bibliography section yourself."
             ),
         }, ensure_ascii=False)
 
@@ -1987,12 +1998,21 @@ class AgentRuntime:
             self.evidence_store.add_source(
                 text, doi=str(item.get("doi") or ""), url=url, title=title)
 
-    def _collect_mcp_citations(self, tool_name: str, result: str) -> str:
-        """
-        Parse MCP JSON results for online sources (url / title) and register
-        them through ``cite_collector`` so the UI 'Cited Sources' block works.
-        Injects the assigned citation id back into each item, then returns the
-        (possibly annotated) result string.
+    #: 注入到工具结果条目里的引用编号字段名（**唯一事实来源**）：模型正文写 ``[该编号]``
+    #: 即可引用该来源，无需自拟 key，也不需要 cite_references 登记。系统提示词
+    #: （chat_tasks 的 RESPONSE GUIDELINES）引用的是同一个字面量。
+    TOOL_CITE_ID_FIELD = "_mcp_cite_id"
+
+    def _collect_tool_citations(self, tool_name: str, result: str) -> str:
+        """把工具结果里的来源列表登记进注册表，并把分配到的编号注入各条目。
+
+        **本地技能与远程 MCP 共用此实现**（见 ``_dispatch_tool`` 的两个分支）：
+        凡是返回 ``{"results": [{"url"/"title"/"abstract", ...}]}`` 的工具结果，
+        其来源都会获得一个编号，模型据此可直接写 ``[n]``。这样模型不必自拟
+        ``[pksreview2022]`` 这类别名，也就不会出现"别名无人登记 → 句子失去引文"。
+
+        注入字段见 :attr:`TOOL_CITE_ID_FIELD`。解析失败或结构不符时原样返回，
+        绝不影响工具结果本身。
         """
         if not isinstance(result, str):
             result = json.dumps(result, ensure_ascii=False)
@@ -2017,7 +2037,7 @@ class AgentRuntime:
                             "search_text": str(item.get("abstract") or ""),
                         })
                         if ref_id:
-                            item["_mcp_cite_id"] = ref_id
+                            item[self.TOOL_CITE_ID_FIELD] = ref_id
                 return json.dumps(res_data, ensure_ascii=False)
         except json.JSONDecodeError:
             pass

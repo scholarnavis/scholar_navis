@@ -16,10 +16,16 @@ UI 渲染（``text_formatter``）、引用扫描（``references``）、导出与
 ----------
 1. XML 变体：``<think>`` ``<thinking>`` ``<reasoning>`` ``<reasoning_content>``
    （含 ``<?think>`` 这类前缀变体与小写/大写混排）
-2. 管道变体：``<|thinking|>`` ``<|reasoning|>``（GPT-OSS、部分本地推理网关）
-3. 符号包裹：``◁think▷``（Kimi K1.5 系列）
-4. Harmony 频道：``<|channel|>analysis<|message|>``（思考信道起点），
+2. 管道变体：``<|thinking|>`` ``<|reasoning|>``（GPT-OSS、部分本地推理网关），
+   竖线有 ASCII ``|`` 与全角 ``｜``（U+FF5C）两种写法，两者必须同源识别
+3. DeepSeek 原生标记：``<｜begin▁of▁thinking｜>`` 起、``<｜end▁of▁thinking｜>``（或
+   裸 ``</think>``）止——未开服务端 reasoning parser 的网关会把它们原样写进正文
+4. 符号包裹：``◁think▷``（Kimi K1.5 系列）
+5. Harmony 频道：``<|channel|>analysis<|message|>``（思考信道起点），
    结束为 ``<|channel|>final<|message|>``
+6. 只剩余结束标记：服务端把起始标记吃掉、只留下 ``</think>``（或
+   ``<｜end▁of▁thinking｜>``）时，**标记之前的全部内容都是思考**——这是原生模板
+   的既定语义。若不按此处理，结束标记会被噪声规则清掉，思考原文反而留在正文里。
 
 这些字面量在正常学术正文中几乎不会出现；即便误判，代价也只是内容被移入
 可折叠面板而非丢失，因此可安全用于兜底。
@@ -40,12 +46,27 @@ THINK_CLOSE_TAG = "</think>"
 MCP_OPEN_TAG = "<mcp_process>"
 MCP_CLOSE_TAG = "</mcp_process>"
 
+#: 竖线写法有 ASCII ``|`` 与全角 ``｜``（U+FF5C）两种，同源识别。
+_PIPE = r"[|｜]"
+#: 管道写法里的思考块名字。``begin/end of thinking`` 是 DeepSeek 原生模板的
+#: 写法，``▁``（U+2581）在原文里是分词占位符，这里容忍其缺失或写成下划线。
+_THINK_OPEN_NAME = (r"(?:begin\s*[▁_\s]*of\s*[▁_\s]*thinking"
+                    r"|think|thinking|reasoning|reasoning_content)")
+_THINK_CLOSE_NAME = (r"(?:end\s*[▁_\s]*of\s*[▁_\s]*thinking"
+                     r"|think|thinking|reasoning)")
+
+#: Harmony 的两个频道标记：``analysis`` 起、``final`` 止（``final`` 是正文起点，
+#: 不是思考结束，见 :func:`_leading_reasoning_prefix_end`）。
+_CHANNEL_OPEN = rf"<\s*{_PIPE}\s*channel\s*{_PIPE}\s*>\s*analysis\s*<\s*{_PIPE}\s*message\s*{_PIPE}\s*>"
+_CHANNEL_CLOSE = rf"<\s*{_PIPE}\s*channel\s*{_PIPE}\s*>\s*final\s*<\s*{_PIPE}\s*message\s*{_PIPE}\s*>"
+_CHANNEL_CLOSE_RE = re.compile(_CHANNEL_CLOSE, re.IGNORECASE)
+
 #: 思考块起始写法（任意 provider 变体）。
 THINK_OPEN_RE = re.compile(
     r"(?:"
     r"<\s*\??\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
-    r"|<\|\s*(?:think|thinking|reasoning)\s*\|>"
-    r"|<\|\s*channel\s*\|>\s*analysis\s*<\|message\|>"
+    rf"|<\s*{_PIPE}\s*{_THINK_OPEN_NAME}\s*{_PIPE}\s*>"
+    rf"|{_CHANNEL_OPEN}"
     r"|◁\s*think\s*▷"
     r")",
     re.IGNORECASE,
@@ -56,8 +77,8 @@ THINK_OPEN_RE = re.compile(
 THINK_CLOSE_RE = re.compile(
     r"(?:"
     r"<\s*[/?]+\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
-    r"|<\|\s*/\s*(?:think|thinking|reasoning)\s*\|>"
-    r"|<\|\s*channel\s*\|>\s*final\s*<\|message\|>"
+    rf"|<\s*{_PIPE}\s*(?:\s*/\s*)?{_THINK_CLOSE_NAME}\s*{_PIPE}\s*>"
+    rf"|{_CHANNEL_CLOSE}"
     r"|◁\s*/\s*think\s*▷"
     r")",
     re.IGNORECASE,
@@ -65,8 +86,9 @@ THINK_CLOSE_RE = re.compile(
 
 #: 推理/Harmony 协议的孤立标记：自身不承载正文，正文抽取后一并清除。
 THINK_NOISE_RE = re.compile(
-    r"<\|\s*(?:end|start|message|constrain)\s*\|>"
-    r"|<\|\s*channel\s*\|>\s*(?:analysis|final)?"
+    rf"<\s*{_PIPE}\s*(?:end|start|message|constrain|final)\s*{_PIPE}\s*>"
+    rf"|<\s*{_PIPE}\s*channel\s*{_PIPE}\s*>\s*(?:analysis|final)?"
+    rf"|<\s*{_PIPE}\s*(?:begin|end)\s*[▁_\s]*of\s*[▁_\s]*(?:thinking|sentence)\s*{_PIPE}\s*>"
     r"|<\s*[/?]*\s*(?:think|thinking|reasoning|reasoning_content)\s*>"
     r"|◁\s*/?\s*think\s*▷",
     re.IGNORECASE,
@@ -87,6 +109,32 @@ THINK_BLOCK_RE = re.compile(
 _PARTIAL_TAG_RE = re.compile(r"<[^<>]{0,64}$")
 
 
+def _leading_reasoning_prefix_end(text: str) -> int:
+    """返回"只有结束标记"时应归入思考的前缀长度，无此情形返回 0。
+
+    判定口径见模块文档第 6 条：**全文第一个思考类标记就是结束标记**时，标记之
+    前的内容属于思考。Harmony 的 ``final`` 频道标记是正文起点，不算思考结束，
+    因此单独排除。
+    """
+    first_open = THINK_OPEN_RE.search(text)
+    for m in THINK_CLOSE_RE.finditer(text):
+        if first_open is not None and first_open.start() <= m.start():
+            break                    # 起始标记在前：走正常配对，不做前缀归类
+        if _CHANNEL_CLOSE_RE.match(m.group()):
+            continue
+        return m.start()
+    return 0
+
+
+def _fold_leading_reasoning(text: str) -> str:
+    """把"缺起始标记"的思考前缀包进统一的 ``<think>`` 标签，供折叠与剥离共用。"""
+    end = _leading_reasoning_prefix_end(text)
+    if end <= 0:
+        return text
+    logger.debug("Think tags: folding leading reasoning prefix (%d chars).", end)
+    return THINK_OPEN_TAG + text[:end] + THINK_CLOSE_TAG + text[end:]
+
+
 # ----------------------------------------------------------------------
 # 整段文本上的操作
 # ----------------------------------------------------------------------
@@ -99,6 +147,7 @@ def normalize(text: str) -> str:
     """
     if not text or "<" not in text and "◁" not in text:
         return text
+    text = _fold_leading_reasoning(text)
     text = re.sub(r"<\s*think\s*>", THINK_OPEN_TAG, text, flags=re.IGNORECASE)
     text = re.sub(r"<\s*/\s*think\s*>", THINK_CLOSE_TAG, text, flags=re.IGNORECASE)
     text = re.sub(r"<\s*mcp_process\s*>", MCP_OPEN_TAG, text, flags=re.IGNORECASE)
@@ -133,6 +182,7 @@ def split(text: str) -> Tuple[str, str]:
     """
     if not text:
         return "", ""
+    text = _fold_leading_reasoning(text)
     reasoning: List[str] = []
     in_think = False
     body_parts: List[str] = []

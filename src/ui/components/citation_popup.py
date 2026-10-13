@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
                                QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QTextBrowser, QVBoxLayout, QWidget)
 
+from src.core.references import UNVERIFIED_LABEL
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.copy_button import CopyButton
 from src.ui.components.toast import ToastManager
@@ -197,6 +198,16 @@ class CitationPopup(QWidget):
         self._lbl_kind.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._lbl_kind.setFixedHeight(TITLE_BAR_HEIGHT)
         header.addWidget(self._lbl_kind)
+
+        # "未核实"标记（紧随来源类型之后）：条目既无 DOI/URL/本地路径、snippet 也未经
+        # 逐字校验时显示，提示"这条没有可点的出处，只能人工核对"。判定口径不在本文件，
+        # 与参考文献列表同源（见 ReferenceItem.needs_manual_review）。
+        self._lbl_unverified = QLabel(f"（{UNVERIFIED_LABEL}）")
+        self._lbl_unverified.setObjectName("CitationUnverifiedChip")
+        self._lbl_unverified.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._lbl_unverified.setFixedHeight(TITLE_BAR_HEIGHT)
+        self._lbl_unverified.setVisible(False)
+        header.addWidget(self._lbl_unverified)
         header.addStretch(1)
 
         self._btn_close = QPushButton("✕")
@@ -310,6 +321,7 @@ class CitationPopup(QWidget):
         text_main = tm.color("text_main")
         muted = tm.color("text_muted")
         hover = tm.color("btn_hover")
+        danger = tm.color("danger")
         strong = strong_weight_css()
 
         self._card.setStyleSheet(f"""
@@ -329,6 +341,11 @@ class CitationPopup(QWidget):
             }}
             QLabel#CitationKindChip {{
                 color: {accent}; background-color: rgba(127,127,127,0.14);
+                border-radius: 5px; padding: 1px 7px;
+                font-family: {fam}; font-size: 10px;
+            }}
+            QLabel#CitationUnverifiedChip {{
+                color: {danger}; background-color: rgba(192,57,43,0.16);
                 border-radius: 5px; padding: 1px 7px;
                 font-family: {fam}; font-size: 10px;
             }}
@@ -439,6 +456,14 @@ class CitationPopup(QWidget):
         index = self._data.get("index")
         self._lbl_index.setText(f"[{index}]" if index not in (None, "") else "[?]")
         self._lbl_kind.setText(_kind_label(self._data.get("kind", "")))
+        # 未核实标记：判定口径与参考文献列表同源（ReferenceItem.needs_manual_review），
+        # 不在此另立标准——两处说法不一致比缺少标记更糟。
+        from src.core.references import ReferenceItem as _RefItem
+        try:
+            self._lbl_unverified.setVisible(
+                _RefItem.from_dict(self._data).needs_manual_review)
+        except Exception:
+            self._lbl_unverified.setVisible(False)
 
         title = str(self._data.get("title") or "").strip()
         self._lbl_title.setText(title or "Untitled")

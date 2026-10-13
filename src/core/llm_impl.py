@@ -92,24 +92,28 @@ def _raw_error_text(e: Exception) -> str:
 
 #: provider 承载"思考链"的字段名。litellm 对多数 provider 归一化为
 #: ``reasoning_content``，但部分本地/兼容网关使用 ``reasoning`` /
-#: ``thinking`` / ``thinking_content``。只识别前者会导致思考链落入正文，
+#: ``thinking`` / ``thinking_content``，聚合网关（OpenRouter 等）用
+#: ``reasoning_details``（结构化分片列表）。只识别前者会导致思考链落入正文，
 #: 因此这里集中做跨字段兼容，避免各处重复判断而口径不一。
-_REASONING_FIELD_NAMES = ("reasoning_content", "reasoning", "thinking", "thinking_content")
+_REASONING_FIELD_NAMES = ("reasoning_content", "reasoning", "thinking", "thinking_content",
+                          "reasoning_details")
 
 
 def _coerce_reasoning_value(value) -> str:
     """把 provider 返回的推理字段值规整为纯文本（恒返回 ``str``）。
 
     字段形态可能是 str、dict（``{"thinking"|"text"|"content": ...}``）、
-    或 list（Anthropic/Gemini 经 litellm 的 ``thinking_blocks``）。未知形态
-    一律返回空串，绝不抛出，避免流式过程中因单条脏数据中断整轮对话。
+    或 list（Anthropic/Gemini 经 litellm 的 ``thinking_blocks``；聚合网关的
+    ``reasoning_details`` 元素用 ``{"type": "reasoning.summary", "summary": ...}``）。
+    未知形态一律返回空串，绝不抛出，避免流式过程中因单条脏数据中断整轮对话。
     """
     if not value:
         return ""
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
-        for key in ("thinking", "text", "content", "reasoning_content", "reasoning"):
+        for key in ("thinking", "text", "content", "summary",
+                    "reasoning_content", "reasoning"):
             inner = value.get(key)
             if isinstance(inner, str) and inner:
                 return inner

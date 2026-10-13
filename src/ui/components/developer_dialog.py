@@ -517,12 +517,27 @@ class DeveloperDialog(BaseDialog):
         self.btn_attachwire = self._make_btn("Attachment Wiring", self._test_attachment_wiring)
         self.btn_typography = self._make_btn("Chat Typography", self._test_chat_typography)
         self.btn_refnum = self._make_btn("Reference Numbering", self._test_reference_citations)
+        self.btn_refint = self._make_btn("Reference Integrity", self._test_reference_integrity)
         for b in (self.btn_filetypes, self.btn_textviewer,
                   self.btn_scrollbar, self.btn_attachwire, self.btn_typography,
-                  self.btn_refnum):
+                  self.btn_refnum, self.btn_refint):
             func_row3.addWidget(b)
         func_row3.addStretch()
         self.content_layout.addLayout(func_row3)
+
+        # 功能测试第四行：引用可信性。Integrity 为离线反捏造审计（进 Run All）；
+        # Literature Trust 会发起**真实检索 + DOI 解析**，故独立成按钮、不进 Run All，
+        # 避免默认自检占用网络与配额。
+        func_row4 = QHBoxLayout()
+        func_row4.setSpacing(8)
+        self.btn_littrust = self._make_btn("Literature Trust (live)",
+                                           self._test_literature_source_trust)
+        self.btn_uiinter = self._make_btn("UI Copy / Drag-Scroll",
+                                          self._test_ui_copy_scroll)
+        for b in (self.btn_littrust, self.btn_uiinter):
+            func_row4.addWidget(b)
+        func_row4.addStretch()
+        self.content_layout.addLayout(func_row4)
 
         # --- Output area（专属源码/日志输出控件：固定最大高度 + 独立滚动条、
         #     边框底纹、复制、折叠、深色模式自适应） ---
@@ -781,7 +796,7 @@ class DeveloperDialog(BaseDialog):
             body = ("光合作用受光调节 [sharkey2019]，且碳同化参与 [long2006]；"
                     "再次引用同一来源 [sharkey2019]；本地文档 [3]；"
                     "未登记 [ghost2020]。")
-            new_text, ordered, unresolved = reg.resolve_citations(body)
+            new_text, ordered, unresolved, repaired = reg.resolve_citations(body)
 
             fails = []
             # 1) 首次出现顺序：sharkey=1, long=2, local=3
@@ -794,9 +809,11 @@ class DeveloperDialog(BaseDialog):
                       "本地文档 [3]；未登记 [ghost2020]。")
             if new_text != expect:
                 fails.append(f"rewrite mismatch: got={new_text!r} exp={expect!r}")
-            # 3) 未登记 key 被报告
+            # 3) 未登记 key 被报告；精确命中不应上报任何"识别回填"（否则日志失真）
             if unresolved != ["ghost2020"]:
                 fails.append(f"unresolved != ['ghost2020']: {unresolved}")
+            if repaired:
+                fails.append(f"exact-only body must not report repairs: {repaired}")
             # 4) 渲染列表顺序与编号一致
             html = reg.render_items(ordered)
             if not (0 <= html.find("[1]") < html.find("[2]") < html.find("[3]")):
@@ -809,9 +826,75 @@ class DeveloperDialog(BaseDialog):
             reg2.add(ReferenceItem(index=0, key="a2004", title="A", year="2004"))
             reg2.add(ReferenceItem(index=0, key="b2011", title="B", year="2011"))
             draft = "第一版 [b2011][a2004] 结束。\n第二版 [b2011][a2004] 结束。"
-            t2, _o2, u2 = reg2.resolve_citations(draft)
+            t2, _o2, u2, _r2 = reg2.resolve_citations(draft)
             if t2.count("[1][2]") != 2 or u2:
                 fails.append(f"duplicate-draft rewrite failed: {t2!r} unresolved={u2}")
+
+            # 6) 兜底清理回归：落不到著录的引用 key 不再上屏——**含思考面板内的残留**
+            #    真实顺序是"先 resolve_citations 重编号，再清理剩余 key 形态 token"；
+            #    不再按 unresolved 清单删除（它只覆盖正文，思考块不参与编号）。
+            from src.core.references import strip_unregistered_cite_keys
+            raw = ("正文 [sharkey2019] 与未登记 [lariguet2004] 混排；"
+                   "思考块里也在用 <think>考虑以 [christie2017] 支撑</think>；"
+                   "经典文献 [mendel1866]；保留项 [EC]、[3]、[Fig. 2]、[the 1990s]。")
+            rewritten6, _o6, unresolved6, _r6 = reg.resolve_citations(raw)
+            cleaned, removed = strip_unregistered_cite_keys(rewritten6)
+            if "[1]" not in cleaned:
+                fails.append(f"registered key not renumbered before cleanup: {cleaned!r}")
+            for bad in ("lariguet2004", "christie2017", "mendel1866"):
+                if bad in cleaned:
+                    fails.append(f"citation-key residue survived cleanup: {bad}")
+            for keep in ("[EC]", "[Fig. 2]", "[the 1990s]"):
+                if keep not in cleaned:
+                    fails.append(f"unrelated bracket usage was dropped: {keep}")
+            # [3] 是已登记的本地 KB 文档号：应被**重编号**（首次出现顺序第 2 条），
+            # 而不是按"未登记"清理掉——这两件事必须区分开。
+            if "[2]" not in cleaned:
+                fails.append(f"registered numeric citation must be renumbered, not dropped: {cleaned!r}")
+            if "lariguet2004" not in unresolved6:
+                fails.append(f"unresolved should report body keys: {unresolved6}")
+            if "christie2017" not in removed:
+                fails.append(f"think-block key not cleaned: removed={removed}")
+
+            # 7) 识别回归：写歪的 key 必须落回**真实著录**并照常编号，而不是被删掉丢引文
+            #    （旧实现把 frutani2007 当"未登记"直接删除，等于让句子无声失去引文）
+            reg3 = ReferenceRegistry()
+            reg3.add(ReferenceItem(index=0, key="furutani2007",
+                                   title="Mutations in the NPH3 gene of Arabidopsis",
+                                   authors="Furutani, M.; Sakamoto, N.", year="2007"))
+            reg3.add(ReferenceItem(index=0, key="zhang2026condensate",
+                                   title="NPH3 condensates", authors="Zhang, Y.", year="2026"))
+            body3 = "姓氏拼写偏差 [frutani2007]；主题词被截断 [zhang2026] 结束。"
+            t3, o3, u3, r3 = reg3.resolve_citations(body3)
+            if t3 != "姓氏拼写偏差 [1]；主题词被截断 [2] 结束。":
+                fails.append(f"near-miss key not repaired into [n]: {t3!r}")
+            if u3:
+                fails.append(f"repaired keys must not be reported unresolved: {u3}")
+            if {tier for _t, tier, _n in r3} != {"typo", "prefix"}:
+                fails.append(f"repair report wrong: {r3}")
+            if [it.index for it in o3] != [1, 2]:
+                fails.append(f"repaired items not in first-appearance order: {[it.index for it in o3]}")
+            if strip_unregistered_cite_keys(t3)[1]:
+                fails.append("fully repaired text should have nothing left to strip")
+
+            # 8) 元数据回填：在线来源只有编号、模型却写成"姓氏+年份"时也能落回真实条目
+            reg4 = ReferenceRegistry()
+            reg4.seed(7, ReferenceItem(index=7, kind="online_source",
+                                       title="Lateral relocation of auxin efflux regulator PIN3",
+                                       authors="Friml, J.; Wisniewska, J.", year="2002"))
+            t4, o4, u4, r4 = reg4.resolve_citations("PIN3 的侧向定位 [friml2002]。")
+            if "[1]" not in t4 or u4 or not o4:
+                fails.append(f"metadata fallback failed: {t4!r} {u4}")
+            elif [tier for _t, tier, _n in r4] != ["metadata"]:
+                fails.append(f"metadata fallback tier wrong: {r4}")
+
+            # 9) 歧义即放弃：前缀能命中两个候选时**不得猜测**（错挂文献比缺标记严重）
+            reg5 = ReferenceRegistry()
+            reg5.add(ReferenceItem(index=0, key="hu2019cotton", title="A", authors="Hu, X.", year="2019"))
+            reg5.add(ReferenceItem(index=0, key="hu2019nph3", title="B", authors="Hu, X.", year="2019"))
+            t5, o5, u5, r5 = reg5.resolve_citations("见 [hu2019] 所述。")
+            if "[hu2019]" not in t5 or u5 != ["hu2019"] or r5 or o5:
+                fails.append(f"ambiguous key must stay unresolved: {t5!r} {u5} {r5}")
 
             if fails:
                 for f in fails:
@@ -821,10 +904,496 @@ class DeveloperDialog(BaseDialog):
                 self._log("Key resolution + first-appearance renumbering OK.", "OK")
                 self._log("Numeric (KB) citation + duplicate-draft key reuse OK.", "OK")
                 self._log("Unresolved-key reporting OK.", "OK")
+                self._log("Key-residue cleanup OK (body + reasoning panel).", "OK")
+                self._log("Near-miss / metadata key repair OK; ambiguity not guessed.", "OK")
                 self._log(f"Sample rewritten body: {new_text}", "INFO")
                 self._log("Reference numbering test PASSED.", "OK")
         except Exception as e:
             self._log(f"Reference numbering test failed: {e}", "FAIL")
+
+    def _test_reference_integrity(self, clear: bool = True):
+        """反捏造审计（离线）：参考文献列表里的每一条都必须有出处。
+
+        列表条目只可能来于三处，逐条钉死其不可捏造性：
+
+        1. 识别回填（folded/prefix/typo/metadata）——只允许命中**已存在**的条目：
+           整条引用管线前后，注册表的条目数、每个条目的对象身份都必须不变；
+        2. 正文凭空写的 key——识别不中就清理，绝不允许"补造一条列出来"；
+        3. 列表条目必须能落回注册表条目并带可核查标识（标题/DOI/URL/本地路径）。
+
+        联网核查（DOI 解析、标题年份比对）见 Literature Trust (live)。
+        """
+        if clear:
+            self._clear()
+        self._log("--- Reference Integrity (anti-fabrication) ---", "INFO")
+        fails = []
+        try:
+            from src.core.references import (ReferenceItem, ReferenceRegistry,
+                                             strip_unregistered_cite_keys)
+
+            reg = ReferenceRegistry()
+            reg.add(ReferenceItem(index=0, key="furutani2007",
+                                  title="Mutations in the NPH3 gene of Arabidopsis",
+                                  authors="Furutani, M.; Sakamoto, N.", year="2007"))
+            reg.add(ReferenceItem(index=0, key="zhang2026condensate",
+                                  title="NPH3 condensates", authors="Zhang, Y.", year="2026"))
+            reg.add(ReferenceItem(index=0, key="hu2019cotton",
+                                  title="A", authors="Hu, X.", year="2019"))
+            reg.add(ReferenceItem(index=0, key="hu2019nph3",
+                                  title="B", authors="Hu, X.", year="2019"))
+            reg.seed(7, ReferenceItem(index=7, kind="online_source",
+                                      title="Lateral relocation of auxin efflux regulator PIN3",
+                                      authors="Friml, J.", year="2002"))
+            before = {it.index: it for it in reg.items()}
+
+            body = ("拼写偏差 [frutani2007]；主题词截断 [zhang2026]；"
+                    "只有编号的来源 [friml2002]；歧义 [hu2019]；"
+                    "凭空 [fabricated2099]；短姓氏再引一次 [hu2019]。")
+            new_text, ordered, unresolved, repaired = reg.resolve_citations(body)
+
+            # 1) 识别链不得新建、替换或改写任何注册条目
+            after = {it.index: it for it in reg.items()}
+            if len(after) != len(before):
+                fails.append(f"registry size changed: {len(before)} -> {len(after)}")
+            for idx, item in before.items():
+                if after.get(idx) is not item:
+                    fails.append(f"registry item {idx} was replaced or mutated by recognition")
+            if len(ordered) > len(after):
+                fails.append(f"listed more items ({len(ordered)}) than registered ({len(after)})")
+
+            # 2) 列表条目必须落回注册表条目，且带可核查标识
+            fingerprints = {(it.key, it.title, it.url, it.doi, it.path) for it in after.values()}
+            for it in ordered:
+                if (it.key, it.title, it.url, it.doi, it.path) not in fingerprints:
+                    fails.append(f"listed item [{it.index}] matches no registry entry")
+                if not (it.title or it.url or it.doi or it.path or it.snippet):
+                    fails.append(f"listed item [{it.index}] carries no provenance field at all")
+
+            # 3) 凭空 key：不得进列表，且必须被清理（不补条目、也不留坏标记）
+            if any("fabricated2099" in f"{it.key} {it.title}" for it in ordered):
+                fails.append("fabricated key produced a reference entry")
+            cleaned, removed = strip_unregistered_cite_keys(new_text)
+            if "fabricated2099" not in removed or "fabricated2099" in cleaned:
+                fails.append(f"fabricated key not cleaned: removed={removed}")
+
+            # 4) 猜测防护：歧义（两个候选）与短姓氏一律不识别
+            if unresolved.count("hu2019") != 2:
+                fails.append(f"ambiguous / short-surname key must stay unresolved: {unresolved}")
+            if "hu2019" in {tok for tok, _tier, _num in repaired}:
+                fails.append(f"ambiguous key was guessed: {repaired}")
+            if not {"typo", "prefix", "metadata"} <= {tier for _tok, tier, _num in repaired}:
+                fails.append(f"recognition tiers under-tested (fixture wrong): {repaired}")
+
+            # 5) 模型提交的无标识条目仍须可指认（只能人工核查），不得静默隐身
+            bare = ReferenceItem.from_ai_payload({"title": "Some paper", "year": "2099"}, index=0)
+            if not bare.dedupe_key:
+                fails.append("model-submitted entry without identifiers lost its traceable key")
+
+            # 6) "未核实"标记：只在"无任何可核对落点"时出现，且不破坏导出往返解析
+            from src.core.references import UNVERIFIED_LABEL, parse_footer_entries
+            marked = ReferenceItem(index=1, title="Model-written entry", year="2099")
+            opened = ReferenceItem(index=2, title="Has DOI", year="2004", doi="10.1/abc")
+            verbatim = ReferenceItem(index=3, title="Verified by snippet", year="2005",
+                                     snippet="verbatim text", verified=True)
+            localdoc = ReferenceItem(index=4, title="KB chunk", path="/tmp/kb.pdf",
+                                     kind="local_document")
+            html = ReferenceRegistry.render_items([marked, opened, verbatim, localdoc])
+            if not marked.needs_manual_review or UNVERIFIED_LABEL not in html:
+                fails.append("entry without any identifier must carry the unverified mark")
+            for it in (opened, verbatim, localdoc):
+                if it.needs_manual_review:
+                    fails.append(f"entry [{it.index}] must NOT be marked unverified "
+                                 f"(doi/path/verbatim present)")
+                if UNVERIFIED_LABEL in ReferenceRegistry.render_items([it]):
+                    fails.append(f"entry [{it.index}] rendered the unverified mark wrongly")
+            parsed = parse_footer_entries(html)
+            if [r.index for r in parsed] != [1, 2, 3, 4] or not all(r.text for r in parsed):
+                fails.append(f"unverified mark broke footer round-trip: {parsed}")
+        except Exception as e:
+            fails.append(f"exception: {e}")
+
+        if fails:
+            for f in fails:
+                self._log(f"FAIL: {f}", "FAIL")
+            self._log(f"Reference integrity test FAILED ({len(fails)} assertion(s)).", "FAIL")
+            return
+        self._log("Recognition never creates, replaces or mutates registry entries.", "OK")
+        self._log("Every listed item traces back to a registered entry with provenance.", "OK")
+        self._log("Fabricated inline keys are cleaned, never added to the list.", "OK")
+        self._log("Ambiguity / short surnames are never guessed into a citation.", "OK")
+        self._log("Unverified mark: shown only for entries with no DOI/URL/path and no "
+                  "verbatim-checked snippet; footer export round-trip intact.", "OK")
+        self._log("Note: a FABRICATED DOI/URL still looks 'identified' — only "
+                  "Literature Trust (live) can disprove it over the network.", "WARN")
+        self._log("Reference integrity test PASSED.", "OK")
+
+    def _test_ui_copy_scroll(self, clear: bool = True):
+        """UI 交互自检：图表文字可复制、悬停卡未核实标记、超宽块拖选自动滚动。
+
+        这三项都是"不点就不知道坏没坏"的交互，用真实控件在自检里跑一遍：
+
+        * 图表页 HTML 不得禁用文字选择，且拖拽平移不得抢占选中；
+        * 悬停卡的未核实标记与参考文献列表**同源**判定（无 DOI/URL/路径且未逐字校验）；
+        * 超宽块把选区拖到左/右边缘时滚动条跟着走，到边界停表，无横向溢出不启动。
+
+        图表实际取文字要靠 WebEngine 完成页面加载，等 5 秒；超时只记 WARN（无头或
+        受限环境可能起不来 WebEngine），不影响其余断言。
+        """
+        if clear:
+            self._clear()
+        self._log("--- UI Interactions (copy / drag-scroll / unverified mark) ---", "INFO")
+        import time as _time
+
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QGuiApplication, QMouseEvent
+        from PySide6.QtWidgets import QApplication
+
+        fails, warns = [], []
+
+        # --- 1) 超宽块：拖选到边缘自动滚动 ---
+        try:
+            from src.ui.components.chat_bubble import OverflowBlock
+
+            def _make_block(html, kind):
+                blk = OverflowBlock(html, block_kind=kind)
+                try:
+                    blk.setAttribute(Qt.WA_DontShowOnScreen, True)  # 自检不弹窗
+                except AttributeError:
+                    pass    # 个别 Qt 构建没有该属性：退化为短暂显示，不影响断言
+                blk.resize(420, 220)
+                blk.show()
+                QApplication.processEvents()
+                blk._resync(force=True)
+                return blk
+
+            wide = ("<table width='2600' cellspacing='0' cellpadding='6'>"
+                    "<tr><td>Alpha</td><td>Beta</td></tr></table>")
+            blk = _make_block(wide, "table")
+            vp = blk.browser.viewport()
+            hbar = blk.horizontalScrollBar()
+
+            def _send(etype, x, y, buttons=Qt.LeftButton):
+                QApplication.sendEvent(vp, QMouseEvent(
+                    etype, QPointF(x, y), Qt.LeftButton, buttons, Qt.NoModifier))
+
+            if hbar.maximum() > 0:
+                w, h = vp.width(), vp.height()
+                _send(QEvent.MouseButtonPress, w // 2, h // 2)
+                _send(QEvent.MouseMove, w - 2, h // 2)
+                if blk._edge_dir[0] <= 0 or not blk._edge_timer.isActive():
+                    fails.append(f"right-edge drag did not arm scrolling: {blk._edge_dir}")
+                hbar.setValue(hbar.maximum())
+                blk._auto_scroll_step()
+                if blk._edge_timer.isActive():
+                    fails.append("timer must stop when the scrollbar cannot move further")
+                hbar.setValue(hbar.maximum())
+                before = hbar.value()
+                _send(QEvent.MouseMove, 1, h // 2)
+                if blk._edge_dir[0] >= 0:
+                    fails.append(f"left-edge drag direction wrong: {blk._edge_dir}")
+                blk._auto_scroll_step()
+                if hbar.value() >= before:
+                    fails.append(f"left-edge step did not scroll: {before} -> {hbar.value()}")
+                _send(QEvent.MouseMove, w // 2, h // 2)
+                if blk._edge_timer.isActive() or blk._edge_dir != (0, 0):
+                    fails.append(f"mid-area move must stop edge scrolling: {blk._edge_dir}")
+                _send(QEvent.MouseButtonPress, w - 2, h // 2)
+                _send(QEvent.MouseButtonRelease, w - 2, h // 2, buttons=Qt.NoButton)
+                if blk._edge_dir != (0, 0) or blk._edge_timer.isActive():
+                    fails.append("release must stop edge scrolling")
+            else:
+                warns.append("wide-table fixture did not overflow here — "
+                             "scroll assertions skipped (geometry-dependent)")
+            blk.hide()
+            blk.deleteLater()
+
+            # 无横向溢出的块不得启动自动滚动
+            narrow = _make_block("<p>short</p>", "text")
+            narrow._update_edge_dir(0, 0)
+            if narrow._edge_dir != (0, 0) or narrow._edge_timer.isActive():
+                fails.append("block without overflow must not auto-scroll")
+            narrow.hide()
+            narrow.deleteLater()
+        except Exception as e:
+            fails.append(f"edge-scroll check raised: {e}")
+
+        # --- 2) 悬停卡：未核实标记与列表同源 ---
+        try:
+            from src.core.references import UNVERIFIED_LABEL
+            from src.ui.components.citation_popup import CitationPopup
+
+            pop = CitationPopup()
+            pop.set_reference({"index": 1, "kind": "reference",
+                               "title": "Model-written entry", "year": "2099"},
+                              pop.MODE_FULL)
+            if UNVERIFIED_LABEL not in pop._lbl_unverified.text():
+                fails.append("popup mark text is out of sync with the reference list")
+            if pop._lbl_unverified.isHidden():
+                fails.append("popup did not mark an entry with no verifiable identifier")
+            for data in ({"index": 2, "kind": "online_source", "title": "T",
+                          "url": "https://example.org/x"},
+                         {"index": 3, "kind": "local_document", "title": "T",
+                          "path": "/tmp/kb.pdf"},
+                         {"index": 4, "kind": "reference", "title": "T",
+                          "snippet": "verbatim text", "verified": True}):
+                pop.set_reference(data, pop.MODE_FULL)
+                if not pop._lbl_unverified.isHidden():
+                    fails.append(f"popup wrongly marked entry {data['index']} as unverified")
+            pop.deleteLater()
+        except Exception as e:
+            fails.append(f"popup mark check raised: {e}")
+
+        # --- 3) Mermaid：文字可选中 / 可复制 ---
+        try:
+            from src.ui.components.mermaid_viewer import MermaidViewer
+
+            viewer = MermaidViewer()
+            viewer.setAttribute(Qt.WA_DontShowOnScreen, True)
+            page = viewer._build_page_html("default")
+            if "user-select: none" in page:
+                fails.append("mermaid page still disables text selection")
+            if "user-select: text" not in page:
+                fails.append("mermaid labels are not selectable")
+            if "navisOnLabel" not in page:
+                fails.append("pan handler does not yield to text selection")
+            if not hasattr(viewer, "act_copy_text"):
+                fails.append("'Copy Text' action is missing from the toolbar")
+
+            # 剪贴板通路（与页面无关的那一段）
+            QGuiApplication.clipboard().setText("__navis_selftest__")
+            viewer._on_diagram_text("Alpha\nBeta")
+            if QGuiApplication.clipboard().text() != "Alpha\nBeta":
+                fails.append("diagram text was not written to the clipboard")
+
+            # 真机通路：渲染一张小图，等页面把文字交回来
+            viewer.mermaid_code = "flowchart LR\n  A[Alpha] --> B[Beta]"
+            QGuiApplication.clipboard().setText("__navis_selftest__")
+            viewer.render_diagram()
+            deadline = _time.monotonic() + 5.0
+            got = ""
+            while _time.monotonic() < deadline:
+                QApplication.processEvents()
+                got = QGuiApplication.clipboard().text()
+                if "Alpha" in got:
+                    break
+                _time.sleep(0.05)
+            if "Alpha" not in got:
+                warns.append("WebEngine did not return diagram text within 5s "
+                             "(headless / restricted environment?)")
+            viewer.hide()
+            viewer.deleteLater()
+        except Exception as e:
+            fails.append(f"mermaid copy check raised: {e}")
+
+        for w in warns:
+            self._log(f"WARN: {w}", "WARN")
+        if fails:
+            for f in fails:
+                self._log(f"FAIL: {f}", "FAIL")
+            self._log(f"UI interaction test FAILED ({len(fails)} assertion(s)).", "FAIL")
+            return
+        self._log("Drag-select at block edges drives the scrollbar; stops at bounds.", "OK")
+        self._log("Blocks without horizontal overflow never auto-scroll.", "OK")
+        self._log("Hover card shows the same unverified mark as the reference list.", "OK")
+        self._log("Mermaid labels are selectable and 'Copy Text' fills the clipboard.", "OK")
+        self._log("UI interaction test PASSED.", "OK")
+
+    def _test_literature_source_trust(self, clear: bool = True):
+        """文献检索可信性检查（**联网**）：真实检索 -> 逐条核查 -> 核查表格。
+
+        走与运行时完全相同的链路（技能结果 -> ``AgentRuntime._collect_tool_citations``
+        注入引用编号 -> 注册表），然后逐条核对：
+
+        1. 字段齐备：标题 / 四位年份 / (DOI 或 URL)；
+        2. 编号可落回：注入的 ``_mcp_cite_id`` 能在注册表里定位到**同一来源**
+           （URL 或标题一致）——编号与来源一对一是"引用可信"的前提；
+        3. 文献真实存在：DOI 经 OpenAlex 解析成功，且解析回来的标题与年份与检索
+           记录一致（关键一步，专门抓上游/模型拼出来的假条目）；
+        4. 链接可达：来源记录链接的 HTTP 状态。
+
+        结论分三档：OK（全部通过）/ WARN（字段缺失或链接不可达）/ SUSPECT（DOI 解析
+        不到或标题年份不符）。表格逐行给出结论与说明，便于人工抽查原始检索数据。
+        """
+        if clear:
+            self._clear()
+        self._log("--- Literature Source Trust (live retrieval) ---", "INFO")
+        query = "NPH3 phototropism Arabidopsis"
+        limit = 5
+        self._log(f"Query: {query!r} | max_results={limit}", "INFO")
+
+        try:
+            from src.core.academic.literature import search_academic_literature
+        except Exception as e:
+            self._log(f"Cannot import literature tools: {e}", "FAIL")
+            return
+
+        try:
+            raw = search_academic_literature(query=query, max_results=limit)
+        except Exception as e:
+            self._log(f"Retrieval failed (network/proxy?): {e}", "FAIL")
+            return
+
+        import json as _json
+
+        try:
+            records = (_json.loads(raw) or {}).get("results") or []
+        except (ValueError, AttributeError):
+            self._log("Retrieval returned unparsable payload.", "FAIL")
+            return
+        if not records:
+            self._log("Retrieval returned zero records — cannot verify anything.", "WARN")
+            return
+        records = [r for r in records if isinstance(r, dict)][:limit]
+
+        # 编号注入 + 落回核对（与生产同一实现）
+        try:
+            from src.core.agent.runtime import AgentRuntime
+            from src.core.references import ReferenceItem, ReferenceRegistry
+            from src.task.chat_tasks import _registry_item_from_source, _source_dedupe_key
+
+            reg = ReferenceRegistry()
+            by_key = {}
+
+            def _collector(meta):
+                dk = _source_dedupe_key(meta)
+                if dk and dk in by_key:
+                    return by_key[dk]
+                ref_id = reg.add(_registry_item_from_source(0, meta))
+                if dk:
+                    by_key[dk] = ref_id
+                return ref_id
+
+            runtime = AgentRuntime(main_llm=None, skill_manager=None, mcp_manager=None,
+                                   cite_collector=_collector, log_fn=lambda *a, **k: None)
+            # annotated 与 records 同序（同一份 payload 的注入结果），可直接逐条比对。
+            annotated = _json.loads(runtime._collect_tool_citations(
+                "search_academic_literature", raw))["results"][:limit]
+        except Exception as e:
+            self._log(f"Citation-id injection failed: {e}", "FAIL")
+            return
+
+        from src.core.academic.base import mcp_request, openalex_api_key
+        from src.core.evidence import normalize_for_match
+
+        def _title_agrees(a, b):
+            na, nb = normalize_for_match(a), normalize_for_match(b)
+            return bool(na and nb and (na in nb or nb in na))
+
+        def _col(value, width):
+            """定宽列：超宽截断加省略号，且恒留一个空格分隔，避免列粘连。"""
+            text = str(value or "")
+            if len(text) >= width:
+                text = text[:width - 1] + "…"
+            return text.ljust(width) + " "
+
+        def _check_doi(doi, title, year):
+            """DOI 真实性：OpenAlex 能否解析，标题与年份是否一致。"""
+            clean = str(doi or "").strip()
+            if not clean:
+                return "no-doi", "记录未带 DOI"
+            url = f"https://api.openalex.org/works/https://doi.org/{clean}"
+            if openalex_api_key:
+                url += f"?api_key={openalex_api_key}"
+            try:
+                res = mcp_request("GET", url, timeout=12)
+            except Exception as e:
+                return "error", f"请求失败：{str(e)[:60]}"
+            if res.status_code != 200:
+                return "missing", f"OpenAlex HTTP {res.status_code}"
+            try:
+                work = res.json() or {}
+            except ValueError:
+                return "error", "返回非 JSON"
+            real_title = str(work.get("title") or "")
+            real_year = str(work.get("publication_year") or "")
+            if not real_title:
+                return "missing", "OpenAlex 无标题记录"
+            if not _title_agrees(real_title, title):
+                return "mismatch", f"标题不符：OpenAlex={real_title[:48]!r}"
+            if year and real_year and year != real_year:
+                return "mismatch", f"年份不符：OpenAlex={real_year} vs 检索={year}"
+            return "ok", f"OpenAlex 标题/年份一致（{real_year}）"
+
+        def _check_url(url):
+            if not url:
+                return "no-url", ""
+            try:
+                res = mcp_request("GET", url, timeout=8, stream=True, allow_redirects=True)
+                code = int(getattr(res, "status_code", 0))
+                try:
+                    res.close()
+                except Exception:
+                    pass
+            except Exception as e:
+                return "error", f"链接请求失败：{str(e)[:48]}"
+            if 200 <= code < 400:
+                return "ok", f"HTTP {code}"
+            if code in (401, 403, 405):
+                return "warn", f"HTTP {code}（站点拒绝自动访问）"
+            return "warn", f"HTTP {code}"
+
+        self._log("", "INFO")
+        self._log(_col("#", 3) + _col("ID", 5) + _col("年", 6) + _col("DOI/URL", 34)
+                  + _col("结论", 8) + "说明", "INFO")
+        summary = {"ok": 0, "warn": 0, "suspect": 0}
+        for i, (rec, ann) in enumerate(zip(records, annotated), 1):
+            title = str(rec.get("title") or "")
+            year = str(rec.get("year") or rec.get("publication_year") or "").strip()
+            doi = str(rec.get("doi") or "")
+            url = str(rec.get("url") or "")
+            ref_id = ann.get("_mcp_cite_id")
+            notes, verdict = [], "ok"
+
+            def _worse(level):
+                nonlocal verdict
+                rank = {"ok": 0, "warn": 1, "suspect": 2}
+                if rank[level] > rank[verdict]:
+                    verdict = level
+
+            if not title:
+                _worse("suspect"); notes.append("无标题")
+            if not (len(year) == 4 and year.isdigit() and 1500 <= int(year) <= 2100):
+                _worse("warn"); notes.append(f"年份异常({year or '空'})")
+            if not doi and not url:
+                _worse("warn"); notes.append("无 DOI/URL")
+
+            # 编号与来源一对一对齐
+            item = reg.lookup(int(ref_id)) if isinstance(ref_id, int) else None
+            if item is None:
+                _worse("suspect"); notes.append("未注入引用编号")
+            elif not (_title_agrees(item.title, title) or (url and item.url == url)):
+                _worse("suspect"); notes.append("编号落回的来源与检索条目不一致")
+
+            doi_level, doi_note = _check_doi(doi, title, year)
+            _worse({"ok": "ok", "missing": "suspect", "mismatch": "suspect",
+                    "no-doi": "warn", "error": "warn"}[doi_level])
+            notes.append(doi_note)
+
+            _target_url = url or (item.url if item else "")
+            url_level, url_note = _check_url(_target_url)
+            _worse({"ok": "ok", "warn": "warn", "no-url": "warn", "error": "warn"}[url_level])
+            if url_note:
+                notes.append(url_note)
+
+            summary[verdict] += 1
+            self._log(_col(i, 3) + _col(ref_id if ref_id is not None else "-", 5)
+                      + _col(year, 6) + _col(doi or url or "-", 34)
+                      + _col(verdict.upper(), 8) + "; ".join(notes), "OK" if verdict == "ok" else
+                      ("WARN" if verdict == "warn" else "FAIL"))
+
+        self._log("", "INFO")
+        self._log(f"Checked {len(records)} record(s): "
+                  f"OK={summary['ok']} WARN={summary['warn']} SUSPECT={summary['suspect']}",
+                  "OK" if summary["suspect"] == 0 else "FAIL")
+        if summary["suspect"]:
+            self._log("SUSPECT 行代表'检索结果无法被独立来源证实'——请人工核对原始记录，"
+                      "不要直接采信。", "FAIL")
+        if summary["warn"]:
+            self._log(f"{summary['warn']} record(s) could not be fully auto-verified "
+                      "(missing identifier / link blocked) — review the WARN rows.", "WARN")
+        if not summary["suspect"] and not summary["warn"]:
+            self._log("All retrieved sources were independently confirmed "
+                      "(DOI resolved + title/year matched).", "OK")
 
     def _run_all(self):
         self._clear()
@@ -841,6 +1410,10 @@ class DeveloperDialog(BaseDialog):
         self._test_provenance(clear=False)
         self._test_literature_merge(clear=False)
         self._test_reference_citations(clear=False)
+        # 反捏造审计：纯函数断言，离线可跑，必须进默认自检
+        self._test_reference_integrity(clear=False)
+        # UI 交互自检：图表复制、悬停卡标记、超宽块拖选自动滚动
+        self._test_ui_copy_scroll(clear=False)
         self._test_image_pipeline(clear=False)
         self._test_deep_plan_card(clear=False)
         self._test_hitl_pipeline(clear=False)

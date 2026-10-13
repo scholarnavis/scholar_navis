@@ -4,11 +4,13 @@ import logging
 import os
 
 from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar, QCheckBox,
                                QComboBox, QSplitter)
 
 from src.core.theme_manager import ThemeManager, apply_native_titlebar_theme, strong_weight_css
+from src.ui.components.toast import ToastManager
 # 🌟 引入你的自定义 Dialog
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.file_dialogs import save_file_name
@@ -261,7 +263,8 @@ class MermaidViewer(QMainWindow):
         # 4. 工具栏图标随主题重新着色
         for attr, icon_name in (('act_source', 'edit'), ('act_zoom_in', 'add'),
                                 ('act_zoom_out', 'remove'), ('act_fit', 'refresh'),
-                                ('act_actual', 'check'), ('act_export', 'download')):
+                                ('act_actual', 'check'), ('act_export', 'download'),
+                                ('act_copy_text', 'copy')):
             action = getattr(self, attr, None)
             if action is not None:
                 action.setIcon(tm.icon(icon_name, 'text_main'))
@@ -299,6 +302,13 @@ class MermaidViewer(QMainWindow):
                                        lambda: self._run_js("navisSetScale(1.0);"))
         self.act_export = tb.addAction(tm.icon("download", "text_main"), "Export Image",
                                        self._export_image)
+        # 一键取文字：与"鼠标选中 + Ctrl+C"互补的干净通路（htmlLabels 下拖选容易
+        # 连带选中连线，且标签分散在多个 <text>/<foreignObject> 里）。
+        self.act_copy_text = tb.addAction(tm.icon("copy", "text_main"), "Copy Text",
+                                          self._copy_diagram_text)
+        self.act_copy_text.setToolTip(
+            "Copy every label in the diagram to the clipboard "
+            "(mouse selection + Ctrl+C also works)")
 
         tb.addSeparator()
 
@@ -316,6 +326,38 @@ class MermaidViewer(QMainWindow):
 
         tb.addSeparator()
 
+
+    #: 提取图内全部可见文字（节点标签/边标签）的 JS：按 DOM 顺序去重输出，
+    #: 供工具栏 "Copy Text" 使用。``tspan`` 与父 ``text`` 内容重复，去重兜住。
+    _COPY_TEXT_JS = r"""
+(function () {
+    var root = document.querySelector('#graphDiv svg');
+    if (!root) return '';
+    var seen = {}, out = [];
+    root.querySelectorAll('text, tspan, foreignObject').forEach(function (el) {
+        var s = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (s && !seen[s]) { seen[s] = 1; out.push(s); }
+    });
+    return out.join('\n');
+})();
+"""
+
+    def _copy_diagram_text(self):
+        """复制图内文字：提取渲染后图形里的全部标签文本写入剪贴板。
+
+        与"鼠标选中 + Ctrl+C"是两条互补通路：标签分散在 ``<text>`` /
+        ``<foreignObject>`` 中，拖选容易连带选中连线，这里给一份干净的全量文本。
+        """
+        self.web_view.page().runJavaScript(self._COPY_TEXT_JS, self._on_diagram_text)
+
+    def _on_diagram_text(self, text):
+        payload = (text or "").strip()
+        if not payload:
+            ToastManager().show("No text in the diagram to copy", "warning")
+            return
+        QGuiApplication.clipboard().setText(payload)
+        ToastManager().show(
+            f"Diagram text copied ({len(payload.splitlines())} line(s)).", "success")
 
     def _export_image(self):
         filters = ("PNG Images (*.png);;JPEG Images (*.jpg);;WebP Images (*.webp);;"
@@ -456,6 +498,10 @@ class MermaidViewer(QMainWindow):
         self.mermaid_code = self.source_editor.code()
         self.render_diagram()
 
+    def _mermaid_js_path(self) -> str:
+        """mermaid.min.js 的资源路径：预览页与页面 base_url 共用的唯一解析入口。"""
+        return ThemeManager().get_resource_path("assets", "js", "mermaid.min.js")
+
     def render_diagram(self, theme=None):
         tm = ThemeManager()
 
@@ -465,16 +511,25 @@ class MermaidViewer(QMainWindow):
         else:
             mermaid_theme = current_combo_theme
 
-        safe_code = json.dumps(self.mermaid_code)
+        self.web_view.setHtml(
+            self._build_page_html(mermaid_theme),
+            QUrl.fromLocalFile(os.path.dirname(self._mermaid_js_path()) + "/"))
 
-        js_path = tm.get_resource_path("assets", "js", "mermaid.min.js")
-        js_uri = QUrl.fromLocalFile(js_path).toString()
+    def _build_page_html(self, mermaid_theme: str) -> str:
+        """生成预览页 HTML（**唯一事实来源**：预览与开发者模式自检读同一份）。
+
+        只依赖 ``mermaid_theme`` 与 :attr:`mermaid_code`，不碰窗口状态，所以自检可以
+        直接断言页面约束（图内文字可选中、平移不抢占选中、Copy Text 取文字）。
+        """
+        tm = ThemeManager()
+        safe_code = json.dumps(self.mermaid_code)
+        js_uri = QUrl.fromLocalFile(self._mermaid_js_path()).toString()
 
         # 预览交互对齐 image_viewer（图片查看器）：滚轮以鼠标为锚点缩放（步进 1.15）、
         # 左键拖拽平移（抓手光标）、Shift+滚轮保留原生水平滚动、缩放区间 0.05~16x、
         # "适应窗口"模式下窗口变化自动重适配。平移实现为改变滚动位置，因此滚动条与
         # 拖动天然同步。导出始终走矢量/真实尺寸光栅化，不受预览缩放影响。
-        html_content = f"""
+        return f"""
         <!DOCTYPE html>
         <html>
         <head>
@@ -496,7 +551,15 @@ class MermaidViewer(QMainWindow):
                     display: block;
                     max-width: none;
                     height: auto;
-                    user-select: none;
+                }}
+                /* 图内文字必须可选中/可复制（Ctrl+C 走浏览器原生复制）。选中与平移
+                   的冲突在下方 JS 里解决：左键落在文字上 = 选中，落在空白处或中键
+                   = 平移，两种手势互不抢占。 */
+                #graphDiv svg text, #graphDiv svg tspan,
+                #graphDiv svg foreignObject, #graphDiv svg foreignObject * {{
+                    user-select: text;
+                    -webkit-user-select: text;
+                    cursor: text;
                 }}
             </style>
             <script src="{js_uri}"></script>
@@ -632,13 +695,23 @@ class MermaidViewer(QMainWindow):
                                       e.deltaY < 0 ? NAVIS_WHEEL_ZOOM_FACTOR : 1 / NAVIS_WHEEL_ZOOM_FACTOR);
                 }}, {{ passive: false }});
 
-                // ---- 左键拖拽平移（改滚动位置 → 与滚动条同步）----
+                // ---- 拖拽平移（改滚动位置 → 与滚动条同步）----
+                // 与"选中文字复制"共存的判定：左键落在图内文字/标签上时不平移，
+                // 让浏览器正常做文本选择；落在空白处（或中键）才平移。
+                function navisOnLabel(target) {{
+                    try {{
+                        return !!(target && target.closest &&
+                                  target.closest('text, tspan, foreignObject, .nodeLabel, .edgeLabel'));
+                    }} catch (e) {{ return false; }}
+                }}
                 var navisDrag = {{ active: false, x: 0, y: 0 }};
                 window.addEventListener('mousedown', function (e) {{
-                    if (e.button !== 0 || !e.target.closest('#graphDiv') || !navisSvg()) return;
+                    if (!e.target.closest('#graphDiv') || !navisSvg()) return;
+                    var panButton = (e.button === 1) || (e.button === 0 && !navisOnLabel(e.target));
+                    if (!panButton) return;   // 左键按在文字上：交给浏览器选中
                     navisDrag.active = true; navisDrag.x = e.clientX; navisDrag.y = e.clientY;
                     document.body.classList.add('navis-dragging');
-                    e.preventDefault();   // 避免拖拽时选中 SVG 文本
+                    e.preventDefault();
                 }});
                 window.addEventListener('mousemove', function (e) {{
                     if (!navisDrag.active) return;
@@ -682,6 +755,3 @@ class MermaidViewer(QMainWindow):
         </body>
         </html>
         """
-
-        base_url = QUrl.fromLocalFile(os.path.dirname(js_path) + "/")
-        self.web_view.setHtml(html_content, base_url)

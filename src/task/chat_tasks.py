@@ -14,8 +14,11 @@ from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.references import (FOOTER_RULE_HTML, PROVENANCE_HEADER_HTML,
-                                 ReferenceItem, ReferenceRegistry)
+                                 ReferenceItem, ReferenceRegistry,
+                                 strip_unregistered_cite_keys)
 from src.core.evidence import EvidenceStore
+from src.core.prompt_rules import (CITATION_TOKEN_RULE,
+                                   LANGUAGE_AND_PUNCTUATION_RULE)
 from src.core import plot_styles
 from src.core.think_tags import strip as strip_think_blocks
 from src.core.theme_manager import strong_weight_css
@@ -44,7 +47,8 @@ def _source_dedupe_key(meta):
     归一键命中即复用既有引用号：参考文献列表不虚增、引用块更省 token，
     编号与实际来源一一对应（准确度↑）。无可归一字段时返回 None（按新来源处理）。
 
-    字段覆盖说明：AgentRuntime._collect_mcp_citations 注入的在线来源用
+    字段覆盖说明：AgentRuntime._collect_tool_citations（本地技能与 MCP 共用）
+    注入的在线来源用
     ``path`` 携带 URL、``name`` 携带标题；其他调用点可能用 ``url``/``title``，
     故全部纳入候选。
     """
@@ -106,11 +110,6 @@ def _seed_registry_from_sources(registry, sources_map, evidence_store=None):
         registry.seed(rid, _registry_item_from_source(rid, meta))
 
 
-#: 模型自拟引用 key 的常见形态：姓氏/单词 + 四位年份（如 ``christie2017``）。
-#: 仅用于"未登记来源、无法解析"时的兜底清理，不参与正常解析。
-_CITE_KEY_YEAR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]*?(?:19|20)\d{2}[a-z]?$")
-
-
 def _seed_registry_from_history(registry, messages):
     """把历史回答里已登记过的引用补录进本轮注册表（跨轮连续性）。
 
@@ -157,27 +156,6 @@ def _seed_registry_from_history(registry, messages):
                 registry.add(item)
             seeded += 1
     return seeded
-
-
-def _strip_unresolved_cite_keys(text, unresolved):
-    """移除正文里"无法解析"的引用 key（姓氏+年份形态），返回 ``(text, removed)``。
-
-    这类 token 是模型自拟的引用别名，但本轮与历史都没有对应来源登记，既不能编号
-    也无著录可渲染，留在正文只会呈现为 ``[christie2017]`` 这样的坏标记。数字型
-    token 不动（可能是正文自身的编号用法），纯净短缩写（如 ``[EC]``）也不动，
-    只清理能明确判定为引用 key 的形态。
-    """
-    keys = {str(t) for t in (unresolved or []) if _CITE_KEY_YEAR_RE.match(str(t))}
-    if not keys:
-        return text, []
-    pattern = re.compile(r"\[(" + "|".join(re.escape(k) for k in sorted(keys)) + r")\]")
-    removed = []
-
-    def _drop(match):
-        removed.append(match.group(1))
-        return ""
-
-    return pattern.sub(_drop, text), removed
 
 
 def _trim_history_for_budget(history, token_budget):
@@ -1053,17 +1031,11 @@ class ChatGenerationTask(BackgroundTask):
             "Also ask before any costly or hard-to-reverse operation. After calling ask_user the runtime pauses "
             "the run automatically; the user's answer arrives as the next user message.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
-            "1. IN-TEXT KEYS (For UI Tracking): For EVERY source you cite, first choose a short, unique ASCII KEY (e.g. [lariguet2004]) and attach it inline IMMEDIATELY after the claim; reuse that SAME key everywhere the source is cited. Local knowledge-base documents are already numbered in the Context as '--- [Document n] ---' — cite those with [n]. If a tool result already carries a numeric id (e.g. '_mcp_cite_id'), you may cite that number directly. NEVER claim facts without an inline citation.\n"
-            "2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): Whenever you cite sources, you MUST register EVERY source by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'). Registration is PER REPLY: keys registered in an earlier turn remain resolvable, but any source you cite that has NOT been registered before MUST be registered again in THIS reply — never write an inline key that has no matching cite_references entry (an unregistered key is dropped from the text and produces no reference list). The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself; use only keys (or the pre-assigned numbers above).\n"
+            f"1. IN-TEXT CITATIONS (STRICT): {CITATION_TOKEN_RULE} Attach the token inline IMMEDIATELY after the claim it supports, and NEVER claim a fact without an inline citation.\n"
+            f"2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): For every source you cite that does NOT already carry a number, you MUST register it by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'). Registration is PER REPLY: keys registered in an earlier turn remain resolvable, but any source you cite that has NOT been registered before MUST be registered again in THIS reply — never write an inline key that has no matching cite_references entry (an unregistered key is dropped from the text and produces no reference list). Sources that already carry a number (knowledge-base '--- [Document n] ---' entries, tool results with '{AgentRuntime.TOOL_CITE_ID_FIELD}') are already registered by the app — cite their number and do NOT register them again under a new key. The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself.\n"
             "3. NEVER WRITE A REFERENCES SECTION YOURSELF: do NOT output a 'References' / 'Bibliography' heading or a manually numbered citation list in your answer text. The app generates that list from your cite_references call; writing one yourself duplicates it and can contradict it.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
-            "### PUNCTUATION LOCALIZATION (STRICT):\n"
-            "The user's input may already have been translated to English for retrieval, so do NOT infer "
-            "the reply language from the query. Instead, match punctuation to the language you are "
-            "ACTUALLY writing each passage in:\n"
-            "   - When writing in Chinese: use FULL-WIDTH punctuation — Chinese commas（，）, periods（。）, semicolons（；）, colons（：）, question/exclamation marks（？！）, Chinese ellipsis（……）, and Chinese parentheses（）for parenthetical remarks. Use Chinese curly quotes（“” and ‘’）for quotations instead of straight or half-width quotes.\n"
-            "   - When writing in English or other languages: follow that language's standard punctuation conventions (half-width punctuation and straight quotes for English).\n"
-            "2. CRITICAL EXCEPTION — do NOT modify these machine-parsed ASCII tokens under any circumstance: in-text citation markers written as [key] or [1], the literal [FOLLOW_UPS] header, JSON blocks, code fences (```...```), mermaid code blocks, tool names, identifiers, and URLs. Keep those exactly half-width ASCII.\n\n"
+            f"{LANGUAGE_AND_PUNCTUATION_RULE}\n\n"
             "### FOLLOW-UP SUGGESTIONS (MANDATORY):\n"
             "At the very end of your response — after ALL other content — you MUST call the "
             "suggest_follow_ups tool with exactly 6 follow-up questions, each carrying the tag of "
@@ -1261,20 +1233,31 @@ class ChatGenerationTask(BackgroundTask):
         # 字面量会在整段替换时漏成正文。
         display_text = re.sub(
             r"\[(?:CLEAR_SEARCH|START_LLM_NETWORK)\]", "", self.full_response_cache or "")
-        new_text, ordered, unresolved = reference_registry.resolve_citations(display_text)
-        # 兜底清理：仍无法解析的引用 key（姓氏+年份形态）从正文移除，避免呈现为
-        # 坏标记 [christie2017]；数字型与短缩写形态不动。
-        new_text, dropped_keys = _strip_unresolved_cite_keys(new_text, unresolved)
+        new_text, ordered, unresolved, repaired = reference_registry.resolve_citations(display_text)
+        # 写歪的 key（大小写/分隔符差异、主题词截断、姓氏拼写偏差、把姓氏当 key 用）
+        # 已在识别阶段落回**真实存在**的条目并编号，这里只做留痕，便于人工核查。
+        if repaired:
+            self.send_log(
+                "INFO",
+                "Citation key(s) matched to registered sources: "
+                + ", ".join(f"{t}->[{n}] ({tier})" for t, tier, n in repaired)[:200])
+        # 兜底清理：仍认不出、也落不到任何著录的引用 key（[lariguet2004] 这类别名）
+        # 从正文与思考面板整体移除，避免坏标记上屏；数字型与不含年份的短缩写原样保留。
+        # 必须对**清理后的全文**扫描，而不是只按 unresolved 列表删除：unresolved
+        # 只覆盖正文（思考块不参与编号），只看它会漏掉思考面板里的同类残留。
+        # 口径与实现见 src/core/references.strip_unregistered_cite_keys（唯一事实来源）。
+        new_text, dropped_keys = strip_unregistered_cite_keys(new_text)
         if dropped_keys:
             self.send_log(
                 "WARNING",
                 "Unregistered citation key(s) removed from the answer text: "
                 f"{', '.join(dict.fromkeys(dropped_keys))[:200]}")
-        elif unresolved:
+        kept_unresolved = [t for t in unresolved if t not in set(dropped_keys)]
+        if kept_unresolved:
             self.send_log(
                 "WARNING",
                 "Unresolved inline citations (not registered, left as-is): "
-                f"{', '.join(dict.fromkeys(unresolved))[:200]}")
+                f"{', '.join(dict.fromkeys(kept_unresolved))[:200]}")
         if ordered:
             self.full_response_cache = new_text + reference_registry.render_items(ordered)
             self.send_log(

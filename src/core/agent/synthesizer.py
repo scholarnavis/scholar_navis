@@ -22,6 +22,8 @@ import logging
 import re
 from typing import Dict, List
 
+from src.core.prompt_rules import LANGUAGE_AND_PUNCTUATION_RULE
+
 logger = logging.getLogger("Agent.Synthesizer")
 
 # Placeholder token wrapping each sub-task's citation ids before remapping.
@@ -43,13 +45,8 @@ _SYNTH_PROMPT = (
     "do not renumber or drop them.\n"
     "4. Write in high-density academic prose, concise but complete. Do not add a new "
     "References section; citations are handled by the system.\n"
-    "5. Output pure Markdown (sections as '## Heading').\n"
-    "6. PUNCTUATION LOCALIZATION: The input question may already be translated to English, so "
-    "do NOT infer the reply language from it. Match punctuation to the language you actually "
-    "write each passage in: when writing Chinese, use full-width punctuation（，。；：？！）、"
-    "full-width parentheses（）and Chinese quotes（“”）; in English/other languages use their "
-    "standard punctuation. Keep ASCII citation markers [1]/[101], section headings, code "
-    "fences and identifiers unchanged."
+    "5. Output pure Markdown (sections as '## Heading').\n\n"
+    + LANGUAGE_AND_PUNCTUATION_RULE
 )
 
 

@@ -31,7 +31,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass, asdict, replace
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from src.core.think_tags import strip as strip_think_blocks
 
@@ -56,6 +56,13 @@ PROVENANCE_HEADER_HTML = f"<b>{PROVENANCE_TITLE}</b><br>"
 #: 正文行内引用标记 ``[n]``（n 为 1~3 位数字；本地 KB 文档等已编号来源使用）。
 INLINE_CITE_RE = re.compile(r"\[(\d{1,3})\]")
 
+#: "未核实"标记文案（**唯一事实来源**）：参考文献列表行尾与导出重排版共用同一
+#: 文案，避免同一条目在不同出口出现两种说法。判定标准见
+#: :attr:`ReferenceItem.needs_manual_review`。
+UNVERIFIED_LABEL = "未核实"
+UNVERIFIED_MARK_HTML = (
+    f" <span style='color:#C0392B; font-size:12px;'>（{UNVERIFIED_LABEL}）</span>")
+
 #: 正文行内引用 key（``[lariguet2004]`` 形态）：字母开头、长度受限的 ASCII slug。
 #: 模型为每个来源自拟 key 并在正文中复用；编号由程序按"首次出现顺序"统一分配，
 #: 从根本上消除"模型猜数字"导致的编号错位（模型写正文与调用工具孰先孰后都不影响）。
@@ -66,6 +73,87 @@ INLINE_TOKEN_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9._:-]{0,63}|\d{1,3})\]")
 
 #: key 合法性校验（与 _KEY_TOKEN_RE 同形，整串匹配）。
 _VALID_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]{0,63}$")
+
+# --------------------------------------------------------------------------- #
+#  引用 key 兜底清理口径（唯一事实来源）
+# --------------------------------------------------------------------------- #
+#: 判定"key 形态的 token 是引用别名而非别的方括号用法"的必要条件：内含四位年份。
+#: 年份下限取 1500（而不只是 19xx/20xx）：生物学经典文献的别名（``[mendel1866]``）
+#: 同样是模型自拟 key，收窄到 19xx/20xx 会漏掉它们。
+_CITE_KEY_YEAR_RE = re.compile(r"(?:1[5-9]\d{2}|20\d{2})")
+
+
+def strip_unregistered_cite_keys(text: str) -> Tuple[str, List[str]]:
+    """移除落不到任何著录的引用 key 坏标记，返回 ``(清理后文本, 被移除的 token)``。
+
+    必须在 :meth:`ReferenceRegistry.resolve_citations` **之后**调用：那时"能认出来的
+    key"（含被 :meth:`ReferenceRegistry._recognize_key` 近似识别回填的）已就地改写为
+    ``[n]``，文本里剩下的 key 形态 token 只可能是"认不出、也没有近似可落回"的别名——
+    本轮与历史都没登记过，或只出现在思考块里因而拿不到编号——留在屏幕上只会呈现为
+    ``[lariguet2004]`` / ``[hu2019cotton]`` 这样的坏标记。
+
+    清理范围是**全文**（含 ``<think>`` 思考块与工具过程块）：思考面板同样上屏，别名
+    在那里同样是读者不该看到的噪声；只按"正文里未登记的 token 清单"删除会漏掉这一半。
+
+    只命中 :data:`_KEY_TOKEN_RE` 的 key 形态（``[lariguet2004]``）；数字型 ``[1]``、
+    无年份的短缩写 ``[EC]``、``[Fig. 2]``、``[the 1990s]`` 这类正文自身的方括号用法
+    一律原样保留——刻意不做"任意含年份短语"的宽匹配：模型被约定的引用形态就是 slug，
+    宽匹配换不来多少覆盖，却会把正常文字误删。
+
+    为什么剩下的不编号：编号必须指向一条真实著录，而这类 token 后面**没有任何来源**
+    （注册表、KB、在线来源、历史快照里都查不到）。凭空给它造一条条目就是捏造文献。
+    """
+    if not text:
+        return text or "", []
+
+    removed: List[str] = []
+
+    def _drop(match: "re.Match[str]") -> str:
+        token = match.group(1)
+        if not _CITE_KEY_YEAR_RE.search(token):
+            return match.group(0)          # 无年份：不是引用 key，原样保留
+        removed.append(token)
+        return ""
+
+    return _KEY_TOKEN_RE.sub(_drop, text), removed
+
+
+# --------------------------------------------------------------------------- #
+#  key 近似识别（把模型写歪的 key 落回真实著录）
+# --------------------------------------------------------------------------- #
+def _fold_key(value: str) -> str:
+    """key 折叠：小写化并剔除分隔符，使 ``Lariguet-2004`` / ``lariguet_2004`` 等价。"""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+#: 模型自拟 key 的约定形态：姓氏 + 四位年份 + 可选主题词（``zhang2026condensate``）。
+#: 识别近似 key 时按该形态把年份与姓氏拆开：**年份必须一致**，姓氏才允许容错——
+#: 年份是模型从著录里抄来的硬信息，姓氏才是最容易被写歪的部分。
+_KEY_YEAR_SPLIT_RE = re.compile(
+    r"^(?P<name>[a-z][a-z0-9]*?)(?P<year>1[5-9]\d{2}|20\d{2})(?P<suffix>[a-z0-9]*)$")
+
+
+def _edit_distance_within(a: str, b: str, limit: int) -> int:
+    """有界编辑距离：超过 ``limit`` 立即返回 ``limit + 1``（只服务近似 key 判定）。"""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > limit:
+            return limit + 1
+        prev = cur
+    return prev[-1]
+
+
+def _name_in_text(name: str, text: str) -> bool:
+    """姓名是否以**独立词**出现在（小写）文本里：``hu`` 不应命中 ``Huang``。"""
+    if not name or not text:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text) is not None
+
 
 #: 思维链 / 工具过程块的识别口径统一在 src/core/think_tags.py（见 strip()）：
 #: 统计"首次出现顺序"时排除，避免模型在思考里的示例编号抢占正文的首次出现位置。
@@ -241,6 +329,26 @@ class ReferenceItem:
     @property
     def authors_display(self) -> str:
         return _truncate_authors(self.authors)
+
+    @property
+    def needs_manual_review(self) -> bool:
+        """是否属于"无法自动核实、只能人工核查"的条目（列表行尾据此打标）。
+
+        判定标准（唯一事实来源）：
+
+        * 有外部标识（``doi`` / ``url``）或本地路径（``path``）——用户能自行点开核对，
+          不打标；
+        * ``verified=True``——snippet 已由程序逐字校验命中已采集原文，有程序侧证据，
+          不打标；
+        * 两者都没有——该条目的著录完全来自模型书写，没有可核对的落点，打标记。
+
+        边界（刻意不打的那些）：模型**伪造 DOI/URL** 的条目会在第一条被放行（有"标识"
+        但在线不可解析）。离线渲染无法判断 DOI 真伪，这类只能靠开发者模式的
+        Literature Trust (live) 联网核查；因此标记的语义是"无落点可查"，不是"已证实为假"。
+        """
+        if self.verified:
+            return False
+        return not (self.doi or self.url or self.path)
 
     @property
     def display_name(self) -> str:
@@ -505,15 +613,88 @@ class ReferenceRegistry:
         with self._lock:
             return self._key_index.get(str(key or "").strip().lower())
 
-    def _resolve_token(self, token: str) -> Optional[int]:
-        """把正文 token 解析为注册表编号：纯数字按编号，其余按 key。"""
+    #: 近似 key 修复的最小姓氏长度：短姓氏（li/lu/hu）差一个字符就可能指向另一个人，
+    #: 宁可判定"无法识别"（记日志、由清理环节处理），也不做猜测性关联。
+    _MIN_SURNAME_FOR_FUZZY = 6
+
+    def _recognize_key(self, token: str) -> Tuple[Optional[int], str]:
+        """把正文 token 识别为注册表编号，返回 ``(编号, 识别方式)``；认不出返回 ``(None, "")``。
+
+        识别**由严到宽**逐级尝试，任一级出现多个候选即放弃该级（宁可判定不认识，也不
+        猜测——把一句论断错挂到别人的论文上，比标记缺失严重得多）：
+
+        1. ``exact``：key 完全一致（大小写不敏感）；
+        2. ``folded``：折叠分隔符后一致（``Lariguet-2004`` = ``lariguet2004``）；
+        3. ``prefix``：年份后的主题词被截断或补全（``zhang2026`` ↔ ``zhang2026condensate``）；
+        4. ``typo``：**年份相同**、姓氏编辑距离 ≤1、首字母一致、姓氏长度
+           ≥ :attr:`_MIN_SURNAME_FOR_FUZZY`（``frutani2007`` -> ``furutani2007``）；
+        5. ``metadata``：**年份相同**且姓氏以独立词出现在条目的作者/标题里（模型把在线
+           来源的姓氏直接当 key 用、却没登记该 key 时，仍能落回真实著录）。
+
+        3/4/5 级是有据可依的回填：命中的是注册表里**真实存在**的条目，不是新造的引文；
+        每次命中都会随 :meth:`resolve_citations` 的返回值上报，由调用方记入日志供人工核查。
+        """
         token = str(token or "").strip()
         if not token:
-            return None
+            return None, ""
+        idx = self._key_index.get(token.lower())
+        if idx is not None:
+            return idx, "exact"
+        # 注意：不能因为"注册表里一条 key 都没有"就提前返回——KB / 在线来源只有编号、
+        # 没有 key，第 5 级（作者/标题元数据）正是为它们准备的落回路径。
+        folded = _fold_key(token)
+        hits = sorted({i for k, i in self._key_index.items() if _fold_key(k) == folded})
+        if hits:
+            return (hits[0], "folded") if len(hits) == 1 else (None, "")
+
+        split = _KEY_YEAR_SPLIT_RE.match(folded)
+        if not split:
+            return None, ""
+        name, year = split.group("name"), split.group("year")
+
+        # 3) 年份后主题词差异（截断 / 补全）
+        hits = sorted({i for k, i in self._key_index.items()
+                       if _fold_key(k).startswith(folded) or folded.startswith(_fold_key(k))})
+        if hits:
+            return (hits[0], "prefix") if len(hits) == 1 else (None, "")
+
+        # 4) 姓氏拼写近似（年份必须一致）
+        if len(name) >= self._MIN_SURNAME_FOR_FUZZY:
+            hits = set()
+            for k, i in self._key_index.items():
+                other = _KEY_YEAR_SPLIT_RE.match(_fold_key(k))
+                if not other or other.group("year") != year:
+                    continue
+                other_name = other.group("name")
+                if not other_name or other_name[0] != name[0]:
+                    continue
+                if _edit_distance_within(name, other_name, 1) <= 1:
+                    hits.add(i)
+            if hits:
+                return (hits.pop(), "typo") if len(hits) == 1 else (None, "")
+
+        # 5) 作者 / 标题元数据（同年份、姓氏独立词命中）
+        if len(name) >= 4:
+            hits = set()
+            for i, item in self._items.items():
+                if str(item.year or "").strip() != year:
+                    continue
+                haystack = f"{item.authors} {item.title}".lower()
+                if _name_in_text(name, haystack):
+                    hits.add(i)
+            if hits:
+                return (hits.pop(), "metadata") if len(hits) == 1 else (None, "")
+        return None, ""
+
+    def _resolve_token(self, token: str) -> Tuple[Optional[int], str]:
+        """把正文 token 解析为注册表编号：纯数字按编号，其余按 key（含近似识别）。"""
+        token = str(token or "").strip()
+        if not token:
+            return None, ""
         if token.isdigit():
             idx = int(token)
-            return idx if idx in self._items else None
-        return self._key_index.get(token.lower())
+            return (idx, "exact") if idx in self._items else (None, "")
+        return self._recognize_key(token)
 
     # ------------------------------------------------------------------ #
     #  正文引用 -> 编号（唯一权威映射）
@@ -528,41 +709,64 @@ class ReferenceRegistry:
         * 编号 1..K 严格按正文中该来源的首次出现顺序分配，列表顺序与正文一致
           （符合学术惯例，也消除了"提交顺序 ≠ 引用顺序"的历史问题）。
 
-        :return: ``(new_text, ordered_items, unresolved)``
+        :return: ``(new_text, ordered_items, unresolved, repaired)``
             - ``new_text``：引用已就地改写为 ``[1..K]`` 后的正文；
             - ``ordered_items``：按新编号排序的条目副本（``index`` 已改为新编号）；
-            - ``unresolved``：无法解析的 token（正文出现但未登记，记日志用）。
+            - ``unresolved``：既非已登记 key、也没有近似可落回条目的 token（记日志用）；
+            - ``repaired``：``(token, 识别方式, 分配到的编号)``——写歪但已落回**真实**
+              著录的 key（见 :meth:`_recognize_key`），供调用方记日志、供人工核查。
         """
         if not text:
-            return text or "", [], []
+            return text or "", [], [], []
         with self._lock:
             # 统计首次出现顺序时排除思考块/工具过程块：模型可能在其中写
             # "用 [x] 引用"这类示意，不应参与正文编号。
             scan_text = strip_think_blocks(text)
             order: Dict[int, int] = {}
             unresolved: List[str] = []
+            #: token -> (编号, 识别方式)：同一 token 反复出现（含思考块里的再次出现）
+            #: 只识别一次，避免近似匹配在长正文上被反复重算。
+            cache: Dict[str, Tuple[Optional[int], str]] = {}
+            repaired: List[Tuple[str, str, int]] = []
+
+            def _lookup(token: str) -> Tuple[Optional[int], str]:
+                if token not in cache:
+                    cache[token] = self._resolve_token(token)
+                return cache[token]
 
             def _scan(m: "re.Match[str]") -> str:
-                idx = self._resolve_token(m.group(1))
+                token = m.group(1)
+                idx, tier = _lookup(token)
                 if idx is None:
-                    unresolved.append(m.group(1))
+                    unresolved.append(token)
                 elif idx not in order:
                     order[idx] = len(order) + 1
+                if idx is not None and tier != "exact":
+                    repaired.append((token, tier, idx))
                 return m.group(0)
 
             INLINE_TOKEN_RE.sub(_scan, scan_text)
 
             def _rewrite(m: "re.Match[str]") -> str:
-                idx = self._resolve_token(m.group(1))
+                idx, _tier = _lookup(m.group(1))
                 if idx is None or idx not in order:
-                    # 未登记引用 / 仅出现在 <think> 中的示意 token：原样保留。
+                    # 认不出的 token / 仅出现在 <think> 中的示意 token：原样保留，
+                    # 交后续清理环节（见 strip_unregistered_cite_keys）。
                     return m.group(0)
                 return f"[{order[idx]}]"
 
             new_text = INLINE_TOKEN_RE.sub(_rewrite, text)
             ordered = [replace(self._items[i], index=order[i])
                        for i in sorted(order, key=lambda k: order[k])]
-        return new_text, ordered, unresolved
+            reported: List[Tuple[str, str, int]] = []
+            seen = set()
+            for token, tier, idx in repaired:
+                mark = (token.lower(), tier)
+                if mark in seen or idx not in order:
+                    continue
+                seen.add(mark)
+                reported.append((token, tier, order[idx]))
+        return new_text, ordered, unresolved, reported
 
     # ------------------------------------------------------------------ #
     #  渲染
@@ -598,17 +802,22 @@ class ReferenceRegistry:
 
     @staticmethod
     def _entry_html(item: ReferenceItem) -> str:
-        """单条参考文献行：编号可点击跳转（在线链接 / 本地查看器）。"""
+        """单条参考文献行：编号可点击跳转（在线链接 / 本地查看器）。
+
+        无任何可核对落点的条目（见 :attr:`ReferenceItem.needs_manual_review`）在行尾
+        追加"未核实"标记：它只说明"这条没有可点的出处"，不代表已被判定为假。
+        """
         number = f"[{item.index}]"
         label = item.citation_text_html()
+        mark = UNVERIFIED_MARK_HTML if item.needs_manual_review else ""
         link = item.primary_link
         if link:
             return (
                 f"<div style='margin-bottom: 6px;'>▪ "
                 f"<a style='color:#05B8CC; text-decoration:none;' href='{_escape(link)}'>"
-                f"<b>{number}</b> {label}</a></div>"
+                f"<b>{number}</b> {label}</a>{mark}</div>"
             )
-        return f"<div style='margin-bottom: 6px;'>▪ <b>{number}</b> {label}</div>"
+        return f"<div style='margin-bottom: 6px;'>▪ <b>{number}</b> {label}{mark}</div>"
 
 
 # --------------------------------------------------------------------------- #
