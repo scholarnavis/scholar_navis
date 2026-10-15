@@ -105,24 +105,6 @@ class ChatSendFlowMixin:
         self.external_files = current_files
         self.start_ai_response(kb_id)
 
-    def _restore_last_input(self):
-        last_user_msg = None
-        for i in range(len(self.history) - 1, -1, -1):
-            if self.history[i]['role'] == 'user':
-                last_user_msg = self.history[i]
-                break
-
-        if last_user_msg:
-            self.input_container.set_text(last_user_msg.get('display_text', ''))
-
-            files = last_user_msg.get('external_files', [])
-            html = last_user_msg.get('context_html', '')
-
-            self.external_files = list(files) if files else []
-            self.external_context_html = html if html else ""
-            # 预览条（文本横幅 + 图片/文档芯片）统一由 attachments mixin 重建
-            self._refresh_attachment_preview()
-
     def _on_query_translated(self, translated_text):
         for i in range(self.chat_layout.count() - 1, -1, -1):
             item = self.chat_layout.itemAt(i)

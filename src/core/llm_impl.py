@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from typing import Generator, List, Dict, Optional, Tuple
 
@@ -154,6 +155,75 @@ def _extract_reasoning(holder) -> str:
         if text:
             return text
     return ""
+
+
+def _usage_tokens(usage) -> Tuple[int, int]:
+    """把 litellm Usage 对象或 ``_usage`` dict 归一化为 ``(prompt, completion)``。
+
+    ``usage`` 缺失（流式接口常不回传）时返回 ``(0, 0)``——日志里显示 0 就是
+    "provider 没给用量"，与"用量真的是 0"在耗时分析里无需区分。
+    """
+    if usage is None:
+        return 0, 0
+    if isinstance(usage, dict):
+        getter = usage.get
+    else:
+        def getter(name, default=0):
+            return getattr(usage, name, default)
+    try:
+        return (int(getter("prompt_tokens", 0) or 0),
+                int(getter("completion_tokens", 0) or 0))
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+class _CallTimer:
+    """单次 LLM 调用的耗时统计（三个调用入口共用的唯一实现）。
+
+    回答"这一轮为什么慢"需要两类时间，缺一不可：
+
+    * ``ttfb`` —— 请求发出到**首个** token 到达。它包含连接、排队与大上下文的
+      prefill；首字迟通常意味着 prompt 太大、provider 在排队或被限速；
+    * ``total`` —— 到响应结束（流式读完最后一个分片）的墙钟耗时。首字正常而
+      total 很长，说明慢在**生成**（输出长 / 思维链长）。
+
+    使用约定：发起请求前构造，首个 token 处调 :meth:`first_token`，响应结束时调
+    :meth:`done`；**异常路径也必须调** ``done(note="failed")``——否则"卡到超时的那次
+    调用"恰恰成了唯一不留痕的调用。日志级别与 ``Request Parameters`` 一致（INFO）。
+    """
+
+    __slots__ = ("_label", "_logger", "_model", "_t0", "_ttfb", "_done")
+
+    def __init__(self, kind: str, logger: logging.Logger, model: str,
+                 is_translation: bool = False):
+        self._label = f"{kind}[translation]" if is_translation else kind
+        self._logger = logger
+        self._model = model
+        self._t0 = time.perf_counter()
+        self._ttfb: Optional[float] = None
+        self._done = False
+
+    def first_token(self) -> None:
+        """记录首个 token 到达时刻（重复调用只认第一次）。"""
+        if self._ttfb is None:
+            self._ttfb = time.perf_counter()
+
+    def done(self, usage=None, chars: int = 0, note: str = "") -> None:
+        """输出本次调用的耗时与用量（``usage`` 可为 litellm Usage 或 dict）。
+
+        幂等：一次调用只留一行。异常分支已记过 `failed` 后，收尾处的常规调用
+        因为同一个 timer 会再记一次——那第二行只会有"耗时正常"的假象，必须挡掉。
+        """
+        if self._done:
+            return
+        self._done = True
+        total = time.perf_counter() - self._t0
+        prompt_tokens, completion_tokens = _usage_tokens(usage)
+        ttfb = f"{self._ttfb - self._t0:.2f}s" if self._ttfb is not None else "n/a"
+        self._logger.info(
+            f"[{self._model}] {self._label} finished in {total:.2f}s "
+            f"(ttfb={ttfb}, prompt={prompt_tokens}, completion={completion_tokens}, "
+            f"chars={chars}{', ' + note if note else ''})")
 
 
 litellm.drop_params = True
@@ -369,6 +439,8 @@ class OpenAICompatibleLLM:
 
         processed_messages = self._process_messages(messages)
         self._log_params(payload)
+        timer = _CallTimer("chat", self.logger, self.model_name,
+                           is_translation=is_translation)
 
         try:
             litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=False)
@@ -383,6 +455,9 @@ class OpenAICompatibleLLM:
                 if not msg_dump.get("content"):
                     msg_dump["content"] = ""
                 self._attach_usage(response, msg_dump)
+                timer.done(usage=getattr(response, "usage", None),
+                           chars=len(msg_dump.get("content") or ""),
+                           note=f"tool_calls={len(choice.message.tool_calls)}")
                 return msg_dump
 
             result = {
@@ -391,8 +466,11 @@ class OpenAICompatibleLLM:
                 "role": "assistant"
             }
             self._attach_usage(response, result)
+            timer.done(usage=getattr(response, "usage", None),
+                       chars=len(result["content"]) + len(result["reasoning_content"]))
             return result
         except Exception as e:
+            timer.done(note=f"failed: {type(e).__name__}")
             self.logger.error(f"Chat completion error.\n{_raw_error_text(e)}", exc_info=True)
             raise
 
@@ -410,6 +488,9 @@ class OpenAICompatibleLLM:
         processed_messages = self._process_messages(messages)
         stream = payload.pop("stream", True)
         self._log_params(payload)
+        timer = _CallTimer("stream", self.logger, self.model_name,
+                           is_translation=is_translation)
+        emitted = 0
 
         # 思考/正文的分流交给统一状态机（src/core/think_tags.py）：它识别全部
         # provider 写法（thinking/reasoning/管道/Harmony/Kimi），允许正文之后
@@ -439,7 +520,9 @@ class OpenAICompatibleLLM:
             response = completion(**litellm_kwargs)
 
             if not stream:
-                yield response.choices[0].message.content or ""
+                text = response.choices[0].message.content or ""
+                timer.done(usage=getattr(response, "usage", None), chars=len(text))
+                yield text
                 return
 
             for chunk in response:
@@ -464,19 +547,26 @@ class OpenAICompatibleLLM:
                 if not reasoning and not content:
                     continue
 
+                timer.first_token()
                 for r_part, c_part in splitter.feed_chunk(reasoning or "", content or ""):
                     for piece in _render(r_part, c_part):
+                        emitted += len(piece)
                         yield piece
 
             # 流结束：放出暂扣片段，并闭合仍开着的思考块
             r_tail, c_tail = splitter.flush()
             for piece in _render(r_tail, c_tail):
+                emitted += len(piece)
                 yield piece
             if emitted_think_open:
-                yield "\n" + THINK_CLOSE_TAG + "\n"
+                piece = "\n" + THINK_CLOSE_TAG + "\n"
+                emitted += len(piece)
+                yield piece
+            timer.done(chars=emitted)
 
 
         except Exception as e:
+            timer.done(chars=emitted, note=f"failed: {type(e).__name__}")
             text, label = self._stream_error_map(e)
             if text is not None:
                 # provider 原始响应体（含"不支持图片/不支持格式"等具体原因）完整入日志
@@ -550,6 +640,9 @@ class OpenAICompatibleLLM:
         payload.pop("stream", None)  # 本方法强制流式
         processed_messages = self._process_messages(messages)
         self._log_params(payload)
+        # Agent 循环的每一轮都走这里：耗时日志直接反映"第几轮慢、慢在首字还是生成"
+        timer = _CallTimer("stream_events", self.logger, self.model_name,
+                           is_translation=is_translation)
 
         content_parts: List[str] = []
         reasoning_parts: List[str] = []
@@ -602,11 +695,14 @@ class OpenAICompatibleLLM:
                 delta = chunk.choices[0].delta
 
                 reasoning = _extract_reasoning(delta)
+                content = getattr(delta, 'content', None)
+                if reasoning or content or getattr(delta, "tool_calls", None):
+                    # 首个模型输出（正文/思考/工具调用分片都算）：TTFB 到此为止
+                    timer.first_token()
                 if reasoning:
                     reasoning_parts.append(reasoning)
                     yield {"type": "reasoning", "text": reasoning}
 
-                content = getattr(delta, 'content', None)
                 if content:
                     content_parts.append(content)
                     yield {"type": "text", "text": content}
@@ -623,6 +719,8 @@ class OpenAICompatibleLLM:
                             slot["args"] += fn.arguments
 
         except Exception as e:
+            timer.done(chars=len("".join(content_parts)) + len("".join(reasoning_parts)),
+                       note=f"failed: {type(e).__name__}")
             text, label = self._stream_error_map(e)
             if text is not None:
                 self.logger.error(f"{label}\n{_raw_error_text(e)}")
@@ -633,7 +731,12 @@ class OpenAICompatibleLLM:
                 self.logger.error(f"Unexpected system error.\n{_raw_error_text(e)}", exc_info=True)
                 content_parts.append(f"\n\n[System Error: {type(e).__name__}: {e}]\n")
 
-        yield {"type": "final", "response": _build_final()}
+        final = _build_final()
+        timer.done(usage=final.get("_usage"),
+                   chars=len(final["content"]) + len(final["reasoning_content"]),
+                   note=(f"tool_calls={len(final['tool_calls'])}"
+                         if final.get("tool_calls") else ""))
+        yield {"type": "final", "response": final}
 
 
     def generate_image(self, prompt: str, **kwargs) -> str:

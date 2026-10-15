@@ -277,8 +277,10 @@ class ChatResponseFlowMixin:
             StandardDialog(self.widget, tr("Task Cancelled"),
                            tr("The AI generation has been stopped by the user."),
                            show_cancel=False).exec()
-            if hasattr(self, '_restore_last_input'):
-                self._restore_last_input()
+            # 刻意不回填输入框：被停止的问题本身已作为用户气泡留在对话里，
+            # 再塞回输入框会让用户以为"没发出去"，还会连带恢复上一轮附件预览，
+            # 导致同一问题被重复发送。需要重发时用用户气泡上的编辑/重发入口
+            # （ChatSendFlowMixin.handle_edit_resend）。
 
             entry = {"role": "assistant", "content": self.current_ai_text, "status": "interrupted"}
             self._attach_references(entry)
