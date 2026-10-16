@@ -167,6 +167,54 @@ def _escape(value: Any) -> str:
     return _html.escape("" if value is None else str(value), quote=True)
 
 
+#: 标题里"原标题自带"的斜体信号：命中才算"来源确实标了斜体"。三类写法都算证据——
+#:   * HTML / JATS 标签 ``<i>`` / ``<em>`` / ``<italic>``（PubMed、Crossref 的元数据
+#:     就是这么标物种名与基因名的）；
+#:   * LaTeX ``\textit{...}`` / ``\emph{...}``；
+#:   * Markdown 单星号强调 ``*...*``（前后紧邻星号的 ``**`` 不算）。
+#: 刻意**不认**下划线 ``_..._``：基因名、序列标识、DOI 里下划线遍地都是，认它等于
+#: 把正常字符当标记吞掉。
+_TITLE_ITALIC_RE = re.compile(
+    r"<(?P<tag>i|em|italic)\b[^>]*>(?P<tagged>.*?)</(?P=tag)\s*>"
+    r"|\\(?:textit|emph)\{(?P<braced>[^{}]*)\}"
+    r"|(?<!\*)\*(?![\s*])(?P<starred>[^*\n]+?)(?<![\s*])\*(?!\*)",
+    re.DOTALL | re.IGNORECASE)
+
+#: 未能配对的斜体标签（残缺 / 交错）：它们是来源的元数据标记，不该当正文显示，
+#: 在普通段落里直接丢弃。
+_STRAY_ITALIC_TAG_RE = re.compile(r"</?\s*(?:i|em|italic)\b[^>]*>", re.IGNORECASE)
+
+
+def title_html(title: Any) -> str:
+    """把标题渲染为富文本：**默认正体**，只保留原标题自带的斜体信号。
+
+    整条标题一律斜体既不符合学术惯例（斜体只落在物种名、基因名、刊名一类局部成分
+    上），也会让整片参考文献糊成一片。因此只有 :data:`_TITLE_ITALIC_RE` 命中的片段
+    才包 ``<i>``，其余一律正体。
+
+    转义与包裹的顺序不能反：先包裹再转义会把 ``<i>`` 变成可见的 ``&lt;i&gt;``——这正是
+    "标题整条斜体"与"标签被当正文显示"两种毛病并发的成因。这里先按信号切分、逐段
+    转义，再只给信号段套标签；普通段里残留的孤立标签直接丢弃。
+
+    页脚参考文献（:meth:`ReferenceItem.citation_text_html`）与引用卡标题共用本函数，
+    两处"标题该怎么斜"因此只有一个说法。
+    """
+    text = "" if title is None else str(title)
+    if not text:
+        return ""
+    parts: List[str] = []
+    cursor = 0
+    for match in _TITLE_ITALIC_RE.finditer(text):
+        if match.start() < cursor:      # 与上一处信号重叠：交给上一处处理
+            continue
+        parts.append(_escape(_STRAY_ITALIC_TAG_RE.sub("", text[cursor:match.start()])))
+        inner = match.group("tagged") or match.group("braced") or match.group("starred") or ""
+        parts.append(f"<i>{_escape(_STRAY_ITALIC_TAG_RE.sub('', inner))}</i>")
+        cursor = match.end()
+    parts.append(_escape(_STRAY_ITALIC_TAG_RE.sub("", text[cursor:])))
+    return "".join(parts)
+
+
 def _basename(path: str) -> str:
     try:
         return os.path.basename(str(path).replace("\\", "/")) or ""
@@ -409,14 +457,16 @@ class ReferenceItem:
         return " ".join(parts)
 
     def citation_text_html(self) -> str:
-        """可视化著录（标题斜体、期刊跟随），仅转义后拼接，无外部输入注入风险。"""
+        """可视化著录：**默认正体**，仅保留原标题自带的斜体信号（见 :func:`title_html`）。
+        """
         parts: List[str] = []
         if self.authors_display:
             parts.append(_escape(_ensure_period(self.authors_display)))
         if self.year:
             parts.append(f"({_escape(self.year)}).")
         if self.title:
-            parts.append(f"<i>{_escape(_ensure_period(self.title))}</i>")
+            # 句末句点必须落在斜体之外：先补句点，再交给标题渲染器决定局部斜体。
+            parts.append(title_html(_ensure_period(self.title)))
         if self.journal:
             parts.append(_escape(_ensure_period(self.journal)))
         if not any((self.authors_display, self.year, self.title, self.journal)):

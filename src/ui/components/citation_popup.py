@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
                                QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QTextBrowser, QVBoxLayout, QWidget)
 
-from src.core.references import UNVERIFIED_LABEL
+from src.core.references import UNVERIFIED_LABEL, title_html
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.copy_button import CopyButton
 from src.ui.components.toast import ToastManager
@@ -224,6 +224,9 @@ class CitationPopup(QWidget):
         self._lbl_title = QLabel("")
         self._lbl_title.setObjectName("CitationTitle")
         self._lbl_title.setWordWrap(True)
+        # 富文本：标题的斜体判定统一交给 references.title_html（默认正体）。显式声明格式
+        # 是必须的——AutoText 会自行嗅探 HTML，标题里凡是像标签的内容都会时好时坏。
+        self._lbl_title.setTextFormat(Qt.RichText)
         self._lbl_title.setTextInteractionFlags(Qt.TextSelectableByMouse)
         lay.addWidget(self._lbl_title)
 
@@ -365,7 +368,6 @@ class CitationPopup(QWidget):
             }}
             QLabel#CitationNote {{
                 color: {muted}; font-family: {fam}; font-size: 11px;
-                font-style: italic;
             }}
             QTextBrowser#CitationSnippet {{
                 color: {text_main}; background-color: rgba(127,127,127,0.10);
@@ -466,7 +468,9 @@ class CitationPopup(QWidget):
             self._lbl_unverified.setVisible(False)
 
         title = str(self._data.get("title") or "").strip()
-        self._lbl_title.setText(title or "Untitled")
+        # 与页脚参考文献共用同一套斜体判定（references.title_html）：默认正体，只保留
+        # 原标题自带的斜体信号，两处不各说各话。
+        self._lbl_title.setText(title_html(title) or "Untitled")
         self._lbl_title.setVisible(True)
 
         self._lbl_meta.setText(self._meta_text())

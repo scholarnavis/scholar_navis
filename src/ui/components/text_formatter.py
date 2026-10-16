@@ -1278,6 +1278,89 @@ class TextFormatter:
             lines[idx] = re.sub(r'(?<=\S)\s+(--+)\s+(?=\S)', r'\n\n\1\n\n', line)
         return '\n'.join(lines)
 
+    # ------------------------------------------------------------------
+    # 压平列表还原：列表标记挤进正文一行 / 列表块前缺空行
+    # ------------------------------------------------------------------
+    #: 顶层列表项标记（允许至多 3 空格缩进）：``- `` / ``* `` / ``+ `` / ``1. ``。
+    #: 宽松度对齐 python-markdown 的列表处理器（``[ ]{0,3}`` 前缀 + 标记后至少
+    #: 一个空白），否则本可解析的列表项会被漏掉。
+    _LIST_ITEM_RE = re.compile(r'^[ \t]{0,3}([-*+]|\d{1,3}\.)[ \t]+(?=\S)')
+
+    #: 被压进正文一行的列表标记：紧跟在句末标点（中英文）之后，
+    #: 形如 ``这一步。 - 证据：…`` / ``…弯曲[1]；- PKS4 是…``。
+    #: 判据取"标记前一个字符是句末标点"而非"标记前是空格"：正文里的连字符与
+    #: 减号（``A - B``、``3 - 2``）及破折号（``——``，后随字符非空白）前面都不是
+    #: 句末标点，因此不会被误判。
+    _GLUED_LIST_MARKER_RE = re.compile(
+        r'(?<=[。；！？：.;!?])[ \t]*([-*+]|\d{1,3}\.)(?=[ \t]+\S)')
+
+    @classmethod
+    def _repair_glued_lists(cls, text: str) -> str:
+        """把被压平的列表还原为 python-markdown 能解析的形态。
+
+        模型输出的压缩文本里有两类压平，都会让列表标记 ``- `` / ``1. `` 原样显示
+        成正文（症状即"整段读起来像用横线分隔的句子，而不是列表"）：
+
+        1. **整段列表挤在一行**：``这一步。 - 证据：…； - 结论：…``。整行不含换行，
+           python-markdown 连块边界都看不见，只会当成一个普通段落；
+        2. **列表紧跟正文、中间没有空行**：``这一步。\\n- 证据：…``。python-markdown
+           （含 ``sane_lists``）要求列表块与上一段之间有空行，否则标记连同缩进一起
+           被并入段落。
+
+        对应两步，顺序固定：
+
+        * **步骤 1 拆行**：把紧贴句末标点的列表标记拆到独立行；
+        * **步骤 2 补空行**：给紧跟在正文行之后的顶层列表块补一个空行。
+
+        两步都不触碰代码围栏内容，也只在上述两种形态下触发：触发点由
+        :attr:`_GLUED_LIST_MARKER_RE`（标记前必须是句末标点）与
+        :attr:`_LIST_ITEM_RE`（标记必须独占行首）共同界定，因此不会误伤正文里的
+        连字符、减号、破折号或表格行。
+        """
+        if not text:
+            return text
+
+        result = []
+        in_list = False     # 当前行是否处于顶层列表块内
+        in_fence = False    # 是否位于 ``` 代码围栏内
+        splits = 0
+
+        def _push(piece):
+            nonlocal in_list
+            if not piece.strip():
+                in_list = False
+            elif cls._LIST_ITEM_RE.match(piece):
+                # 列表块与上一段之间必须是空行，否则标记会被并入段落
+                if not in_list and result and result[-1].strip():
+                    result.append('')
+                in_list = True
+            elif piece[:1] in (' ', '\t'):
+                pass        # 列表项的续行/嵌套内容：保持在该列表块内
+            else:
+                in_list = False
+            result.append(piece)
+
+        for line in text.split('\n'):
+            if line.lstrip().startswith('```'):
+                # 围栏开/闭行本身不属于正文，其内部一律原样保留
+                in_fence = not in_fence
+                in_list = False
+                result.append(line)
+                continue
+            if in_fence:
+                result.append(line)
+                continue
+
+            # 步骤 1：一行里可能挤着多个列表项，拆分后逐段重新判定块归属
+            split_line, hits = cls._GLUED_LIST_MARKER_RE.subn(r'\n\1', line)
+            splits += hits
+            for piece in split_line.split('\n'):
+                _push(piece)
+
+        if splits:
+            logger.debug("Repaired glued list markers: split %d marker(s) onto their own line.", splits)
+        return '\n'.join(result)
+
     @staticmethod
     def markdown_to_html(text, theme_key=None, base_font_px=None,
                          space_before=None, space_after=None):
@@ -1313,6 +1396,9 @@ class TextFormatter:
         #    "| --- | --- |" 同样命中"空白 + 连字符 + 空白"，旧实现会把它拆成
         #    "|"、"<hr>"，从而破坏整张表——这正是表格渲染异常的根因。
         processed_text = TextFormatter._repair_glued_horizontal_rules(processed_text)
+        # 1.5 修复被压平的列表：列表标记挤进正文一行，或列表块前缺空行。
+        #     两者都会让列表标记原样显示成正文（见 _repair_glued_lists）。
+        processed_text = TextFormatter._repair_glued_lists(processed_text)
         # 2. 修复紧贴文本的标题，以及跟在表格后面的标题
         processed_text = re.sub(r'(\|\s*)(#{1,6}\s+)', r'\1\n\n\2', processed_text)
         processed_text = re.sub(r'(?<=\S)\s+(#{1,6}\s+)', r'\n\n\1', processed_text)
