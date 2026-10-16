@@ -41,8 +41,9 @@ from src.core import plot_styles
 from src.core.evidence import EvidenceStore, is_usable_source_text
 from src.core.prompt_rules import CITATION_TOKEN_RULE
 from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG
+from src.core.model_capabilities import resolve_window
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
-                                      resolve_context_window, derive_context_budgets)
+                                      derive_context_budgets)
 from src.core.tool_call_leak import (ToolCallStreamFilter, iter_tool_call_objects,
                                      tool_call_fingerprint)
 
@@ -392,17 +393,18 @@ class AgentRuntime:
         # （model_cost，含 max_input_tokens）优先，内置家族表兜底，使
         # DeepSeek(1M) / GPT / Claude / Gemini / Qwen / 本地小模型各按
         # 自身容量执行截断与淘汰，而非套用固定阈值。
-        try:
-            _model_name = getattr(self.main_llm, "model_name", "") or ""
-        except Exception:
-            _model_name = ""
-        _ctx_window = resolve_context_window(_model_name)
+        # 窗口来源：用户声明（provider 配置 context_window）→ 运行时实测（能力表）
+        # → 静态推断（litellm/家族表）→ 保守默认；合成点见 src.core.model_capabilities。
+        _model_name = str(getattr(self.main_llm, "model_name", "") or "")
+        _base_url = str(getattr(self.main_llm, "base_url", "") or "")
+        _declared = (getattr(self.main_llm, "config_data", None) or {}).get("context_window")
+        _ctx_window, _window_source = resolve_window(_model_name, _base_url, _declared)
         _budgets = derive_context_budgets(_ctx_window)
         self._tool_result_chars = _budgets["tool_result_chars"]
         self._tool_token_budget = _budgets["tool_token_budget"]
-        logger.info("Context budgets derived from model '%s': window=%d tokens, "
+        logger.info("Context budgets derived from model '%s': window=%d tokens (source=%s), "
                     "tool_result_chars=%d, tool_token_budget=%d",
-                    _model_name or "<unknown>", _ctx_window,
+                    _model_name or "<unknown>", _ctx_window, _window_source,
                     self._tool_result_chars, self._tool_token_budget)
         self._plot_seq = int(plot_seq) if plot_seq else (max((int(k.split("_")[-1]) for k in self._plot_registry if k.startswith("plot_")), default=0) if self._plot_registry else 0)
 
@@ -665,15 +667,28 @@ class AgentRuntime:
         self._strip_stale_reasoning(messages)
         kwargs = {"messages": messages, "tools": tools, "tool_choice": "auto"} if tools else {"messages": messages}
         response = None
+        #: 本步是否已向界面吐过 token。上下文超限必定发生在 prefill 阶段（还没有
+        #: 任何输出），但流式路径的其它失败可能发生在半途——那种情况重试会把已显示的
+        #: 内容再说一遍，因此只在"一个字都没吐"时才允许压缩重试。
+        streamed_any = False
+
+        def _stream_emit(text: str) -> None:
+            nonlocal streamed_any
+            streamed_any = True
+            emit_token(text)
+
         if emit_token is not None:
             try:
-                response = self._llm_step_stream(kwargs, emit_token)
+                response = self._invoke_with_overflow_retry(
+                    kwargs,
+                    lambda kw: self._llm_step_stream(kw, _stream_emit),
+                    can_retry=lambda: not streamed_any)
             except Exception as e:
                 # 流式路径异常（provider 不支持流式工具调用等）：回退非流式
                 # 完整调用，保证结果正确；重复计费由异常场景兜底接受
                 logger.warning(f"Streamed LLM step failed; falling back to blocking chat: {e}")
         if response is None:
-            response = self.main_llm.chat(**kwargs)
+            response = self._invoke_with_overflow_retry(kwargs, self.main_llm.chat)
             # 非流式回退路径：正文由主循环打字机回放（_stream_final_text），但思维链
             # 若不在此补齐，该路径下 Reasoning 面板会整段缺失——与真流式路径的展示
             # 口径不一致。此处一次性 emit 整块 reasoning（折叠格式与截断策略同流式）。
@@ -684,8 +699,64 @@ class AgentRuntime:
                         "Non-stream fallback: emitted reasoning block (%d chars) for display.",
                         len(reasoning),
                     )
-        self._accumulate_usage(messages, response)
+        self._accumulate_usage(kwargs["messages"], response)
         return response
+
+    def _invoke_with_overflow_retry(self, kwargs: Dict, invoke: Callable[[Dict], Dict],
+                                    can_retry: Optional[Callable[[], bool]] = None) -> Dict:
+        """执行一次 LLM 调用；上下文超限则压缩历史后重试一次（唯一实现）。
+
+        provider 报上下文超限是**唯一**能证明"它认为上下文太长"的信号，而我们对窗口
+        的估计可能偏大（自建网关的模型名识别不出，落回兜底默认：远程 300K / 本地 32K；
+        或静态元数据滞后）。
+        此时把最旧的历史砍掉再试一次，比直接把错误甩给用户有用得多。
+
+        重试只做一次：压缩后仍超限说明真实上限比我们能推断的更小，继续硬试只是重复
+        失败——provider 报错文案里的真值已被记入能力表（llm_impl 侧），下一轮预算
+        会自动收紧。
+        """
+        # 函数内导入：判定逻辑与错误解析同在 llm_impl（那里是 provider 文案解析
+        # 的唯一归属地），模块级 import 会让本模块与 llm_impl 互相牵连。
+        from src.core.llm_impl import is_context_overflow_error
+        try:
+            return invoke(kwargs)
+        except Exception as e:
+            if not is_context_overflow_error(e) or (can_retry is not None and not can_retry()):
+                raise
+            trimmed = self._shrink_step_messages(kwargs.get("messages") or [])
+            if trimmed is None:
+                raise
+            logger.warning("Context window exceeded; retrying this step with a trimmed "
+                           "history (%d -> %d messages).",
+                           len(kwargs.get("messages") or []), len(trimmed))
+            kwargs["messages"] = trimmed
+            return invoke(kwargs)
+
+    def _shrink_step_messages(self, messages: List[Dict]) -> Optional[List[Dict]]:
+        """上下文超限应急压缩：丢掉最旧的非 system 消息，保留最新一整轮对话。
+
+        返回压缩后的列表；当已经无处可砍（只剩 system + 最新一轮）时返回 ``None``，
+        表示"再试也没意义"。工具消息与其配对的 assistant.tool_calls 必须一起丢，
+        否则消息序列不合法（缺 tool 响应 / 悬空 tool_call_id）。
+        """
+        if len(messages) <= 2:
+            return None
+        head = [m for m in messages if m.get("role") == "system"]
+        body = [m for m in messages if m.get("role") != "system"]
+        if len(body) <= 1:
+            return None
+        # 保留最后一轮：从尾部往前找到最近的 user 消息，其后（含）全部保留
+        keep_from = len(body) - 1
+        for idx in range(len(body) - 1, -1, -1):
+            if body[idx].get("role") == "user":
+                keep_from = idx
+                break
+        else:
+            keep_from = max(0, len(body) - 2)
+        trimmed = head + body[keep_from:]
+        if len(trimmed) >= len(messages):
+            return None
+        return trimmed
 
     def _llm_step_stream(self, kwargs: Dict, emit_token: Callable[[str], None]) -> Dict:
         """流式执行一步 Agent LLM 调用。

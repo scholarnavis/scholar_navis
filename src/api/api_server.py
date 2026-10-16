@@ -503,6 +503,11 @@ async def chat_completions(
         raise OpenAIException(f"Main Model Provider '{provider_id}' not found.", status_code=404)
     if body.model and body.model != "default":
         main_config["model_name"] = body.model
+    if not str(main_config.get("model_name") or "").strip():
+        # provider 条目的 model_name 常常是空的（真正生效的是选择器记在 settings 里的
+        # 那个）。不补上就会拿着空模型名去推上下文窗口 → 退化成 32K 默认值，历史被
+        # 砍到 8K。统一走 ConfigManager 的单一入口，理由见其 docstring。
+        main_config["model_name"] = config_mgr.effective_model_name(main_config, provider_id)
 
     from src.core.lang_detect import detect_primary_language
 

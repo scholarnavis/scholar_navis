@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -12,6 +13,9 @@ from litellm.exceptions import APIError, APIConnectionError, ContextWindowExceed
     AuthenticationError, ServiceUnavailableError, BadRequestError, NotFoundError
 
 from src.core.config_manager import ConfigManager
+from src.core.model_capabilities import (KNOWN_REQUEST_PARAMS, cached_max_output_tokens,
+                                         record_context_window, record_max_output_tokens,
+                                         record_unsupported_param, unsupported_params)
 from src.core.network_worker import _get_explicit_proxy_kwargs
 from src.core.think_tags import (THINK_CLOSE_TAG, THINK_OPEN_TAG,
                                  ThinkStreamSplitter)
@@ -226,6 +230,115 @@ class _CallTimer:
             f"chars={chars}{', ' + note if note else ''})")
 
 
+# ---------------------------------------------------------------------- #
+#  请求自适应（纯解析部分）
+#
+#  provider 对"不接受的参数 / 超限的输出长度 / 超限的上下文"都只会在报错文案里
+#  给出线索，且措辞各家不同。这里把"从文案里读出事实"的解析集中定义，全部是
+#  纯函数（可脱机测试）；"怎么用这些事实"由 OpenAICompatibleLLM 的适配方法负责。
+# ---------------------------------------------------------------------- #
+#: 400 文案里"该参数不被接受"的常见措辞（与参数名同句出现才算数）。
+_PARAM_REJECT_HINTS = (
+    "unsupported", "not supported", "does not support", "unrecognized",
+    "unknown parameter", "unexpected", "invalid", "not allowed", "extra field",
+)
+#: 允许出现在"拒绝"句式里的参数名（白名单，避免误伤 content 之类的普通词）。
+_HINT_ALT = "|".join(re.escape(h) for h in _PARAM_REJECT_HINTS)
+
+#: "输出上限"文案里数字的常见位置（仅当文案提到 max_tokens 时才启用，见下）。
+_MAX_TOKENS_PATTERNS = (
+    # "Invalid 'max_tokens': maximum value is 65536." / "max_tokens is too large ..., limit is 8192"
+    r"max_tokens[^.\n]{0,80}?(?:maximum|limit|at most|no more than|must be|"
+    r"less than or equal to|exceeds)[^0-9]{0,24}(\d[\d,_]*)",
+    # "This model supports at most 65536 completion tokens." / "... supports up to 8192 tokens"
+    r"(?:supports?(?: up to| at most| at least)|at most|no more than|limited to|"
+    r"maximum(?: value)?(?: of| is| for)?)[^0-9]{0,24}(\d[\d,_]*)\s*(?:completion )?tokens",
+    # "max_tokens 999999 exceeds the maximum 65536"
+    r"max_tokens[^.\n]{0,40}?(\d[\d,_]*)[^.\n]{0,40}?(?:is the maximum|maximum)",
+)
+
+
+def detect_max_tokens_limit(message: str) -> Optional[int]:
+    """从报错文案里解析输出上限（``max_tokens`` 超限时 provider 会给出真值）。
+
+    只在文案确实提到 ``max_tokens`` 时才解析：通用的"at most N tokens"句式也出现在
+    上下文超限文案里，不加这个门槛会把上下文窗口误当成输出上限。
+    """
+    text = str(message or "").lower()
+    if "max_tokens" not in text and "max_completion_tokens" not in text:
+        return None
+    return _find_count(_MAX_TOKENS_PATTERNS, message)
+
+#: "上下文窗口"文案里数字的常见位置。
+_CONTEXT_LIMIT_PATTERNS = (
+    r"maximum context length is[^0-9]{0,16}(\d[\d,_]*)",
+    r"context (?:window|length)[^.\n]{0,60}?(\d[\d,_]*)\s*tokens",
+    r"maximum (?:allowed )?(?:number of )?tokens[^0-9]{0,24}(\d[\d,_]*)",
+)
+
+
+def _parse_count(raw: str) -> int:
+    """把 ``"131,072"`` / ``"65_536"`` 这类计数还原成 int。"""
+    return int(str(raw).replace(",", "").replace("_", "").replace(" ", ""))
+
+
+def _find_count(patterns, message: str) -> Optional[int]:
+    """按给定句式列表在文案里找第一个计数（找不到返回 None）。"""
+    text = str(message or "").lower()
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            try:
+                return _parse_count(match.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def detect_rejected_param(message: str, payload: Dict) -> Optional[str]:
+    """从报错文案里识别"哪个已发送的参数不被接受"（识别不出返回 None）。
+
+    只认"报错方明确点名"的句式，不做启发式猜测：误删用户本来可用的参数
+    比继续报错更糟。
+    """
+    text = str(message or "").lower()
+    if not text:
+        return None
+    for name in payload:
+        if name not in KNOWN_REQUEST_PARAMS:
+            continue
+        token = re.escape(str(name).lower())
+        if (re.search(rf"(?:{_HINT_ALT})[^.\n]{{0,60}}{token}\b", text)
+                or re.search(rf"\b{token}\b[^.\n]{{0,60}}(?:{_HINT_ALT})", text)):
+            return name
+    return None
+
+
+def detect_context_limit(message: str) -> Optional[int]:
+    """从报错文案里解析上下文窗口（超限时 provider 会给出真值）。"""
+    return _find_count(_CONTEXT_LIMIT_PATTERNS, message)
+
+
+#: 中转站常把 400 原样抛出（不发 ContextWindowExceededError），文案是唯一线索。
+_CONTEXT_OVERFLOW_HINTS = (
+    "maximum context length", "context length exceeded", "context window exceeded",
+    "reduce the length of the messages", "too many tokens", "input is too long",
+    "exceeds the maximum number of tokens",
+)
+
+
+def is_context_overflow_error(error: Exception) -> bool:
+    """异常是否表示"上下文超限"（类型优先，文案兜底）。唯一判定处。
+
+    调用方据此决定"压缩历史后重试"，因此判定必须宽：漏判会把本可自动恢复的
+    请求变成用户可见的报错。
+    """
+    if isinstance(error, ContextWindowExceededError):
+        return True
+    text = _raw_error_text(error).lower()
+    return any(hint in text for hint in _CONTEXT_OVERFLOW_HINTS)
+
+
 litellm.drop_params = True
 
 
@@ -336,7 +449,20 @@ class OpenAICompatibleLLM:
         if "top_p" not in custom_params:
             custom_params["top_p"] = 0.1
 
-        return {k: v for k, v in custom_params.items() if k not in ["messages", "model", "stream", "tools"]}
+        payload = {k: v for k, v in custom_params.items()
+                   if k not in ["messages", "model", "stream", "tools"]}
+        # 用户声明的输出上限（provider 配置 max_output_tokens）：只在用户明确填了、
+        # 且没有自定义 max_tokens 时下发——把"我声明这个模型能出多长"与"这次要它出多长"
+        # 分开，避免悄悄改变默认行为。
+        declared_output = self.config_data.get("max_output_tokens")
+        if declared_output and not any(k in payload for k in ("max_tokens", "max_completion_tokens")):
+            try:
+                payload["max_tokens"] = int(declared_output)
+            except (TypeError, ValueError):
+                pass
+        # 所有调用入口都经过本方法，因此"不再发送已被实测拒绝的参数"只需在这一处
+        # 定义（证据来自能力表，见 src.core.model_capabilities）。
+        return self._strip_unsupported_params(payload)
 
     def _process_messages(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -407,6 +533,99 @@ class OpenAICompatibleLLM:
 
         return kwargs
 
+    # ------------------------------------------------------------------ #
+    #  请求自适应：把 provider 的明确拒绝变成"下次不再犯错"
+    # ------------------------------------------------------------------ #
+    def _strip_unsupported_params(self, payload: Dict) -> Dict:
+        """剔除已被该模型明确拒绝的请求参数，并收紧已实测的输出上限。
+
+        只在"曾经被明确拒绝过"时才剔除——绝不预先猜测能力：猜错会让用户本来
+        可用的参数失效，而 provider 的拒绝是权威证据。记录来源见
+        :mod:`src.core.model_capabilities`。
+        """
+        rejected = unsupported_params(self.base_url, self.model_name)
+        if rejected:
+            dropped = [k for k in list(payload) if k in rejected]
+            for key in dropped:
+                payload.pop(key, None)
+            if dropped:
+                self.logger.info(f"[{self.model_name}] Omitting parameters previously "
+                                 f"rejected by the provider: {dropped}")
+        limit = cached_max_output_tokens(self.base_url, self.model_name)
+        if limit:
+            for key in ("max_tokens", "max_completion_tokens"):
+                try:
+                    if int(payload.get(key) or 0) > limit:
+                        self.logger.info(f"[{self.model_name}] Clamping '{key}' to the "
+                                         f"measured output limit {limit}.")
+                        payload[key] = limit
+                except (TypeError, ValueError):
+                    continue
+        return payload
+
+    def _adapt_after_error(self, payload: Dict, error: Exception) -> Optional[Dict]:
+        """依 provider 的明确报错修正请求参数；无法修正返回 None。
+
+        只处理有权威证据的两类（各重试一次即止，不循环）：
+
+        1. 参数不被接受 —— 剔除该参数，并记入能力表（后续请求不再发送）；
+        2. ``max_tokens`` 超上限 —— 下调到 provider 给出的上限，同样记入能力表。
+
+        上下文超限需要"砍历史"，属于上层（AgentRuntime）的职责，这里只把 provider
+        透露的真值记入能力表后原样抛出。
+        """
+        message = _raw_error_text(error)
+        new_payload = dict(payload)
+        changed = False
+
+        rejected = detect_rejected_param(message, new_payload)
+        if rejected:
+            new_payload.pop(rejected, None)
+            record_unsupported_param(self.base_url, self.model_name, rejected)
+            self.logger.warning(f"[{self.model_name}] Provider rejected parameter "
+                                f"'{rejected}'; dropping it and retrying once.")
+            changed = True
+
+        limit = detect_max_tokens_limit(message)
+        if limit:
+            for key in ("max_tokens", "max_completion_tokens"):
+                if key in new_payload:
+                    new_payload[key] = min(int(new_payload.get(key) or limit), limit)
+                    changed = True
+            record_max_output_tokens(self.base_url, self.model_name, limit)
+            self.logger.warning(f"[{self.model_name}] max_tokens exceeds the provider "
+                                f"limit {limit}; lowering it and retrying once.")
+
+        return new_payload if changed else None
+
+    def _completion_with_adaptation(self, kwargs: Dict, payload: Dict):
+        """发起一次 completion；参数被拒/超限时修正参数并**重试一次**。
+
+        只对"参数层面"的错误重试——这类错误必然发生在产生任何输出之前，重试
+        不会造成重复输出或重复副作用。其余异常原样抛出，交由上层决定
+        （网络重试、上下文压缩等）。
+        """
+        try:
+            return completion(**kwargs)
+        except Exception as e:
+            if is_context_overflow_error(e):
+                # 上下文超限要在"砍历史"那一层解决（AgentRuntime），这里只把 provider
+                # 给出的真值记入能力表，让下一轮的预算直接按它收紧。
+                self._remember_context_limit(e)
+                raise
+            adapted = self._adapt_after_error(payload, e)
+            if adapted is None:
+                raise
+            rebuilt = self._build_litellm_kwargs(adapted, kwargs.get("messages") or [],
+                                                 stream=bool(kwargs.get("stream")))
+            return completion(**rebuilt)
+
+    def _remember_context_limit(self, error: Exception) -> None:
+        """把 provider 报错文案里的上下文窗口真值记入能力表（下次预算直接用它）。"""
+        limit = detect_context_limit(_raw_error_text(error))
+        if limit:
+            record_context_window(self.base_url, self.model_name, limit)
+
     def _attach_usage(self, response, result: Dict) -> None:
         """把 provider 返回的真实 usage 以 ``_usage`` 键附加到结果 dict。
 
@@ -444,7 +663,7 @@ class OpenAICompatibleLLM:
 
         try:
             litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=False)
-            response = completion(**litellm_kwargs)
+            response = self._completion_with_adaptation(litellm_kwargs, payload)
             choice = response.choices[0]
 
             reasoning = _extract_reasoning(choice.message)
@@ -517,7 +736,7 @@ class OpenAICompatibleLLM:
 
         try:
             litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=stream)
-            response = completion(**litellm_kwargs)
+            response = self._completion_with_adaptation(litellm_kwargs, payload)
 
             if not stream:
                 text = response.choices[0].message.content or ""
@@ -682,7 +901,7 @@ class OpenAICompatibleLLM:
 
         try:
             litellm_kwargs = self._build_litellm_kwargs(payload, processed_messages, stream=True)
-            response = completion(**litellm_kwargs)
+            response = self._completion_with_adaptation(litellm_kwargs, payload)
 
             for chunk in response:
                 if self._is_cancelled:

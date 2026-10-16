@@ -29,6 +29,7 @@ tiktoken 按需从 ``openaipublic.blob.core.windows.net`` 下载，其内部实�
 import logging
 import os
 import threading
+from functools import lru_cache
 
 from src.core import BASE_DIR
 
@@ -214,23 +215,44 @@ _BUILTIN_CONTEXT_HINTS = [
     ("llama", 128_000), ("mistral", 128_000),
 ]
 
-#: 无法识别模型时的保守默认（本地小模型常见量级）。
-_DEFAULT_CONTEXT_WINDOW = 32_768
+#: 无法识别模型时，**远程**端点使用的默认窗口（token）。
+#:
+#: 取 300K 而不是早年那种 32K：主流商用模型如今普遍 ≥128K，1M 已不稀奇，"未知 =
+#: 小窗口"会让自建网关/新发布的模型被白白闲置。猜高的代价由运行时兜底：真超限时
+#: AgentRuntime 会压缩最旧历史重试一次，并把 provider 在报错里给出的真值写入能力表
+#: （见 src/core/model_capabilities.py），因此最坏情况只是多一次往返，之后永久正确。
+_DEFAULT_CONTEXT_WINDOW = 300_000
+
+#: 本地推理端点（LM Studio / Ollama / llama.cpp 等）的默认窗口（token）。
+#:
+#: 与本机服务通信时，窗口取决于本地部署与量化设置——既探测不到，也几乎不会是大窗口，
+#: 常见量级就是 8K~32K。此处保持保守，避免每次和本地模型对话都先撞一次上下文超限。
+_LOCAL_CONTEXT_WINDOW = 32_768
 
 
-def resolve_context_window(model_name) -> int:
+def resolve_context_window(model_name, base_url=None, explicit=None) -> int:
     """解析模型的输入上下文窗口（token）。
 
-    解析顺序（取所有来源的最大值，防任一来源数据滞后）：
-    1. ``litellm.model_cost``（litellm 自带的模型元数据库，含
-       max_input_tokens / max_tokens，按精确名匹配；带 provider 前缀时
-       同时尝试去掉前缀的名字）；
-    2. 内置家族提示表（子串匹配）；
-    均未命中返回 ``_DEFAULT_CONTEXT_WINDOW``。
+    完整优先级与理由见 :mod:`src.core.model_capabilities`（唯一合成点）：
+    用户声明 → 运行时实测 → 静态推断（本模块） → 默认值。
+    """
+    from src.core.model_capabilities import resolve_window
+
+    return resolve_window(model_name, base_url=base_url, explicit=explicit)[0]
+
+
+@lru_cache(maxsize=512)
+def _static_context_window(model_name) -> int:
+    """静态推断窗口（``litellm.model_cost`` 与内置家族表取较大值）。
+
+    未命中任何来源时返回 **0**（不是默认值）——调用方据此区分"识别出来了"与
+    "完全没线索"，默认值由 :func:`src.core.model_capabilities.resolve_window`
+    统一兜底。结果按模型名缓存：litellm 元数据在进程内不会变，而本函数在
+    每轮预算推导里都会被调用。
     """
     name = (model_name or "").strip().lower()
     if not name:
-        return _DEFAULT_CONTEXT_WINDOW
+        return 0
     candidates = {name}
     if "/" in name:
         candidates.add(name.rsplit("/", 1)[-1])
@@ -252,26 +274,42 @@ def resolve_context_window(model_name) -> int:
                 best = max(best, window)
                 break
 
-    return best or _DEFAULT_CONTEXT_WINDOW
+    return best
 
 
 def derive_context_budgets(context_window: int) -> dict:
-    """按模型上下文窗口推导上下文治理预算（相对比例 + 合理 clamp）。
+    """按模型上下文窗口推导上下文治理预算（比例主导，上下限随窗口缩放）。
 
-    - tool_result_chars：单条工具结果字符上限（≈窗口的 1.6%，按 4
-      chars/token 即 0.4% 窗口）；
-    - tool_token_budget：单轮内全部 role=tool 消息的 token 预算（≈10%）；
-    - kb_token_budget：KB 检索注入 system prompt 的 token 预算（≈2.4%）；
-    - history_token_budget：历史对话回传 token 预算（≈25%），供按轮次
-      裁剪长会话历史（_trim_history_for_budget）。
+    1M 级窗口已是常态，"够用但保守"的比例会把容量白白闲置——那正是"窗口 1M、
+    程序只喂一点点"的成因。因此比例按"把窗口用起来"来定：
 
-    小窗口模型自动收紧（如 8K 窗口 → 工具 2K / KB 2K / 历史 4K），大窗口
-    模型放宽（1M → 工具 100K / KB 24K / 历史 256K / 单条 16K 字符），保证
-    各模型符合自身容量。
+    ===================  ==========  ==========  ==============
+    预算项               占窗口比例  窗口硬上限  1M 窗口实测值
+    ===================  ==========  ==========  ==============
+    tool_result_chars      3%          8%         31,457 字符
+    tool_token_budget     20%         35%        209,715 token
+    kb_token_budget        8%         15%         83,886 token
+    kb_chunk_chars       0.5%          4%          5,243 字符
+    history_token_budget  45%         60%        471,859 token
+    ===================  ==========  ==========  ==============
+
+    各项都是**上界**而非预定量，实际占用取决于内容多少；"硬上限"只在窗口大到
+    离谱（>2M）时才生效，避免单项吞掉整张上下文。小窗口仍有安全下限。
+
+    代价要说清楚：历史/工具预算越大，Agent 每轮重发的 prompt 越大——首字延迟与
+    token 成本随之上升。1M 窗口 + 全部拉满是"用满容量"，不是"必然更快"。若要压
+    成本，改这里的比例即可（唯一处定义）。
     """
+    window = max(int(context_window or 0), 1_000)
     return {
-        "tool_result_chars": max(4_000, min(int(context_window * 0.016), 16_000)),
-        "tool_token_budget": max(2_000, min(int(context_window * 0.10), 128_000)),
-        "kb_token_budget": max(2_000, min(int(context_window * 0.024), 48_000)),
-        "history_token_budget": max(4_000, min(int(context_window * 0.25), 256_000)),
+        "tool_result_chars": _clamp(round(window * 0.03), 4_000, round(window * 0.08)),
+        "tool_token_budget": _clamp(round(window * 0.20), 2_000, round(window * 0.35)),
+        "kb_token_budget": _clamp(round(window * 0.08), 2_000, round(window * 0.15)),
+        "kb_chunk_chars": _clamp(round(window * 0.005), 1_600, round(window * 0.04)),
+        "history_token_budget": _clamp(round(window * 0.45), 4_000, round(window * 0.60)),
     }
+
+
+def _clamp(value: int, low: int, high: int) -> int:
+    """把 ``value`` 夹到 ``[low, max(low, high)]``（下限优先，避免比例上限倒挂）。"""
+    return max(low, min(value, max(low, high)))

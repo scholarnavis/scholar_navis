@@ -8,7 +8,7 @@ import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QFrame, QFormLayout, QGroupBox, QHBoxLayout,
-                               QLineEdit, QPushButton, QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
 from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager
@@ -16,6 +16,19 @@ from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import StandardDialog
 from src.ui.components.param_editor import ParamEditorWidget
+
+
+def parse_optional_positive_int(text) -> int:
+    """把"可留空的正整数"输入解析成 int（留空/非法/非正数都返回 0 = 自动）。
+
+    上下文窗口、输出上限都走这一个解析：调用方据 0 判定"交给自动推断"，
+    这样 UI 与配置里都不会出现 ``"0"``、``""`` 这类含混值。
+    """
+    try:
+        value = int(float(str(text).strip()))
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
 
 
 class LlmSectionMixin:
@@ -68,6 +81,28 @@ class LlmSectionMixin:
         self.input_llm_url = QLineEdit()
         self.input_llm_key = QLineEdit()
         self.input_llm_key = HoverRevealLineEdit()
+
+        # 模型容量声明（可选，留空 = 自动）。OpenAI 兼容接口**不提供**上下文窗口与
+        # 输出上限，程序只能靠 litellm 元数据/模型家族名推断，自建网关的模型名往往
+        # 推断不出（落回兜底默认：远程 300K、本地 32K）。此处填一次即永久生效，
+        # 优先级高于一切推断，见 src/core/model_capabilities.py。
+        self.input_llm_context_window = QLineEdit()
+        self.input_llm_context_window.setPlaceholderText(tr("Auto"))
+        self.input_llm_context_window.setToolTip(tr(
+            "Declare this model's input context window in tokens (e.g. 128000).\n"
+            "Leave empty to infer automatically: litellm metadata → built-in family\n"
+            "table → measured value reported by the provider when a request overflows."))
+        self.input_llm_max_output = QLineEdit()
+        self.input_llm_max_output.setPlaceholderText(tr("Auto"))
+        self.input_llm_max_output.setToolTip(tr(
+            "Declare the maximum number of output tokens (e.g. 8192).\n"
+            "Leave empty to use the provider's default."))
+        capacity_layout = QHBoxLayout()
+        capacity_layout.setContentsMargins(0, 0, 0, 0)
+        capacity_layout.addWidget(QLabel(tr("Context:")))
+        capacity_layout.addWidget(self.input_llm_context_window, stretch=1)
+        capacity_layout.addWidget(QLabel(tr("Max Output:")))
+        capacity_layout.addWidget(self.input_llm_max_output, stretch=1)
 
         self.editor_provider_params = ParamEditorWidget()
         self.btn_add_provider_param = QPushButton(tr(" Add Provider Parameter"))
@@ -131,6 +166,7 @@ class LlmSectionMixin:
         layout.addRow(tr("Provider Name:"), self.input_llm_name)
         layout.addRow(tr("API Base URL:"), self.input_llm_url)
         layout.addRow(tr("API Key:"), self.input_llm_key)
+        layout.addRow(tr("Model Capacity:"), capacity_layout)
         layout.addRow(tr("Provider Params:"), provider_param_layout)
         layout.addRow(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
         layout.addRow(tr("Model Name:"), model_layout)
@@ -143,6 +179,8 @@ class LlmSectionMixin:
         self.input_llm_name.textChanged.connect(self._sync_llm_data_debounced)
         self.input_llm_url.textChanged.connect(self._sync_llm_data_debounced)
         self.input_llm_key.textChanged.connect(self._sync_llm_data_debounced)
+        self.input_llm_context_window.textChanged.connect(self._sync_llm_data_debounced)
+        self.input_llm_max_output.textChanged.connect(self._sync_llm_data_debounced)
         self.combo_model_param_strategy.currentIndexChanged.connect(self._sync_llm_data_debounced)
         self.editor_provider_params.sig_data_changed.connect(self._sync_llm_data_debounced)
         self.editor_model_params.sig_data_changed.connect(self._sync_llm_data_debounced)
@@ -160,11 +198,15 @@ class LlmSectionMixin:
         self.input_llm_name.blockSignals(True)
         self.input_llm_url.blockSignals(True)
         self.input_llm_key.blockSignals(True)
+        self.input_llm_context_window.blockSignals(True)
+        self.input_llm_max_output.blockSignals(True)
         self.combo_model_param_strategy.blockSignals(True)
 
         self.input_llm_name.setText(conf.get("name", ""))
         self.input_llm_url.setText(conf.get("base_url", ""))
         self.input_llm_key.setText(conf.get("api_key", ""))
+        self.input_llm_context_window.setText(str(conf.get("context_window") or ""))
+        self.input_llm_max_output.setText(str(conf.get("max_output_tokens") or ""))
 
         mode = conf.get("model_params_mode", "inherit")
         reverse_map = {"inherit": 0, "custom": 1, "closed": 2}
@@ -178,6 +220,8 @@ class LlmSectionMixin:
         self.input_llm_name.blockSignals(False)
         self.input_llm_url.blockSignals(False)
         self.input_llm_key.blockSignals(False)
+        self.input_llm_context_window.blockSignals(False)
+        self.input_llm_max_output.blockSignals(False)
         self.combo_model_param_strategy.blockSignals(False)
 
         default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow","mimo",
@@ -239,6 +283,15 @@ class LlmSectionMixin:
             "params": self.editor_model_params.extract_data()
         }
         conf["provider_params"] = self.editor_provider_params.extract_data()
+
+        # 容量声明：留空即删除该键（配置里不留 "" / 0 这类含混值，自动推断看键是否存在）
+        context_window = parse_optional_positive_int(self.input_llm_context_window.text())
+        max_output = parse_optional_positive_int(self.input_llm_max_output.text())
+        for key, value in (("context_window", context_window), ("max_output_tokens", max_output)):
+            if value:
+                conf[key] = value
+            else:
+                conf.pop(key, None)
 
         self.combo_llm_preset.blockSignals(True)
         self.combo_llm_preset.setItemText(idx, conf["name"])

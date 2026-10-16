@@ -28,10 +28,12 @@ from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
 
 logger = logging.getLogger(__name__)
 
-# KB 检索注入治理：单 chunk 字符上限固定；总 token 预算按主模型上下文
-# 窗口动态推导（derive_context_budgets，litellm 模型元数据优先），使不同
-# 模型各按自身容量注入。被省略的文档仍写入 sources_map，引用可点开原文。
-_KB_CHUNK_MAX_CHARS = 1600
+# KB 检索注入治理：单 chunk 字符上限与总 token 预算**都**按主模型上下文窗口
+# 动态推导（derive_context_budgets，含 kb_chunk_chars / kb_token_budget），使不同
+# 模型各按自身容量注入——固定 1600 字符的 chunk 上限会让大窗口模型拿到一堆碎片。
+# 窗口的解析顺序（用户声明 → 运行时实测 → litellm/家族表推断 → 保守默认）定义在
+# src/core/model_capabilities.py，此处不再自带任何口径。被省略的文档仍写入
+# sources_map，引用可点开原文。
 
 # Human-in-the-loop 深度研究计划协议：确认卡（<deep_plan> 标记）由 UI 渲染，
 # 用户确认/跳过后以哨兵前缀文本重新进入发送管线；任务端据此跳过重复分解
@@ -218,7 +220,8 @@ def _trim_history_for_budget(history, token_budget):
     return flat
 
 
-def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context=""):
+def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="",
+                       main_base_url="", declared_window=None):
     """本地 KB 检索唯一权威实现：embedding 加载 -> 三变体向量检索 -> 交叉编码器
     重排 -> 按主模型上下文预算裁剪 -> 生成 context_str 与 sources_map(整型 id)。
 
@@ -279,8 +282,10 @@ def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="")
     except Exception:
         final_docs = candidate_docs[:10]
 
-    _kb_budget = derive_context_budgets(
-        resolve_context_window(main_model_name))["kb_token_budget"]
+    _kb_limits = derive_context_budgets(
+        resolve_context_window(main_model_name, main_base_url, declared_window))
+    _kb_budget = _kb_limits["kb_token_budget"]
+    _kb_chunk_chars = _kb_limits["kb_chunk_chars"]
     context_str = ""
     sources_map = {}
     current_ref_id = 1
@@ -294,8 +299,8 @@ def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="")
             "search_text": doc['content'],
         }
         chunk = doc['content']
-        if len(chunk) > _KB_CHUNK_MAX_CHARS:
-            chunk = chunk[:_KB_CHUNK_MAX_CHARS] + "...[chunk truncated]"
+        if len(chunk) > _kb_chunk_chars:
+            chunk = chunk[:_kb_chunk_chars] + "...[chunk truncated]"
         chunk_tokens = estimate_tokens(chunk)
         if kb_tokens + chunk_tokens > _kb_budget:
             context_str += (
@@ -315,9 +320,13 @@ def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="")
     return context_str, sources_map, domain
 
 
-def _kb_retrieval_worker(kb_id, search_query, main_model_name, out_path, history_context=""):
+def _kb_retrieval_worker(kb_id, search_query, main_model_name, out_path, history_context="",
+                         main_base_url="", declared_window=None):
     """独立子进程入口：隔离本地 ONNX 推理。执行权威检索逻辑并把结果写 out_path。
     JSON 的 key 只能是字符串，写入前把整型 sources_map 键转字符串，父进程读回时复原。
+
+    ``main_base_url`` / ``declared_window`` 与父进程同口径传入：KB 注入预算按主模型
+    窗口推导，而窗口解析需要 (base_url, 声明值) 才能命中能力表的实测/声明记录。
     """
     import json
     import logging
@@ -326,7 +335,8 @@ def _kb_retrieval_worker(kb_id, search_query, main_model_name, out_path, history
         from src.task.kb_tasks import _setup_worker_env
         _setup_worker_env()
         context_str, sources_map, _domain = _kb_retrieval_core(
-            kb_id, search_query, main_model_name, history_context)
+            kb_id, search_query, main_model_name, history_context,
+            main_base_url, declared_window)
         payload = {
             "context_str": context_str,
             "sources_map": {str(k): v for k, v in sources_map.items()},
@@ -404,6 +414,24 @@ class ChatGenerationTask(BackgroundTask):
         if hasattr(self, 'main_llm') and self.main_llm: self.main_llm.cancel()
         if hasattr(self, 'trans_llm') and self.trans_llm: self.trans_llm.cancel()
         if hasattr(self, 'vision_llm') and self.vision_llm: self.vision_llm.cancel()
+
+    def _main_model_facts(self):
+        """主模型能力事实：``(模型名, base_url, 用户声明的窗口)``，预算推导的唯一入口。
+
+        模型名必须走 :meth:`ConfigManager.effective_model_name`——``main_config``
+        来自模型选择器，通常已带正确模型名，但 API server 等入口传进来的可能是
+        ``llm_config.json`` 里的 provider 条目（``model_name`` 往往为空）。直接读
+        条目会让窗口退化成兜底默认（远程 300K / 本地 32K）、历史被砍到零头，表现为"明明是大窗口模型，
+        程序只喂一点点"。``context_window`` 是用户显式声明的窗口（可选），优先级
+        高于一切推断，见 :mod:`src.core.model_capabilities`。
+        """
+        cfg = self.main_config or {}
+        config = getattr(self, "config", None)
+        if config is not None:
+            name = config.effective_model_name(cfg)
+        else:
+            name = str(cfg.get("model_name") or "").strip()
+        return name, str(cfg.get("base_url") or ""), cfg.get("context_window")
 
     def _init_llms(self):
         from src.core.llm_impl import OpenAICompatibleLLM
@@ -1083,8 +1111,9 @@ class ChatGenerationTask(BackgroundTask):
         # 从旧到新丢弃（保留最新完整轮）。短会话零影响；长会话显著降低
         # Agent 循环每轮重发历史的 token 开销，单 Agent / Deep 模式均受益。
         try:
+            _model_name, _base_url, _declared_window = self._main_model_facts()
             _hist_budget = derive_context_budgets(
-                resolve_context_window(self.main_config.get("model_name", ""))
+                resolve_context_window(_model_name, _base_url, _declared_window)
             )["history_token_budget"]
             clean_history = _trim_history_for_budget(clean_history, _hist_budget)
         except Exception as e:
@@ -1823,7 +1852,7 @@ class ChatGenerationTask(BackgroundTask):
         返回 (context_str, sources_map, effective_domain)。调用方负责在 context_str
         为空时写默认文案。
         """
-        model_name = (self.main_config or {}).get("model_name", "")
+        model_name, base_url, declared_window = self._main_model_facts()
         history_context = ""
         if len(self.messages) >= 3:
             prev_assistant = self.messages[-2].get('content', '')[:100]
@@ -1840,7 +1869,8 @@ class ChatGenerationTask(BackgroundTask):
 
             proc = mp.Process(
                 target=_kb_retrieval_worker,
-                args=(self.kb_id, search_query, model_name, tmp_path, history_context),
+                args=(self.kb_id, search_query, model_name, tmp_path, history_context,
+                      base_url, declared_window),
                 daemon=True,
             )
             proc.start()
@@ -1866,7 +1896,8 @@ class ChatGenerationTask(BackgroundTask):
             self.logger.warning(f"KB retrieval subprocess unavailable, falling back inline: {e}")
 
         # 兜底：进程内联执行（共享同一权威实现，保证行为一致）
-        return _kb_retrieval_core(self.kb_id, search_query, model_name, history_context)[:2] + (domain,)
+        return _kb_retrieval_core(self.kb_id, search_query, model_name, history_context,
+                                  base_url, declared_window)[:2] + (domain,)
 
     def _process_rerank(self, query, docs, domain, top_k=None, emit_warning=True):
         """两阶段精排：交叉编码器重排 + 分数阈值过滤。

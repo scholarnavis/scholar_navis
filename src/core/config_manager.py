@@ -366,6 +366,36 @@ class ConfigManager:
         self._merge_secrets("settings", secret)
         self.apply_env_vars()
 
+    def effective_model_name(self, provider_cfg=None, provider_id: str = "",
+                             model_key: str = "chat_model_name") -> str:
+        """当前实际生效的模型名（单一事实来源）。
+
+        模型选择器把"某 provider 选中的模型"记在
+        ``settings[f"{model_key}_{provider_id}"]``（见
+        :meth:`ModelSelectorWidget._on_model_changed`），而 ``llm_config.json`` 里
+        provider 条目的 ``model_name`` 只是**默认值**，常常是空串。任何需要按模型
+        名判断能力的调用方（上下文窗口 → 预算裁剪、API server 的请求校验）都必须
+        走本方法，否则会拿到空名 → 窗口退化成 32K 默认值（历史被砍到 8K），
+        表现为"明明是大窗口模型，程序却只喂一点点"。
+
+        解析顺序：按 provider 记忆的模型名 → provider 条目里的默认模型名 → 空串。
+
+        刻意**不**回退到 ``settings[model_key]``：那里存的是选择器用来显示的文本
+        （可能带 " [Closed]" 之类后缀），且属于"当前选中的那个 provider"，拿它去
+        推断另一个 provider 的模型能力只会得到错误的窗口。
+        """
+        provider_cfg = provider_cfg or {}
+        pid = str(provider_id or provider_cfg.get("id") or "").strip()
+        candidates = []
+        if pid:
+            candidates.append(self.user_settings.get(f"{model_key}_{pid}", ""))
+        candidates.append(provider_cfg.get("model_name", ""))
+        for candidate in candidates:
+            name = str(candidate or "").strip()
+            if name:
+                return name
+        return ""
+
     def load_llm_configs(self) -> list:
         default_config = [
             {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "model_name": "",
