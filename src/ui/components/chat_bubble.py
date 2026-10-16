@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from src.core.chat_typography import read as read_typography, scope_values
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
+from src.core.i18n import tr
 from src.core.platform_env import is_windows
 from src.core.references import render_footer_references, split_footer
 from src.core.signals import GlobalSignals
@@ -646,7 +647,10 @@ class ChatBubbleWidget(QWidget):
 
     sig_edit_confirmed = Signal(int, str)
     sig_link_clicked = Signal(str)
-    sig_retry_clicked = Signal(int)
+    #: "重新发起"入口（只出现在**最新一条用户消息**上，且**本轮已结束**）：携带本气泡
+    #: 编号，也就是该条问题在 ``history`` 里的下标，上层据此核对它是否仍是最新那一条
+    #: （见 ChatSendFlowMixin.handle_regenerate_last_turn）。
+    sig_regenerate_clicked = Signal(int)
     sig_plot_plan_confirm = Signal(str)
     sig_ask_user_submit = Signal(str)
     sig_deep_plan_confirm = Signal(str)
@@ -671,7 +675,7 @@ class ChatBubbleWidget(QWidget):
     btn_layout: QHBoxLayout
     btn_copy: QPushButton
     btn_copy_md: QPushButton
-    btn_bubble_retry: QPushButton
+    btn_regenerate: QPushButton
     btn_edit: QPushButton
     edit_btn_widget: QWidget
     edit_btn_layout: QHBoxLayout
@@ -906,21 +910,25 @@ class ChatBubbleWidget(QWidget):
         self.btn_copy_md.setIcon(tm.icon("markdown_copy", "text_muted"))
         self.btn_layout.addWidget(self.btn_copy_md)
 
-        if not self.is_user and self.msg_type != self.MSG_ERROR:
-            self.btn_bubble_retry = QPushButton(" Retry")
-            self.btn_bubble_retry.setIcon(tm.icon("refresh", "warning"))
-            self.btn_bubble_retry.setCursor(Qt.PointingHandCursor)
-            # 配色在 _apply_theme 中按主题注入（原硬编码橙/白在浅色下对比不足）
-            self.btn_bubble_retry.clicked.connect(lambda: self.sig_retry_clicked.emit(self.index))
-            self.btn_bubble_retry.setVisible(False)
-            self.btn_layout.addWidget(self.btn_bubble_retry)
-
         if self.is_user:
             self.btn_edit = QPushButton("Edit")
             self.btn_edit.setIcon(tm.icon("edit", "text_muted"))
             self.btn_edit.setCursor(Qt.PointingHandCursor)
             self.btn_edit.clicked.connect(self.toggle_edit)
             self.btn_layout.addWidget(self.btn_edit)
+
+            # 重新发起：与复制按钮同一套小按钮外观（文字 + SVG 图标，随主题取色）。
+            # 它与"编辑"同属**只作用于最新一条问题**的入口，因此就放在编辑按钮旁边
+            # ——"重新发起"与"编辑后再发送"本来就是同一件事（同一个 handle_edit_resend
+            # 路径）。可见性另有一条：**本轮必须已经结束**（见 set_regenerate_available）。
+            self._regenerate_available = False
+            self.btn_regenerate = QPushButton(tr("Regenerate"))
+            self.btn_regenerate.setIcon(tm.icon("sync", "text_muted"))
+            self.btn_regenerate.setCursor(Qt.PointingHandCursor)
+            self.btn_regenerate.clicked.connect(
+                lambda: self.sig_regenerate_clicked.emit(self.index))
+            self.btn_regenerate.setVisible(False)
+            self.btn_layout.addWidget(self.btn_regenerate)
 
         self.content_layout.addWidget(self.btn_widget)
 
@@ -1097,11 +1105,38 @@ class ChatBubbleWidget(QWidget):
         menu.exec(source.mapToGlobal(pos))
 
     def disable_edit(self):
+        """"只作用于最新一条问题"的入口一并收起：编辑 + 重新发起。
+
+        两者共用一条判据（``_can_edit``）：新问题一入场，旧问题上这两个入口就都不该
+        再响应——点下去会把"当前轮次之外"的内容重跑一遍。因此放在同一个方法里收，
+        不另立一套"哪条才是最新"的判定。
+        """
         self._can_edit = False
         if hasattr(self, 'btn_edit'):
             self.btn_edit.setVisible(False)
+        self._refresh_regenerate_visible()
         if self.is_editing:
             self.cancel_edit()
+
+    def set_regenerate_available(self, available: bool):
+        """本轮对话是否**已结束**——只有结束了才给出"重新发起"入口。
+
+        由对话面板按生成生命周期统一下发，气泡不自判"忙不忙"：整轮是否结束只有一处
+        判据（见 ``ChatBubblesMixin._sync_regenerate_available``），这里只负责与
+        "是不是最新一条"（``_can_edit``）取交集。
+
+        为什么必须有这条：本轮还在跑（或停在等待作答的暂停态）时给出入口，点下去要么
+        与新任务抢同一条生成管线、要么重跑一段还没落定的内容；这两种结果都不该由一次
+        误点触发。因此"忙"时直接不给入口，而不是给一个点了会被拒的按钮。
+        """
+        self._regenerate_available = bool(available)
+        self._refresh_regenerate_visible()
+
+    def _refresh_regenerate_visible(self):
+        """"最新一条" ∧ "本轮已结束" → 显示；其余一律收起。"""
+        btn = getattr(self, 'btn_regenerate', None)
+        if btn is not None:
+            btn.setVisible(getattr(self, '_regenerate_available', False) and self._can_edit)
 
     # --- 3.2 富文本浏览器 / 滚动块的统一样式（随主题刷新） ---
     def _browser_qss(self) -> str:
@@ -1223,17 +1258,12 @@ class ChatBubbleWidget(QWidget):
         if hasattr(self, 'btn_edit'): self.btn_edit.setStyleSheet(btn_style)
         if hasattr(self, 'btn_cancel'): self.btn_cancel.setStyleSheet(btn_style)
 
-        # Retry / Confirm：原为硬编码橙色与固定蓝，改为主题取色后随深浅模式
-        # 自动刷新（浅色主题下 warning 用更深的橙，背景填充时文字取 bg_main
-        # 保证对比度）。
-        if hasattr(self, 'btn_bubble_retry'):
-            self.btn_bubble_retry.setIcon(tm.icon("refresh", "warning"))
-            self.btn_bubble_retry.setStyleSheet(f"""
-                QPushButton {{ background-color: transparent; border: none;
-                               color: {tm.color('warning')}; font-size: 12px;
-                               padding: 2px 4px; border-radius: 4px; font-weight: {strong_weight_css()}; }}
-                QPushButton:hover {{ color: {tm.color('bg_main')}; background-color: {tm.color('warning')}; }}
-            """)
+        # 重新发起：与复制按钮同一套取值（图标 + 文字都随主题刷新，深/浅模式一致）
+        if hasattr(self, 'btn_regenerate'):
+            self.btn_regenerate.setIcon(tm.icon("sync", "text_muted"))
+            self.btn_regenerate.setStyleSheet(btn_style)
+
+        # Confirm：原为固定蓝，改为主题取色后随深浅模式自动刷新。
         if hasattr(self, 'btn_confirm'):
             self.btn_confirm.setIcon(tm.icon("check-circle", "bg_main"))
             self.btn_confirm.setStyleSheet(f"""

@@ -289,6 +289,8 @@ class ChatResponseFlowMixin:
             # 轮次边界落盘（取消也算一轮结束，半条已并入历史）
             self._autosave_session()
             self.current_ai_bubble = None
+            # 用户停止也是一轮的出口：到这一刻"重新发起"入口才该出现
+            self._sync_regenerate_available()
             self.scroll_to_bottom(force=False)
             return
 
@@ -345,6 +347,7 @@ class ChatResponseFlowMixin:
         # 轮次边界落盘：回答完整收尾，半条文件随之作废
         self._autosave_session()
         self.current_ai_bubble = None
+        self._sync_regenerate_available()   # 回答结束：本轮的重新发起入口此刻出现
         self.logger.info("AI response generation finished and UI updated.")
 
     def _attach_references(self, entry: dict):
@@ -478,6 +481,7 @@ class ChatResponseFlowMixin:
         self._autosave_session()
 
         self.current_ai_bubble = None
+        self._sync_regenerate_available()   # 意外结束同样是一轮的出口
         # 完整原始错误（含 JSON payload 中的 details）写入日志
         self.logger.error("Chat task failed.\n%s", msg)
         ToastManager().show(tr("Generation failed due to an error."), "error")

@@ -691,6 +691,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "聊天记录 (*.schat *.json *.md *.txt *.csv);;Scholar Navis 无损 (*.schat *.json);;Markdown (*.md);;文本 (*.txt);;CSV (*.csv)",
         "Importing Chat": "正在导入对话",
         "Reading and parsing chat history...": "正在读取并解析聊天记录…",
+        "Rendering {n} message(s)...": "正在渲染 {n} 条消息…",
+        "Some messages could not be rendered.": "部分消息未能渲染。",
         "No chat messages were found in the file.": "文件中未找到任何聊天消息。",
         "Lossless (full fidelity).": "无损（完整保真）。",
         "Best-effort text import (rich content such as citations/images may be reduced to plain text).":
@@ -706,14 +708,23 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "No Knowledge Base (Direct Chat)": "无知识库（直接对话）",
         "The knowledge base was modified. Chat is currently locked.": "知识库已被修改，对话当前已锁定。",
         "Chat history cleared.": "聊天记录已清空。",
+        "Restoring the last conversation...": "正在恢复上一次对话…",
         "Restored the last conversation ({n} messages).": "已恢复上一次对话（{n} 条消息）。",
         "Please answer the pending question card above first (or press Stop to dismiss it).":
             "请先回答上方待答的问题卡（或按“停止”关闭它）。",
+        "The conversation is still loading. Please wait a moment.":
+            "对话仍在加载中，请稍候。",
         "Cannot edit: The current library has been modified. Please clear chat.":
             "无法编辑：当前知识库已被修改。请清空对话。",
         "Cannot send: the current library has been modified. Please clear chat.":
             "无法发送：当前知识库已被修改。请清空对话。",
         "You can only edit your most recent message.": "只能编辑你最近的一条消息。",
+        "Regenerate": "重新发起",
+        "Cannot regenerate: the current library has been modified. Please clear chat.":
+            "无法重新发起：当前知识库已被修改。请清空对话。",
+        "Please wait for the current answer to finish first.": "请先等待当前回答结束。",
+        "Nothing to regenerate: the conversation has no question to re-send.":
+            "没有可重新发起的内容：当前对话中找不到可重发的提问。",
         "Empty plotting requirement.": "绘图需求为空。",
         "Empty answer.": "答案为空。",
         "The plan is empty.": "计划为空。",

@@ -48,6 +48,15 @@ class ChatSendFlowMixin:
             self.logger.debug("Send blocked: turn is waiting for an interactive-card answer.")
             return
 
+        # 0.6 历史回灌分片进行中拦一切发送（同 0.5 的口径：在这一处卡住所有入口）。
+        #     回灌期间 self.history 只是"已重建的一部分"，此刻发送会把新消息挂在半截
+        #     上下文上，后续分片还会继续往后追加，两边互相插队；桌面端此时盖着加载
+        #     遮罩，等待本身就是预期行为。
+        if getattr(self, '_history_rebuild_state', None) is not None:
+            ToastManager().show(tr("The conversation is still loading. Please wait a moment."), "warning")
+            self.logger.debug("Send blocked: history rebuild is still in progress.")
+            return
+
         # 1. 获取并格式化 KB ID
         kb_data = self.combo_kb.currentData()
         kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
@@ -243,6 +252,82 @@ class ChatSendFlowMixin:
         # hide_context_preview 会一并清空图片 / 文档芯片
         self.input_container.hide_context_preview()
 
+    def handle_regenerate_last_turn(self, index: int = -1):
+        """重新发起最后一次对话：删掉该轮已有内容，按"编辑后再发送"重跑一次。
+
+        与用户气泡上"编辑 → 确认"走**同一条**路径（:meth:`handle_edit_resend`）：
+        截断到该轮用户消息之前、重放此前的回答、再把同一个问题重新送入生成管线。
+        这里刻意不另写一套截断 / 重放：附件上下文的重建、引用编号空间的重置、重放
+        期间的滚动抑制都长在那条路径里，复制一份必然会分叉。
+
+        与"编辑"的唯一差别是文本不变——所以"重新发起"就是让模型把同一问题重答一次。
+
+        :param index: 点击的那条用户消息在 ``history`` 里的下标（=-1 表示不校验来源）。
+            入口只在最新一条用户消息上出现（与"编辑"同一条判据），但点击与新一轮开始
+            之间可能夹着状态变化，故仍按下标核对一次，避免把当前轮次之外的内容重跑。
+        """
+        # 守卫顺序与 process_send 的闸口一致：库被改动 / 等待作答 / 历史回灌中是三条
+        # 既有闸口，外加"正在生成"——这四态下重发要么破坏上下文，要么与新任务抢管线
+        # （现有"编辑后再发送"没有最后一道，正是"旧任务变成孤儿继续烧 token"的来路）。
+        # 四种忙碌态都不会显示入口（见 _sync_regenerate_available），这里的守卫是**竞态
+        # 兜底**：点击已入队、随后用户又发了新问题，本次点击不该落在那条新任务上。
+        if getattr(self, 'is_locked', False):
+            ToastManager().show(
+                tr("Cannot regenerate: the current library has been modified. "
+                   "Please clear chat."), "warning")
+            return
+        if getattr(self, '_awaiting_user_input', False):
+            ToastManager().show(
+                tr("Please answer the pending question card above first "
+                   "(or press Stop to dismiss it)."), "warning")
+            return
+        if getattr(self, '_history_rebuild_state', None) is not None:
+            ToastManager().show(
+                tr("The conversation is still loading. Please wait a moment."), "warning")
+            return
+        if getattr(self, 'current_ai_bubble', None) is not None:
+            ToastManager().show(
+                tr("Please wait for the current answer to finish first."), "warning")
+            return
+
+        last_user_idx = -1
+        for i in range(len(self.history) - 1, -1, -1):
+            if self.history[i].get('role') == 'user':
+                last_user_idx = i
+                break
+        if index >= 0 and index != last_user_idx:
+            self.logger.info("Regenerate ignored: message #%d is no longer the last question "
+                             "(last is #%d).", index, last_user_idx)
+            return
+        text = self._user_display_text(self.history[last_user_idx]) if last_user_idx >= 0 else ""
+        if not text:
+            ToastManager().show(
+                tr("Nothing to regenerate: the conversation has no question to re-send."),
+                "warning")
+            return
+
+        self.logger.info("Regenerate requested: re-sending question of message #%d.",
+                         last_user_idx)
+        self.handle_edit_resend(last_user_idx, text)
+
+    @staticmethod
+    def _user_display_text(msg) -> str:
+        """用户消息里"用户真正输入的那段文字"（气泡展示与重新发起都用它）。
+
+        历史条目的 ``content`` 是送给模型的完整文本（附件上下文包在
+        ``Context Info: …\\n\\nQuestion:\\n`` 里），``display_text`` 才是用户看到的原文。
+        旧快照可能没有该字段，此时按同一分隔规则从 ``content`` 取回问题段——分隔符与
+        :meth:`handle_edit_resend` 复用上下文前缀时用的完全一致。
+        """
+        if not isinstance(msg, dict):
+            return ""
+        text = str(msg.get('display_text') or '').strip()
+        if text:
+            return text
+        content = str(msg.get('content') or '')
+        marker = "\n\nQuestion:\n"
+        return content.split(marker, 1)[1].strip() if marker in content else content.strip()
+
     def handle_edit_resend(self, index, new_text):
         if getattr(self, 'is_locked', False):
             ToastManager().show(tr("Cannot edit: The current library has been modified. Please clear chat."), "warning")
@@ -417,6 +502,8 @@ class ChatSendFlowMixin:
             self.input_container.set_send_locked(False)
             self.input_container.btn_stop.setVisible(False)
             self.input_container.btn_send.setVisible(True)
+            # 解除等待即本轮被用户终止：与其余出口一样重算"重新发起"入口
+            self._sync_regenerate_available()
             self.logger.info("Waiting state dismissed by user; normal chat restored.")
             ToastManager().show(tr("Waiting dismissed. You can chat normally now."), "info")
             return

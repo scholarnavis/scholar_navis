@@ -72,6 +72,10 @@ class ChatBubblesMixin:
         bubble.sig_link_clicked.connect(self.handle_link_click)
         if is_user:
             bubble.sig_edit_confirmed.connect(self.handle_edit_resend)
+            # 重新发起：与"编辑"同在最新那条用户消息上（"是不是最新"与编辑同源，见
+            # ChatBubbleWidget.disable_edit），但**只在本轮结束之后**才出现（见
+            # _sync_regenerate_available）；忙时不给入口，而不是给一个点了被拒的按钮。
+            bubble.sig_regenerate_clicked.connect(self.handle_regenerate_last_turn)
 
         self.chat_layout.addWidget(bubble)
 
@@ -82,6 +86,31 @@ class ChatBubblesMixin:
                 # AI 气泡出现时只在用户本来就在底部时跟随，不打断上翻阅读
                 QTimer.singleShot(50, lambda: self.scroll_to_bottom(smooth=True, force=False))
         return bubble
+
+    def _sync_regenerate_available(self):
+        """"重新发起"入口的**唯一判据**：本轮结束了吗。
+
+        "本轮是否结束"= 三件事同时成立：
+
+        1. 没有正在生成的回答（``current_ai_bubble`` 为空）；
+        2. 没有停在等待作答的暂停态（``_awaiting_user_input``）——那是本轮进行中，不是
+           结束；
+        3. 没有正在进行的会话回灌（``_history_rebuild_state``）。
+
+        调用点是本轮的**各条出口**（正常结束 / 用户停止 / 报错 / 等待被解除 / 会话恢复
+        完成），每处都只是"状态变了，重算一次"，判据本身只在这里一份。
+        """
+        if getattr(self, 'chat_layout', None) is None:
+            return
+        available = (getattr(self, 'current_ai_bubble', None) is None
+                     and not getattr(self, '_awaiting_user_input', False)
+                     and getattr(self, '_history_rebuild_state', None) is None)
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            widget = item.widget() if item is not None else None
+            setter = getattr(widget, 'set_regenerate_available', None)
+            if callable(setter):
+                setter(available)
 
     def _restore_message_references(self, bubble, msg):
         """把历史条目携带的引用整批回灌引用缓存（按该气泡的新编号）。

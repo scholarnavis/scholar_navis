@@ -16,11 +16,24 @@ class ChatSessionMixin:
     """把当前对话持续落盘，并在下次构建面板时回灌（口径见 src/core/chat_session.py）。"""
 
     # ---------- 保存 ----------
+    def _snapshot_writable(self) -> bool:
+        """当前是否允许把 ``self.history`` 写回磁盘快照。
+
+        历史回灌（:meth:`~src.tools.chat_mixins.attachments.ChatAttachmentsMixin.
+        _apply_imported_history`）是分片推进的，期间 ``self.history`` 只是"已重建的
+        一部分"；此刻落盘会用截断的会话覆盖磁盘上那份完整快照——而回灌的数据正是从
+        它读出来的。宁可这次不写，也不要写坏。
+        """
+        if getattr(self, "_history_rebuild_state", None) is not None:
+            logger.info("Skip session snapshot: history rebuild is still in progress.")
+            return False
+        return True
+
     def _autosave_session(self):
         """轮次边界：覆盖落盘完整会话，并丢弃流式半条（它已并入 history）。"""
         from src.core import chat_session
         history = getattr(self, "history", []) or []
-        if not history:
+        if not history or not self._snapshot_writable():
             return
         self._sync_all_bubble_cards()
         if chat_session.save_session(history):
@@ -106,6 +119,8 @@ class ChatSessionMixin:
         from src.core import chat_session
         if getattr(self, "widget", None) is None:
             return
+        if not self._snapshot_writable():
+            return
 
         history = getattr(self, "history", []) or []
         if history:
@@ -140,10 +155,26 @@ class ChatSessionMixin:
             # ask_user / deep-plan 的交互卡是 UI 组件，无法随消息恢复；若不复位这个
             # 标志，输入框会被永久锁在"等待作答"状态。
             self._awaiting_user_input = False
-            self._apply_imported_history(messages, announce=False)
-            logger.info("Restored last chat session: %d message(s)", len(messages))
-            ToastManager().show(
-                tr("Restored the last conversation ({n} messages).").format(n=len(messages)),
-                "info")
+            # 回灌是分片推进的（大历史可达数秒），期间盖一层加载遮罩：启动阶段没有
+            # 任何其它等待反馈，不加遮罩用户看到的就是"启动完就卡住"。
+            self._apply_imported_history(
+                messages, announce=False,
+                progress_text=tr("Restoring the last conversation..."),
+                on_done=lambda success: self._on_session_restored(messages, success))
         except Exception:
             logger.exception("Failed to restore last chat session.")
+
+    def _on_session_restored(self, messages, success):
+        """启动恢复的收尾（``_apply_imported_history`` 的 ``on_done`` 回调）。
+
+        单条消息渲染失败不影响整轮恢复，但必须让用户知道"看到的不完整"——静默降级
+        会让人以为对话本身就只有这些内容。
+        """
+        logger.info("Restored last chat session: %d message(s) (all_rendered=%s)",
+                    len(messages), success)
+        if not success:
+            ToastManager().show(tr("Some messages could not be rendered."), "warning")
+            return
+        ToastManager().show(
+            tr("Restored the last conversation ({n} messages).").format(n=len(messages)),
+            "info")

@@ -6,6 +6,7 @@ import base64
 import logging
 import os
 import re
+import time
 from urllib.parse import quote
 
 from PySide6.QtGui import QCursor
@@ -591,27 +592,64 @@ class ChatAttachmentsMixin:
             pd.close_safe()
             return
 
+        # 重建阶段（逐条渲染气泡）比解析慢得多，且全程在 UI 线程：这里改用异步
+        # 分片推进（见 _apply_imported_history），进度对话框在这期间才能继续滚动
+        # 动画、主窗口才能重绘。收尾提示因此挪到完成回调里。
+        pd.update_progress(-1, tr("Rendering {n} message(s)...").format(n=len(messages)))
+
+        def _on_rebuilt(success):
+            if success:
+                pd.show_finish_state(
+                    True, tr("Import Complete"),
+                    tr("Imported {n} message(s) from:\n{name}").format(
+                        n=len(messages), name=os.path.basename(path)))
+                self.logger.info("Imported %d chat message(s) from %s (lossless=%s)",
+                                 len(messages), path, lossless)
+            else:
+                pd.show_finish_state(False, tr("Import Error"),
+                                     tr("Some messages could not be rendered."))
+                self.logger.error("Imported %d chat message(s) from %s, "
+                                  "but some messages failed to render.", len(messages), path)
+
         try:
-            self._apply_imported_history(messages)
-            pd.show_finish_state(
-                True, tr("Import Complete"),
-                tr("Imported {n} message(s) from:\n{name}").format(
-                    n=len(messages), name=os.path.basename(path)))
-            self.logger.info("Imported %d chat message(s) from %s (lossless=%s)",
-                             len(messages), path, lossless)
+            self._apply_imported_history(messages, on_done=_on_rebuilt)
         except Exception as e:
             self.logger.exception("Failed to render imported history.")
             pd.show_finish_state(False, tr("Import Error"),
                                  tr("Failed to render chat history:\n{err}").format(err=e))
 
-    def _apply_imported_history(self, messages, announce=True):
+    #: 历史回灌的分片时间预算（毫秒）：每片最多占用 UI 线程这么久，随后让出事件
+    #: 循环一拍。取值低于一帧（约 16ms），保证加载动画持续有节拍可动、窗口不会被
+    #: 桌面环境判定为"无响应"；又不至于小到让分片调度本身成为瓶颈。
+    _HISTORY_REBUILD_SLICE_MS = 8
+
+    def _apply_imported_history(self, messages, announce=True, on_done=None, progress_text=None):
         """将导入的消息替换进对话：重建气泡并写回 self.history。
 
         复用编辑重发（edit-resend）同款重放逻辑，保证渲染行为与现有对话一致，
         导入后的记录可继续作为上下文追问。
 
-        :param announce: 是否弹出"已导入 N 条"提示。启动时恢复上次对话走的是同一套
-            重放逻辑，但那不是用户发起的导入动作，故传 ``False`` 静默回灌。
+        **分片推进**：单条气泡的重建（``ChatBubbleWidget`` 构造 +
+        ``_format_response`` + ``set_content``）耗时随正文长度线性增长且无法预估，
+        整段同步跑在 UI 线程会让窗口在这期间完全冻结（大历史可达数秒，桌面环境会
+        给出"无响应"）。因此本方法只做同步前置（终止生成、清空旧会话、复位编号
+        空间），逐条重建交给 :meth:`_rebuild_history_step` 按
+        :attr:`_HISTORY_REBUILD_SLICE_MS` 的时间预算推进，片间让出事件循环：加载
+        动画能动、窗口可重绘。
+
+        代价是**本方法返回时重建尚未结束**：需要收尾动作的调用方用 ``on_done``
+        传回调，不要依赖返回后的状态。
+
+        分片的粒度是**小步**（见 :meth:`_rebuild_history_step`）：预算在一条消息内部的
+        各个慢步骤之间同样生效，而不是只在消息与消息之间。
+
+        :param announce: 完成后是否弹"已导入 N 条"提示。启动时恢复上次对话走的是同一
+            套重放逻辑，但那不是用户发起的导入动作，故传 ``False`` 静默回灌。
+        :param on_done: 重建结束后的回调，签名 ``(success: bool) -> None``。单条消息
+            渲染失败不会中断整轮重建，只会让 ``success`` 为 ``False``。
+        :param progress_text: 非 ``None`` 时在对话区盖一层加载遮罩并显示该文案
+            （见 :meth:`ChatTool._show_chat_loading`）；``None`` 表示不加遮罩，供已有
+            进度反馈的调用方（如导入流程的 ``ProgressDialog``）避免重复提示。
         """
         self._ensure_chat_ui()
 
@@ -627,37 +665,184 @@ class ChatAttachmentsMixin:
         # 避免旧会话残留条目串到导入结果的正文 [n] 上。
         from src.ui.components.citation_popup import CitationPopupController
         CitationPopupController.instance().clear_store()
-
-        # 逐条重放并同时写入 self.history：add_bubble 依赖 len(history) 生成自增
-        # 气泡索引，故必须与历史写入交替进行（与 edit-resend 重放逻辑一致）。
         self.history = []
-        for msg in messages:
-            role = msg.get("role", "assistant")
-            is_user = role == "user"
-            content = msg.get("content", "") or ""
-            display_text = msg.get("display_text", content) if is_user else content
-            ctx_html = msg.get("context_html")
-            msg_images = [c for c in msg.get("external_files", []) if c.get("type") == "image"] \
-                if msg.get("external_files") else []
-            bubble = self.add_bubble(display_text, is_user=is_user, context_html=ctx_html,
-                                     image_files=msg_images)
+
+        # 重放期间抑制气泡自带的滚动定位（add_bubble 挂的 50ms 单次定时器）：分片
+        # 推进跨多个事件循环轮次，那些定时器会在重建中途触发，把视图拽来拽去。视图
+        # 定位统一留到重建结束后做一次，与 edit-resend 重放同一口径（见 send_flow）。
+        self._is_editing = True
+
+        state = {"messages": list(messages), "cursor": 0, "job": None,
+                 "announce": announce, "on_done": on_done, "failed": False,
+                 "progress_text": progress_text, "timings": {}, "max_step": 0.0,
+                 "started": time.perf_counter()}
+        # 上一轮未走完的分片链靠"状态对象是否仍是当前值"自行终止（见 _rebuild_history_step）
+        self._history_rebuild_state = state
+
+        # 遮罩只是装饰性反馈：创建/显示失败不能拖住重建，因此单独兜一层。
+        try:
+            if progress_text is not None:
+                self._show_chat_loading(progress_text)
+        except Exception as e:
+            logger.warning("Failed to show chat loading overlay: %s", e)
+
+        QTimer.singleShot(0, lambda s=state: self._rebuild_history_step(s))
+
+    def _rebuild_history_step(self, state):
+        """分片重建一步：在时间预算内推进尽可能多的小步，然后让出事件循环。
+
+        粒度是**小步**而不是整条消息。单条消息内部各步耗时差着几个数量级——构造气泡、
+        渲染正文（markdown → HTML）、把正文交给 QTextBrowser 重排，任何一步都可能独占
+        UI 线程数百毫秒。预算只在消息之间检查的话，遇到那样一条长回答时加载动画照样
+        停住（实测 44 条历史的回灌里就是这种分布）；按小步检查，一次让出前的占用被压
+        到"最慢的单个 Qt 调用"。
+
+        顺带记录主线程的真实占用（总忙时 + 最长单步）：这是"动画停住"唯一能定量的
+        证据，收尾时汇总成一行日志（见 :meth:`_finish_history_rebuild`）。
+        """
+        if self._history_rebuild_state is not state:
+            # 已被更新的回灌接管（或被取消）：本分片链自然终止，不再触碰共享状态
+            logger.debug("History rebuild superseded; stopping this shard chain.")
+            return
+
+        messages = state["messages"]
+        deadline = time.perf_counter() + self._HISTORY_REBUILD_SLICE_MS / 1000.0
+        while time.perf_counter() < deadline:
+            job = state["job"]
+            if job is None:
+                if state["cursor"] >= len(messages):
+                    self._finish_history_rebuild(state)
+                    return
+                state["cursor"] += 1
+                state["timings"][state["cursor"] - 1] = 0.0
+                state["job"] = self._rebuild_history_message(messages[state["cursor"] - 1])
+                job = state["job"]
+                self._report_rebuild_progress(state)
+
+            started = time.perf_counter()
+            try:
+                job.send(None)
+            except StopIteration as done:
+                # 该条消息的小步已跑完：生成器的返回值就是"是否完整渲染"
+                if not done.value:
+                    state["failed"] = True
+                state["job"] = None
+            except Exception:
+                state["failed"] = True
+                state["job"] = None
+                logger.exception("Failed to rebuild chat message #%d while restoring history.",
+                                 state["cursor"] - 1)
+
+            step = time.perf_counter() - started
+            index = state["cursor"] - 1
+            state["timings"][index] = state["timings"].get(index, 0.0) + step
+            if step > state["max_step"]:
+                state["max_step"] = step
+
+        QTimer.singleShot(0, lambda s=state: self._rebuild_history_step(s))
+
+    def _rebuild_history_message(self, msg):
+        """重建单条历史消息；**生成器**，每个 ``yield`` 是一个让出点。
+
+        让出点供 :meth:`_rebuild_history_step` 在步与步之间检查时间预算，因此这里刻意
+        把三处"可能很慢"的活儿分开：构造气泡 / 回灌引用与卡片 / 渲染并写入正文。
+
+        AI 气泡先建**空壳**再写入最终 HTML：``add_bubble`` 会把传入文本先渲染一遍
+        （``ChatBubbleWidget.__init__`` → ``set_content``），而紧接着这里还要用
+        ``_format_response`` 的结果再写一次——对一条长回答等于白渲染一遍，是回灌耗时的
+        主要来源之一。流式生成走的正是"空壳 + 后续 set_content"，与线上完全一致。
+
+        索引与历史必须交替写入：``add_bubble`` 用 ``len(self.history)`` 生成自增气泡
+        编号，两者必须同步前进，否则后续气泡编号整体错位（与 edit-resend 重放一致）。
+
+        :return: 该条是否**完整**渲染。AI 正文渲染失败时回落到"直接写原始文本"（宁可
+            排版差，也不要一个空气泡），并把 ``False`` 交回调用方，汇总成"恢复/导入
+            不完整"的提示——静默降级会让用户以为对话本身就只有这些内容。
+        """
+        role = msg.get("role", "assistant")
+        is_user = role == "user"
+        content = msg.get("content", "") or ""
+        display_text = msg.get("display_text", content) if is_user else ""
+        ctx_html = msg.get("context_html")
+        msg_images = [c for c in msg.get("external_files", []) if c.get("type") == "image"] \
+            if msg.get("external_files") else []
+        bubble = self.add_bubble(display_text, is_user=is_user, context_html=ctx_html,
+                                 image_files=msg_images)
+
+        rendered = True
+        try:
+            yield
+
             # 无损导入的引用条目按新气泡编号回灌，恢复 [n] 的悬停著录与支撑原文。
             self._restore_message_references(bubble, msg)
             self._restore_message_cards(bubble, msg)
+            yield
+
             if not is_user and bubble is not None:
                 # AI 消息必须走与正常生成流一致的渲染管线（_format_response）：
-                # 无损导出的 content 是原始 markdown，含 <think>/<mcp_process>
-                # 思考块、[FINAL_ANSWER] 标记与 mermaid 代码块。若直接
-                # set_content（仅 markdown_to_html），未闭合标签会被透传成
-                # 一坨原始文本，导致导入后排版混乱。此处理会生成 think 折叠
-                # 面板 / mermaid 卡片，并缓存 mermaid 源码供点击查看。
+                # 无损导出的 content 是原始 markdown，含 <think>/<mcp_process> 思考块、
+                # [FINAL_ANSWER] 标记与 mermaid 代码块。若直接 set_content（仅
+                # markdown_to_html），未闭合标签会被透传成一坨原始文本，导致导入后排版
+                # 混乱。此处理会生成 think 折叠面板 / mermaid 卡片，并缓存 mermaid
+                # 源码供点击查看。
+                final_html = ""
                 try:
                     final_html = self._format_response(content, getattr(bubble, "index", -1))
-                    if final_html:
-                        bubble.set_content(final_html)
                 except Exception as e:
-                    logger.warning("Failed to render imported AI message with format_response: %s", e)
-            self.history.append(msg)
+                    rendered = False
+                    logger.warning("Failed to render imported AI message with "
+                                   "format_response: %s", e)
+                yield
+                bubble.set_content(final_html or content)
+        except Exception as e:
+            rendered = False
+            logger.warning("Failed to rebuild imported message #%d: %s",
+                           getattr(bubble, "index", -1), e)
+
+        # 写在 try 之外、刻意不用 finally：气泡一旦建出来就必须与 history 同步前进，
+        # 而 finally 在生成器被中途丢弃时会推迟到对象回收时刻才执行——那已是无法预期的
+        # 时机，可能落到重建收尾之后。
+        self.history.append(msg)
+        return rendered
+
+    def _report_rebuild_progress(self, state):
+        """把"已重建 N/M 条"写进加载遮罩。
+
+        动画有节拍还不够：整轮要几秒时，用户需要看到"它在往前走"。进度数字每开始重建
+        一条就变一次，即便某一小步偶尔偏慢，也不会被读成"卡死"。
+        """
+        base = state.get("progress_text")
+        if not base:
+            return
+        try:
+            self._show_chat_loading(f"{base} {state['cursor']}/{len(state['messages'])}")
+        except Exception as e:
+            logger.debug("Progress overlay update skipped: %s", e)
+
+    def _finish_history_rebuild(self, state):
+        """重建收尾：复位交互状态、收起遮罩、恢复输入与视图，最后回调调用方。
+
+        顺序有意如此：先把 ``_history_rebuild_state`` / ``_is_editing`` 复位，再收起
+        遮罩，最后才执行 ``on_done``——回调可能弹阻塞式结果对话框（导入流程即如此），
+        此刻内部状态必须已经一致，不能让对话框活在一次"重建未完成"的状态里。
+        """
+        timings = state.get("timings") or {}
+        slowest = sorted(timings.items(), key=lambda kv: -kv[1])[:3]
+        # 一行定量的回灌账本：整轮墙钟耗时 vs 主线程真实忙时，以及最长的一次独占。
+        # "加载动画卡住"= 主线程被某一步独占太久，只看总耗时分不清是"步多"还是"步慢"，
+        # 因此这两项必须一起记（慢的几条也列出来，便于按内容定位）。
+        logger.info(
+            "History rebuild: %d message(s) in %.2fs (main-thread busy %.2fs, "
+            "longest single step %.0fms); slowest: %s",
+            len(state.get("messages") or []), time.perf_counter() - state["started"],
+            sum(timings.values()), state["max_step"] * 1000.0,
+            ", ".join(f"#{i} {d * 1000.0:.0f}ms" for i, d in slowest) or "n/a")
+
+        self._history_rebuild_state = None
+        self._is_editing = False
+        self._hide_chat_loading()
+        # 会话恢复/导入完成：整段历史都是"已结束"的轮次，最后一条问题该给出重新发起入口
+        self._sync_regenerate_available()
 
         # 恢复输入控件状态
         if hasattr(self, 'input_container'):
@@ -665,5 +850,10 @@ class ChatAttachmentsMixin:
             self.input_container.clear_text()
         self.clear_attached_context()
         self.scroll_to_bottom(smooth=True)
-        if announce:
-            ToastManager().show(tr("Imported {n} message(s).").format(n=len(messages)), "success")
+
+        if state["announce"]:
+            ToastManager().show(tr("Imported {n} message(s).").format(n=len(state["messages"])), "success")
+
+        callback = state["on_done"]
+        if callback is not None:
+            callback(not state["failed"])

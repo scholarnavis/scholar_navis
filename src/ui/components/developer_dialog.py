@@ -15,8 +15,9 @@ Two test categories:
     * Functional tests — run in-process against the core modules directly
       (R detection, skill gating, syntax/import sanity, file-type knowledge,
       text-viewer render dispatch, overlay-scrollbar visibility, attachment
-      wiring). No AI involved. Checks that only need pure functions never
-      create a window and never touch user data.
+      wiring, bubble typography + glued-list repair, reference integrity and
+      title italics, history-replay chunking). No AI involved. Checks that only
+      need pure functions never create a window and never touch user data.
 
 Design principles:
     * High cohesion: one test = one focused method; no cross-deps.
@@ -534,16 +535,17 @@ class DeveloperDialog(BaseDialog):
         func_row.addStretch()
         self.content_layout.addLayout(func_row)
 
-        # 功能测试第二行：交互卡链路。Deep Plan Card 放在首位 —— 不依赖
+        # 功能测试第二行：交互卡与对话区状态。Deep Plan Card 放在首位 —— 不依赖
         # AI / 网络，点击立即完成"组件行为 + 气泡渲染链路"全量自检。
         func_row2 = QHBoxLayout()
         func_row2.setSpacing(8)
         self.btn_deep_card = self._make_btn("Deep Plan Card", self._test_deep_plan_card)
         self.btn_hitl = self._make_btn("HITL Pipeline", self._test_hitl_pipeline)
         self.btn_render = self._make_btn("Render Preview", self._test_render_preview)
-        func_row2.addWidget(self.btn_deep_card)
-        func_row2.addWidget(self.btn_hitl)
-        func_row2.addWidget(self.btn_render)
+        # 历史回灌：恢复上次对话的分片推进 + 加载遮罩 + 快照闸口（离线、不碰用户数据）
+        self.btn_restore = self._make_btn("History Restore", self._test_history_restore)
+        for b in (self.btn_deep_card, self.btn_hitl, self.btn_render, self.btn_restore):
+            func_row2.addWidget(b)
         func_row2.addStretch()
         self.content_layout.addLayout(func_row2)
 
@@ -1052,6 +1054,57 @@ class DeveloperDialog(BaseDialog):
             parsed = parse_footer_entries(html)
             if [r.index for r in parsed] != [1, 2, 3, 4] or not all(r.text for r in parsed):
                 fails.append(f"unverified mark broke footer round-trip: {parsed}")
+
+            # 7) 标题斜体：**默认正体**，只有原标题自带的斜体信号才保留。整条标题斜体
+            #    既不符合学术惯例（斜体只落在物种名/基因名/刊名一类局部成分上），也让
+            #    整片参考文献糊成一片。另有一处易错顺序：先包裹再转义会把 <i> 变成可见的
+            #    &lt;i&gt;——"整条斜体"与"标签当正文显示"两种毛病同源，故一并钉住。
+            from src.core.references import title_html
+            plain_title = title_html("Phototropin blue-light receptors")
+            if "<i>" in plain_title:
+                fails.append(f"an unmarked title must render upright: {plain_title!r}")
+            signals = {
+                "JATS <i>": ("Cryo-EM of <i>Arabidopsis thaliana</i> NPH3",
+                             "Cryo-EM of <i>Arabidopsis thaliana</i> NPH3"),
+                "<em>": ("Growth of <em>Zea mays</em>", "Growth of <i>Zea mays</i>"),
+                "<italic …>": ('Role of <italic id="x">PKS1</italic>',
+                               "Role of <i>PKS1</i>"),
+                "LaTeX": (r"Signalling in \textit{Arabidopsis}",
+                          "Signalling in <i>Arabidopsis</i>"),
+                "Markdown": ("Growth of *A. thaliana*", "Growth of <i>A. thaliana</i>"),
+            }
+            for label, (src, expect) in signals.items():
+                got = title_html(src)
+                if got != expect:
+                    fails.append(f"{label} italic signal not preserved: {got!r}")
+            if title_html("Unclosed <i>tag title") != "Unclosed tag title":
+                fails.append("stray italic markup must be dropped, not shown as body text")
+            if title_html("a < b & c") != "a &lt; b &amp; c":
+                fails.append("title escaping must stay injection-safe")
+            if "NPH3_R1" not in title_html("Gene NPH3_R1 and DOI 10.1/a_b"):
+                fails.append("underscores must not be read as an italic signal")
+            if title_html("A **x** B").count("<i>") == 0:
+                fails.append("double asterisks must not be read as an italic signal")
+
+            # 著录行同样默认正体，且句末句点必须落在斜体之外
+            upright = ReferenceItem(index=5, title="Phototropin blue-light receptors",
+                                    authors="Christie JM", year="2007")
+            if "<i>" in upright.citation_text_html():
+                fails.append("citation_text_html must render unmarked titles upright")
+            partial = ReferenceItem(index=6, title="Cryo-EM of <i>A. thaliana</i> NPH3",
+                                    authors="Sullivan S", year="2021")
+            partial_html = partial.citation_text_html()
+            if "<i>A. thaliana</i> NPH3." not in partial_html:
+                fails.append(f"the trailing period must fall outside the italic span: "
+                             f"{partial_html!r}")
+
+            # 引用卡与页脚必须共用同一个渲染器：两处各写一套判定，迟早会分叉
+            try:
+                from src.ui.components import citation_popup
+                if citation_popup.title_html is not title_html:
+                    fails.append("the citation card must reuse references.title_html")
+            except Exception as e:
+                fails.append(f"citation card title wiring check failed: {e}")
         except Exception as e:
             fails.append(f"exception: {e}")
 
@@ -1066,6 +1119,8 @@ class DeveloperDialog(BaseDialog):
         self._log("Ambiguity / short surnames are never guessed into a citation.", "OK")
         self._log("Unverified mark: shown only for entries with no DOI/URL/path and no "
                   "verbatim-checked snippet; footer export round-trip intact.", "OK")
+        self._log("Titles render upright; italics kept only where the source itself "
+                  "signalled them (JATS/LaTeX/Markdown), shared by footer and card.", "OK")
         self._log("Note: a FABRICATED DOI/URL still looks 'identified' — only "
                   "Literature Trust (live) can disprove it over the network.", "WARN")
         self._log("Reference integrity test PASSED.", "OK")
@@ -1374,6 +1429,165 @@ class DeveloperDialog(BaseDialog):
         self._log("Mermaid labels are selectable and 'Copy Text' fills the clipboard.", "OK")
         self._log("UI interaction test PASSED.", "OK")
 
+    def _test_history_restore(self, clear: bool = True):
+        """历史回灌自检：分片推进契约 + 加载遮罩 + 快照写入闸口。
+
+        起因：恢复上次对话曾整段同步跑在 UI 线程（逐条重建气泡、渲染正文），期间事件
+        循环不转——窗口"启动即冻结"，任何加载动画都停在第一帧。修好之后有三处必须
+        一直成立，否则会退化成"看着像好了、其实又卡了"或"数据被写坏"：
+
+        1. **分片推进**：``_apply_imported_history`` 只做同步前置，逐条重建交给
+           ``_rebuild_history_step`` 按时间预算分片、片间让出事件循环；收尾一律走
+           ``on_done`` 回调。这两个形参一旦被改掉，完成提示（导入完成对话框 /
+           "已恢复 N 条"）会静默消失——没人会立刻发现。
+        2. **加载遮罩**：小会话不闪现（延迟亮相）、跟随宿主尺寸、可重复 start/stop。
+        3. **快照闸口**：回灌期间 ``self.history`` 只是"已重建的一部分"，此刻落盘会用
+           截断的会话覆盖磁盘上那份完整快照（而回灌数据正是从它读出来的）。因此
+           ``_autosave_session`` 与 ``flush_session_snapshot`` 都必须被拦住。
+
+        第 1、3 项是纯 Python 断言；第 2 项用真实控件探针（``WA_DontShowOnScreen``，
+        不弹窗）。整轮只读：第 3 项把落盘函数临时换成记录器，绝不写用户数据。
+        """
+        if clear:
+            self._clear()
+        self._log("--- History Restore (chunked replay / loading overlay / snapshot gate) ---",
+                  "INFO")
+        fails = []
+        warns = []
+
+        def record(name, ok):
+            self._log(f"{name}: {'OK' if ok else 'FAIL'}", "OK" if ok else "FAIL")
+            if not ok:
+                fails.append(name)
+
+        # 1) 分片推进契约
+        try:
+            import inspect
+
+            from src.tools.chat_mixins.attachments import ChatAttachmentsMixin
+
+            params = inspect.signature(
+                ChatAttachmentsMixin._apply_imported_history).parameters
+            record("replay takes on_done / progress_text for asynchronous callers",
+                   {"on_done", "progress_text"} <= set(params))
+            record("replay exposes its shard steps",
+                   all(callable(getattr(ChatAttachmentsMixin, name, None)) for name in
+                       ("_rebuild_history_step", "_rebuild_history_message",
+                        "_finish_history_rebuild")))
+            budget = ChatAttachmentsMixin._HISTORY_REBUILD_SLICE_MS
+            record("shard budget stays under one frame (keeps the UI repainting)",
+                   0 < budget < 16)
+        except Exception as e:
+            record(f"replay contract check raised {e}", False)
+
+        # 2) 快照闸口：用最小替身调用**真实**方法，落盘函数临时换成记录器
+        try:
+            from src.core import chat_session
+            from src.tools.chat_mixins.session import ChatSessionMixin
+
+            calls = []
+            real_save = chat_session.save_session
+            real_clear = chat_session.clear_inflight
+            chat_session.save_session = lambda history: (calls.append("save"), True)[1]
+            chat_session.clear_inflight = lambda: calls.append("clear")
+            try:
+                class _SnapshotProbe:
+                    """最小替身：只提供两个方法真正用到的那点状态。"""
+
+                    widget = object()       # flush_session_snapshot 的前置判据
+
+                    def __init__(self, rebuilding):
+                        self.history = [{"role": "user", "content": "probe"}]
+                        self._history_rebuild_state = {} if rebuilding else None
+
+                    def _sync_all_bubble_cards(self):
+                        calls.append("sync_cards")
+
+                _SnapshotProbe._snapshot_writable = ChatSessionMixin._snapshot_writable
+
+                ChatSessionMixin._autosave_session(_SnapshotProbe(False))
+                record("a finished conversation is still flushed to disk",
+                       calls == ["sync_cards", "save", "clear"])
+
+                calls.clear()
+                busy = _SnapshotProbe(True)
+                ChatSessionMixin._autosave_session(busy)
+                ChatSessionMixin.flush_session_snapshot(busy)
+                record("no snapshot is written while a replay is in flight",
+                       calls == [])
+            finally:
+                chat_session.save_session = real_save
+                chat_session.clear_inflight = real_clear
+        except Exception as e:
+            record(f"snapshot gate check raised {e}", False)
+
+        # 3) 加载遮罩：真实控件探针。断言一律用 isHidden() 而非 isVisible()——宿主不在
+        #    屏幕上时 isVisible() 恒为 False，用它断言会得到假失败（同类坑见
+        #    UI Copy / Drag-Scroll 里的滚动范围断言）。
+        try:
+            import time as _time
+
+            from PySide6.QtCore import QEvent
+            from PySide6.QtWidgets import QApplication, QWidget
+
+            from src.ui.components.RotatingSpinner import LoadingOverlay
+
+            host = QWidget()
+            host.setAttribute(Qt.WA_DontShowOnScreen, True)     # 自检不弹窗
+            host.resize(320, 200)
+            host.show()
+            overlay = LoadingOverlay(host, "restoring")
+            try:
+                record("the overlay starts hidden and declares a reveal delay",
+                       overlay.REVEAL_DELAY_MS > 0 and overlay.isHidden())
+
+                overlay.start("restoring")
+                record("a pending reveal keeps the overlay hidden (no flash)",
+                       overlay.isHidden() and overlay._reveal_timer.isActive())
+
+                deadline = _time.monotonic() + 2.0
+                while _time.monotonic() < deadline and overlay.isHidden():
+                    QApplication.processEvents()
+                    _time.sleep(0.01)
+                record("the overlay appears and animates once the delay elapses",
+                       not overlay.isHidden() and overlay.spinner.timer.isActive()
+                       and not overlay._reveal_timer.isActive())
+
+                host.resize(640, 480)
+                for _ in range(3):
+                    QApplication.processEvents()
+                if overlay.size() != host.size():
+                    # 有的 Qt 构建不给"未上屏的可见控件"派发 resize 事件。此时直接驱动
+                    # 同一个过滤器入口来判定几何跟随，避免把环境差异记成产品缺陷；但也
+                    # 如实说明"真实事件投递"这一环本次没被覆盖。
+                    overlay.eventFilter(host, QEvent(QEvent.Type.Resize))
+                    warns.append("resize events are not delivered to off-screen probes "
+                                 "in this environment; overlay geometry was verified "
+                                 "through its filter entry point instead")
+                record("the overlay fills its host and follows resizes",
+                       host.width() == 640 and host.height() == 480
+                       and overlay.size() == host.size())
+
+                overlay.start("still loading")
+                record("a second start() only swaps the text",
+                       not overlay.isHidden() and overlay.label.text() == "still loading")
+
+                overlay.stop()
+                overlay.stop()      # 必须可重复调用
+                record("stop() hides the overlay and stops its animation",
+                       overlay.isHidden() and not overlay.spinner.timer.isActive())
+            finally:
+                overlay.deleteLater()
+                host.deleteLater()
+        except Exception as e:
+            record(f"loading overlay check raised {e}", False)
+
+        for w in warns:
+            self._log(f"WARN: {w}", "WARN")
+        self._log("History restore OK." if not fails else
+                  f"History restore FAILED: {', '.join(fails)}",
+                  "OK" if not fails else "FAIL")
+
     def _test_literature_source_trust(self, clear: bool = True):
         """文献检索可信性检查（**联网**）：真实检索 -> 逐条核查 -> 核查表格。
 
@@ -1590,6 +1804,8 @@ class DeveloperDialog(BaseDialog):
         self._test_reference_integrity(clear=False)
         # UI 交互自检：图表复制、悬停卡标记、超宽块拖选自动滚动
         self._test_ui_copy_scroll(clear=False)
+        # 历史回灌：分片推进契约、加载遮罩、快照闸口（纯断言 + 控件探针，离线）
+        self._test_history_restore(clear=False)
         self._test_image_pipeline(clear=False)
         self._test_deep_plan_card(clear=False)
         self._test_hitl_pipeline(clear=False)
@@ -2997,6 +3213,52 @@ class DeveloperDialog(BaseDialog):
                 probe.deleteLater()
         except Exception as e:
             record(f"selector scoping check raised {e}", False)
+
+        # 压平列表的还原：压缩输出会把整段列表挤成一行（"这一步。 - 证据：A； - 结论：B。"
+        # 或 "。 - 证据：A"），python-markdown 因此看不到块边界，标记原样显示成正文——
+        # 症状是"读起来像用横线分隔的句子，而不是列表"。修好之后必须仍然成列表，且
+        # **不得**把正文里的连字符/减号/破折号或代码块内同形内容误判成列表标记。
+        try:
+            from src.ui.components.text_formatter import TextFormatter as _TF
+
+            def _tag_count(html: str, tag: str) -> int:
+                # 渲染管线会给标签挂内联样式（<ul style="…">），只能按前缀计数
+                return html.count("<" + tag)
+
+            glued = ("错处 1：这一步。 - 证据：A； - 结论：B。\n\n"
+                     "错处 2：功能划分。- 第一条[1]；- 第二条[2]。")
+            glued_html = _TF.markdown_to_html(glued)
+            record("list markers glued into one line are still rendered as lists",
+                   _tag_count(glued_html, "ul") == 2
+                   and _tag_count(glued_html, "li") == 4)
+
+            joined = "结论：这一步。\n1. 第一项\n2. 第二项\n3. 第三项"
+            joined_html = _TF.markdown_to_html(joined)
+            record("an ordered list glued to a paragraph gets its blank line",
+                   _tag_count(joined_html, "ol") == 1
+                   and _tag_count(joined_html, "li") == 3)
+
+            under_heading = _TF.markdown_to_html("## 步骤\n- 取样本\n- 跑测序")
+            record("a list directly under a heading stays a list",
+                   _tag_count(under_heading, "ul") == 1
+                   and _tag_count(under_heading, "li") == 2)
+
+            record("list repair is idempotent",
+                   _TF._repair_glued_lists(glued) == _TF._repair_glued_lists(
+                       _TF._repair_glued_lists(glued)))
+
+            # 反例：这些里面的"-"都不是列表标记，整段必须一字不改
+            samples = {
+                "hyphens in prose": "减法示例：3 - 2 = 1；A - B 表示差值；"
+                                    "范围 10:30 - 11:00。",
+                "code fence": "正文。\n\n```python\nx = 1  # 见 A。 - B\n```\n\n结尾。",
+                "unsignalled dash": "普通的连字符句子 - 带连字符。",
+            }
+            for label, src in samples.items():
+                record(f"{label} is never rewritten by the list repair",
+                       _TF._repair_glued_lists(src) == src)
+        except Exception as e:
+            record(f"glued-list repair check raised {e}", False)
 
         self._log("Chat typography OK." if not fails else
                   f"Chat typography FAILED: {', '.join(fails)}",

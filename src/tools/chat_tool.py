@@ -38,6 +38,7 @@ from src.tools.chat_mixins import (ChatAttachmentsMixin, ChatBubblesMixin,
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.model_selector import ModelSelectorWidget
+from src.ui.components.RotatingSpinner import LoadingOverlay
 from src.ui.components.search import SearchBar
 from src.ui.components.toast import ToastManager
 
@@ -94,6 +95,13 @@ class ChatTool(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin,
         # 退出 / 崩溃前的兜底落盘由 core 的钩子表统一触发，这里只登记能力。
         self._session_restore_done = False
         chat_session.register_flush_hook(self.flush_session_snapshot)
+
+        # 历史回灌的分片状态（见 ChatAttachmentsMixin._apply_imported_history）：
+        # 非 None 表示重建正在进行，此时 self.history 只是"已重建的一部分"，禁止
+        # 落盘覆盖磁盘上的完整快照（判定点见 ChatSessionMixin._snapshot_writable）。
+        self._history_rebuild_state = None
+        # 对话区加载遮罩：惰性创建（见 _show_chat_loading），与悬浮按钮同为浮层子控件。
+        self._chat_loading_overlay = None
 
         GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
         GlobalSignals().kb_switched.connect(self.on_global_kb_switched)
@@ -420,6 +428,24 @@ class ChatTool(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin,
             if hasattr(self, 'input_container'):
                 self.input_container.lock_input()
             ToastManager().show(tr("The knowledge base was modified. Chat is currently locked."), "warning")
+
+    def _show_chat_loading(self, text: str):
+        """在对话区盖一层加载遮罩并显示 ``text``（惰性创建，可重复调用）。
+
+        遮罩与悬浮导航按钮一样是 ``scroll_area`` 的浮层子控件：不进 ``chat_layout``，
+        因此历史回灌前的 ``clear_layout`` 不会把它清掉，定位也由遮罩自己跟随宿主
+        尺寸（见 :class:`~src.ui.components.RotatingSpinner.LoadingOverlay`）。
+        """
+        overlay = self._chat_loading_overlay
+        if overlay is None:
+            overlay = self._chat_loading_overlay = LoadingOverlay(self.scroll_area)
+        overlay.start(text)
+
+    def _hide_chat_loading(self):
+        """收起对话区加载遮罩。未创建过（或已收起）时是空操作。"""
+        overlay = self._chat_loading_overlay
+        if overlay is not None:
+            overlay.stop()
 
     def _make_overlay_button(self, icon_name: str):
         """创建悬浮导航圆按钮（40x40 圆形，透明度渐隐动画）。
