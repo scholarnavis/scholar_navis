@@ -10,8 +10,8 @@ import traceback
 from src.core.platform_env import (
     app_root, configure_qt_environment, format_qt_import_error,
     gui_display_available, is_elevated, is_shared_library_error, is_windows,
-    log_environment, maybe_relaunch_in_fhs, no_display_message,
-    shared_library_hint,
+    log_environment, maybe_relaunch_for_webengine, maybe_relaunch_in_fhs,
+    no_display_message, shared_library_hint,
 )
 
 configure_qt_environment()
@@ -39,6 +39,16 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["SCARF_NO_ANALYTICS"] = "true"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+#: 启动模式：API 模式只跑 HTTP 服务，不需要图形运行库，也不该被 FHS 接管打断。
+#: **唯一定义处**（下面多个分支都据此分流）。
+IS_API_MODE = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
+
+# 基础 Qt 可用 ≠ 内置查看器可用：QtWebEngine（Mermaid / PDF）另需 libnss3、libasound
+# 等系统库。NixOS 上若不在此刻接管运行环境，症状会推迟到用户第一次点开图 / PDF 时
+# 才出现——那时进程已在运行，只能退化为"提示不可用"。故在此尽早判定。
+if not IS_API_MODE and maybe_relaunch_for_webengine():
+    sys.exit(0)
 
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
@@ -344,20 +354,19 @@ if __name__ == "__main__":
     except RuntimeError:
         pass
 
-    # 1. 判断启动模式
-    is_api_mode = len(sys.argv) > 1 and sys.argv[1] == "--api-server"
+    # 1. 启动模式见模块顶部的 IS_API_MODE（唯一定义处）
 
     # 2. 图形会话预检（仅 GUI 模式）：无 X11/Wayland 会话时给出可操作提示，
     #    而不是让 Qt 以原生错误码中断在用户读不到的位置（SSH、纯终端、容器）。
     has_display = gui_display_available()
-    if not is_api_mode and not has_display:
+    if not IS_API_MODE and not has_display:
         print(no_display_message(), file=sys.stderr)
         sys.exit(3)
 
     def _fatal_message(title, text, detail=""):
         """致命提示：可用界面则弹窗，否则写 stderr（API 模式/无显示会话）。"""
         print(f"{title}: {text}" + (f"\n{detail}" if detail else ""), file=sys.stderr)
-        if is_api_mode or not has_display:
+        if IS_API_MODE or not has_display:
             return
         try:
             QApplication.instance() or QApplication(sys.argv)
@@ -383,7 +392,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # 4. 统一在最开始创建 Qt 应用实例
-    app = QCoreApplication(sys.argv) if is_api_mode else QApplication(sys.argv)
+    app = QCoreApplication(sys.argv) if IS_API_MODE else QApplication(sys.argv)
 
     # 退出前请求取消并等待仍在运行的任务线程：否则解释器清理模块全局时会回收
     # 仍在运行的 QThread，Qt 打印
@@ -402,7 +411,7 @@ if __name__ == "__main__":
     socket.connectToServer(unique_server_name)
 
     if socket.waitForConnected(500):
-        if is_api_mode:
+        if IS_API_MODE:
             print("Initialization Failed: Scholar Navis (GUI or API) is currently executing.")
         else:
             msg_box = QMessageBox()
@@ -421,7 +430,7 @@ if __name__ == "__main__":
     local_server.listen(unique_server_name)
 
     # 7. 根据模式进入相应的启动流程
-    if is_api_mode:
+    if IS_API_MODE:
         os.environ["SCARF_NO_ANALYTICS"] = "true"
 
 

@@ -673,7 +673,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Export as PDF": "导出为 PDF",
         "Export as MD": "导出为 MD",
         "Export as TXT": "导出为 TXT",
-        "Export as Archive (.schat, lossless, for re-import)": "导出为归档（.schat，无损，可重新导入）",
+        "Export as Archive": "导出为归档",
         "PDF Document (*.pdf)": "PDF 文档 (*.pdf)",
         "Markdown File (*.md)": "Markdown 文件 (*.md)",
         "Scholar Navis Archive (*.schat)": "Scholar Navis 归档 (*.schat)",
@@ -703,6 +703,26 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Imported {n} message(s) from:\n{name}": "从以下位置导入 {n} 条消息：\n{name}",
         "Failed to render chat history:\n{err}": "渲染聊天记录失败：\n{err}",
         "Imported {n} message(s).": "已导入 {n} 条消息。",
+
+        # ================= 对话助手：标签页 =================
+        "Default Conversation": "默认对话",
+        "New Tab": "新建标签页",
+        "Close Tab": "关闭标签页",
+        "Rename Tab": "重命名标签页",
+        "Export All Tabs": "导出全部标签页",
+        "At least one tab must remain open.": "至少需要保留一个标签页。",
+        "Found {tabs} tab(s) with {n} message(s).\n{note}\n\nThey will be opened as new tabs. Continue?":
+            "找到 {tabs} 个标签页、共 {n} 条消息。\n{note}\n\n将把它们作为新的标签页打开。是否继续？",
+        "Opening {tabs} tab(s)...": "正在打开 {tabs} 个标签页…",
+        "Imported {tabs} tab(s), {n} message(s) from:\n{name}":
+            "已从以下位置导入 {tabs} 个标签页、共 {n} 条消息：\n{name}",
+        "No chat tab is available to receive the imported conversations.":
+            "当前没有可接收导入对话的标签页。",
+
+        # ================= 对话助手：链接路由与内置查看器 =================
+        "Cannot open the viewer: the QtWebEngine runtime could not be loaded.":
+            "无法打开查看器：QtWebEngine 运行库未能加载。",
+        "Failed to open the link.": "打开链接失败。",
 
         # ================= 对话助手：对话流程 =================
         "No Knowledge Base (Direct Chat)": "无知识库（直接对话）",

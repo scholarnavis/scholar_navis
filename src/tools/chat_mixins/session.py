@@ -1,7 +1,11 @@
-"""Chat session mixin: 关闭自动保存 + 启动自动恢复。
+"""Chat session mixin: 每个标签页的自动保存。
 
-持久化口径（路径、格式、节流、半条合并、清理语义）集中在
-:mod:`src.core.chat_session`；本文件只回答两个时序问题：**什么时候存**、**什么时候恢复**。
+持久化口径（路径、格式、节流、半条合并、清理语义、标签页清单）集中在
+:mod:`src.core.chat_session`；本文件只回答两个时序问题：**什么时候存**。
+
+"什么时候恢复"归标签页容器（:class:`src.tools.chat_tool.ChatTool`）：一个标签页的
+会话要等它第一次被激活、控件真正建出来之后才回灌，因此这里只提供
+:meth:`ChatSessionMixin.load_messages` 这一处"把消息灌进面板"的入口。
 """
 
 import logging
@@ -13,9 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 class ChatSessionMixin:
-    """把当前对话持续落盘，并在下次构建面板时回灌（口径见 src/core/chat_session.py）。"""
+    """把当前标签页的对话持续落盘（口径见 src/core/chat_session.py）。"""
 
     # ---------- 保存 ----------
+    def _tab_id(self) -> str:
+        """本会话所属标签页 id（由容器在构造时注入）。"""
+        return str(getattr(self, "tab_id", "") or "")
+
     def _snapshot_writable(self) -> bool:
         """当前是否允许把 ``self.history`` 写回磁盘快照。
 
@@ -30,14 +38,14 @@ class ChatSessionMixin:
         return True
 
     def _autosave_session(self):
-        """轮次边界：覆盖落盘完整会话，并丢弃流式半条（它已并入 history）。"""
+        """轮次边界：覆盖落盘本标签页的完整会话，并丢弃流式半条（它已并入 history）。"""
         from src.core import chat_session
         history = getattr(self, "history", []) or []
         if not history or not self._snapshot_writable():
             return
         self._sync_all_bubble_cards()
-        if chat_session.save_session(history):
-            chat_session.clear_inflight()
+        if chat_session.save_tab(self._tab_id(), history):
+            chat_session.clear_inflight(self._tab_id())
 
     def _autosave_inflight(self):
         """流式期间刷新半条回答。
@@ -49,12 +57,12 @@ class ChatSessionMixin:
         if not text.strip():
             return
         from src.core import chat_session
-        chat_session.save_inflight(text)
+        chat_session.save_inflight(self._tab_id(), text)
 
     def _forget_autosaved_session(self):
-        """用户清空对话：快照一并删除，下次启动不再恢复（"没清理过才恢复"的实现点）。"""
+        """用户清空本标签页对话：快照一并删除，下次启动不再恢复。"""
         from src.core import chat_session
-        chat_session.clear_session()
+        chat_session.clear_tab(self._tab_id())
 
     def _on_bubble_cards_changed(self, bubble):
         """组件交互落定：把该气泡的组件状态回写所属历史条目并立即落盘。
@@ -78,8 +86,10 @@ class ChatSessionMixin:
 
         if snapshots:
             history[idx]["ui_components"] = snapshots
-        else:
-            history[idx].pop("ui_components", None)
+        # 空快照**不**清除既有值：气泡里没有卡片并不能证明历史上没有过组件
+        # （正文标记可能缺失、渲染可能失败、此刻也可能尚未重建完成），而
+        # ui_components 是"用户当初选了什么"的唯一载体——删掉就再也找不回来。
+        # 多留一条对不上号的快照是无害的（回灌按 (kind, key) 匹配，配不上就忽略）。
         self._autosave_session()
 
     def _sync_all_bubble_cards(self):
@@ -88,6 +98,9 @@ class ChatSessionMixin:
         卡片交互一般会即时回写（见 :meth:`_on_bubble_cards_changed`），但并非每张卡
         都带状态信号（例如错误面板的折叠状态），且界面上的组件才是"当前真实状态"。
         因此每次落盘前对账一遍：退出兜底与轮次边界都拿到当前状态，而不是上次同步的旧值。
+
+        **只覆盖、不清除**（与 :meth:`_on_bubble_cards_changed` 同一条规则）：空快照
+        不构成"历史上没有组件"的证据，据此删除会让用户当初的作答永久消失。
         """
         layout = getattr(self, "chat_layout", None)
         history = getattr(self, "history", None) or []
@@ -107,8 +120,6 @@ class ChatSessionMixin:
                 continue
             if snapshots:
                 history[idx]["ui_components"] = snapshots
-            else:
-                history[idx].pop("ui_components", None)
 
     def flush_session_snapshot(self):
         """退出 / 崩溃前的兜底落盘（由 ``MainWindow.closeEvent`` 与全局异常处理器触发）。
@@ -126,43 +137,34 @@ class ChatSessionMixin:
         if history:
             # 先对账再落盘：界面上的组件状态才是"当前真实状态"
             self._sync_all_bubble_cards()
-            chat_session.save_session(history)
+            chat_session.save_tab(self._tab_id(), history)
 
         text = getattr(self, "current_ai_text", "") or ""
         if text.strip() and getattr(self, "current_ai_bubble", None) is not None:
-            chat_session.save_inflight(text, force=True)
+            chat_session.save_inflight(self._tab_id(), text, force=True)
 
     # ---------- 恢复 ----------
-    def _restore_autosaved_session(self):
-        """启动恢复：把上次对话回灌进面板。
+    def load_messages(self, messages):
+        """把已保存 / 导入的消息回灌进本标签页（由容器在控件就绪后调用）。
 
-        只在"面板刚构建、当前对话为空"时执行一次，且**只渲染不发送**——重放复用
-        导入历史同款逻辑（``_apply_imported_history``），全程不触碰
-        ``start_ai_response``，因此不会重复请求或重复计费。
+        **只渲染不发送**：重放复用导入历史同款逻辑（``_apply_imported_history``），
+        全程不触碰 ``start_ai_response``，因此不会重复请求或重复计费。
         """
-        if getattr(self, "_session_restore_done", False):
+        messages = list(messages or [])
+        if not messages or getattr(self, "history", None):
             return
-        self._session_restore_done = True
-        if getattr(self, "history", None):
-            return      # 面板上已有内容（例如用户已抢先发问），不覆盖
-
-        from src.core import chat_session
-        messages = chat_session.load_session()
-        if not messages:
-            return
-
         try:
             # ask_user / deep-plan 的交互卡是 UI 组件，无法随消息恢复；若不复位这个
             # 标志，输入框会被永久锁在"等待作答"状态。
             self._awaiting_user_input = False
-            # 回灌是分片推进的（大历史可达数秒），期间盖一层加载遮罩：启动阶段没有
-            # 任何其它等待反馈，不加遮罩用户看到的就是"启动完就卡住"。
+            # 回灌是分片推进的（大历史可达数秒），期间盖一层加载遮罩：否则用户看到的
+            # 就是"切过来就卡住"。
             self._apply_imported_history(
                 messages, announce=False,
                 progress_text=tr("Restoring the last conversation..."),
                 on_done=lambda success: self._on_session_restored(messages, success))
         except Exception:
-            logger.exception("Failed to restore last chat session.")
+            logger.exception("Failed to restore chat session for tab %s.", self._tab_id())
 
     def _on_session_restored(self, messages, success):
         """启动恢复的收尾（``_apply_imported_history`` 的 ``on_done`` 回调）。
@@ -170,8 +172,8 @@ class ChatSessionMixin:
         单条消息渲染失败不影响整轮恢复，但必须让用户知道"看到的不完整"——静默降级
         会让人以为对话本身就只有这些内容。
         """
-        logger.info("Restored last chat session: %d message(s) (all_rendered=%s)",
-                    len(messages), success)
+        logger.info("Restored chat tab %s: %d message(s) (all_rendered=%s)",
+                    self._tab_id(), len(messages), success)
         if not success:
             ToastManager().show(tr("Some messages could not be rendered."), "warning")
             return

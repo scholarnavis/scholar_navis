@@ -10,10 +10,18 @@
 
 .. code-block:: text
 
-    chat_history.json      # 与旧版纯 JSON 完全同构（format / version / messages …）
+    chat_history.json      # 标签页与消息（format / version / tabs / attachments …）
     attachments/<name>     # external_files 引用的文件本体，去重后按原名保存
 
 JSON 部分刻意保留 ``indent=2``：压缩后缩进几乎不增加体积，而解包出来仍可人读。
+
+标签页语义
+----------
+归档内容是**若干个标签页**（``tabs: [{"name": …, "messages": [...]}, …]``）：
+导出单个标签页就是只含一个元素的 ``tabs``；"导出全部"则原样带上所有标签页。
+读取侧统一走 :func:`extract_tabs`，历史版本（只有 ``messages`` 的旧归档）会被
+视作"一个未命名标签页"，因此 :data:`DEFAULT_TAB_NAME` 与 :func:`clean_tab_name`
+只在这里定义一次，快照与界面均从本模块取用。
 
 兼容
 ----
@@ -39,13 +47,18 @@ logger = logging.getLogger("Core.ChatArchive")
 #: 消息 schema 与格式标识（与历史版本保持一致，导入侧据此判定"无损"）。
 FORMAT = "scholar_navis_chat_history"
 VERSION = 1
-#: 容器结构版本：1 = 纯 JSON（旧），2 = ZIP（压缩 + 内嵌附件）。
-ARCHIVE_VERSION = 2
+#: 容器结构版本：1 = 纯 JSON（旧），2 = ZIP（压缩 + 内嵌附件），3 = ZIP + 多标签页。
+ARCHIVE_VERSION = 3
 
 #: 归档内的固定入口名。
 ENTRY_JSON = "chat_history.json"
 #: 附件在归档内的目录前缀。
 ATTACHMENT_DIR = "attachments"
+
+#: 标签页默认名（用户未命名时）。快照（chat_session）与界面创建标签页共用此常量。
+DEFAULT_TAB_NAME = "Default Conversation"
+#: 标签页名长度上限：超出部分截断，既避免顶栏被撑爆，也防止恶意归档写入超长串。
+TAB_NAME_MAX = 80
 
 _ZIP_MAGIC = b"PK\x03\x04"
 
@@ -75,6 +88,70 @@ def sanitize(value):
         return str(value)
     except Exception:  # pragma: no cover - 纯防御
         return None
+
+
+def clean_tab_name(name) -> str:
+    """把任意标签页名归一为可安全落盘 / 上存档的短字符串。
+
+    去掉控制字符、折叠为单行、限长 :data:`TAB_NAME_MAX`；空串表示"未命名"
+    （调用方自行决定回退为 :data:`DEFAULT_TAB_NAME` 还是文件名）。
+    """
+    text = str(name or "")
+    # 控制字符（含换行/制表/回车）一律换成空格：标签名是单行文本，
+    # 且会被写进归档 JSON 与界面标签，留着只会让两处显示都出问题。
+    text = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in text)
+    return " ".join(text.split())[:TAB_NAME_MAX]
+
+
+def normalize_tabs(tabs: Iterable[Dict]) -> List[Dict[str, Any]]:
+    """把 ``[{"name": …, "messages": [...]}, …]`` 归一为可序列化的标签页列表。
+
+    归档写出（本模块）与"导出全部"共用这一份实现：缺失的名字回退
+    :data:`DEFAULT_TAB_NAME`，消息逐条 :func:`sanitize`。
+    """
+    normalized: List[Dict[str, Any]] = []
+    for tab in tabs or []:
+        if not isinstance(tab, dict):
+            continue
+        messages = tab.get("messages")
+        msgs = [sanitize(m) for m in messages if isinstance(m, dict)] \
+            if isinstance(messages, list) else []
+        normalized.append({
+            "name": clean_tab_name(tab.get("name")) or DEFAULT_TAB_NAME,
+            "messages": msgs,
+        })
+    return normalized
+
+
+def extract_tabs(payload) -> List[Tuple[Optional[str], List[Dict]]]:
+    """从归档 JSON 取出 ``[(标签名或 None, 原始消息列表), …]``。
+
+    * 新格式：``{"tabs": [{"name": …, "messages": [...]}, …]}``；
+    * 旧格式：``{"messages": [...]}`` / ``{"history": [...]}`` / 裸列表 / 单条
+      消息 —— 一律视作**一个未命名标签页**（``None`` 表示交由调用方决定名字）。
+
+    只做**结构**抽取，不做消息字段规范化（那是导入任务的职责），
+    这样"归档长什么样"与"消息怎么规范化"各自只有一处定义。
+    """
+    if isinstance(payload, dict):
+        tabs = payload.get("tabs")
+        if isinstance(tabs, list):
+            extracted = [
+                (clean_tab_name(t.get("name")) or None,
+                 [m for m in (t.get("messages") or []) if isinstance(m, dict)])
+                for t in tabs if isinstance(t, dict)
+            ]
+            if extracted:
+                return extracted
+        for key in ("messages", "history", "conversation"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [(None, [m for m in value if isinstance(m, dict)])]
+        if "role" in payload and "content" in payload:
+            return [(None, [payload])]
+    if isinstance(payload, list):
+        return [(None, [m for m in payload if isinstance(m, dict)])]
+    return []
 
 
 def _collect_attachments(messages: Iterable[Dict]) -> List[str]:
@@ -133,20 +210,24 @@ def _unique_arcname(used: set, name: str) -> str:
     return f"{ATTACHMENT_DIR}/{candidate}"
 
 
-def write_archive(path: str, messages: Iterable[Dict]) -> Dict[str, Any]:
-    """把聊天记录写入压缩归档，返回统计信息（供日志与结果提示）。
+def write_archive(path: str, tabs: Iterable[Dict]) -> Dict[str, Any]:
+    """把若干标签页的聊天记录写入压缩归档，返回统计信息（供日志与结果提示）。
 
-    附件按**内容路径**嵌入归档；读取不到的文件只告警并保留原路径，绝不因此
-    中断导出（导出本身必须成功，附件缺失是次要问题）。
+    :param tabs: ``[{"name": 标签名, "messages": [...]}, …]``；只导出一个标签页时
+        传单元素列表即可（归档格式与"导出全部"完全相同，不存在两种容器）。
+
+    附件按**内容路径**嵌入归档（跨标签页去重）；读取不到的文件只告警并保留原
+    路径，绝不因此中断导出（导出本身必须成功，附件缺失是次要问题）。
     """
-    msgs = [sanitize(m) for m in (messages or [])]
+    norm_tabs = normalize_tabs(tabs)
+    all_msgs = [m for tab in norm_tabs for m in tab["messages"]]
 
     # 1) 收集可嵌入的附件
     attachment_map: Dict[str, str] = {}
     missing: List[str] = []
     used_names: set = set()
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        for raw_path in _collect_attachments(msgs):
+        for raw_path in _collect_attachments(all_msgs):
             if not os.path.isfile(raw_path):
                 missing.append(raw_path)
                 continue
@@ -165,7 +246,7 @@ def write_archive(path: str, messages: Iterable[Dict]) -> Dict[str, Any]:
             "version": VERSION,
             "archive_version": ARCHIVE_VERSION,
             "generated": _now_iso(),
-            "messages": msgs,
+            "tabs": norm_tabs,
             # 原路径 -> 归档内路径：导入时据此把附件还原到本机并改写消息
             "attachments": attachment_map,
         }
@@ -176,10 +257,11 @@ def write_archive(path: str, messages: Iterable[Dict]) -> Dict[str, Any]:
             raise
 
     size = os.path.getsize(path) if os.path.exists(path) else 0
-    logger.info("Archive written: %s (messages=%d, attachments=%d, missing=%d, bytes=%d)",
-                path, len(msgs), len(attachment_map), len(missing), size)
+    logger.info("Archive written: %s (tabs=%d, messages=%d, attachments=%d, missing=%d, bytes=%d)",
+                path, len(norm_tabs), len(all_msgs), len(attachment_map), len(missing), size)
     return {
-        "messages": len(msgs),
+        "tabs": len(norm_tabs),
+        "messages": len(all_msgs),
         "attachments": len(attachment_map),
         "missing_attachments": missing,
         "bytes": size,

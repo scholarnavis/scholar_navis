@@ -765,6 +765,37 @@ def _tidy_markdown(text: str) -> str:
 THINK_PANEL_ATTR = "data-navis-think"
 
 
+def load_webengine_viewer(module_path: str, class_name: str):
+    """惰性导入**依赖 QtWebEngine** 的查看器；失败时返回 ``None`` 并给出可照做的提示。
+
+    QtWebEngine 是 Chromium 侧单独编译的运行库，Linux 上还额外依赖 libnss3 /
+    libasound 等系统库（清单见 :mod:`src.core.platform_env`）。这些模块刻意不在
+    启动路径上，只在用户第一次打开 PDF / Mermaid 图时才导入——此刻的 ImportError
+    会从 Qt 信号槽里抛回事件循环，被全局异常处理器当成致命错误而**直接结束应用**。
+    链接点击这类用户动作不该有这种杀伤力，因此这里把失败收敛成一条提示。
+
+    :return: 查看器类；不可用时为 ``None``（调用方直接放弃本次打开）。
+    """
+    import importlib
+
+    from src.core.i18n import tr
+    from src.core.platform_env import is_shared_library_error, shared_library_hint
+
+    try:
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+    except Exception as e:
+        # 用户可见的说法只有一条，由 Toast 给出（ToastManager 会按等级记入日志：
+        # 用户点了却打不开，属 ERROR）。这里只留一条开发期诊断，避免同一件事在
+        # 日志里出现两种措辞。
+        logger.debug("QtWebEngine viewer '%s.%s' unavailable: %s", module_path, class_name, e)
+        detail = shared_library_hint(e) if is_shared_library_error(e) else str(e)
+        ToastManager().show(
+            tr("Cannot open the viewer: the QtWebEngine runtime could not be loaded.")
+            + f"\n{detail}", "error")
+        return None
+
+
 class TextFormatter:
 
     #: 本管线"自有样式"的标签：每次渲染都会重新注入这些标签的样式，因此渲染
@@ -2070,10 +2101,15 @@ class TextFormatter:
             code_hash = query.queryItemValue("hash")
             code = mermaid_cache.get(code_hash, "")
             if code:
-                if getattr(parent_widget, 'mermaid_viewer', None) is None:
-                    from src.ui.components.mermaid_viewer import MermaidViewer
-                    parent_widget.mermaid_viewer = MermaidViewer(qt_parent)
-                parent_widget.mermaid_viewer.load_diagram(code)
+                viewer = getattr(parent_widget, 'mermaid_viewer', None)
+                if viewer is None:
+                    viewer_cls = load_webengine_viewer(
+                        "src.ui.components.mermaid_viewer", "MermaidViewer")
+                    if viewer_cls is None:
+                        return
+                    viewer = viewer_cls(qt_parent)
+                    parent_widget.mermaid_viewer = viewer
+                viewer.load_diagram(code)
             else:
                 ToastManager().show("Diagram data lost. Please ask the AI to generate it again.", "error")
             return
@@ -2119,10 +2155,18 @@ class TextFormatter:
                 ext = file_extension(file_path) or file_extension(source_name)
 
                 if ext == 'pdf':
-                    from src.ui.components.pdf_viewer import InternalPDFViewer
-                    if getattr(parent_widget, 'pdf_viewer', None) is None:
-                        parent_widget.pdf_viewer = InternalPDFViewer(qt_parent)
-                    parent_widget.pdf_viewer.load_document(file_path, 0, text_snippet, display_name=source_name)
+                    viewer = getattr(parent_widget, 'pdf_viewer', None)
+                    if viewer is None:
+                        viewer_cls = load_webengine_viewer(
+                            "src.ui.components.pdf_viewer", "InternalPDFViewer")
+                        if viewer_cls is None:
+                            # 内置阅读器不可用时退化为系统默认程序打开：路径本来就能
+                            # 交给外部程序（见下方 else 分支），总好过点了没反应。
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+                            return
+                        viewer = viewer_cls(qt_parent)
+                        parent_widget.pdf_viewer = viewer
+                    viewer.load_document(file_path, 0, text_snippet, display_name=source_name)
 
                 elif ext in TEXT_VIEWER_EXTS:
                     # 能力清单与查看器渲染共用同一份定义（见 core.file_types）

@@ -37,16 +37,18 @@ import logging
 import os
 import re
 import tempfile
+import threading
 
 from pathlib import Path
 from urllib.parse import quote
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
+    QGridLayout,
     QLabel,
     QPushButton,
-    QHBoxLayout,
     QRadioButton,
 )
 
@@ -454,6 +456,27 @@ PREVIEW_DEMO_TOML = (
 )
 
 
+#: "Literature Trust" 按钮的两态文案。**唯一定义处**：创建、后台运行中、收尾三处
+#: 都引用它，避免按钮文字与运行状态说明各写一份而漂移。
+LITTRUST_BTN_IDLE = "Literature Trust (live)"
+LITTRUST_BTN_RUNNING = "Literature Trust (running…)"
+
+
+class _DevLogStream(QObject):
+    """后台线程 → UI 线程的单向输出通道。
+
+    联网自检（真实检索 + DOI / 链接核查，单条超时上限合计可达百秒级）必须离开 UI
+    线程，否则整个窗口在等待期间不响应；但结果要写进对话框的输出控件，而 Qt 只允许
+    在对象所属线程使用对象。跨线程因此只走信号：PySide6 会自动改用队列连接，槽在主
+    线程执行，后台线程一根控件都不碰。
+    """
+
+    #: (消息, 等级) —— 等级取值与 :meth:`DeveloperDialog._log` 一致
+    sig_line = Signal(str, str)
+    #: 后台自检结束（无论成功或异常），用于恢复按钮状态
+    sig_finished = Signal()
+
+
 class DeveloperDialog(BaseDialog):
     """Hidden developer self-test panel."""
 
@@ -464,6 +487,16 @@ class DeveloperDialog(BaseDialog):
 
         self.setWindowTitle("Developer Mode")
         self.setObjectName("DeveloperDialog")
+
+        #: 按钮组登记：(按钮列表, 列数)。对话框宽度由它们的真实文字宽度反推
+        #: （见 _fit_width_to_buttons），保证按钮文字永远不被截断。
+        self._btn_groups: list = []
+
+        #: 联网自检的后台线程与它的回传通道（见 _test_literature_source_trust）
+        self._littrust_thread: threading.Thread | None = None
+        self._dev_stream = _DevLogStream(self)
+        self._dev_stream.sig_line.connect(self._log)
+        self._dev_stream.sig_finished.connect(self._on_littrust_finished)
 
         # --- Title ---
         self.title_lbl = QLabel("Developer Mode")
@@ -480,48 +513,32 @@ class DeveloperDialog(BaseDialog):
         self._section_labels: list = []
 
         # --- AI tests ---
+        # 每个按钮都保持"刚好放得下文字"的宽度；用网格而不是单行 QHBoxLayout，
+        # 否则一行塞 4 个长标题时按钮会被压到文字宽度以下（文字被截断）。
         self.content_layout.addWidget(self._section_label("AI Tests (run in Chat panel)"))
-        ai_row = QHBoxLayout()
-        ai_row.setSpacing(8)
         self.btn_ai_plot = self._make_btn("AI: Plot (bubble)", lambda: self._ai_test("plot_bubble"))
         self.btn_ai_prov = self._make_btn("AI: Provenance", lambda: self._ai_test("provenance_chain"))
         self.btn_ai_lit = self._make_btn("AI: Literature (Breadth)", lambda: self._ai_test("literature_breadth"))
         self.btn_ai_img = self._make_btn("AI: Image Vision", lambda: self._ai_test("image_upload_vision"))
-        ai_row.addWidget(self.btn_ai_plot)
-        ai_row.addWidget(self.btn_ai_prov)
-        ai_row.addWidget(self.btn_ai_lit)
-        ai_row.addWidget(self.btn_ai_img)
-        ai_row.addStretch()
-        self.content_layout.addLayout(ai_row)
-
-        # AI 测试第二行：human-in-the-loop（ask_user / deep plan 卡）与非图片附件
-        ai_row2 = QHBoxLayout()
-        ai_row2.setSpacing(8)
+        # 第二行：human-in-the-loop（ask_user / deep plan 卡）与非图片附件、
+        # 参考文献编号链路（真实检索 + 编号一致性核对）
         self.btn_ai_ask = self._make_btn("AI: Ask-User (HITL)",
                                          lambda: self._ai_test("ask_user_clarify"))
         self.btn_ai_deep = self._make_btn("AI: Deep Plan Card",
                                           lambda: self._ai_test("deep_plan_confirm"))
         self.btn_ai_doc = self._make_btn("AI: File Attachment",
                                          lambda: self._ai_test("document_attachment"))
-        ai_row2.addWidget(self.btn_ai_ask)
-        ai_row2.addWidget(self.btn_ai_deep)
-        ai_row2.addWidget(self.btn_ai_doc)
-        ai_row2.addStretch()
-        self.content_layout.addLayout(ai_row2)
-
-        # AI 测试第三行：参考文献编号链路（真实检索 + 编号一致性核对）
-        ai_row3 = QHBoxLayout()
-        ai_row3.setSpacing(8)
         self.btn_ai_refnum = self._make_btn("AI: Reference Numbering (real search)",
                                             lambda: self._ai_test("reference_numbering"))
-        ai_row3.addWidget(self.btn_ai_refnum)
-        ai_row3.addStretch()
-        self.content_layout.addLayout(ai_row3)
+        self.content_layout.addLayout(self._button_grid(
+            (self.btn_ai_plot, self.btn_ai_prov, self.btn_ai_lit, self.btn_ai_img), cols=4))
+        self.content_layout.addLayout(self._button_grid(
+            (self.btn_ai_ask, self.btn_ai_deep, self.btn_ai_doc, self.btn_ai_refnum),
+            cols=4))
 
         # --- Functional tests ---
         self.content_layout.addWidget(self._section_label("Functional Tests"))
-        func_row = QHBoxLayout()
-        func_row.setSpacing(8)
+        # 离线纯函数 / 接口断言：不启动引擎、不创建窗口、不碰用户数据
         self.btn_all = self._make_btn("Run All", self._run_all)
         self.btn_r = self._make_btn("R Engine", self._test_r_engine)
         self.btn_prov = self._make_btn("Provenance (module)", self._test_provenance)
@@ -529,31 +546,14 @@ class DeveloperDialog(BaseDialog):
         self.btn_syntax = self._make_btn("Syntax/Import", self._test_syntax)
         self.btn_lit = self._make_btn("Literature Merge", self._test_literature_merge)
         self.btn_img = self._make_btn("Image Pipeline", self._test_image_pipeline)
-        for b in (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill,
-                  self.btn_syntax, self.btn_lit, self.btn_img):
-            func_row.addWidget(b)
-        func_row.addStretch()
-        self.content_layout.addLayout(func_row)
-
-        # 功能测试第二行：交互卡与对话区状态。Deep Plan Card 放在首位 —— 不依赖
-        # AI / 网络，点击立即完成"组件行为 + 气泡渲染链路"全量自检。
-        func_row2 = QHBoxLayout()
-        func_row2.setSpacing(8)
+        # 交互卡与对话区状态。Deep Plan Card 不依赖 AI / 网络，点击立即完成
+        # "组件行为 + 气泡渲染链路"全量自检；History Restore 覆盖分片回灌 + 快照闸口。
         self.btn_deep_card = self._make_btn("Deep Plan Card", self._test_deep_plan_card)
         self.btn_hitl = self._make_btn("HITL Pipeline", self._test_hitl_pipeline)
         self.btn_render = self._make_btn("Render Preview", self._test_render_preview)
-        # 历史回灌：恢复上次对话的分片推进 + 加载遮罩 + 快照闸口（离线、不碰用户数据）
         self.btn_restore = self._make_btn("History Restore", self._test_history_restore)
-        for b in (self.btn_deep_card, self.btn_hitl, self.btn_render, self.btn_restore):
-            func_row2.addWidget(b)
-        func_row2.addStretch()
-        self.content_layout.addLayout(func_row2)
-
-        # 功能测试第三行：附件与阅读链路自检（可上传类型 / 文本查看器渲染分派 /
-        # 滚动条可见性 / 附件芯片接线）。全部只做纯函数与类接口断言：
-        # 不创建窗口、不切换面板、不改动用户数据。
-        func_row3 = QHBoxLayout()
-        func_row3.setSpacing(8)
+        # 附件与阅读链路自检（可上传类型 / 文本查看器渲染分派 / 滚动条可见性 /
+        # 附件芯片接线 / 排版 / 引用编号与反捏造审计 / 引文点击）
         self.btn_filetypes = self._make_btn("File Types", self._test_file_types)
         self.btn_textviewer = self._make_btn("Text Viewer", self._test_text_viewer_render)
         self.btn_scrollbar = self._make_btn("Scrollbar Theme", self._test_scrollbar_theme)
@@ -561,28 +561,22 @@ class DeveloperDialog(BaseDialog):
         self.btn_typography = self._make_btn("Chat Typography", self._test_chat_typography)
         self.btn_refnum = self._make_btn("Reference Numbering", self._test_reference_citations)
         self.btn_refint = self._make_btn("Reference Integrity", self._test_reference_integrity)
-        # 引文点击：切到 Chat 面板注入带引用的假对话，供用户实际悬停 / 点击 [n]
         self.btn_citeclick = self._make_btn("Citation Click-Through", self._test_citation_click)
-        for b in (self.btn_filetypes, self.btn_textviewer,
-                  self.btn_scrollbar, self.btn_attachwire, self.btn_typography,
-                  self.btn_refnum, self.btn_refint, self.btn_citeclick):
-            func_row3.addWidget(b)
-        func_row3.addStretch()
-        self.content_layout.addLayout(func_row3)
-
-        # 功能测试第四行：引用可信性。Integrity 为离线反捏造审计（进 Run All）；
-        # Literature Trust 会发起**真实检索 + DOI 解析**，故独立成按钮、不进 Run All，
-        # 避免默认自检占用网络与配额。
-        func_row4 = QHBoxLayout()
-        func_row4.setSpacing(8)
-        self.btn_littrust = self._make_btn("Literature Trust (live)",
+        # 引用可信性。Integrity 为离线反捏造审计（进 Run All）；Literature Trust 会
+        # 发起**真实检索 + DOI 解析**，故独立成按钮、不进 Run All，避免默认自检占用
+        # 网络与配额，且它必须跑在后台线程（见 _test_literature_source_trust）。
+        self.btn_littrust = self._make_btn(LITTRUST_BTN_IDLE,
                                            self._test_literature_source_trust)
         self.btn_uiinter = self._make_btn("UI Copy / Drag-Scroll",
                                           self._test_ui_copy_scroll)
-        for b in (self.btn_littrust, self.btn_uiinter):
-            func_row4.addWidget(b)
-        func_row4.addStretch()
-        self.content_layout.addLayout(func_row4)
+        self.content_layout.addLayout(self._button_grid(
+            (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill,
+             self.btn_syntax, self.btn_lit, self.btn_img,
+             self.btn_deep_card, self.btn_hitl, self.btn_render, self.btn_restore,
+             self.btn_filetypes, self.btn_textviewer, self.btn_scrollbar,
+             self.btn_attachwire, self.btn_typography, self.btn_refnum,
+             self.btn_refint, self.btn_citeclick, self.btn_littrust, self.btn_uiinter),
+            cols=4))
 
         # --- Output area（专属源码/日志输出控件：固定最大高度 + 独立滚动条、
         #     边框底纹、复制、折叠、深色模式自适应） ---
@@ -593,6 +587,10 @@ class DeveloperDialog(BaseDialog):
             max_height=420,
         )
         self.content_layout.addWidget(self.txt_output, 1)
+
+        # 按按钮的真实文字宽度定宽：BaseDialog 是固定宽度对话框，宽度不够时 Qt 只能
+        # 裁掉右侧内容（表现为按钮文字被切掉），所以必须在这里先把宽度算准。
+        self._fit_width_to_buttons()
 
         # 首次主题应用由 BaseDialog 在事件循环第一帧统一触发（此时本类
         # __init__ 已执行完，_apply_theme 依赖的控件均已存在）。
@@ -635,14 +633,80 @@ class DeveloperDialog(BaseDialog):
             lbl.setStyleSheet(section_style)
 
     def _make_btn(self, text, handler) -> QPushButton:
+        """自检按钮：**最小宽度 = 文字宽度**（+ 余量），因此任何一行都不会切字。
+
+        QPushButton 的 sizeHint 已经含样式表的内边距与边框，取它作最小宽度即可；
+        额外加的 8px 是给字体渲染差异与主题切换后的内边距变化留的余量。
+        """
         btn = QPushButton(text)
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(handler)
+        btn.setMinimumWidth(btn.sizeHint().width() + 8)
         return btn
+
+    def _button_grid(self, buttons, cols: int) -> QGridLayout:
+        """把按钮排成"每行 ``cols`` 个"的网格，并登记宽度需求。
+
+        为什么不用单行 ``QHBoxLayout``：一行塞 7~8 个按钮时 Qt 会把每个按钮压缩到
+        低于文字宽度（截断成 "Citation Click-Thro"），而网格 + 按钮最小宽度让每一行
+        自己折行，文字始终完整。
+        """
+        buttons = list(buttons)
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        for index, btn in enumerate(buttons):
+            grid.addWidget(btn, index // cols, index % cols)
+        # 末列右侧留一列弹性：按钮保持自然宽度并左对齐，不被拉伸成大间距
+        grid.setColumnStretch(cols, 1)
+        self._btn_groups.append((buttons, cols))
+        return grid
+
+    def _fit_width_to_buttons(self):
+        """按各按钮组的真实文字宽度决定对话框宽度（不超过屏幕的 90%）。
+
+        ``BaseDialog`` 用 ``setFixedWidth`` 锁定宽度，内容最小宽度超出时 Qt 只能裁剪
+        （历史症状：按钮文字被切掉）。这里按"每列最宽按钮之和 + 间距 + 内容边距"算出
+        所需宽度，取最大值与当前目标宽度的较大者——因此既不会裁字，也不会无谓变宽。
+        """
+        needed = 0
+        for buttons, cols in self._btn_groups:
+            col_w = [0] * cols
+            for index, btn in enumerate(buttons):
+                # 取"布局绝不会压到的下限"：minimumWidth（_make_btn 已设为文字宽度
+                # + 余量），缺省时退回 sizeHint。用 sizeHint 会在按钮被显式加宽
+                # （如字体变大后重设最小宽度）时低估需求。
+                col_w[index % cols] = max(col_w[index % cols],
+                                          btn.minimumWidth(), btn.sizeHint().width())
+            needed = max(needed, sum(col_w) + 8 * max(0, cols - 1))
+        if not needed:
+            return
+
+        # content_layout 左右各 24px 边距 + 少量余量（滚动条占位、字体渲染差异）
+        target = int(needed) + 48 + 16
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            target = min(target, int(screen.availableGeometry().width() * 0.9))
+        target = max(int(self._target_width), target)
+        if target != self._target_width:
+            logger.debug("Developer dialog width widened to %dpx (button groups=%d).",
+                         target, len(self._btn_groups))
+            self._target_width = target
+            self.setFixedWidth(target)
 
     def _log(self, msg: str, level: str = "INFO"):
         prefix = {"INFO": "[ ]", "OK": "[OK]", "FAIL": "[FAIL]", "WARN": "[!!]"}.get(level, "[ ]")
         self.txt_output.append(f"{prefix} {msg}")
+
+    def _emit_dev_log(self, msg: str, level: str = "INFO"):
+        """后台线程写日志的**唯一**入口：只发信号，绝不直接碰控件。
+
+        对话框可能已被关闭销毁（后台线程仍在跑），此时发信号会抛
+        "Internal C++ object already deleted"——静默忽略即可，线程自行收尾。
+        """
+        try:
+            self._dev_stream.sig_line.emit(msg, level)
+        except RuntimeError:
+            pass
 
     def _clear(self):
         self.txt_output.clear()
@@ -1486,15 +1550,16 @@ class DeveloperDialog(BaseDialog):
             from src.tools.chat_mixins.session import ChatSessionMixin
 
             calls = []
-            real_save = chat_session.save_session
+            real_save = chat_session.save_tab
             real_clear = chat_session.clear_inflight
-            chat_session.save_session = lambda history: (calls.append("save"), True)[1]
-            chat_session.clear_inflight = lambda: calls.append("clear")
+            chat_session.save_tab = lambda tab_id, history: (calls.append("save"), True)[1]
+            chat_session.clear_inflight = lambda tab_id: calls.append("clear")
             try:
                 class _SnapshotProbe:
                     """最小替身：只提供两个方法真正用到的那点状态。"""
 
                     widget = object()       # flush_session_snapshot 的前置判据
+                    tab_id = "0" * 32       # 快照按标签页落盘
 
                     def __init__(self, rebuilding):
                         self.history = [{"role": "user", "content": "probe"}]
@@ -1504,6 +1569,7 @@ class DeveloperDialog(BaseDialog):
                         calls.append("sync_cards")
 
                 _SnapshotProbe._snapshot_writable = ChatSessionMixin._snapshot_writable
+                _SnapshotProbe._tab_id = ChatSessionMixin._tab_id
 
                 ChatSessionMixin._autosave_session(_SnapshotProbe(False))
                 record("a finished conversation is still flushed to disk",
@@ -1516,7 +1582,7 @@ class DeveloperDialog(BaseDialog):
                 record("no snapshot is written while a replay is in flight",
                        calls == [])
             finally:
-                chat_session.save_session = real_save
+                chat_session.save_tab = real_save
                 chat_session.clear_inflight = real_clear
         except Exception as e:
             record(f"snapshot gate check raised {e}", False)
@@ -1591,6 +1657,11 @@ class DeveloperDialog(BaseDialog):
     def _test_literature_source_trust(self, clear: bool = True):
         """文献检索可信性检查（**联网**）：真实检索 -> 逐条核查 -> 核查表格。
 
+        本方法只负责"起线程 + 交代活儿"，核查在
+        :meth:`_literature_trust_check` 中执行。原因：整条链路都是**阻塞式网络调用**
+        （一次检索 + 每条记录一次 DOI 解析 + 一次链接可达性检查，单条超时上限合计可达
+        百秒级），跑在 UI 线程上会让窗口在这段时间里完全不响应。
+
         走与运行时完全相同的链路（技能结果 -> ``AgentRuntime._collect_tool_citations``
         注入引用编号 -> 注册表），然后逐条核对：
 
@@ -1604,23 +1675,57 @@ class DeveloperDialog(BaseDialog):
         结论分三档：OK（全部通过）/ WARN（字段缺失或链接不可达）/ SUSPECT（DOI 解析
         不到或标题年份不符）。表格逐行给出结论与说明，便于人工抽查原始检索数据。
         """
+        if self._littrust_thread is not None and self._littrust_thread.is_alive():
+            self._log("Literature Trust is already running; wait for it to finish.", "WARN")
+            return
         if clear:
             self._clear()
         self._log("--- Literature Source Trust (live retrieval) ---", "INFO")
+        self._log("Running on a background thread — the window stays responsive.", "INFO")
+        self.btn_littrust.setEnabled(False)
+        self.btn_littrust.setText(LITTRUST_BTN_RUNNING)
+        self._littrust_thread = threading.Thread(
+            target=self._literature_trust_worker,
+            name="dev-literature-trust",
+            daemon=True,
+        )
+        self._littrust_thread.start()
+
+    def _on_littrust_finished(self):
+        """后台自检收尾（主线程槽）：恢复按钮文字与可用状态。"""
+        self.btn_littrust.setEnabled(True)
+        self.btn_littrust.setText(LITTRUST_BTN_IDLE)
+        self._log("Literature Trust finished.", "INFO")
+
+    def _literature_trust_worker(self):
+        """后台线程外壳：保证异常被记录、按钮一定被恢复。"""
+        try:
+            self._literature_trust_check()
+        except Exception as e:      # 后台线程的异常不该只留在 stderr
+            logger.exception("Literature trust check crashed.")
+            self._emit_dev_log(f"Literature Trust crashed: {e}", "FAIL")
+        finally:
+            try:
+                self._dev_stream.sig_finished.emit()
+            except RuntimeError:
+                pass    # 对话框已销毁
+
+    def _literature_trust_check(self):
+        """联网核查实现：**运行在后台线程**，只能经 ``_emit_dev_log`` 输出。"""
         query = "NPH3 phototropism Arabidopsis"
         limit = 5
-        self._log(f"Query: {query!r} | max_results={limit}", "INFO")
+        self._emit_dev_log(f"Query: {query!r} | max_results={limit}", "INFO")
 
         try:
             from src.core.academic.literature import search_academic_literature
         except Exception as e:
-            self._log(f"Cannot import literature tools: {e}", "FAIL")
+            self._emit_dev_log(f"Cannot import literature tools: {e}", "FAIL")
             return
 
         try:
             raw = search_academic_literature(query=query, max_results=limit)
         except Exception as e:
-            self._log(f"Retrieval failed (network/proxy?): {e}", "FAIL")
+            self._emit_dev_log(f"Retrieval failed (network/proxy?): {e}", "FAIL")
             return
 
         import json as _json
@@ -1628,10 +1733,10 @@ class DeveloperDialog(BaseDialog):
         try:
             records = (_json.loads(raw) or {}).get("results") or []
         except (ValueError, AttributeError):
-            self._log("Retrieval returned unparsable payload.", "FAIL")
+            self._emit_dev_log("Retrieval returned unparsable payload.", "FAIL")
             return
         if not records:
-            self._log("Retrieval returned zero records — cannot verify anything.", "WARN")
+            self._emit_dev_log("Retrieval returned zero records — cannot verify anything.", "WARN")
             return
         records = [r for r in records if isinstance(r, dict)][:limit]
 
@@ -1659,7 +1764,7 @@ class DeveloperDialog(BaseDialog):
             annotated = _json.loads(runtime._collect_tool_citations(
                 "search_academic_literature", raw))["results"][:limit]
         except Exception as e:
-            self._log(f"Citation-id injection failed: {e}", "FAIL")
+            self._emit_dev_log(f"Citation-id injection failed: {e}", "FAIL")
             return
 
         from src.core.academic.base import mcp_request, openalex_api_key
@@ -1722,9 +1827,9 @@ class DeveloperDialog(BaseDialog):
                 return "warn", f"HTTP {code}（站点拒绝自动访问）"
             return "warn", f"HTTP {code}"
 
-        self._log("", "INFO")
-        self._log(_col("#", 3) + _col("ID", 5) + _col("年", 6) + _col("DOI/URL", 34)
-                  + _col("结论", 8) + "说明", "INFO")
+        self._emit_dev_log("", "INFO")
+        self._emit_dev_log(_col("#", 3) + _col("ID", 5) + _col("年", 6) + _col("DOI/URL", 34)
+                           + _col("结论", 8) + "说明", "INFO")
         summary = {"ok": 0, "warn": 0, "suspect": 0}
         for i, (rec, ann) in enumerate(zip(records, annotated), 1):
             title = str(rec.get("title") or "")
@@ -1733,6 +1838,9 @@ class DeveloperDialog(BaseDialog):
             url = str(rec.get("url") or "")
             ref_id = ann.get("_mcp_cite_id")
             notes, verdict = [], "ok"
+            # 长回答：每条记录检查前先报进度（后台线程里最慢的就是这两次网络往返）
+            self._emit_dev_log(f"Checking {i}/{len(records)}: {title[:72] or '(no title)'}",
+                               "INFO")
 
             def _worse(level):
                 nonlocal verdict
@@ -1766,24 +1874,28 @@ class DeveloperDialog(BaseDialog):
                 notes.append(url_note)
 
             summary[verdict] += 1
-            self._log(_col(i, 3) + _col(ref_id if ref_id is not None else "-", 5)
-                      + _col(year, 6) + _col(doi or url or "-", 34)
-                      + _col(verdict.upper(), 8) + "; ".join(notes), "OK" if verdict == "ok" else
-                      ("WARN" if verdict == "warn" else "FAIL"))
+            self._emit_dev_log(
+                _col(i, 3) + _col(ref_id if ref_id is not None else "-", 5)
+                + _col(year, 6) + _col(doi or url or "-", 34)
+                + _col(verdict.upper(), 8) + "; ".join(notes),
+                "OK" if verdict == "ok" else ("WARN" if verdict == "warn" else "FAIL"))
 
-        self._log("", "INFO")
-        self._log(f"Checked {len(records)} record(s): "
-                  f"OK={summary['ok']} WARN={summary['warn']} SUSPECT={summary['suspect']}",
-                  "OK" if summary["suspect"] == 0 else "FAIL")
+        self._emit_dev_log("", "INFO")
+        self._emit_dev_log(f"Checked {len(records)} record(s): "
+                           f"OK={summary['ok']} WARN={summary['warn']} "
+                           f"SUSPECT={summary['suspect']}",
+                           "OK" if summary["suspect"] == 0 else "FAIL")
         if summary["suspect"]:
-            self._log("SUSPECT 行代表'检索结果无法被独立来源证实'——请人工核对原始记录，"
-                      "不要直接采信。", "FAIL")
+            self._emit_dev_log(
+                "SUSPECT 行代表'检索结果无法被独立来源证实'——请人工核对原始记录，"
+                "不要直接采信。", "FAIL")
         if summary["warn"]:
-            self._log(f"{summary['warn']} record(s) could not be fully auto-verified "
-                      "(missing identifier / link blocked) — review the WARN rows.", "WARN")
+            self._emit_dev_log(
+                f"{summary['warn']} record(s) could not be fully auto-verified "
+                "(missing identifier / link blocked) — review the WARN rows.", "WARN")
         if not summary["suspect"] and not summary["warn"]:
-            self._log("All retrieved sources were independently confirmed "
-                      "(DOI resolved + title/year matched).", "OK")
+            self._emit_dev_log("All retrieved sources were independently confirmed "
+                               "(DOI resolved + title/year matched).", "OK")
 
     def _run_all(self):
         self._clear()

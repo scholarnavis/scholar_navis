@@ -54,8 +54,11 @@ class ChatSearchMixin:
         self.search_bar.sig_prev.connect(self.chat_find_prev)
         self.search_bar.sig_close.connect(self.close_chat_search)
 
-        # Ctrl+F：会话页内生效（输入框聚焦时同样可触发）
+        # Ctrl+F：**本会话控件**内生效（输入框聚焦时同样可触发）。
+        # 快捷键作用域必须收在 widget 及其子控件上：标签页里每个会话各有一个
+        # Ctrl+F，默认的 WindowShortcut 会让一次按键同时命中所有标签页。
         self.shortcut_chat_find = QShortcut(QKeySequence("Ctrl+F"), self.widget)
+        self.shortcut_chat_find.setContext(Qt.WidgetWithChildrenShortcut)
         self.shortcut_chat_find.activated.connect(self.open_chat_search)
 
         # 命中表：[(bubble, browser, cursor), ...]，按文档顺序排列

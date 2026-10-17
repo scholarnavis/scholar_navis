@@ -1968,9 +1968,12 @@ class ExportChatTask(BackgroundTask):
       :meth:`TextFormatter.clean_text_for_export`。
     * **JSON / .schat** —— 无损归档：正文、思考链、参考文献、附件全部保留，
       用 ZIP 压缩并内嵌附件本体，读写口径见 :mod:`src.core.chat_archive`。
+      归档内容是**若干个标签页**：传 ``tabs`` 导出全部标签页，只传 ``history``
+      则导出单个标签页（两者产出同一个容器格式，不存在"只导一个标签页"的特例）。
     """
     def _execute(self):
-        history = self.kwargs.get('history', [])
+        history = self.kwargs.get('history') or []
+        tabs = self.kwargs.get('tabs')
         path = self.kwargs.get('path')
         export_fmt = self.kwargs.get('export_fmt')
         colors = self.kwargs.get('colors', {})
@@ -1987,7 +1990,7 @@ class ExportChatTask(BackgroundTask):
 
         # 说明：不再静默过滤 interrupted/error 消息 —— 它们往往含部分已生成内容，
         # 直接丢弃会导致导出对话"不全/断档"。改为在各格式正文前标注其未完成状态。
-        if not history:
+        if not history and not tabs:
             return {"success": False, "msg": "No valid chat records to export."}
 
         def _status_note(msg):
@@ -2103,7 +2106,8 @@ class ExportChatTask(BackgroundTask):
                 # 纯 JSON 体积过大，且附件只存本机绝对路径换机器即失效。
                 # 读写口径统一在 src/core/chat_archive.py。
                 from src.core.chat_archive import write_archive
-                stats = write_archive(path, history)
+                export_tabs = tabs if tabs else [{"name": None, "messages": history}]
+                stats = write_archive(path, export_tabs)
                 return {"success": True, "path": path, "stats": stats}
 
             return {"success": True, "path": path}
@@ -2118,11 +2122,12 @@ class ImportChatHistoryTask(BackgroundTask):
 
     支持的输入：
     - ``.schat`` / ``.json``：Scholar Navis 无损格式（ZIP 压缩归档，含正文 /
-      思考链 / 引文 / 附件本体），导入后附件按归档内容解包并改写路径。
-    - ``.md`` / ``.txt``：纯文本导出格式，尽力还原为文本气泡（有损）。
+      思考链 / 引文 / 附件本体），导入后附件按归档内容解包并改写路径；归档可含
+      **一个或多个标签页**（旧版单标签页归档按一个未命名标签页处理）。
+    - ``.md`` / ``.txt``：纯文本导出格式，尽力还原为文本气泡（有损，单个标签页）。
 
-    返回 ``{"success": True, "messages": [...], "lossless": bool}``，
-    消息结构已规范化为可写入 ``self.history`` 的条目。
+    返回 ``{"success": True, "tabs": [{"name", "messages"}, …], "lossless": bool}``，
+    每个标签页的消息结构已规范化为可写入 ``self.history`` 的条目。
     """
     _TXT_USER = "[USER INQUIRY]"
     _TXT_AI = "[AI ANALYSIS]"
@@ -2135,23 +2140,40 @@ class ImportChatHistoryTask(BackgroundTask):
         lower = path.lower()
         try:
             if lower.endswith((".schat", ".json")):
-                messages, lossless = self._parse_lossless(path)
+                tabs, lossless = self._parse_lossless(path), True
             elif lower.endswith(".md"):
-                messages, lossless = self._parse_markdown(path), False
+                tabs, lossless = [self._single_tab(self._parse_markdown(path))], False
             elif lower.endswith((".txt", ".csv")):
-                messages, lossless = self._parse_text(path), False
+                tabs, lossless = [self._single_tab(self._parse_text(path))], False
             else:
                 return {"success": False,
                         "msg": "Unsupported format. Please import a .schat/.json/.md/.txt file."}
 
-            if not messages:
+            tabs = [t for t in tabs if t["messages"]]
+            if not tabs:
                 return {"success": False,
                         "msg": "No chat messages could be parsed from this file."}
 
-            return {"success": True, "messages": messages, "lossless": lossless}
+            return {"success": True, "tabs": tabs, "lossless": lossless}
         except Exception as e:
             self.send_log("ERROR", f"Import task failed: {str(e)}")
             return {"success": False, "msg": str(e)}
+
+    @staticmethod
+    def _tab_name(raw_name):
+        """标签页名：归档自带名字 > 默认名（"默认对话"）。
+
+        命名口径只在这里定义一次，单标签页 / 多标签页 / 纯文本导入全部走它：
+        未命名者一律落到 :data:`src.core.chat_archive.DEFAULT_TAB_NAME`，
+        界面上就是"默认对话"。
+        """
+        from src.core.chat_archive import DEFAULT_TAB_NAME, clean_tab_name
+
+        return clean_tab_name(raw_name) or DEFAULT_TAB_NAME
+
+    def _single_tab(self, messages):
+        """把"一个扁平消息列表"包装成单个标签页（纯文本类导入用）。"""
+        return {"name": self._tab_name(None), "messages": list(messages or [])}
 
     @staticmethod
     def _normalize_msg(raw):
@@ -2181,32 +2203,21 @@ class ImportChatHistoryTask(BackgroundTask):
     def _parse_lossless(self, path):
         """解析无损归档：ZIP 压缩容器（含内嵌附件）与历史纯 JSON 都走这里。
 
-        容器判别与附件解包口径统一在 :mod:`src.core.chat_archive`；本方法只负责
-        把 payload 规范成消息列表，并把解包后的附件路径写回消息。
+        容器判别、标签页结构抽取与附件解包口径统一在 :mod:`src.core.chat_archive`；
+        本方法只负责把每个标签页的消息规范化，并把解包后的附件路径写回消息。
         """
-        from src.core.chat_archive import read_archive, remap_attachment_paths
-        payload, meta = read_archive(path)
-        messages = self._extract_lossless_messages(payload)
-        attachment_map = meta.get("attachment_map") or {}
-        if messages and attachment_map:
-            remap_attachment_paths(messages, attachment_map)
-        return messages, True
+        from src.core.chat_archive import extract_tabs, read_archive, remap_attachment_paths
 
-    def _extract_lossless_messages(self, payload):
-        """从归档 payload 取消息列表，兼容单条 / 列表 / 多种包装键。"""
-        if isinstance(payload, dict) and payload.get("format") == "scholar_navis_chat_history":
-            return [self._normalize_msg(m) for m in payload.get("messages", [])]
-        # 退路：形如 {"role": ..., "content": ...} 的单条，或 {"history"/"messages": [...]} 的包装
-        if isinstance(payload, list):
-            return [self._normalize_msg(m) for m in payload if isinstance(m, dict)]
-        if isinstance(payload, dict):
-            for key in ("messages", "history", "conversation"):
-                val = payload.get(key)
-                if isinstance(val, list):
-                    return [self._normalize_msg(m) for m in val if isinstance(m, dict)]
-            if "role" in payload and "content" in payload:
-                return [self._normalize_msg(payload)]
-        return []
+        payload, meta = read_archive(path)
+        attachment_map = meta.get("attachment_map") or {}
+
+        tabs = []
+        for raw_name, raw_messages in extract_tabs(payload):
+            messages = [self._normalize_msg(m) for m in raw_messages]
+            if messages and attachment_map:
+                remap_attachment_paths(messages, attachment_map)
+            tabs.append({"name": self._tab_name(raw_name), "messages": messages})
+        return tabs
 
     def _parse_markdown(self, path):
         # 按历史消息的 `### ... User Inquiry / AI Analysis` 标题切分。

@@ -379,9 +379,16 @@ class ChatBubblesMixin:
         if not hasattr(self, 'expanded_thinks'):
             self.expanded_thinks = set()
 
-        TextFormatter.handle_link_click(
-            url=url, parent_widget=self, mermaid_cache=self.mermaid_codes,
-            user_toggled_thinks=self.user_toggled_thinks,
-            expanded_indices=self.expanded_thinks,
-            render_callback=trigger_render
-        )
+        # 本方法是 Qt 信号槽的终点：此处抛出的异常会一路回到事件循环，被全局异常
+        # 处理器判定为致命错误并直接退出应用。打开一个链接（尤其是需要 QtWebEngine
+        # 的查看器，缺系统库时导入即失败）不该有这种杀伤力，故在此收口。
+        try:
+            TextFormatter.handle_link_click(
+                url=url, parent_widget=self, mermaid_cache=self.mermaid_codes,
+                user_toggled_thinks=self.user_toggled_thinks,
+                expanded_indices=self.expanded_thinks,
+                render_callback=trigger_render
+            )
+        except Exception:
+            logger.exception("Unhandled error while handling link: %s", url)
+            ToastManager().show(tr("Failed to open the link."), "error")

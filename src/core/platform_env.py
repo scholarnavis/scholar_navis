@@ -278,11 +278,13 @@ _LINUX_LIB_PACKAGES = {
     "libdbus-1.so.3": {"apt": "libdbus-1-3", "dnf": "dbus-libs", "pacman": "dbus", "apk": "dbus-libs"},
     "libnss3.so": {"apt": "libnss3", "dnf": "nss", "pacman": "nss", "apk": "nss"},
     "libnspr4.so": {"apt": "libnspr4", "dnf": "nspr", "pacman": "nspr", "apk": "nspr"},
-    "libxcomposite.so.1": {"apt": "libxcomposite1", "dnf": "libXcomposite", "pacman": "libxcomposite", "apk": "libxcomposite"},
-    "libxdamage.so.1": {"apt": "libxdamage1", "dnf": "libXdamage", "pacman": "libxdamage", "apk": "libxdamage"},
-    "libxrandr.so.2": {"apt": "libxrandr2", "dnf": "libXrandr", "pacman": "libxrandr", "apk": "libxrandr"},
+    # X11 库的 soname 是大写 X，与错误文本里出现的名字一致（键必须逐字相同，
+    # 否则提取到的库名映射不到包名，提示会退化成"整份依赖清单"）。
+    "libXcomposite.so.1": {"apt": "libxcomposite1", "dnf": "libXcomposite", "pacman": "libxcomposite", "apk": "libxcomposite"},
+    "libXdamage.so.1": {"apt": "libxdamage1", "dnf": "libXdamage", "pacman": "libxdamage", "apk": "libxdamage"},
+    "libXrandr.so.2": {"apt": "libxrandr2", "dnf": "libXrandr", "pacman": "libxrandr", "apk": "libxrandr"},
     "libxshmfence.so.1": {"apt": "libxshmfence1", "dnf": "libxshmfence", "pacman": "libxshmfence", "apk": "libxshmfence"},
-    "libxtst.so.6": {"apt": "libxtst6", "dnf": "libXtst", "pacman": "libxtst", "apk": "libxtst"},
+    "libXtst.so.6": {"apt": "libxtst6", "dnf": "libXtst", "pacman": "libxtst", "apk": "libxtst"},
     "libasound.so.2": {"apt": "libasound2", "dnf": "alsa-lib", "pacman": "alsa-lib", "apk": "alsa-lib"},
     "libcups.so.2": {"apt": "libcups2", "dnf": "cups-libs", "pacman": "libcups", "apk": "cups-libs"},
     "libdrm.so.2": {"apt": "libdrm2", "dnf": "libdrm", "pacman": "libdrm", "apk": "libdrm"},
@@ -323,6 +325,42 @@ _NIX_LIB_CACHE_ENV = "SCHOLAR_NAVIS_NIX_LIB_CACHE"
 #: 缓存格式版本。架构过滤是 v2 才加入的：v1 缓存可能含 32 位库目录
 #: （症状为 "libsmime3.so: wrong ELF class: ELFCLASS32"），必须整体作废。
 _NIX_LIB_CACHE_VERSION = "2"
+
+#: QtWebEngine（内置 PDF / Mermaid 查看器）**独有**的系统库 soname。
+#:
+#: 与上面的 :data:`_NIX_FHS_EXTRA_SONAMES` 不同：那份是"接管后仍要补的"，这份是
+#: "用来判断需不需要接管"的探针清单，因此只列基础 Qt 不需要、QtWebEngine 才需要的库。
+#: 基础 Qt 能启动 ≠ 它们可用——这正是 NixOS 上"应用正常打开、一点图就报
+#: libasound.so.2 缺失"的原因。
+_WEBENGINE_PROBE_SONAMES = (
+    "libnss3.so", "libnspr4.so", "libasound.so.2", "libcups.so.2",
+    # X11 系列的 soname 是大写 X（文件系统区分大小写）：写成小写会"永远探不到"，
+    # 表现为明明装了库却判定缺失。
+    "libXcomposite.so.1", "libXdamage.so.1", "libXrandr.so.2",
+    "libxshmfence.so.1",
+)
+
+
+def missing_webengine_libs() -> list:
+    """当前进程**加载不到**的 QtWebEngine 系统库（全部可用时为空列表）。
+
+    逐个小价（微秒级）地问 ``dlopen``：与 QtWebEngine 自己加载这些库走的是同一条
+    查找路径（含 ``LD_LIBRARY_PATH``），因此结论与实际能否导入一致，无需真的去导入
+    QtWebEngine（那要付出上百毫秒）。
+
+    非 Linux 平台直接返回空列表：Windows / macOS 的对应运行库由 wheel 自带。
+    """
+    if not is_linux():
+        return []
+    import ctypes
+
+    missing = []
+    for soname in _WEBENGINE_PROBE_SONAMES:
+        try:
+            ctypes.CDLL(soname)
+        except OSError:
+            missing.append(soname)
+    return missing
 
 
 def _is_compatible_elf(path: str) -> bool:
@@ -461,9 +499,44 @@ def maybe_relaunch_in_fhs(exc: BaseException) -> bool:
 
     :return: True 表示进程已被替换（正常情况下不会返回 True）。
     """
+    if not is_shared_library_error(exc):
+        return False
+    return _relaunch_under_fhs(
+        "[NixOS] PySide6 could not find the system Qt/X11 libraries.\n"
+        "[NixOS] Relaunching inside the FHS environment provided by 'steam-run'...")
+
+
+def maybe_relaunch_for_webengine() -> bool:
+    """NixOS 上"基础 Qt 可用、但内置查看器的系统库不在"时接管运行环境。
+
+    与 :func:`maybe_relaunch_in_fhs` 是同一套接管动作（同一份库目录与防重入标记），
+    只是触发条件不同：那里是"基础 Qt 导入就失败"，这里是"应用能启动，但
+    QtWebEngine 要用的库（libnss3 / libasound …）加载不到"。后者若不在此处接管，
+    症状会推迟到用户第一次点开 Mermaid / PDF 时才出现——那一刻进程已经在运行，
+    再想换环境就得重启应用，只能退化为"提示不可用"。
+
+    :return: True 表示进程已被替换（正常情况下不会返回 True）。
+    """
+    missing = missing_webengine_libs()
+    if not missing:
+        return False
+    return _relaunch_under_fhs(
+        "[NixOS] QtWebEngine (built-in PDF / Mermaid viewers) is missing system "
+        f"libraries: {', '.join(missing)}.\n"
+        "[NixOS] Relaunching inside the FHS environment provided by 'steam-run'...")
+
+
+def _relaunch_under_fhs(notice: str) -> bool:
+    """在 ``steam-run`` 提供的 FHS 环境中重新执行本进程。
+
+    成功后进程被 ``os.execve`` 替换，**不会返回**；无法接管时返回 False（由调用方
+    决定是提示还是继续运行）。
+
+    :param notice: 打印到 stderr 的原因说明（用户无需理解 Nix 细节）。
+    """
     if os.environ.get(_FHS_LAUNCHED_ENV) == "1":
         return False  # 已经由本模块拉起过，避免无限重启
-    if not is_nixos() or not is_shared_library_error(exc):
+    if not is_nixos():
         return False
 
     steam_run = shutil.which("steam-run")
@@ -474,12 +547,7 @@ def maybe_relaunch_in_fhs(exc: BaseException) -> bool:
     if not lib_dirs:
         return False
 
-    print(
-        "[NixOS] PySide6 could not find the system Qt/X11 libraries.\n"
-        "[NixOS] Relaunching inside the FHS environment provided by 'steam-run'...",
-        file=sys.stderr,
-        flush=True,
-    )
+    print(notice, file=sys.stderr, flush=True)
 
     env = dict(os.environ)
     env[_FHS_LAUNCHED_ENV] = "1"
