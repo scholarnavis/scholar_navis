@@ -25,7 +25,7 @@ from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
 from src.core.i18n import tr
 from src.core.platform_env import is_windows
-from src.core.references import render_footer_references, split_footer
+from src.core.references import CITE_LINK_RE, render_footer_references, split_footer
 from src.core.signals import GlobalSignals
 from src.core.think_tags import strip as strip_think_blocks
 # hex_to_rgba 由核心层统一实现（全应用唯一来源，避免各 UI 模块各自复制）
@@ -209,15 +209,15 @@ class ImageAwareTextBrowser(QTextBrowser):
     # ---- 行内引用悬停 ----
     @staticmethod
     def _ref_index(href: str) -> int:
-        """从 ``ref://cite?n=N`` 解析引用编号；非引用链接返回 -1。"""
-        if not href or not str(href).startswith("ref://"):
+        """从 ``ref://cite?n=N`` 解析引用编号；非引用链接返回 -1。
+
+        路由形态与解析口径统一在 :mod:`src.core.references`（``CITE_LINK_RE``）：
+        工具回传的 token、渲染注入的锚点、这里的悬停识别共用一个定义。
+        """
+        if not href:
             return -1
-        try:
-            from urllib.parse import parse_qs, urlparse
-            values = parse_qs(urlparse(str(href)).query).get("n", [])
-            return int(values[0]) if values else -1
-        except (ValueError, TypeError, IndexError):
-            return -1
+        match = CITE_LINK_RE.search(str(href))
+        return int(match.group(1)) if match else -1
 
     def _anchor_global_rect(self, pos):
         """把光标所在的**整个引用编号**（``[n]``）换算为全局坐标矩形。
@@ -3067,7 +3067,9 @@ class ChatBubbleWidget(QWidget):
         for i, m in enumerate(mermaids):
             text = text.replace(f"__MERMAID_{i}__", m)
 
-        # 收尾：清除过多换行
+        # 收尾：清除过多换行。零宽空格是给 QTextBrowser 制造断行机会用的，
+        # 复制出去只会变成"每​个​字​之​间​都​有​东​西"，一律去掉。
+        text = text.replace("\u200b", "")
         lines = [line.rstrip() for line in text.splitlines()]
         cleaned = '\n'.join(lines)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()

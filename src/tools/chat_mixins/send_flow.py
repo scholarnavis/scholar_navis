@@ -57,11 +57,9 @@ class ChatSendFlowMixin:
             self.logger.debug("Send blocked: history rebuild is still in progress.")
             return
 
-        # 1. 获取并格式化 KB ID
-        kb_data = self.combo_kb.currentData()
-        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
-        if not kb_id:
-            kb_id = "none"
+        # 1. 自动文献库常开：不再使用用户手选的 KB。旧 KB 选择器已下线，
+        #    这里固定 none，避免隐藏控件里残留的选择偷偷参与检索。
+        kb_id = "none"
 
         # 4. 获取当前附件数据
         current_html = getattr(self, 'external_context_html', "")
@@ -151,6 +149,30 @@ class ChatSendFlowMixin:
             return None
         return None
 
+    def _auto_deep_mode(self) -> bool:
+        """自动判断是否需要深度研究；不再依赖用户勾选 Deep Mode。
+
+        触发条件是"明确的综述/对比/多子问题"信号，普通单问单答仍走单 Agent。
+        深度研究仍会先给计划卡确认，避免自动分解后跑偏。
+        """
+        try:
+            msg = self.history[-1] if self.history else {}
+            text = str(msg.get("display_text") or msg.get("content") or "")
+        except Exception:
+            return False
+        low = text.lower()
+        explicit = (
+            "深度研究", "deep research", "系统综述", "systematic review",
+            "literature review", "meta-analysis", "研究进展", "领域综述",
+            "全面梳理", "多篇文献", "对比分析", "compare ", "comparison of",
+        )
+        if any(key in low for key in explicit):
+            return True
+        question_marks = text.count("?") + text.count("？")
+        if len(text) >= 180 and (question_marks >= 2 or "；" in text or "\n-" in text):
+            return True
+        return False
+
     def start_ai_response(self, kb_id, requires_translation=False):
         main_config = self.model_selector.get_current_config()
         trans_config = self._resolve_trans_config()
@@ -159,8 +181,8 @@ class ChatSendFlowMixin:
                                                                                             'chk_academic_agent') else True
         use_external_tools = self.input_container.chk_external_tools.isChecked() if hasattr(self.input_container,
                                                                                             'chk_external_tools') else False
-        deep_mode = self.input_container.chk_deep_mode.isChecked() if hasattr(self.input_container,
-                                                                              'chk_deep_mode') else False
+        # 不再读用户可见的 Deep Mode 开关：复杂/综述型问题自动升级为深度研究。
+        deep_mode = self._auto_deep_mode()
 
         selected_tags = self.input_container.get_selected_tags()
         academic_tags = [t.replace("[ACADEMIC]", "").strip() for t in selected_tags if t.startswith("[ACADEMIC]")]
@@ -179,6 +201,12 @@ class ChatSendFlowMixin:
 
         # 初始化聊天气泡与 UI 状态
         self.current_ai_text = ""
+        # 生成期间一律不展示引用标记：编号要等收尾按出现顺序定稿（见
+        # ReferenceRegistry.renumber_by_appearance），中途露出的只是内部号。
+        self._citations_hidden = True
+        # 本轮 token 用量由 usage 事件回填；上一轮的值必须清掉，否则新气泡会带着
+        # 上一轮的数字（收尾落历史时就会张冠李戴）。
+        self._current_usage = None
         self.current_ai_bubble = self.add_bubble("", is_user=False)
         self.current_ai_bubble.set_loading(True)
 
@@ -236,6 +264,8 @@ class ChatSendFlowMixin:
                 trans_config=trans_config,
                 messages=list(self.history),
                 kb_id=kb_id,
+                conversation_id=self._tab_id(),
+                auto_evidence=True,
                 requires_translation=requires_translation,
                 external_files=current_external_files,
                 use_academic_agent=use_academic_agent,
@@ -379,8 +409,8 @@ class ChatSendFlowMixin:
             self._restore_message_cards(bubble, msg)
             self.history.append(msg)
 
-        kb_data = self.combo_kb.currentData()
-        kb_id = kb_data.get("id") if isinstance(kb_data, dict) else kb_data
+        # 编辑重发同样走自动文献库，不再读已下线的 KB 选择器。
+        kb_id = "none"
 
         # 重放完成、恢复常规滚动策略后再挂新气泡：新气泡走"用户发送"同一条路径
         # （add_bubble 延迟定位到该气泡顶端），与普通发送行为一致。

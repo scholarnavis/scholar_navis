@@ -3,6 +3,7 @@ import json
 import re
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
 
@@ -100,46 +101,61 @@ def _has_abstract(rec):
 def _merge_records(records):
     """多来源聚合去重。
 
-    - 优先按 DOI 去重；无 DOI 时按标题模糊匹配去重。
-    - 合并来源列表、取最高引用数与最完整摘要，并补充期刊名。
+    - 同一篇论文可能在一个来源里有 DOI、另一个来源里只有标题；用 DOI 索引 +
+      标题索引双路匹配，后到的 DOI 会补进已有记录，不再出现两条重复。
+    - 合并来源列表、取最高引用数与最完整摘要，并把缺失的作者/年份/期刊/URL
+      逐项补全。
+    - 保持首次出现顺序（检索源的 relevance 顺序）；不再按引用数重排，避免
+      老综述把真正相关的新论文压到后面。
     - 每个记录计算 ``confidence`` 可信度评分，供上层参考。
     """
     merged = {}
     order = []
+    doi_index = {}
+    title_index = {}
+
+    def _fill(existing, rec):
+        for key in ("doi", "url", "journal", "year", "pmid", "type"):
+            if not existing.get(key) and rec.get(key):
+                existing[key] = rec[key]
+        if not existing.get("authors") and rec.get("authors"):
+            existing["authors"] = rec["authors"]
+        if not _has_abstract(existing) and _has_abstract(rec):
+            existing["abstract"] = rec["abstract"]
+        existing["citation_count"] = max(
+            existing.get("citation_count", 0) or 0, rec.get("citation_count", 0) or 0)
+        if rec.get("is_retracted"):
+            existing["is_retracted"] = True
+        srcs = existing.setdefault("source_dbs", [])
+        src = rec.get("source_db")
+        if src and src not in srcs:
+            srcs.append(src)
 
     for rec in records:
         if not isinstance(rec, dict) or not rec.get("title"):
             continue
         doi = _normalize_doi(rec.get("doi"))
         ntitle = _norm_title(rec.get("title"))
-        key = f"doi:{doi}" if doi else f"title:{ntitle}"
+        key = (doi_index.get(doi) if doi else None) or title_index.get(ntitle)
 
-        if key in merged:
-            existing = merged[key]
-            # 合并来源（保持有序、去重）
-            srcs = existing.get("source_dbs") or []
-            for s in rec.get("source_db") and [rec["source_db"]] or []:
-                if s and s not in srcs:
-                    srcs.append(s)
-            existing["source_dbs"] = srcs
-            # 引用数取各来源最大值
-            existing["citation_count"] = max(
-                existing.get("citation_count", 0) or 0, rec.get("citation_count", 0) or 0)
-            # 摘要：已有原文时保留首次取值，否则用后到的原文补全
-            if not _has_abstract(existing) and _has_abstract(rec):
-                existing["abstract"] = rec["abstract"]
-            # 期刊名补充
-            if not existing.get("journal") and rec.get("journal"):
-                existing["journal"] = rec["journal"]
-        else:
-            srcs = [rec["source_db"]] if rec.get("source_db") else []
-            rec.setdefault("source_dbs", srcs)
+        if key is None:
+            key = f"doi:{doi}" if doi else f"title:{ntitle}"
+            order.append(key)
+            rec.setdefault("source_dbs", [rec["source_db"]] if rec.get("source_db") else [])
             rec.setdefault("journal", "")
             rec.setdefault("pmid", "")
             merged[key] = rec
-            order.append(key)
+        else:
+            _fill(merged[key], rec)
 
-    # 计算可信度评分并排序（引用数为主，来源覆盖数为辅）
+        if doi:
+            doi_index[doi] = key
+        title_index[ntitle] = key
+        # 有 DOI 的记录后来补进无 DOI 的记录时，已有 DOI 也应能被后续记录命中
+        existing_doi = _normalize_doi(merged[key].get("doi"))
+        if existing_doi:
+            doi_index[existing_doi] = key
+
     ranked = []
     for key in order:
         rec = merged[key]
@@ -149,11 +165,10 @@ def _merge_records(records):
         score += 1.0 if rec.get("doi") else 0.0                # 有 DOI
         score += 1.0 if _has_abstract(rec) else 0.0             # 有真实摘要原文
         score += 0.5 if rec.get("journal") else 0.0            # 有期刊名
-        score += 0.2 * min(float(rec.get("citation_count", 0) or 0) / 100.0, 2.0)  # 引用量
+        score += 0.2 * min(float(rec.get("citation_count", 0) or 0) / 100.0, 2.0)
         rec["confidence"] = round(score, 2)
         ranked.append(rec)
 
-    ranked.sort(key=lambda r: (r.get("citation_count", 0) or 0, r.get("confidence", 0)), reverse=True)
     return ranked
 
 
@@ -221,10 +236,112 @@ def _fetch_pubmed_abstracts(pmids, ncbi_rps):
     return abstracts
 
 
+_ARXIV_NS = {"a": "http://www.w3.org/2005/Atom",
+             "arxiv": "http://arxiv.org/schemas/atom"}
+
+
+_ARXIV_FAILURES = 0
+_ARXIV_COOLDOWN_UNTIL = 0.0
+
+
+def _arxiv_records(query: str, max_results: int = 10):
+    """arXiv 官方 API：返回标题/作者/摘要/DOI/abs 链接（预印本）。
+
+    arXiv 要求请求间隔约 3 秒；限速器按 rps=0.33 排队，避免被临时封禁。
+    ``export.arxiv.org`` 在部分代理/大陆网络会整体超时；连续失败两次后
+    本轮/近期直接跳过，避免每次检索都白等 curl_cffi 20s + requests 8s。
+    """
+    global _ARXIV_FAILURES, _ARXIV_COOLDOWN_UNTIL
+    now = time.time()
+    if now < _ARXIV_COOLDOWN_UNTIL:
+        raise RuntimeError(
+            f"arXiv temporarily skipped for {int(_ARXIV_COOLDOWN_UNTIL - now)}s "
+            "after repeated network timeouts.")
+    global_rate_limiter.acquire("arxiv", rps=0.33)
+    params = {
+        "search_query": f"all:{query}",
+        "start": 0,
+        "max_results": max_results,
+        "sortBy": "relevance",
+        "sortOrder": "descending",
+    }
+    try:
+        # 8s 足够正常响应；代理不通时尽快失败，避免拖慢整个并行检索。
+        res = mcp_request("GET", "https://export.arxiv.org/api/query",
+                          params=params, timeout=8)
+        res.raise_for_status()
+    except Exception:
+        _ARXIV_FAILURES += 1
+        if _ARXIV_FAILURES >= 2:
+            _ARXIV_COOLDOWN_UNTIL = time.time() + 600
+            logger.warning("arXiv disabled for 10 minutes after repeated timeouts.")
+        raise
+    _ARXIV_FAILURES = 0
+    root = ET.fromstring(res.text)
+    records = []
+    for entry in root.findall("a:entry", _ARXIV_NS):
+        title = " ".join((entry.findtext("a:title", "", _ARXIV_NS) or "").split())
+        if not title:
+            continue
+        published = entry.findtext("a:published", "", _ARXIV_NS) or ""
+        authors = [a.findtext("a:name", "", _ARXIV_NS)
+                   for a in entry.findall("a:author", _ARXIV_NS)]
+        abs_url = entry.findtext("a:id", "", _ARXIV_NS) or ""
+        doi = (entry.findtext("arxiv:doi", "", _ARXIV_NS) or "").strip()
+        journal = (entry.findtext("arxiv:journal_ref", "", _ARXIV_NS) or "arXiv").strip()
+        records.append({
+            "title": title,
+            "year": published[:4] if published else "Unknown",
+            "authors": [a for a in authors if a],
+            "citation_count": 0,
+            "abstract": _clean_abstract(entry.findtext("a:summary", "", _ARXIV_NS)),
+            "doi": doi,
+            "url": f"https://doi.org/{doi}" if doi else abs_url,
+            "source_db": "arXiv",
+            "journal": journal,
+            "type": "preprint",
+        })
+    return records
+
+
+def _preprint_records(query: str, max_results: int = 10):
+    """Europe PMC 预印本检索（bioRxiv / medRxiv / 部分 arXiv）。"""
+    url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    params = {"query": f"({query}) AND (SRC:PPR)", "format": "json",
+              "resultType": "core", "pageSize": max_results}
+    res = mcp_request("GET", url, params=params, timeout=15)
+    res.raise_for_status()
+    records = []
+    for p in res.json().get("resultList", {}).get("result", []):
+        title = " ".join(str(p.get("title") or "").split())
+        if not title:
+            continue
+        doi = (p.get("doi") or "").strip()
+        details = p.get("bookOrReportDetails") or {}
+        server = (details.get("publisher") if isinstance(details, dict) else "") or "Preprint"
+        published = str(p.get("firstPublicationDate") or p.get("pubYear") or "")
+        records.append({
+            "title": title,
+            "year": published[:4] if published else "Unknown",
+            "authors": [a.strip() for a in str(p.get("authorString") or "").split(",") if a.strip()],
+            "citation_count": 0,
+            "abstract": _clean_abstract(p.get("abstractText")),
+            "doi": doi,
+            "url": f"https://doi.org/{doi}" if doi else (
+                f"https://europepmc.org/article/PPR/{p.get('id')}" if p.get("id") else ""),
+            "source_db": "Europe PMC Preprint",
+            "journal": server,
+            "type": "preprint",
+        })
+    return records
+
+
 @simple_retry(max_attempts=2, delay=1)
 def search_academic_literature(query: str, max_results: int = 15, offset: int = 0,
-                               source: Literal["auto", "semantic_scholar", "openalex", "crossref", "pubmed"] = "auto",
+                               source: Literal["auto", "semantic_scholar", "openalex",
+                                               "crossref", "pubmed", "arxiv", "preprints"] = "auto",
                                aggregate: bool = True, min_year: int | None = None,
+                               include_preprints: bool = True,
                                ) -> str:
     """Unified literature search with cross-database aggregation.
 
@@ -284,12 +401,23 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
             source = primary.get("source")
             source = source if isinstance(source, dict) else {}
 
+            clean_doi = (p.get("doi") or "").replace("https://doi.org/", "")
+            best = p.get("best_oa_location")
+            best = best if isinstance(best, dict) else {}
+            # url 必须是论文落地页/DOI，不能是 OpenAlex 的 API id（旧实现会把它
+            # 直接塞进引用卡的"打开链接"）。
+            landing = (primary.get("landing_page_url")
+                       or best.get("landing_page_url") or "")
+            url = landing or (f"https://doi.org/{clean_doi}" if clean_doi else p.get("id", ""))
+
             parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
                            "authors": authors,
                            "citation_count": p.get("cited_by_count", 0), "abstract": abstract_text,
-                           "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
-                           "url": p.get("id", ""), "source_db": "OpenAlex",
-                           "journal": source.get("display_name") or ""})
+                           "doi": clean_doi,
+                           "url": url, "source_db": "OpenAlex",
+                           "journal": source.get("display_name") or "",
+                           "is_retracted": bool(p.get("is_retracted")),
+                           "type": "preprint" if not source.get("display_name") else "article"})
         return parsed
 
     def _parse_crossref():
@@ -422,6 +550,12 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
         wanted.append("pubmed")
     if source in ["auto", "semantic_scholar"]:
         wanted.append("semantic_scholar")
+    if source == "arxiv":
+        wanted.append("arxiv")
+    if source == "preprints":
+        wanted.append("preprints")
+    if source == "auto" and include_preprints:
+        wanted.extend(["arxiv", "preprints"])
 
     all_records = []
     source_stats = {}
@@ -446,6 +580,10 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
             if not is_s2_enabled():
                 return db, []
             return db, _parse_s2()
+        if db == "arxiv":
+            return db, _arxiv_records(query, max_results=max(5, max_results // 2))
+        if db == "preprints":
+            return db, _preprint_records(query, max_results=max(5, max_results // 2))
         return db, []
 
     # 显式指定 semantic_scholar 但未配 key：保持原提前返回语义（错误直达调用方）
@@ -586,12 +724,21 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
                 authors = [a.get("author", {}).get("display_name", "") for a in authors_raw if
                            isinstance(a, dict) and isinstance(a.get("author"), dict)]
 
+                clean_doi = (p.get("doi") or "").replace("https://doi.org/", "")
+                primary = p.get("primary_location")
+                primary = primary if isinstance(primary, dict) else {}
+                src = primary.get("source")
+                src = src if isinstance(src, dict) else {}
+                landing = primary.get("landing_page_url") or ""
                 parsed.append({"title": p.get("title", ""), "year": p.get("publication_year", "Unknown"),
                                "authors": authors,
                                "citation_count": p.get("cited_by_count", 0),
                                "abstract": abstract_text,
-                               "doi": p.get("doi", "").replace("https://doi.org/", "") if p.get("doi") else "",
-                               "url": p.get("id", "")})
+                               "doi": clean_doi,
+                               "url": landing or (f"https://doi.org/{clean_doi}" if clean_doi else p.get("id", "")),
+                               "journal": src.get("display_name") or "",
+                               "is_retracted": bool(p.get("is_retracted")),
+                               "source_db": "OpenAlex citation graph"})
 
             return json.dumps({"status": "success", "source": "OpenAlex", "direction": direction, "results": parsed})
         except Exception as e:
@@ -683,16 +830,8 @@ def fetch_open_access_pdf(doi: str, source: Literal["auto", "openalex", "unpaywa
 def search_preprints(query: str, max_results: int = 5) -> str:
     logger.info(f"Task: Preprint Search | Query: '{query}'")
     try:
-        url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-        params = {"query": f'({query}) AND (SRC:PPR)', "format": "json", "resultType": "core", "pageSize": max_results}
-        res = mcp_request("GET", url, params=params, timeout=15)
-        res.raise_for_status()
-        results = [
-            {"title": p.get("title", ""), "year": p.get("pubYear", "Unknown"), "authors": p.get("authorString", ""),
-             "doi": p.get("doi", ""), "source": p.get("bookOrReportDetails", {}).get("publisher", "Preprint Server"),
-             "abstract": _clean_abstract(p.get("abstractText")),
-             "url": f"https://doi.org/{p.get('doi')}" if p.get("doi") else ""} for p in
-            res.json().get("resultList", {}).get("result", [])]
-        return json.dumps({"status": "success", "results": results}, ensure_ascii=False)
+        return json.dumps({"status": "success",
+                           "results": _preprint_records(query, max_results)},
+                          ensure_ascii=False)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})

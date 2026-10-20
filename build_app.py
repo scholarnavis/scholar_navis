@@ -2,7 +2,7 @@
 
 产物形态按平台分派
 ------------------
-* **Linux**：**源码包**（不再使用 PyInstaller）。PyPI 上的 PySide6 / torch /
+* **Linux**：**源码包**（不再使用 PyInstaller）。PyPI 上的 PySide6 / tokenizers /
   onnxruntime 都是 manylinux wheel，冻结成可执行产物时必须把 Qt/X11 系统库分析并
   复制进去，代价是构建被绑死在特定发行版镜像上、产物与宿主 glibc 强绑定（详见
   ``.github/workflows/build-release.yml`` 的历史注释），而且用户装不了自己发行版的
@@ -21,6 +21,7 @@
   的 ``mode``：冻结产物收集 wheel 许可正文，源码包只出声明）。
 """
 import glob
+import json
 import logging
 import os
 import platform
@@ -354,17 +355,11 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
     """Windows 产物：PyInstaller ``--onedir``。失败时非零退出，不进入打包/发布。"""
     is_windows = sys_os == "Windows"
 
-    hook_file = "torch_runtime_hook.py"
-    with open(hook_file, "w", encoding="utf-8") as f:
-        f.write("import torch\nimport torch.autograd\n")
-    print("[*] Generated PyTorch Runtime Hook to prevent circular imports.")
-
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--onedir",
         f"--name={app_name_safe}",
-        f"--runtime-hook={hook_file}",
     ]
 
     if sys_os in ("Windows", "Darwin"):
@@ -374,11 +369,23 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
         cmd.append("--windowed")
 
     packages_to_collect = [
-        "optimum", "transformers", "onnxruntime", "onnx", "tokenizers",
-        "chromadb", "anyio"
+        "onnxruntime", "onnx", "tokenizers", "chromadb", "anyio"
     ]
 
     data_to_collect = ["docx", "litellm"]
+
+    # 冻结产物里 LiteLLM 的 model map 是纯数据文件；漏收集会让打包后的
+    # ``litellm.model_cost`` 为空，所有模型都显示 Unknown。构建时先验证。
+    try:
+        from PyInstaller.utils.hooks import collect_data_files
+        litellm_data = collect_data_files("litellm")
+        if not any("model_prices_and_context_window" in src
+                   for src, _dest in litellm_data):
+            raise RuntimeError(
+                "LiteLLM model_prices_and_context_window.json is missing; "
+                "refusing to build an app without model metadata.")
+    except ImportError:
+        pass
 
     # 惰性导入的包在字节码里没有 import 指令，静态分析无法发现，必须显式收集：
     # 对话框包用 PEP 562 ``__getattr__`` + ``import_module(f".{name}")`` 转发子模块
@@ -391,9 +398,6 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
     ]
 
     hidden_imports = [
-        "torch",
-        "torch.autograd",
-        "safetensors",
         "huggingface_hub",
         "ssl",
         "_ssl",
@@ -437,23 +441,37 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
     for hi in hidden_imports:
         cmd.extend(["--hidden-import", hi])
 
-    # 依然需要 Copy Metadata 骗过 transformers 的检查
-    cmd.extend(["--copy-metadata", "transformers"])
+    # 这些包运行时会读取自身 distribution metadata。
     cmd.extend(["--copy-metadata", "tqdm"])
     cmd.extend(["--copy-metadata", "regex"])
-    cmd.extend(["--copy-metadata", "torch"])
     cmd.extend(["--copy-metadata", "tiktoken"])
+    cmd.extend(["--copy-metadata", "tokenizers"])
     cmd.extend(["--copy-metadata", "onnx"])
+    # LiteLLM 运行时会读取自身包元数据/本地 model map；冻结产物必须带上。
+    cmd.extend(["--copy-metadata", "litellm"])
     # 按 distribution 名取：Windows 上只有 DirectML 包，写死 "onnxruntime" 会让
     # PyInstaller 抛 PackageNotFoundError 直接构建失败（见该映射的说明）。
-    # 附带影响：DirectML 包的 distribution 名不是 onnxruntime，冻结产物里
-    # ``importlib.metadata.version("onnxruntime")`` 不可用——已扫描确认 optimum /
-    # transformers / huggingface_hub / sentence_transformers / chromadb 均不读它。
     cmd.extend(["--copy-metadata", onnxruntime_distribution_name(sys_os)])
-    cmd.extend(["--copy-metadata", "optimum"])
 
     # --add-data 的分隔符是平台相关的：Windows 为 ';'，POSIX 为 ':'。
     cmd.append(f"--add-data=Assets{os.pathsep}Assets")
+
+    # 打包时抓一次 LiteLLM 官方 model map 作为随包种子：即使首次启动完全离线，
+    # GPT-6 / DeepSeek V4 等新模型也有上下文数据。抓取失败则复用上次种子。
+    seed_path = os.path.join("build_support", "litellm_model_cost.json")
+    try:
+        from src.core.token_estimator import fetch_litellm_model_map
+        seed_data = fetch_litellm_model_map(timeout=12)
+        if seed_data:
+            with open(seed_path, "w", encoding="utf-8") as f:
+                json.dump(seed_data, f)
+            print(f"[*] Bundled LiteLLM model map seed: {len(seed_data)} entries")
+        else:
+            print("[!] LiteLLM model map fetch failed; reusing the previous seed if present.")
+    except Exception as e:
+        print(f"[!] LiteLLM model map seed fetch skipped: {e}")
+    if os.path.isfile(seed_path):
+        cmd.append(f"--add-data={seed_path}{os.pathsep}scholar_workspace")
 
     # 许可合规：AGPL-3 §4/§6 与 LGPL-3 §4 要求随二进制向接收者提供许可文本与声明，
     # 而 PyInstaller 默认不带任何许可文件（此前发布的产物里连 LICENSE 都没有）。

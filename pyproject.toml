@@ -21,14 +21,13 @@ dependencies = [
     # 上限 <2 是为避免顺带跳进 mcp 2.x 这个与安全无关的大版本。
     "mcp[cli]>=1.28.1,<2",
     "biopython>=1.87",
-    "optimum>=2.1.0",
     "curl-cffi>=0.15.0",
-    "torch>=2.13.0",
     "cryptography>=50.0.0",
     "keyring>=24.0.0",
     "chardet<6.0",
     "hf-xet>=1.2.0",
-    "optimum-onnx>=0.1.0",
+    # 只用于读取 tokenizer.json；不走 transformers，也不需要 torch。
+    "tokenizers>=0.23.3",
     # ONNX Runtime 的 CPU / CUDA / DirectML 是三个独立发行包，却提供同一个
     # ``onnxruntime`` 包目录：同时安装会让同名文件互相覆盖，加速提供者随之消失。
     # 因此**每个平台 + 架构只声明一个发行包**，并由 [tool.uv] 的
@@ -89,17 +88,6 @@ dev = [
 ]
 
 
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchaudio = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }
-
-
 [tool.uv]
 # 依赖锁定用到两项较新的能力：exclude-dependencies 的作用域形式，以及 lock
 # revision 5。两者都需要 uv >= 0.13，这里显式声明最低版本——旧版 uv 会直接拒绝
@@ -157,16 +145,8 @@ constraint-dependencies = [
 #    (/api/v2/tenants/{tenant}/databases/{db}/collections + trust_remote_code)；
 #    本项目只用进程内嵌的 PersistentClient（src/core/kb_manager.py），
 #    不对外暴露 Chroma 服务端，因此实际暴露面很低。
-# 2) transformers 5 条（4 High + 1 Moderate）：修复下限依次为
-#    GHSA-29pf-2h5f-8g72 → 5.3.0、GHSA-fgcw-684q-jj6r → 5.5.0、
-#    GHSA-xrqw-3rrv-vx5w → 5.10.0、GHSA-69w3-r845-3855 → 5.0.0rc3；
-#    GHSA-x9r9-c232-4q39（>= 4.49.0, <= 5.8.1）的 first_patched_version 为 null，
-#    但升级到 5.9+ 即脱离该区间。即清空这 5 条至少要 transformers>=5.10.0，
-#    而 optimum-onnx 0.1.0（PyPI 最新版）硬性要求 transformers<4.58.0，无法同时满足
-#    （optimum 已发布到 2.3.0，但其 onnx 能力仍由 optimum-onnx 提供，约束未变）。
-#    缓解：本项目的 transformers 只被 optimum 的 ORTModel* 走 ONNX 推理路径
-#    （src/task/kb_tasks.py、src/core/rerank_engine.py 的 from_pretrained），
-#    不构造 Trainer、不加载外部 checkpoint，因此这几条告警的触发面不经过本项目。
-#    解除条件：optimum-onnx 发布支持 transformers 5.x 的版本，或移除 ONNX 导出链路。
+# 2) 已移除 transformers/optimum/torch：tokenizer 改由 tokenizers 直接读取
+#    tokenizer.json，ONNX Runtime 负责推理。由 transformers 带入的 5 条告警
+#    不再适用本项目。
 
 

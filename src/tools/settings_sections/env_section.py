@@ -7,7 +7,7 @@
 import logging
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFormLayout, QHBoxLayout, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QLabel, QPushButton, QGroupBox, QVBoxLayout)
 
 from src.core.i18n import AUTO, LANGUAGE_NATIVE_NAMES, tr
@@ -294,8 +294,18 @@ class EnvSectionMixin:
 
         self.combo_proxy_mode.currentIndexChanged.connect(self._on_proxy_mode_changed)
 
+        # 期刊登录浏览器是否走全局代理。默认关闭：部分期刊/机构（含 Tair）
+        # 通过校园/机构出口 IP 自动登录，走代理反而会落到非机构 IP。
+        self.chk_journal_proxy = QCheckBox(tr("Use global proxy for journal browser"))
+        self.chk_journal_proxy.setToolTip(tr(
+            "Off by default. Some journals and institutional services auto-login by "
+            "recognizing your institution's IP; using a proxy can break that."))
+        self.chk_journal_proxy.setChecked(
+            bool(self.config.user_settings.get("journal_use_proxy", False)))
+
         layout.addRow(tr("Proxy Mode:"), self.combo_proxy_mode)
         layout.addRow(tr("Proxy URL:"), self.input_proxy)
+        layout.addRow(tr("Journal Browser:"), self.chk_journal_proxy)
         layout.addRow(tr("HF Mirror:"), self.input_mirror)
 
         self.layout.addWidget(group)

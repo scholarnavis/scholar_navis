@@ -407,11 +407,15 @@ class DatabaseManager:
         else:
             self.logger.error("self.collection is None when trying to add documents!")
 
-    def query(self, query_text, n_results=5):
+    def query(self, query_text, n_results=5, where=None):
+        """向量检索；``where`` 为 Chroma 元数据过滤条件（可空）。"""
         if self.collection:
             try:
+                kwargs = {"query_texts": [query_text], "n_results": n_results}
+                if where:
+                    kwargs["where"] = where
                 with self._db_lock:
-                    return self.collection.query(query_texts=[query_text], n_results=n_results)
+                    return self.collection.query(**kwargs)
             except Exception as e:
                 self.logger.error(f"Query failed: {e}\n{traceback.format_exc()}")
                 return None

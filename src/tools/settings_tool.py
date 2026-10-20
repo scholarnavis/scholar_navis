@@ -178,6 +178,7 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.input_github_token.textChanged.connect(self._mark_unsaved)
         self.combo_proxy_mode.currentIndexChanged.connect(self._mark_unsaved)
         self.input_proxy.textChanged.connect(self._mark_unsaved)
+        self.chk_journal_proxy.toggled.connect(self._mark_unsaved)
         self.input_mirror.textChanged.connect(self._mark_unsaved)
         self.combo_embed.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_rerank.currentIndexChanged.connect(self._mark_unsaved)
@@ -343,6 +344,8 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.combo_proxy_mode.setCurrentIndex(
             {"off": 0, "custom": 1}.get(self.config.user_settings.get("proxy_mode", "off"), 0))
         self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
+        self.chk_journal_proxy.setChecked(
+            bool(self.config.user_settings.get("journal_use_proxy", False)))
         self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
 
         curr_embed = self.config.user_settings.get("current_model_id", "embed_auto")

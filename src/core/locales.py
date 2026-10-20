@@ -765,6 +765,59 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Bookmark removed.": "书签已移除。",
         "This message cannot be bookmarked.": "这条消息无法添加书签。",
         "A bookmark needs a title.": "书签需要一个标题。",
+        "PDF detected. Adding it to this conversation's evidence...":
+            "已检测到 PDF，正在加入本对话的证据库…",
+        "Full text added to this conversation's evidence.":
+            "全文已加入本对话的证据库。",
+        "Failed to add the downloaded PDF to the evidence store.":
+            "下载的 PDF 未能加入证据库。",
+        " Clear Literature Login Session": " 清除文献登录会话",
+        "Literature Login:": "文献登录：",
+        "Use global proxy for journal browser": "期刊浏览器使用全局代理",
+        "Off by default. Some journals and institutional services auto-login by recognizing your institution's IP; using a proxy can break that.":
+            "默认关闭。部分期刊/机构服务会通过机构 IP 自动登录，使用代理可能反而失效。",
+        "Journal Browser:": "期刊浏览器：",
+        "Conversation Evidence": "本对话证据",
+        " Evidence": " 证据",
+        "Show literature evidence attached to this conversation": "查看本对话已入库的文献证据",
+        "Title": "标题", "Year": "年份", "Journal": "期刊",
+        "Source": "来源", "Status": "状态",
+        "Full text": "全文", "Abstract": "摘要",
+        "Refresh": "刷新", "Get full text": "获取全文",
+        "Get next missing": "获取下一篇缺失全文",
+        "No abstract-only papers with DOI/URL remain.":
+            "没有仍只有摘要且有 DOI/URL 的论文了。",
+        "Delete private": "删除私有证据", "Close": "关闭",
+        "This conversation has {n} evidence item(s), {p} private.":
+            "本对话共有 {n} 条证据，其中 {p} 条私有。",
+        "This conversation has {n} evidence item(s), {p} private, {f} full text, {a} abstract-only. Select an abstract-only row and click Get full text; log in once and cookies are reused.":
+            "本对话共有 {n} 条证据，其中 {p} 条私有、{f} 条全文、{a} 条仅摘要。选中仅摘要条目后点击“获取全文”，登录一次后 Cookie 会复用。",
+        "Loading evidence...": "正在读取证据…",
+        "Private evidence deleted.": "私有证据已删除。",
+        "Delete failed.": "删除失败。",
+        "Context:": "上下文：", "Max Output:": "最大输出：",
+        "Detect": "探测", "Detecting...": "探测中…",
+        "Refresh models": "刷新模型表", "Refreshing...": "刷新中…",
+        "Download LiteLLM's official model_prices_and_context_window.json so new models (GPT-6, DeepSeek V4, Qwen3-Max, ...) resolve correctly.":
+            "下载 LiteLLM 官方 model_prices_and_context_window.json，让 GPT-6、DeepSeek V4、Qwen3-Max 等新模型正确解析。",
+        "LiteLLM model metadata refreshed: {n} entries":
+            "LiteLLM 模型表已刷新：{n} 条。",
+        "Could not refresh LiteLLM model metadata; using the local backup.":
+            "无法刷新 LiteLLM 模型表，继续使用本地备份。",
+        "Provider URL and model name are required for detection.":
+            "探测上下文窗口需要 Provider URL 和模型名。",
+        "Detected context window: {n} tokens": "已探测到上下文窗口：{n} tokens",
+        "Provider did not expose a context window; using static inference or the 1M fallback.":
+            "Provider 未暴露上下文窗口；将使用静态推断或 1M 兜底。",
+        "Ask the provider's /models metadata for a context window. OpenAI official endpoints usually do not expose it.":
+            "向 provider 的 /models 元数据查询上下文窗口；OpenAI 官方接口通常不返回该字段。",
+        "Updating LiteLLM model metadata...": "正在更新 LiteLLM 模型元数据…",
+        "Model metadata is still updating in the background...":
+            "模型元数据仍在后台更新…",
+        "Model metadata updated.": "模型元数据已更新。",
+        "Model metadata is up to date.": "模型元数据已是最新。",
+        "Literature login session cleared.": "文献登录会话已清除。",
+        "Could not clear the literature login session.": "未能清除文献登录会话。",
 
         # ================= 对话助手：链接路由与内置查看器 =================
         "Cannot open the viewer: the QtWebEngine runtime could not be loaded.":

@@ -412,8 +412,9 @@ class ChatAttachmentsMixin:
     def export_chat_history(self):
         """导出对话：当前对话（单归档）或全部对话（多归档）。
 
-        导出格式只有 ``.schat`` 一种：正文、思考链、参考文献、书签、组件状态与
-        小体积附件都在同一个容器里，导入后可继续对话。PDF/MD/TXT 已移除。
+        导出格式只有 ``.schat`` 一种（SQLite 容器）：正文、思考链、参考文献、
+        书签、标签、组件状态与小体积附件都在同一个文件里，导入后可继续对话。
+        PDF/MD/TXT 已移除。
         """
         has_current = bool(self.history)
         tm = ThemeManager()
@@ -446,7 +447,7 @@ class ChatAttachmentsMixin:
             tr("Scholar Navis Conversation (*.schat)"))
         if not path:
             return
-        # 归档是 ZIP 容器，扩展名必须与容器一致（用户可能手输 .json）
+        # 归档是单一容器文件，扩展名统一为 .schat（用户可能手输 .json / .db）
         if not path.lower().endswith(".schat"):
             path = os.path.splitext(path)[0] + ".schat"
 
@@ -554,10 +555,11 @@ class ChatAttachmentsMixin:
 
     # ---------- Import ----------
     def import_chat_history(self):
-        """选择并导入对话归档（``.schat`` / ``.json``）。
+        """选择并导入对话归档（``.schat`` / ``.sqlite3`` / ``.db`` / ``.json``）。
 
         归档可含一个或多个对话：单对话归档替换当前对话，多对话归档则新建对应
-        数量的标签页（见 :meth:`ChatTool.import_tabs`）。PDF/MD/TXT 已移除。
+        数量的标签页（见 :meth:`ChatTool.import_tabs`）。旧版 ZIP / 纯 JSON 归档
+        仍可导入。PDF/MD/TXT 已移除。
         """
         from src.task.chat_tasks import ImportChatHistoryTask
         from src.ui.components.dialog import ProgressDialog
@@ -565,7 +567,7 @@ class ChatAttachmentsMixin:
         # 空历史也允许导入（直接填充），因此不做前置判空
         path, _ = open_file_name(
             self.widget, tr("Import Conversations"), "",
-            tr("Scholar Navis Conversation (*.schat *.json)"))
+            tr("Scholar Navis Conversation (*.schat *.sqlite3 *.db *.json)"))
         if not path:
             return
 
@@ -633,6 +635,11 @@ class ChatAttachmentsMixin:
         rename = getattr(container, "rename_tab", None)
         if imported_name and imported_name != DEFAULT_TAB_NAME and callable(rename):
             rename(self._tab_id(), imported_name)
+        # 标签也随归档恢复：导入进来的是一段对话，它的标签同样属于这段内容。
+        imported_tags = [t for t in (tabs[0].get("tags") or []) if isinstance(t, str)]
+        if imported_tags:
+            from src.core import chat_session
+            chat_session.save_tab_tags(self._tab_id(), imported_tags)
 
         # 重建阶段（逐条渲染气泡）比解析慢得多，且全程在 UI 线程：这里改用异步
         # 分片推进（见 _apply_imported_history），进度对话框在这期间才能继续滚动
@@ -927,6 +934,9 @@ class ChatAttachmentsMixin:
             # 无损导入的引用条目按新气泡编号回灌，恢复 [n] 的悬停著录与支撑原文。
             # （引用与组件不同：它只与"气泡编号"相关，不依赖正文是否渲染。）
             self._restore_message_references(bubble, msg)
+            # token 用量是本轮回答的属性，随条目落盘；重建时一并还原，否则
+            # 重启 / 导入之后计数器会整片消失。
+            self._restore_message_usage(bubble, msg)
             yield
 
             if not is_user and bubble is not None:
@@ -938,7 +948,11 @@ class ChatAttachmentsMixin:
                 # 源码供点击查看。
                 final_html = ""
                 try:
-                    final_html = self._format_response(content, getattr(bubble, "index", -1))
+                    # 只有带引用列表的历史消息才显示 [n]：旧记录里可能残留编号却
+                    # 没有对应条目（早期导出丢过引用），那种编号点开只会是空卡。
+                    final_html = self._format_response(
+                        content, getattr(bubble, "index", -1),
+                        hide_citations=self._citations_hidden_for(msg))
                 except Exception as e:
                     rendered = False
                     logger.warning("Failed to render imported AI message with "

@@ -341,6 +341,10 @@ class ChatBookmarksMixin:
         panel = getattr(self, "_bookmark_panel", None)
         if panel is not None and panel.isVisible():
             panel.hide()
+        for name in ("_literature_panel", "_evidence_panel"):
+            panel = getattr(self, name, None)
+            if panel is not None and panel.isVisible():
+                panel.hide()
 
     def _reset_bookmark_views(self):
         strip = getattr(self, "_bookmark_strip", None)

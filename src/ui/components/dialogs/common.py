@@ -68,9 +68,12 @@ class ProgressDialog(BaseDialog):
         super().__init__(parent, title=title, width=540)
         self.setWindowModality(Qt.ApplicationModal)
 
-        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+        # 恢复系统原生标题栏/边框：不自定义 frameless 窗口。
+        self.setWindowFlags(
+            Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint
+            | Qt.WindowCloseButtonHint)
+        self.setWindowTitle(title)
 
-        # --- UI 初始化 ---
         self.lbl_message = QLabel(message)
         self.lbl_message.setWordWrap(True)
         self.content_layout.addWidget(self.lbl_message)

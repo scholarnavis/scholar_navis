@@ -25,19 +25,21 @@
 """
 
 import logging
+import threading
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation,
-                            Qt, QTimer)
+                            Qt, QTimer, Signal)
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (QGraphicsOpacityEffect, QHBoxLayout, QLabel,
-                               QPushButton, QScrollArea, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
 from src.core import chat_session
 from src.core.i18n import tr
 from src.core.kb_manager import DatabaseManager, KBManager
 from src.core.models_registry import get_model_conf
 from src.core.signals import GlobalSignals
-from src.core.theme_manager import ThemeManager, overlay_scrollbar_qss
+from src.core.theme_manager import ThemeManager, overlay_scrollbar_qss, strong_weight_css
 from src.tools.base_tool import BaseTool
 from src.tools.chat_input_widgets import (ChatDropTargetWidget,
                                          ChatInputContainer)
@@ -58,6 +60,9 @@ logger = logging.getLogger(__name__)
 class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin,
                        ChatBookmarksMixin, ChatBubblesMixin, ChatAttachmentsMixin,
                        ChatSessionMixin, BaseTool):
+    #: 付费墙/手动 PDF 入库完成：(ok, message, path)。由后台线程发出，UI 线程接收。
+    sig_private_pdf_ready = Signal(bool, str, str)
+
     # 由 get_ui_widget 与信号槽流程创建，仅作静态检查声明
     top_bar_wrapper: QWidget
     model_selector: ModelSelectorWidget
@@ -80,11 +85,41 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
     follow_up_shelf_layout: QVBoxLayout
     input_container: ChatInputContainer
     btn_toggle_search: QPushButton
+    btn_evidence: QPushButton
     search_bar: SearchBar  # 见 src/ui/components/search.py（共享搜索条）
     _render_timer: QTimer
     _is_rendering_dirty: bool
     kb_id: str
     is_locked: bool
+
+    # ------------------------------------------------------------------ #
+    #  流式文本缓冲
+    # ------------------------------------------------------------------ #
+    @property
+    def current_ai_text(self) -> str:
+        """当前回答的累计文本（惰性拼接）。
+
+        流式 token 逐个到达时，如果每来一个就做 ``text += token``，Python 字符串
+        不可变，整体是 O(N²) 拷贝：长思维链（几万到十几万字符）会把主线程拖死，
+        表现为"AI 一思考整个程序就卡"。这里改为分段追加，只有真正需要读取
+        （渲染、落盘、收尾）时才一次性 join。
+        """
+        parts = getattr(self, "_ai_text_parts", None)
+        if parts is None:
+            return ""
+        if len(parts) > 1:
+            value = "".join(parts)
+            parts.clear()
+            parts.append(value)
+            self._ai_text_len = len(value)
+            return value
+        return parts[0] if parts else ""
+
+    @current_ai_text.setter
+    def current_ai_text(self, value):
+        text = str(value or "")
+        self._ai_text_parts = [text]
+        self._ai_text_len = len(text)
 
     def __init__(self, tab_id: str, tabs_container=None):
         """:param tab_id: 本会话所属标签页 id（快照文件名与清单键都用它）。
@@ -99,6 +134,21 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self.current_ai_text = ""
         self.current_ai_bubble = None
         self.pdf_viewer = None
+        self._literature_panel = None
+        self._evidence_panel = None
+        self.sig_private_pdf_ready.connect(self._on_private_pdf_ready)
+        try:
+            from src.ui.components.citation_popup import CitationPopupController
+            CitationPopupController.instance().sig_fulltext_requested.connect(
+                self.open_fulltext_panel)
+        except Exception as e:
+            logger.debug("Citation fulltext hook unavailable: %s", e)
+        # 滚动范围变化在流式期间非常频繁：合并成 90ms 一次，避免每个 rangeChanged
+        # 都全量扫描气泡布局来确定"回顶/到底"按钮。
+        self._scroll_check_timer = QTimer(self)
+        self._scroll_check_timer.setSingleShot(True)
+        self._scroll_check_timer.setInterval(90)
+        self._scroll_check_timer.timeout.connect(self._check_scroll_position)
         self.expanded_thinks = set()
         self.user_toggled_thinks = set()
         self.external_context_buffer = ""
@@ -190,6 +240,7 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self.setup_chat_search(row2_layout, top_bar)
         # 书签集入口：插在搜索按钮之前（同一行的状态按钮组）
         self.setup_bookmark_button(row2_layout)
+        self.setup_evidence_button(row2_layout)
 
         main_layout.addWidget(self.top_bar_wrapper)
 
@@ -197,12 +248,13 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
 
         def set_ribbon_visible(visible, show_row=True):
             # Collapsed：整行收起（不留空白带）；Hover：保留一行占位，鼠标进入
-            # 顶栏时再展开模型选择器。
+            # 顶栏时再展开模型选择器。KB 选择器已下线：自动文献库常开，不再让
+            # 用户选库（旧库仍保留在后端，作为自动检索失败时的兜底）。
             self.ribbon_row.setVisible(show_row)
             self.model_selector.setVisible(visible)
             self.collapsed_placeholder.setVisible(not visible and show_row)
-            self.lbl_kb.setVisible(visible)
-            self.combo_kb.setVisible(visible)
+            self.lbl_kb.setVisible(False)
+            self.combo_kb.setVisible(False)
 
         def apply_ribbon_state(state):
             tm = ThemeManager()
@@ -339,6 +391,120 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
 
         return self.widget
 
+    # ------------------------------------------------------------------ #
+    #  会话证据面板
+    # ------------------------------------------------------------------ #
+    def setup_evidence_button(self, row2_layout):
+        tm = ThemeManager()
+        self.btn_evidence = QPushButton(tr(" Evidence"))
+        self.btn_evidence.setToolTip(tr("Show literature evidence attached to this conversation"))
+        self.btn_evidence.setCursor(Qt.PointingHandCursor)
+        self.btn_evidence.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.btn_evidence.clicked.connect(lambda: self.open_evidence_panel())
+        row2_layout.insertWidget(row2_layout.count() - 1, self.btn_evidence)
+        self._apply_evidence_button_theme()
+        tm.theme_changed.connect(self._apply_evidence_button_theme)
+
+    def _apply_evidence_button_theme(self):
+        btn = getattr(self, "btn_evidence", None)
+        if btn is None:
+            return
+        tm = ThemeManager()
+        btn.setIcon(tm.icon("folder", "text_main"))
+        btn.setStyleSheet(f"""
+            QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')};
+                           border: 1px solid {tm.color('border')}; padding: 4px 10px;
+                           border-radius: 4px; font-weight: {strong_weight_css()}; }}
+            QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
+        """)
+
+    def open_evidence_panel(self):
+        from src.ui.components.evidence_panel import EvidencePanel
+        panel = getattr(self, "_evidence_panel", None)
+        if panel is None:
+            panel = EvidencePanel(self.widget)
+            panel.sig_get_fulltext.connect(self.open_fulltext_panel)
+            panel.sig_get_missing_fulltext.connect(
+                self._open_next_missing_fulltext)
+            self._evidence_panel = panel
+        panel.refresh(self._tab_id())
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+
+    # ------------------------------------------------------------------ #
+    #  付费墙全文获取
+    # ------------------------------------------------------------------ #
+    def _open_next_missing_fulltext(self):
+        """从证据面板挑下一篇仅摘要的论文，打开登录/下载流程。"""
+        from src.core.auto_evidence import list_conversation_evidence
+        items = list_conversation_evidence(self._tab_id())
+        target = next((it for it in items
+                       if not it.get("has_fulltext")
+                       and (it.get("doi") or it.get("url"))), None)
+        if target is None:
+            ToastManager().show(
+                tr("No abstract-only papers with DOI/URL remain."), "info")
+            return
+        self.open_fulltext_panel(
+            str(target.get("doi") or ""), str(target.get("title") or ""),
+            str(target.get("url") or ""))
+
+    def open_fulltext_panel(self, doi: str, title: str, url: str):
+        """从引用卡打开非模态登录面板；不触碰当前对话历史/生成任务。"""
+        # 引号卡控制器是进程级单例：所有标签页都会收到同一信号，
+        # 只让当前可见的对话页响应，避免一次点击弹出多个登录窗口。
+        if self.widget is None or not self.widget.isVisible():
+            return
+        from src.ui.components.literature_login import LiteratureLoginPanel
+        panel = getattr(self, "_literature_panel", None)
+        if panel is None:
+            panel = LiteratureLoginPanel(self.widget)
+            panel.sig_pdf_ready.connect(self._on_literature_pdf_downloaded)
+            self._literature_panel = panel
+        panel.open_paper(doi=doi, title=title, url=url)
+        logger.info("Literature login panel opened for DOI=%s", doi or url)
+
+    def _on_literature_pdf_downloaded(self, path, meta):
+        """PDF 下载完成：后台解析入库，当前对话与正在生成的回答都不动。"""
+        ToastManager().show(
+            tr("PDF detected. Adding it to this conversation's evidence..."), "info")
+        tab_id = self._tab_id()
+
+        def worker():
+            from src.core.auto_evidence import run_private_pdf_ingest
+            try:
+                ok, message = run_private_pdf_ingest(
+                    path, tab_id, meta, origin="login_pdf")
+            except Exception as e:
+                ok, message = False, f"PDF ingest failed: {e}"
+            try:
+                self.sig_private_pdf_ready.emit(ok, message, path)
+            except RuntimeError:
+                pass  # 标签页已关闭
+
+        threading.Thread(target=worker, daemon=True,
+                         name="private-pdf-ingest").start()
+
+    def _on_private_pdf_ready(self, ok: bool, message: str, path: str = ""):
+        login_panel = getattr(self, "_literature_panel", None)
+        if login_panel is not None:
+            try:
+                login_panel.set_submission_result(path, ok, message)
+            except RuntimeError:
+                pass
+        if ok:
+            panel = getattr(self, "_evidence_panel", None)
+            if panel is not None and panel.isVisible():
+                panel.refresh(self._tab_id())
+            ToastManager().show(
+                message or tr("Full text added to this conversation's evidence."),
+                "success")
+        else:
+            ToastManager().show(
+                message or tr("Failed to add the downloaded PDF to the evidence store."),
+                "warning")
+
     def shutdown(self):
         """关闭本标签页：注销退出钩子、断开全局信号、终止生成、释放画面。
 
@@ -359,9 +525,19 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
             except Exception as e:
                 logger.warning("Failed to cancel generation while closing tab %s: %s",
                                self._tab_id(), e)
-        timer = getattr(self, '_render_timer', None)
-        if timer is not None:
-            timer.stop()
+        for name in ('_render_timer', '_scroll_check_timer'):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.stop()
+
+        for name in ("_literature_panel", "_evidence_panel"):
+            panel = getattr(self, name, None)
+            if panel is not None:
+                try:
+                    panel.close()
+                except RuntimeError:
+                    pass
+                setattr(self, name, None)
 
         layout = getattr(self, 'chat_layout', None)
         if layout is not None:
@@ -396,8 +572,16 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
             ThemeManager().theme_changed.disconnect(self._apply_ribbon_button_style)
         except (RuntimeError, TypeError):
             pass
+        for slot in (self._apply_bookmark_button_theme,
+                     self._apply_evidence_button_theme):
+            try:
+                ThemeManager().theme_changed.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
         try:
-            ThemeManager().theme_changed.disconnect(self._apply_bookmark_button_theme)
+            from src.ui.components.citation_popup import CitationPopupController
+            CitationPopupController.instance().sig_fulltext_requested.disconnect(
+                self.open_fulltext_panel)
         except (RuntimeError, TypeError):
             pass
 
@@ -449,15 +633,11 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
                 if event.type() == QEvent.Enter:
                     self.model_selector.setVisible(True)
                     self.collapsed_placeholder.setVisible(False)
-                    self.lbl_kb.setVisible(True)
-                    self.combo_kb.setVisible(True)
 
                 elif event.type() == QEvent.Leave:
                     if not self.top_bar_wrapper.geometry().contains(self.widget.mapFromGlobal(QCursor.pos())):
                         self.model_selector.setVisible(False)
                         self.collapsed_placeholder.setVisible(True)
-                        self.lbl_kb.setVisible(False)
-                        self.combo_kb.setVisible(False)
 
         return super().eventFilter(obj, event)
 
@@ -659,9 +839,9 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self._update_jump_top_button()
 
     def _on_scroll_range_changed(self, min_v, max_v):
-        # 布局高度变化后延迟一帧重检：singleShot(0) 排在布局事件之后执行，
-        # 此时 scrollbar range 已是最终值，误显的按钮得以收敛隐藏
-        QTimer.singleShot(0, self._check_scroll_position)
+        # 布局高度变化后延迟重检：合并 90ms 内的连续 rangeChanged，避免流式期间
+        # 每个 token 都全量扫描气泡布局来更新悬浮按钮。
+        self._scroll_check_timer.start()
         # 布局变化可能意味着新气泡或流式内容增长，搜索展开时节流重扫命中表
         self._schedule_chat_search_refresh()
 

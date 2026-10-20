@@ -17,7 +17,13 @@ from src.core.chat_typography import (PARAM_BY_NAME as _TYPO_PARAMS,
                                       clamp, clamp_font_size, heading_metrics)
 from src.core.file_types import TEXT_VIEWER_EXTS, file_extension
 from src.core.platform_env import is_windows
-from src.core.references import render_footer_references, split_footer
+from src.core.references import (CITE_LINK_RE, CITE_LINK_TEMPLATE,
+                                 render_footer_references, split_footer,
+                                 strip_citation_markers)
+
+#: CJK 字符（含全角标点）：超长串断行用的零宽空格注入要跳过它们。
+#: 中文可在任意字间断行，注入只会污染复制结果。
+_CJK_CHAR_RE = re.compile(r"[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]")
 from src.core.think_tags import (
     THINK_NOISE_RE,
     normalize as normalize_think_tags,
@@ -1071,6 +1077,62 @@ class TextFormatter:
 
 
     @staticmethod
+    def _strip_leaked_tool_output(text: str) -> str:
+        """清掉正文里残留的工具过程行 / 工具结果 JSON。
+
+        正常链路里 ``<mcp_process>`` 会在上游被摘除；但以下两种情况仍会把
+        内部执行信息漏进气泡：
+
+        * ``[FINAL_ANSWER]`` 恰好落在一个工具过程块中间，切片后只剩半截
+          ``</span></b>``；
+        * 模型把 ``search_academic_literature`` 返回的 ``{"query":...,
+          "results":[...]}`` 当成正文抄了一遍。
+
+        这里只做**展示层**兜底，不动历史原文。
+        """
+        if not text:
+            return text
+
+        # 1) 残留的 [Status: Executing] 行（可能已丢 <mcp_process> 开头）
+        kept = []
+        for line in text.splitlines():
+            if "[Status: Executing]" in line:
+                continue
+            if "search_academic_literature" in line and "</span>" in line:
+                continue
+            kept.append(line)
+        text = "\n".join(kept)
+
+        # 2) 工具结果 JSON：有 results，且带 query 或 _mcp_cite_id 字段
+        decoder = _json.JSONDecoder()
+        out = []
+        i = 0
+        while i < len(text):
+            if text[i] == "{":
+                try:
+                    obj, end = decoder.raw_decode(text[i:])
+                except (ValueError, _json.JSONDecodeError):
+                    out.append(text[i])
+                    i += 1
+                    continue
+                results = obj.get("results") if isinstance(obj, dict) else None
+                looks_like_tool_result = isinstance(results, list) and any(
+                    isinstance(it, dict)
+                    and ("_mcp_cite_id" in it or "source_dbs" in it
+                         or "confidence" in it)
+                    for it in results)
+                if isinstance(obj, dict) and looks_like_tool_result:
+                    i += end
+                    continue
+            out.append(text[i])
+            i += 1
+        text = "".join(out)
+
+        # 3) JSON 被包在围栏里时，删除后留下的空围栏
+        text = re.sub(r"```[A-Za-z0-9_+-]*\s*```\s*", "", text)
+        return text.strip()
+
+    @staticmethod
     def format_chat_text(text, index, expanded_indices, user_toggled_thinks):
         tm = ThemeManager()
         accent_color = tm.color('accent')
@@ -1087,6 +1149,24 @@ class TextFormatter:
         # （唯一事实来源），此处不再自建正则。
         text = normalize_think_tags(text)
 
+        # 工具过程块必须在定位 [FINAL_ANSWER] **之前**整体摘除：
+        # marker 可能正好落在 <mcp_process> 块中间。若先按 marker 切片，
+        # 块会被切成半截，残留的 </span></b> 等 HTML 会当正文渲染出来
+        # （典型症状：气泡里出现 "[Status: Executing] Args..." 原文）。
+        def _consume_mcp(match):
+            mcp_contents.append(match.group(1).strip())
+            return ""
+
+        text, _closed_mcp_count = re.subn(
+            r'<mcp_process>(.*?)</mcp_process>', _consume_mcp, text,
+            flags=re.DOTALL | re.IGNORECASE)
+        text, open_mcp_count = re.subn(
+            r'<mcp_process>(.*)$', _consume_mcp, text,
+            flags=re.DOTALL | re.IGNORECASE)
+        had_open_mcp = bool(open_mcp_count)
+        if had_open_mcp:
+            is_closed = False
+
         # [FINAL_ANSWER] 的位置必须在规范化之后重算：规范化会改变其前缀长度
         # （如角括号写法会多出字符），沿用规范化前的偏移切片会让标记前后的
         # 内容错位，从而把思考链残留在正文。
@@ -1095,14 +1175,11 @@ class TextFormatter:
         if final_answer_match:
             raw_hidden = text[:final_answer_match.start()]
             main_text = text[final_answer_match.end():].strip()
-            is_closed = True
+            is_closed = not had_open_mcp
 
             # 提取已闭合的所有标签内容
             for t_match in re.finditer(r'<think>(.*?)</think>', raw_hidden, flags=re.DOTALL | re.IGNORECASE):
                 think_contents.append(t_match.group(1).strip())
-            for m_match in re.finditer(r'<mcp_process>(.*?)</mcp_process>', raw_hidden,
-                                       flags=re.DOTALL | re.IGNORECASE):
-                mcp_contents.append(m_match.group(1).strip())
         else:
             def think_repl(match):
                 think_contents.append(match.group(1).strip())
@@ -1110,24 +1187,15 @@ class TextFormatter:
 
             main_text = re.sub(r'<think>(.*?)</think>', think_repl, text, flags=re.DOTALL | re.IGNORECASE)
 
-            def mcp_repl(match):
-                mcp_contents.append(match.group(1).strip())
-                return ""
-
-            main_text = re.sub(r'<mcp_process>(.*?)</mcp_process>', mcp_repl, main_text,
-                               flags=re.DOTALL | re.IGNORECASE)
-
             unclosed_think = re.search(r'<think>(.*)$', main_text, flags=re.DOTALL | re.IGNORECASE)
             if unclosed_think:
                 think_contents.append(unclosed_think.group(1).strip())
                 main_text = main_text[:unclosed_think.start()].strip()
                 is_closed = False
 
-            unclosed_mcp = re.search(r'<mcp_process>(.*)$', main_text, flags=re.DOTALL | re.IGNORECASE)
-            if unclosed_mcp:
-                mcp_contents.append(unclosed_mcp.group(1).strip())
-                main_text = main_text[:unclosed_mcp.start()].strip()
-                is_closed = False
+        # 兜底：工具块被上层切半、或模型把工具结果 JSON 抄进正文时，正文里
+        # 仍可能残留 "[Status: Executing] Args..." 片段和 {"results": ...}。
+        main_text = TextFormatter._strip_leaked_tool_output(main_text)
 
         def render_hidden(raw: str) -> str:
             """把一段思考/工具过程文本转成面板内可安全渲染的 HTML。
@@ -1147,8 +1215,16 @@ class TextFormatter:
             hidden_blocks.append("<b>🧠 AI Reasoning:</b><br>"
                                  + "<br><br>".join(render_hidden(c) for c in think_contents if c))
         if mcp_contents:
-            hidden_blocks.append("<b>🛠️ MCP Tool Execution:</b><br>"
-                                 + "<br><br>".join(render_hidden(c) for c in mcp_contents if c))
+            # 老消息里可能还带着 "[Status: Executing] Args: {...}"；面板只保留
+            # 人类可读的步骤，不再展示原始参数 JSON。
+            cleaned_steps = []
+            for content in mcp_contents:
+                step = re.sub(r"\[Status:\s*Executing\]\s*Args:.*", "", content or "",
+                              flags=re.IGNORECASE | re.DOTALL).strip()
+                if step:
+                    cleaned_steps.append(step)
+            hidden_blocks.append("<b>🔎 Research Process:</b><br>"
+                                 + "<br><br>".join(render_hidden(c) for c in cleaned_steps))
 
         hidden_content = "<br><br>".join(hidden_blocks)
         final_html = ""
@@ -1174,9 +1250,9 @@ class TextFormatter:
 
             # 根据内容智能显示折叠面板标题
             if mcp_contents and not think_contents:
-                status_title = "Tool Execution" if is_closed else "Executing Tools..."
+                status_title = "Research Process" if is_closed else "Researching..."
             elif mcp_contents and think_contents:
-                status_title = "Reasoning & Tool Execution" if is_closed else "AI is Analyzing & Working..."
+                status_title = "Reasoning & Research" if is_closed else "AI is Analyzing & Working..."
             else:
                 status_title = "AI Reasoning" if is_closed else "AI is thinking..."
 
@@ -1617,9 +1693,24 @@ class TextFormatter:
         _cite_accent = _tm.color('accent', theme_key)
         _cite_style = (f"color:{_cite_accent}; background-color:{_rgba(_cite_accent, 0.12)}; "
                        f"text-decoration:underline; font-weight:{_emph_value}; {_emph_family_decl}")
+        # 工具回传的引用 token 可能被模型原样粘贴进正文（<a href="ref://cite?n=N">[N]</a>）。
+        # 它的编号是工具的产出，外观却由模型决定（可能缺样式、被拆行）。这里先把 token
+        # 还原成裸编号 [N]，下面"行内引用标记"规则再统一建链——引用锚点**只在一处生成**，
+        # 因此两条来源（工具 token / 模型照抄的编号）渲染结果必然一致，也不会嵌套锚点。
+        # 编号本身不被改写：这里只是取下已分配给它的数字。
+        html = re.sub(
+            r"<a\b[^>]*href=['\"]" + CITE_LINK_RE.pattern + r"['\"][^>]*>[^<]*</a>",
+            lambda m: f"[{m.group(1)}]", html, flags=re.IGNORECASE)
+        # 漏写 </a> 的残缺 token：只丢掉开标签、保留其可见文本（其中通常已带 [N]），
+        # 避免跨元素匹配吞掉正文，也避免留下无法闭合的锚点。
+        html = re.sub(
+            r"<a\b[^>]*href=['\"]" + CITE_LINK_RE.pattern + r"['\"][^>]*>",
+            "", html, flags=re.IGNORECASE)
+        _cite_href_template = CITE_LINK_TEMPLATE.replace("{index}", "\\1")
         replacements = [
             # 正文行内引用标记：[1] / [12] / [101]（模板中的 \1 即 group(2)）
-            (r'\[(\d{1,3})\]', '<a href="ref://cite?n=\\1" style="' + _cite_style + '">[\\1]</a>'),
+            (r'\[(\d{1,3})\]', f'<a href="{_cite_href_template}" '
+                               f'style="{_cite_style}">[\\1]</a>'),
             # 棉花基因 ID（CottonGen feature 页；置于首位优先建链获得 skip 保护）。
             # 覆盖多套命名体系（[AD]=亚基因组，\d{2}=染色体号）：
             #   Ghir_[AD]xxGxxxx / Gxxxxx（4-5 位，可带 .x 版本号，TM-1 参考基因组）
@@ -1733,12 +1824,16 @@ class TextFormatter:
             lambda m: (f'<a style="color:{_accent}; text-decoration:none; '
                        f'font-weight:{_emph_value}; {_emph_family_decl}"{m.group(1)}'),
             html)
+        # 超长无空格串插入零宽空格，给 QTextBrowser 制造换行机会。只对**非 CJK**
+        # 串生效：中文本身可在任意字间断行，而这段注入会随复制一起带走
+        # （粘贴出来变成"每​个​字​之​间​都​有​东西"），必须避免。
         parts = re.split(r'(<[^>]+>)', html)
         for i in range(0, len(parts), 2):
             if parts[i]:
                 parts[i] = re.sub(
                     r'[^\s&;]{40,}',
-                    lambda m: '\u200b'.join(list(m.group(0))),
+                    lambda m: (m.group(0) if _CJK_CHAR_RE.search(m.group(0))
+                               else '\u200b'.join(list(m.group(0)))),
                     parts[i]
                 )
         html = ''.join(parts)
@@ -2028,7 +2123,8 @@ class TextFormatter:
         final_answer_match = re.search(r'\[FINAL_ANSWER\]\s*', text, flags=re.IGNORECASE)
         if final_answer_match:
             cleaned = normalize_think_tags(text[final_answer_match.end():])
-            return re.sub(r'</?(think|mcp_process)\s*>', '', cleaned, flags=re.IGNORECASE).strip()
+            cleaned = re.sub(r'</?(think|mcp_process)\s*>', '', cleaned, flags=re.IGNORECASE)
+            return TextFormatter._strip_leaked_tool_output(cleaned).strip()
 
         cleaned = strip_think_blocks(text)
 
@@ -2041,18 +2137,33 @@ class TextFormatter:
                 tm = ThemeManager()
                 return f"<span style='color:{tm.color('text_muted')}; font-style:italic;'>[AI is working in the background...]</span>"
             return ""
-        return cleaned.lstrip()
+        return TextFormatter._strip_leaked_tool_output(cleaned).lstrip()
 
     @staticmethod
-    def format_response(text, index, expanded_indices, user_toggled_thinks, mermaid_cache):
-        """统一处理包含 Mermaid 图表和 Think 面板的对话渲染"""
+    def format_response(text, index, expanded_indices, user_toggled_thinks, mermaid_cache,
+                        hide_citations: bool = False):
+        """统一处理包含 Mermaid 图表和 Think 面板的对话渲染。
+
+        :param hide_citations: 生成过程中传 ``True``：把引用标记（含思考面板内的）
+            整体抹掉。编号要等整条回答收尾、按出现顺序统一分配，中途展示的只是
+            内部号，既没有列表可对，收尾时还会被改写。抹除发生在原始文本上，
+            因此正文与思考块两处都不会露出半截编号。
+        """
         if not text:
             return ""
+        if hide_citations:
+            # 参考文献块整体不显示：只抹标记的话，历史里残留的列表会变成
+            # "没有编号的著录行"，比不显示更让人困惑。
+            text = split_footer(text)[0]
+            text = strip_citation_markers(text)
+            if not text.strip():
+                return ""
 
         # 显示侧兜底：剥离混入正文的文本工具调用（口径见 src/core/tool_call_leak.py）。
         # 主防线在 emit 侧（AgentRuntime 的流式暂扣过滤器）；这里再兜一次，覆盖
         # 历史消息重渲染，以及 emit 侧因超出暂扣上限而放行的极端情况。
         text = strip_tool_call_leaks(text)
+        text = TextFormatter._strip_leaked_tool_output(text)
         if not text:
             return ""
 

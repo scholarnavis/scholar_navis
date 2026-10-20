@@ -44,6 +44,12 @@ class ModelSectionMixin:
         self.btn_open_cache.clicked.connect(self._open_hf_cache)
         layout.addRow(tr("Model Storage:"), self.btn_open_cache)
 
+        # 出版社/机构登录会话：Cookie 长期保留，这里提供显式清除入口。
+        self.btn_clear_lit_login = QPushButton(tr(" Clear Literature Login Session"))
+        self.btn_clear_lit_login.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_lit_login.clicked.connect(self._clear_literature_login)
+        layout.addRow(tr("Literature Login:"), self.btn_clear_lit_login)
+
         # --- 1. Embedding 模型选择 ---
         self.combo_embed = BaseComboBox()
         self.lbl_embed_icon = QLabel()
@@ -66,6 +72,8 @@ class ModelSectionMixin:
         embed_layout.addWidget(self.btn_del_embed)
 
         for m in EMBEDDING_MODELS:
+            if m.get("hidden"):
+                continue
             self.combo_embed.addItem(m['ui_name'], m['id'])
 
         curr_embed = self.config.user_settings.get("current_model_id", "embed_auto")
@@ -94,6 +102,8 @@ class ModelSectionMixin:
         rerank_layout.addWidget(self.btn_del_rerank)
 
         for m in RERANKER_MODELS:
+            if m.get("hidden"):
+                continue
             self.combo_rerank.addItem(m['ui_name'], m['id'])
 
         curr_rerank = self.config.user_settings.get("rerank_model_id", "rerank_auto")
@@ -103,8 +113,19 @@ class ModelSectionMixin:
 
         layout.addRow(tr("Embedding:"), self.combo_embed)
         layout.addRow("", embed_layout)
+        self.lbl_embed_intro = QLabel("")
+        self.lbl_embed_intro.setWordWrap(True)
+        self.lbl_embed_intro.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 11px;")
+        layout.addRow("", self.lbl_embed_intro)
+
         layout.addRow(tr("Reranker:"), self.combo_rerank)
         layout.addRow("", rerank_layout)
+        self.lbl_rerank_intro = QLabel("")
+        self.lbl_rerank_intro.setWordWrap(True)
+        self.lbl_rerank_intro.setStyleSheet(
+            f"color: {tm.color('text_muted')}; font-size: 11px;")
+        layout.addRow("", self.lbl_rerank_intro)
 
         # --- 3. 硬件加速设备选择 ---
         self.combo_device = BaseComboBox()
@@ -125,6 +146,39 @@ class ModelSectionMixin:
 
         self.combo_embed.currentTextChanged.connect(self.combo_embed.setToolTip)
         self.combo_rerank.currentTextChanged.connect(self.combo_rerank.setToolTip)
+        self.combo_embed.currentIndexChanged.connect(self._update_model_intro)
+        self.combo_rerank.currentIndexChanged.connect(self._update_model_intro)
+        self._update_model_intro()
+
+    @staticmethod
+    def _model_intro(conf):
+        if not conf:
+            return ""
+        rc = conf.get("recommended_config") or {}
+        bits = [str(conf.get("description") or "").strip()]
+        meta = []
+        if conf.get("params"):
+            meta.append(str(conf["params"]))
+        if conf.get("dimensions"):
+            meta.append(f"{conf['dimensions']} dims")
+        if conf.get("max_tokens"):
+            meta.append(f"{conf['max_tokens']} ctx")
+        for key, label in (("device_priority", "Device"),
+                           ("min_ram", "RAM"), ("min_vram", "VRAM"),
+                           ("disk_space", "Disk")):
+            if rc.get(key) and rc.get(key) != "N/A":
+                meta.append(f"{label} {rc[key]}")
+        if meta:
+            bits.append(" · ".join(meta))
+        return "\n".join(b for b in bits if b)
+
+    def _update_model_intro(self):
+        embed = get_model_conf(self.combo_embed.currentData(), "embedding")
+        rerank = get_model_conf(self.combo_rerank.currentData(), "reranker")
+        if hasattr(self, "lbl_embed_intro"):
+            self.lbl_embed_intro.setText(self._model_intro(embed))
+        if hasattr(self, "lbl_rerank_intro"):
+            self.lbl_rerank_intro.setText(self._model_intro(rerank))
 
     #: 显存策略说明的 HTML 模板：色值以 ``{占位符}`` 注入，保证翻译键稳定。
     _VRAM_HINT_TEMPLATE = (
@@ -149,6 +203,19 @@ class ModelSectionMixin:
         model_dir = os.path.join(BASE_DIR, "models")
         os.makedirs(model_dir, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
+
+    def _clear_literature_login(self):
+        """清除出版社/机构登录 Cookie（文献获取面板与设置共用同一 profile）。"""
+        try:
+            from src.ui.components.literature_login import clear_literature_login
+            ok = clear_literature_login()
+        except Exception as e:
+            ok = False
+            self.logger.warning("Clear literature login failed: %s", e)
+        if ok:
+            ToastManager().show(tr("Literature login session cleared."), "success")
+        else:
+            ToastManager().show(tr("Could not clear the literature login session."), "warning")
 
     # ---------- Device test ----------
     def _selected_device_is_unavailable(self) -> bool:
@@ -256,10 +323,14 @@ class ModelSectionMixin:
 
         self.combo_embed.clear()
         for m in EMBEDDING_MODELS:
+            if m.get("hidden"):
+                continue
             self.combo_embed.addItem(m['ui_name'], m['id'])
 
         self.combo_rerank.clear()
         for m in RERANKER_MODELS:
+            if m.get("hidden"):
+                continue
             self.combo_rerank.addItem(m['ui_name'], m['id'])
 
         idx_e = self.combo_embed.findData(curr_embed)
@@ -408,6 +479,12 @@ class ModelSectionMixin:
     # ---------- Download queue ----------
     def start_download(self, repo_list):
         if not repo_list: return
+        old_task = getattr(self, "task_mgr", None)
+        if old_task is not None:
+            try:
+                old_task.cancel_task()
+            except Exception:
+                pass
         self.pending_downloads = repo_list
         self.pd = ProgressDialog(self.widget, tr("Downloading"), tr("Initializing..."),
                                  telemetry_config={"net": True})
@@ -423,7 +500,12 @@ class ModelSectionMixin:
 
         self.current_repo = self.pending_downloads.pop(0)
 
-        if hasattr(self, 'task_mgr'): self.task_mgr = None
+        old_task = getattr(self, "task_mgr", None)
+        if old_task is not None:
+            try:
+                old_task.cancel_task()
+            except Exception:
+                pass
         self.task_mgr = TaskManager()
         self.task_mgr.sig_progress.connect(self.pd.update_progress)
         self.task_mgr.sig_state_changed.connect(self.on_task_state_changed)

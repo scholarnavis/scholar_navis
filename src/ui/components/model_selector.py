@@ -1,8 +1,31 @@
-import os
+import logging
+
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
 from PySide6.QtCore import Signal, Qt
 from src.core.config_manager import ConfigManager
+from src.core.token_estimator import litellm_context_window
 from src.ui.components.combo import BaseComboBox
+
+logger = logging.getLogger(__name__)
+
+
+def format_context_size(tokens: int) -> str:
+    """上下文 token 数的自动进制：512 / 128K / 1M / 10M。"""
+    try:
+        n = int(tokens or 0)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B".replace(".0B", "B")
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        value = n / 1_000
+        return (f"{value:.0f}K" if value >= 100
+                else f"{value:.1f}K".replace(".0K", "K"))
+    return str(n)
 
 
 class ModelSelectorWidget(QWidget):
@@ -52,15 +75,34 @@ class ModelSelectorWidget(QWidget):
             main_layout.addLayout(row2)
 
             self.combo_vision.currentIndexChanged.connect(self._on_vision_changed)
-            self.combo_vision.currentTextChanged.connect(self.combo_vision.setToolTip)
+            self.combo_vision.currentIndexChanged.connect(
+                lambda _: self._sync_combo_tooltip(self.combo_vision))
 
         self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
         self.combo_model.currentIndexChanged.connect(self._on_model_changed)
         self.combo_provider.currentTextChanged.connect(self.combo_provider.setToolTip)
-        self.combo_model.currentTextChanged.connect(self.combo_model.setToolTip)
+        self.combo_model.currentIndexChanged.connect(
+            lambda _: self._sync_combo_tooltip(self.combo_model))
 
         self.configs = []
         self.load_llm_configs()
+        try:
+            from src.core.signals import GlobalSignals
+            GlobalSignals().model_metadata_changed.connect(self._on_model_metadata_changed)
+        except Exception as e:
+            logger.debug("Model metadata signal unavailable: %s", e)
+
+    @staticmethod
+    def _sync_combo_tooltip(combo):
+        tip = combo.itemData(combo.currentIndex(), Qt.ToolTipRole)
+        combo.setToolTip(str(tip or combo.currentText()))
+
+    def _on_model_metadata_changed(self):
+        """LiteLLM 元数据刷新后重算上下文大小；保持当前模型选择。"""
+        try:
+            self.load_llm_configs()
+        except Exception as e:
+            logger.debug("Reload model selector after metadata refresh failed: %s", e)
 
     def load_llm_configs(self):
         self.combo_provider.blockSignals(True)
@@ -112,7 +154,7 @@ class ModelSelectorWidget(QWidget):
                     models.append(clean_m)
 
             models_config = cfg.get("models_config", {})
-            for m in models_config.keys():
+            for m in models_config:
                 clean_m = str(m).strip()
                 if clean_m and clean_m not in models:
                     models.append(clean_m)
@@ -147,12 +189,20 @@ class ModelSelectorWidget(QWidget):
                 else:
                     if tm: icon = tm.icon("api", "text_muted")
 
+                # 上下文大小只用 LiteLLM 的 model map；未知就显示“?”，不猜。
+                ctx = litellm_context_window(m_name)
+                ctx_label = format_context_size(ctx)
+                display_name = f"{display_name} · {ctx_label or '?'}"
+                tooltip = (f"{display_name}\nContext window: {ctx:,} tokens (LiteLLM)"
+                           if ctx > 0 else
+                           f"{display_name}\nContext window: unknown (LiteLLM has no entry)")
+
                 if icon:
                     self.combo_model.addItem(icon, display_name, m_name)
                 else:
                     self.combo_model.addItem(display_name, m_name)
 
-                self.combo_model.setItemData(i, display_name, Qt.ToolTipRole)
+                self.combo_model.setItemData(i, tooltip, Qt.ToolTipRole)
 
                 if m_name == memorized_model:
                     idx_to_select = i
@@ -165,8 +215,16 @@ class ModelSelectorWidget(QWidget):
                 memorized_vision = str(
                     self.config_manager.user_settings.get(f"{self.vision_key}_{provider_id}", "auto")).strip()
                 for i, m_name in enumerate(models):
-                    self.combo_vision.addItem(m_name, m_name)
-                    self.combo_vision.setItemData(i + 1, m_name, Qt.ToolTipRole)
+                    ctx = litellm_context_window(m_name)
+                    ctx_label = format_context_size(ctx)
+                    label = f"{m_name} · {ctx_label or '?'}"
+                    self.combo_vision.addItem(label, m_name)
+                    self.combo_vision.setItemData(
+                        i + 1,
+                        (f"{label}\nContext window: {ctx:,} tokens (LiteLLM)"
+                         if ctx > 0 else
+                         f"{label}\nContext window: unknown (LiteLLM has no entry)"),
+                        Qt.ToolTipRole)
                 idx = self.combo_vision.findData(memorized_vision)
                 if idx >= 0:
                     self.combo_vision.setCurrentIndex(idx)
@@ -184,6 +242,9 @@ class ModelSelectorWidget(QWidget):
         self.config_manager.save_settings()
         self.combo_model.blockSignals(False)
         if has_vision: self.combo_vision.blockSignals(False)
+        self._sync_combo_tooltip(self.combo_model)
+        if has_vision:
+            self._sync_combo_tooltip(self.combo_vision)
         self.sig_model_changed.emit()
 
     def _on_model_changed(self):
@@ -193,7 +254,8 @@ class ModelSelectorWidget(QWidget):
         provider_id = cfg.get("id")
 
         clean_model = str(self.combo_model.currentData() or "").strip()
-        display_name = str(self.combo_model.currentText() or "").strip()
+        # 显示文本现在带 “· 128K” 后缀，写回配置必须用 currentData 的纯模型名。
+        display_name = clean_model or str(self.combo_model.currentText() or "").strip()
 
         if provider_id and clean_model:
             self.config_manager.user_settings[f"{self.model_key}_{provider_id}"] = clean_model

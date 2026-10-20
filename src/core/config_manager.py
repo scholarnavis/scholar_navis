@@ -282,6 +282,7 @@ class ConfigManager:
             "inference_device": "cpu",
             "proxy_mode": "off",
             "proxy_url": "",
+            "journal_use_proxy": False,
             "hf_mirror": "",
             "hf_token": "",
             "theme": "auto",

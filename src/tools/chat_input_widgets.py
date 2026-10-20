@@ -394,6 +394,9 @@ class ChatInputContainer(QFrame):
             "then synthesize a section-by-section answer (broader coverage, "
             "higher cost)"))
         self.chk_deep_mode.toggled.connect(lambda c: self._save_agent_state("agent_deep_mode", c))
+        # Deep Mode 不再作为用户可见开关：深度研究由发送时自动判断（复杂/综述型
+        # 问题升级）。控件保留只为兼容旧代码里的 hasattr 读取。
+        self.chk_deep_mode.setVisible(False)
 
         self.btn_mcp_tags = QToolButton()
         self.btn_mcp_tags = QPushButton(tr("Tools Filter"), self)

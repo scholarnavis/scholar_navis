@@ -18,7 +18,7 @@ from src.core.model_capabilities import (KNOWN_REQUEST_PARAMS, cached_max_output
                                          record_unsupported_param, unsupported_params)
 from src.core.network_worker import _get_explicit_proxy_kwargs
 from src.core.think_tags import (THINK_CLOSE_TAG, THINK_OPEN_TAG,
-                                 ThinkStreamSplitter)
+                                 ThinkStreamSplitter, strip as strip_think_blocks)
 
 
 _translation_lock = threading.Lock()
@@ -464,6 +464,51 @@ class OpenAICompatibleLLM:
         # 定义（证据来自能力表，见 src.core.model_capabilities）。
         return self._strip_unsupported_params(payload)
 
+    def _context_char_budget(self) -> int:
+        """按当前模型窗口推导 `### CONTEXT` 的字符预算，而不是固定 14k。
+
+        2026 年主流窗口是 128K–1M；固定 14k 字符（约 4k token）会把检索
+        文献和附件切得只剩骨架。这里复用 token 预算：KB 预算 × 约 4 字符/
+        token，并保留 50% 窗口的硬上限。
+        """
+        cached = getattr(self, "_context_char_budget_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            from src.core.token_estimator import (derive_context_budgets,
+                                                  resolve_context_window)
+            declared = (getattr(self, "config_data", None) or {}).get("context_window")
+            window = resolve_context_window(self.model_name, self.base_url, declared)
+            budgets = derive_context_budgets(window)
+            value = max(14_000, int(budgets["kb_token_budget"] * 4.0))
+            value = min(value, max(14_000, int(window * 0.50 * 4.0)))
+        except Exception:
+            value = 48_000
+        self._context_char_budget_cache = value
+        return value
+
+    def _tool_message_char_budget(self) -> int:
+        try:
+            from src.core.token_estimator import (derive_context_budgets,
+                                                  resolve_context_window)
+            window = resolve_context_window(self.model_name, self.base_url)
+            return max(6_000, int(derive_context_budgets(window)["tool_result_chars"]))
+        except Exception:
+            return 12_000
+
+    def _trim_context_block(self, text: str) -> str:
+        marker = "### CONTEXT:"
+        idx = text.find(marker)
+        if idx < 0:
+            return text
+        limit = self._context_char_budget()
+        body_start = idx + len(marker)
+        if len(text) - body_start <= limit:
+            return text
+        return (text[:body_start] + "\n"
+                + text[body_start:body_start + limit]
+                + "\n...[context truncated by client to fit provider limits]")
+
     def _process_messages(self, messages: List[Dict]) -> List[Dict]:
         """
         支持多模态消息：LiteLLM 会将符合 OpenAI 规范的 image_url 自动转译给 Anthropic/Gemini 等
@@ -486,7 +531,18 @@ class OpenAICompatibleLLM:
                         valid_parts.append({"type": "text", "text": part})
                 msg_dict["content"] = valid_parts
             else:
-                msg_dict["content"] = str(content) if content is not None else ""
+                text = str(content) if content is not None else ""
+                # 历史里的思考/工具过程不是用户内容：发给 provider 前剥掉，
+                # 既省 token，也避免工具参数/搜索结果里的词触发内容审查。
+                if role != "user":
+                    text = strip_think_blocks(text)
+                    text = re.sub(r"\[Status:\s*Executing\][^\n]*", "", text,
+                                  flags=re.IGNORECASE)
+                if role == "tool":
+                    text = text[:self._tool_message_char_budget()]
+                elif role == "system":
+                    text = self._trim_context_block(text)
+                msg_dict["content"] = text
 
             processed_msgs.append(msg_dict)
 
@@ -598,6 +654,44 @@ class OpenAICompatibleLLM:
 
         return new_payload if changed else None
 
+    @staticmethod
+    def _is_content_inspection_error(error: Exception) -> bool:
+        text = _raw_error_text(error).lower()
+        return any(token in text for token in (
+            "datainspectionfailed", "inappropriate content",
+            "content filter", "content_policy", "content policy",
+            "safety system", "moderation",
+        ))
+
+    def _minimal_retry_messages(self, messages: List[Dict]) -> List[Dict]:
+        """内容审查 400 的最后退路：只保留系统规则 + 最后一条用户消息。
+
+        自动证据/附件全文里可能夹着触发审查的词；把 `### CONTEXT:` 整段去掉、
+        丢掉历史与工具消息，通常能换回一次可用回答。失败仍按原错误抛出。
+        """
+        system_text = ""
+        last_user = ""
+        for msg in messages or []:
+            role = msg.get("role")
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            if role == "system" and not system_text:
+                system_text = content
+            elif role == "user":
+                last_user = content
+        if system_text:
+            idx = system_text.find("### CONTEXT:")
+            if idx >= 0:
+                system_text = system_text[:idx].rstrip()
+            system_text = system_text[:24000]
+        minimal = []
+        if system_text:
+            minimal.append({"role": "system", "content": system_text})
+        if last_user:
+            minimal.append({"role": "user", "content": last_user[:24000]})
+        return minimal
+
     def _completion_with_adaptation(self, kwargs: Dict, payload: Dict):
         """发起一次 completion；参数被拒/超限时修正参数并**重试一次**。
 
@@ -613,6 +707,15 @@ class OpenAICompatibleLLM:
                 # 给出的真值记入能力表，让下一轮的预算直接按它收紧。
                 self._remember_context_limit(e)
                 raise
+            if self._is_content_inspection_error(e):
+                minimal = self._minimal_retry_messages(kwargs.get("messages") or [])
+                if minimal:
+                    self.logger.warning(
+                        "Provider content inspection rejected the input; retrying once "
+                        "with minimal context (system rules + last user message).")
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs["messages"] = minimal
+                    return completion(**retry_kwargs)
             adapted = self._adapt_after_error(payload, e)
             if adapted is None:
                 raise
@@ -821,6 +924,11 @@ class OpenAICompatibleLLM:
         if isinstance(e, NotFoundError):
             return f"\n\n[API Request Error: HTTP 404]\n{getattr(e, 'message', str(e))}\n", "Not Found Error."
         if isinstance(e, BadRequestError):
+            if OpenAICompatibleLLM._is_content_inspection_error(e):
+                return ("\n\n[Content Filter Error]\nThe provider rejected the input during "
+                        "content inspection. The app retried once with the retrieved context "
+                        "removed; if this still fails, shorten the conversation or switch "
+                        "provider.\n", "Content inspection rejected input.")
             return (f"\n\n[API Request Error: HTTP 400]\n{getattr(e, 'message', str(e))}\n"
                     "💡 Tip: This might happen if you sent an image to a text-only model, "
                     "used an unsupported image format, or provided invalid parameters.\n",

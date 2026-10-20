@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 
-__version__ = "2.0.7-dev-1"
+__version__ = "2.1.0-dev-1"
 __app_name__ = "Scholar Navis"
 __description__ = "AI-Powered Research Assistant"
 __company__ = "Scholar Navis Studio"

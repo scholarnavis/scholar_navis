@@ -40,12 +40,32 @@ from typing import Callable, Dict, List, Optional, Tuple
 from src.core import plot_styles
 from src.core.evidence import EvidenceStore, is_usable_source_text
 from src.core.prompt_rules import CITATION_TOKEN_RULE
+from src.core.references import citation_token
 from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG
 from src.core.model_capabilities import resolve_window
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       derive_context_budgets)
 from src.core.tool_call_leak import (ToolCallStreamFilter, iter_tool_call_objects,
                                      tool_call_fingerprint)
+
+
+def _fold_narration(text: str, segments) -> str:
+    """把"工具调用前自言自语"折进 ``<mcp_process>``，不让它冒充回答正文。
+
+    模型在调用工具前常写一句 "I'll gather evidence from multiple sources…"。
+    这句话是过程，不是结论；留在正文里会让整条回答看起来像一堆检索计划，
+    真正的答案反而被淹没。折叠而不是删除：内容不丢，展开过程面板仍可回看。
+
+    过长的片段（> 4000 字符）不折：那更可能是被工具调用打断的半个答案，
+    整段挪进折叠面板反而会让人以为它不存在。
+    """
+    out = str(text or "")
+    for segment in segments or []:
+        chunk = str(segment or "").strip()
+        if not chunk or len(chunk) > 4000 or chunk not in out:
+            continue
+        out = out.replace(segment, f"\n<mcp_process>{chunk}</mcp_process>\n")
+    return out
 
 
 def _html_escape(text) -> str:
@@ -287,16 +307,16 @@ _ALWAYS_TOOLS = {
                 "Register the bibliographic references you cite so the app can render a "
                 "clickable, verifiable reference list. Use this tool ONLY for sources that "
                 f"carry no pre-assigned number. {CITATION_TOKEN_RULE} "
-                "The app assigns the numbered list "
-                "automatically (by order of first appearance), so do NOT invent numeric "
-                "citation numbers and do NOT write a 'References' / 'Bibliography' "
-                "section — the app generates the list from this tool call. Call this ONCE, "
-                "passing every source you intend to cite that has no pre-assigned number. "
-                "Each item is an object with: "
-                "'key' (required, short ASCII slug you used inline), 'title' (required), "
-                "'authors', 'year', 'journal', 'doi', 'url', 'snippet' (a VERBATIM "
-                "excerpt copied character-for-character from a tool result or the "
-                "provided Context — never paraphrased or written from memory; the app "
+                "The app assigns each entry its number and returns it as a ready-made "
+                "'citation_token' (hyperlink text such as "
+                "<a href=\"ref://cite?n=3\">[3]</a>) — paste that token verbatim where you "
+                "cite the source; never type or guess a number yourself. Do NOT write a "
+                "'References' / 'Bibliography' section — the app generates the list from "
+                "this tool call. Call this ONCE, passing every source you intend to cite "
+                "that has no pre-assigned number. Each item is an object with: "
+                "'title' (required), 'authors', 'year', 'journal', 'doi', 'url', 'snippet' "
+                "(a VERBATIM excerpt copied character-for-character from a tool result or "
+                "the provided Context — never paraphrased or written from memory; the app "
                 "verifies and replaces/drops non-verbatim passages), and 'note' "
                 "(optional one-line reason). Report only real sources that came from your context or tool "
                 "results; never fabricate DOIs, authors or years."
@@ -310,13 +330,6 @@ _ALWAYS_TOOLS = {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "key": {
-                                    "type": "string",
-                                    "description": ("Short unique ASCII citation key you also "
-                                                    "use inline as [key], e.g. 'lariguet2004'. "
-                                                    "Only for sources without a pre-assigned "
-                                                    "number."),
-                                },
                                 "title": {"type": "string", "description": "Title of the work."},
                                 "authors": {"type": "string",
                                             "description": "Author list (comma/semicolon separated)."},
@@ -342,7 +355,7 @@ _ALWAYS_TOOLS = {
                                     "description": "'article' | 'preprint' | 'dataset' | 'web' | 'book'.",
                                 },
                             },
-                            "required": ["key", "title"],
+                            "required": ["title"],
                         },
                     },
                 },
@@ -437,11 +450,21 @@ class AgentRuntime:
             max_iterations:    hard safety cap on tool-calling rounds.
         """
         self._is_cancelled = False
+        # 同一轮内重复的检索/阅读调用直接复用结果：真人不会把同一条检索
+        # 原样重跑五遍；这也能避免模型陷入"搜索 -> 再搜索"的机器式循环。
+        self._tool_result_cache: Dict[Tuple[str, str], str] = {}
         full_response_cache: List[str] = []
+        #: 工具调用步骤里"我先检索一下"式的自我叙述。它属于过程，不属于回答；
+        #: 收尾时统一折进工具过程面板（见 :meth:`_compose_final_text`）。
+        narration: List[str] = []
 
         def _emit(tok: str):
             full_response_cache.append(tok)
             emit_token(tok)
+
+        def _final_text() -> str:
+            """收尾文本：把工具调用步骤的叙述折进 mcp_process，而不是留在正文。"""
+            return _fold_narration("".join(full_response_cache), narration)
 
         # Fresh working copy; never mutate the caller's message list.
         # NOTE: the tool directive is already injected into the system prompt by
@@ -514,7 +537,7 @@ class AgentRuntime:
                     if not response.get("_live_streamed"):
                         self._stream_final_text(content, _emit, is_cancelled)
                     self._finalize_usage("".join(full_response_cache))
-                    return "".join(full_response_cache)
+                    return _final_text()
                 # Empty answer with no tool calls: force the model to produce a
                 # real final answer instead of returning an empty response.
                 messages.append({
@@ -531,7 +554,12 @@ class AgentRuntime:
                 for token in self._final_stream(messages, [], is_cancelled):
                     _emit(token)
                 self._finalize_usage("".join(full_response_cache))
-                return "".join(full_response_cache)
+                return _final_text()
+
+            # 工具调用步骤的正文只可能是"接下来我要查什么"的叙述：记下来，
+            # 收尾时折进过程面板（见 _final_text），不留在回答里。
+            if content.strip():
+                narration.append(content)
 
             # Execute requested tools, then loop back to the model.
             messages.append(self._assistant_tool_msg(content, reasoning, tool_calls))
@@ -555,7 +583,7 @@ class AgentRuntime:
                     "and the task will continue.</i>\n"
                 )
                 self._finalize_usage("".join(full_response_cache))
-                return "".join(full_response_cache)
+                return _final_text()
 
         # Loop exhausted: force a final plain-text answer.
         if not messages or messages[-1].get("role") != "tool":
@@ -580,7 +608,7 @@ class AgentRuntime:
         for token in self._final_stream(messages, candidate_tools, is_cancelled):
             _emit(token)
         self._finalize_usage("".join(full_response_cache))
-        return "".join(full_response_cache)
+        return _final_text()
 
     # ------------------------------------------------------------------ #
     #  Step / observe helpers
@@ -1064,12 +1092,24 @@ class AgentRuntime:
                 return idx
             name = parsed[idx]["name"]
             args = parsed[idx]["args"]
+            cacheable = name in {
+                "search_academic_literature", "search_preprints", "search_web",
+                "fetch_open_access_pdf", "fetch_pubmed_abstract",
+                "fetch_webpage_content", "traverse_citation_graph",
+            }
+            cache_key = (name, json.dumps(args, sort_keys=True,
+                                          ensure_ascii=False, default=str))
+            if cacheable and cache_key in self._tool_result_cache:
+                results[idx] = self._tool_result_cache[cache_key]
+                return idx
             self._emit_tool_start(name, args, emit_token)
             try:
                 raw = self._dispatch_tool(name, args, emit_token)
                 # 截断前采集逐字原文：截断后的 head+tail 已不能保证 snippet 可校验。
                 self._harvest_evidence(raw)
                 results[idx] = self._truncate(raw, self._tool_result_chars)
+                if cacheable and len(self._tool_result_cache) < 64:
+                    self._tool_result_cache[cache_key] = results[idx]
             except Exception as e:
                 logger.error(f"Tool '{name}' raised unexpectedly: {e}")
                 results[idx] = f"[TOOL ERROR] Execution of '{name}' raised: {e}"
@@ -1148,11 +1188,11 @@ class AgentRuntime:
                     return self._handle_plot_result(result, emit_token)
                 if isinstance(result, (dict, list)):
                     result = json.dumps(result, ensure_ascii=False)
-                # 本地技能（如 search_academic_literature）返回的文献列表同样要注入引用
-                # 编号：否则模型手里只有"标题+URL"，无号可引，只能自拟 [pksreview2022]
-                # 这类别名，而登记那一步（cite_references）一旦漏做/写歪，句子就失去引文。
-                # Deep 模式的子 Agent 更无退路——cite_references 被从它的工具池里剔除，
-                # 自拟别名必然无人登记。故此处与 MCP 分支共用同一注入实现。
+                # 本地技能（如 search_academic_literature）返回的文献列表同样要注入
+                # 编号与引用 token：否则模型手里只有"标题+URL"，只能自拟
+                # [pksreview2022] 这类别名，而程序并不认别名。Deep 模式的子 Agent
+                # 更无退路——cite_references 被从它的工具池里剔除，来源编号必须由
+                # 工具这一侧直接给出。故此处与 MCP 分支共用同一注入实现。
                 if self.cite_collector is not None and isinstance(result, str):
                     result = self._collect_tool_citations(name, result)
                 return result if isinstance(result, str) else str(result)
@@ -1732,12 +1772,13 @@ class AgentRuntime:
         }, ensure_ascii=False)
 
     def _handle_cite_references(self, args: dict) -> str:
-        """登记参考文献，由程序统一编号并渲染参考文献列表。
+        """登记参考文献：编号与引用 token 由本工具当场生成并回传。
 
-        模型只提交结构化条目（标题/作者/年份/期刊/DOI/链接/支撑原文），编号由
-        :class:`~src.core.references.ReferenceRegistry` 分配并回传；模型据此在正文
-        里写 ``[n]``，参考文献列表 HTML 由任务层按注册表渲染。这样"参考文献"只有
-        一个事实来源，列表格式不再依赖模型输出，也就不会因格式漂移而丢失。
+        模型只提交结构化著录（标题/作者/年份/期刊/DOI/链接/支撑原文）；编号由
+        :class:`~src.core.references.ReferenceRegistry` 分配，随后本工具把编号包装成
+        **带超链接的可粘贴文本**（``<a href="ref://cite?n=3">[3]</a>``）回传。模型
+        正文只需粘贴该 token——编号在工具调用这一刻就固定，正文不再参与编号分配，
+        因此"列表与正文对不上""别名无人登记"这类问题从机制上消失。
         """
         from src.core.references import ReferenceRegistry, ReferenceItem
 
@@ -1757,24 +1798,20 @@ class AgentRuntime:
             self.reference_registry = ReferenceRegistry()
 
         entries = []
-        auto_seq = 0
         replaced = cleared = 0
         for entry in payloads:
             item = ReferenceItem.from_ai_payload(entry, index=0)
             if not (item.title or item.url or item.doi or item.path):
                 continue
-            if not item.key:
-                # 模型漏填 key：兜底生成一个（正文若未用该 key 则此条不会被引用）。
-                auto_seq += 1
-                item.key = f"ref{auto_seq}"
             had_snippet = bool(item.snippet)
             if self._enforce_verbatim_snippet(item):
                 replaced += 1
             elif had_snippet and not item.snippet:
                 cleared += 1
-            self.reference_registry.add(item)
+            ref_id = self.reference_registry.add(item)
             entries.append({
-                "key": item.key,
+                "citation_id": ref_id,
+                "citation_token": citation_token(ref_id),
                 "title": item.display_name,
                 "doi": item.doi,
                 "url": item.url,
@@ -1787,17 +1824,22 @@ class AgentRuntime:
             }, ensure_ascii=False)
 
         self.log_fn("INFO", f"References registered: {len(entries)} item(s) -> "
-                            f"{[e['key'] for e in entries]}"
+                            f"{[e['citation_id'] for e in entries]}"
                             + (f" (snippet rewritten: {replaced}, dropped: {cleared})"
                                if replaced or cleared else ""))
         return json.dumps({
             "status": "success",
             "references": entries,
             "message": (
-                "Registered. Cite THESE sources inline using their KEYS, e.g. [lariguet2004] "
-                "(sources that already carry a pre-assigned number keep using that number). "
-                "The app assigns the numbered reference list automatically by order of first "
-                "appearance. Do NOT write a References/Bibliography section yourself."
+                f"Registered {len(entries)} entr"
+                f"{'y' if len(entries) == 1 else 'ies'}. Paste each entry's "
+                f"'citation_token' VERBATIM at the claim it supports — for example "
+                f"{entries[0]['citation_token']} for \"{entries[0]['title'][:60]}\". "
+                "The number inside a token identifies the source: never change, renumber "
+                "or re-type it (final numbering is applied by the app when the answer "
+                "completes). Sources that came with a pre-assigned number (knowledge-base "
+                "documents, tool results with a 'citation_token' field) must reuse THAT "
+                "number/token. Do NOT write a References/Bibliography section yourself."
             ),
         }, ensure_ascii=False)
 
@@ -1826,15 +1868,15 @@ class AgentRuntime:
         if held:
             self.log_fn(
                 "INFO",
-                f"Citation [{item.key}] snippet was not verbatim; replaced with the "
-                f"captured source text ({len(held)} chars).")
+                f"Citation '{item.display_name[:60]}' snippet was not verbatim; replaced "
+                f"with the captured source text ({len(held)} chars).")
             item.snippet = held
             item.verified = True
             return True
         self.log_fn(
             "WARNING",
-            f"Citation [{item.key}] snippet could not be verified verbatim against any "
-            f"captured source text; passage dropped (reference kept).")
+            f"Citation '{item.display_name[:60]}' snippet could not be verified verbatim "
+            f"against any captured source text; passage dropped (reference kept).")
         item.snippet = ""
         item.verified = False
         return False
@@ -2075,17 +2117,23 @@ class AgentRuntime:
     #: 即可引用该来源，无需自拟 key，也不需要 cite_references 登记。系统提示词
     #: （chat_tasks 的 RESPONSE GUIDELINES）引用的是同一个字面量。
     TOOL_CITE_ID_FIELD = "_mcp_cite_id"
+    #: 注入到工具结果条目里的**可粘贴引用 token** 字段名：带超链接的编号文本，
+    #: 由 :func:`src.core.references.citation_token` 生成。编号与链接同源，
+    #: 模型只需原样粘贴，不再由正文反推编号。
+    TOOL_CITE_TOKEN_FIELD = "citation_token"
 
     def _collect_tool_citations(self, tool_name: str, result: str) -> str:
-        """把工具结果里的来源列表登记进注册表，并把分配到的编号注入各条目。
+        """把工具结果里的来源列表登记进注册表，并把编号与引用 token 注入各条目。
 
         **本地技能与远程 MCP 共用此实现**（见 ``_dispatch_tool`` 的两个分支）：
         凡是返回 ``{"results": [{"url"/"title"/"abstract", ...}]}`` 的工具结果，
-        其来源都会获得一个编号，模型据此可直接写 ``[n]``。这样模型不必自拟
-        ``[pksreview2022]`` 这类别名，也就不会出现"别名无人登记 → 句子失去引文"。
+        其来源都会获得一个编号，随后连同带超链接的 token 一起写回条目：
 
-        注入字段见 :attr:`TOOL_CITE_ID_FIELD`。解析失败或结构不符时原样返回，
-        绝不影响工具结果本身。
+        * ``_mcp_cite_id``：编号（机器可读，供程序侧核对）；
+        * ``citation_token``：``<a href="ref://cite?n=3">[3]</a>``，模型原样粘贴。
+
+        编号在这一步就固定，模型不必自拟 ``[pksreview2022]`` 这类别名，程序也不
+        需要对正文做任何别名解析。解析失败或结构不符时原样返回，绝不影响工具结果。
         """
         if not isinstance(result, str):
             result = json.dumps(result, ensure_ascii=False)
@@ -2118,6 +2166,7 @@ class AgentRuntime:
                         })
                         if ref_id:
                             item[self.TOOL_CITE_ID_FIELD] = ref_id
+                            item[self.TOOL_CITE_TOKEN_FIELD] = citation_token(ref_id)
                 return json.dumps(res_data, ensure_ascii=False)
         except json.JSONDecodeError:
             pass
@@ -2128,12 +2177,37 @@ class AgentRuntime:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _emit_tool_start(name: str, args: dict, emit_token: Callable[[str], None]):
-        args_str = json.dumps(args, ensure_ascii=False)
-        short = args_str if len(args_str) < 120 else args_str[:120] + "..."
-        emit_token(
-            f"<mcp_process><b>{name}</b><br>"
-            f"<span style='font-size:12px; color:#888;'>[Status: Executing] Args: {short}</span></mcp_process>\n"
-        )
+        """给用户看的工具步骤：像研究者在做事，而不是打印函数名和参数 JSON。"""
+        args = args or {}
+
+        def _short(value, limit=120):
+            text = " ".join(str(value or "").split())
+            return text if len(text) <= limit else text[:limit] + "..."
+
+        query = _short(args.get("query") or args.get("term") or args.get("q"), 100)
+        doi = _short(args.get("doi") or args.get("paper_doi"), 80)
+        pmid = _short(args.get("pmid") or args.get("pmcid"), 40)
+
+        if name in ("search_academic_literature", "search_literature"):
+            step = f"Searching the literature: {query}" if query else "Searching the literature"
+        elif name == "search_preprints":
+            step = f"Checking preprints: {query}" if query else "Checking preprints"
+        elif name in ("fetch_open_access_pdf", "fetch_pubmed_abstract"):
+            step = f"Reading the full text: {doi}" if doi else "Reading the full text"
+        elif name == "traverse_citation_graph":
+            step = f"Following citations: {doi}" if doi else "Following citations"
+        elif name in ("fetch_webpage_content", "search_web"):
+            step = f"Reading the web: {query}" if query else "Reading the web"
+        elif name == "cite_references":
+            step = "Preparing the reference list"
+        elif name == "suggest_follow_ups":
+            step = "Preparing follow-up questions"
+        elif name == "ask_user":
+            step = "Checking one detail with you"
+        else:
+            step = f"Working on {name.replace('_', ' ')}"
+
+        emit_token(f"<mcp_process>{step}</mcp_process>\n")
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:

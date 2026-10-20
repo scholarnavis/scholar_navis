@@ -250,7 +250,12 @@ class ChatBubblesMixin:
             raw = self.history[idx].get('content', '') or ""
         if not raw:
             return False
-        bubble.set_content(self._format_response(raw, idx))
+        # 历史消息按"有没有引用列表"决定是否显示 [n]（与回灌时同一判据）；
+        # 流式中的回答由 _citations_hidden 控制，_format_response 的默认值会处理。
+        hide = None
+        if bubble is not getattr(self, 'current_ai_bubble', None) and 0 <= idx < len(self.history):
+            hide = self._citations_hidden_for(self.history[idx])
+        bubble.set_content(self._format_response(raw, idx, hide_citations=hide))
         return True
 
     def is_at_bottom(self, threshold: int = 50) -> bool:
@@ -381,10 +386,16 @@ class ChatBubblesMixin:
                     w = item.widget()
                     from src.ui.components.chat_bubble import ChatBubbleWidget
                     if isinstance(w, ChatBubbleWidget) and getattr(w, 'index', -1) == idx:
-                        raw_text = self.current_ai_text if w == getattr(self, 'current_ai_bubble', None) else (
+                        is_streaming = w == getattr(self, 'current_ai_bubble', None)
+                        raw_text = self.current_ai_text if is_streaming else (
                             self.history[idx]['content'] if idx < len(self.history) else "")
                         if raw_text:
-                            w.set_content(self._format_response(raw_text, idx))
+                            # 历史消息按"有没有引用列表"决定是否显示 [n]；流式中的
+                            # 回答由 _citations_hidden 的默认值处理。
+                            hide = (None if is_streaming else
+                                    self._citations_hidden_for(self.history[idx]))
+                            w.set_content(self._format_response(raw_text, idx,
+                                                                hide_citations=hide))
                         break
 
         if not hasattr(self, 'mermaid_codes'):

@@ -144,17 +144,17 @@ class MainWindow(QMainWindow):
 
         self.tm = ThemeManager()
         self.icon_map = {
-            "Library Manager": "folder",
             "Chat Assistant": "send",
             "Literature Tracker": "rss",
             "System Logs": "list",
             "Global Settings": "settings",
-            "About": "info"
+            "About": "info",
         }
 
-        # (显示名, 模块路径, 类名)：模块在首次实例化对应面板时才导入
+        # (显示名, 模块路径, 类名)：模块在首次实例化对应面板时才导入。
+        # Library Manager 已从主界面下线：自动证据库常开，旧 KB 后端保留但不再
+        # 作为普通入口；需要人工建库时走高级入口/后续证据面板。
         self.tool_classes = [
-            ("Library Manager", "src.tools.import_tool", "ImportTool"),
             ("Chat Assistant", "src.tools.chat_tool", "ChatTool"),
             ("Literature Tracker", "src.tools.rss_tool", "RSSTool"),
             ("Global Settings", "src.tools.settings_tool", "SettingsTool"),
@@ -404,7 +404,7 @@ class MainWindow(QMainWindow):
         return True
 
     def route_to_chat(self, context_text, prompt_text=""):
-        chat_index = 1  # ChatTool 在侧边栏的索引是 1
+        chat_index = 0  # Library Manager 下线后 ChatTool 在侧边栏的索引是 0
         self.sidebar.setCurrentRow(chat_index)  # 切换标签（此时会自动实例化 ChatTool）
         chat_tool = self.tools[chat_index]
         if chat_tool:
@@ -419,7 +419,7 @@ class MainWindow(QMainWindow):
         """Developer-mode AI test: switch to Chat, show a user-visible note
         (NOT sent to the LLM), optionally mount attachments (images and/or
         documents), then send the real prompt to the LLM."""
-        chat_index = 1
+        chat_index = 0
         self.sidebar.setCurrentRow(chat_index)
 
         def _send():
@@ -465,7 +465,7 @@ class MainWindow(QMainWindow):
             they are written into the citation popup cache so hovering /
             clicking the ``[n]`` markers works in the demo.
         """
-        chat_index = 1
+        chat_index = 0
         self.sidebar.setCurrentRow(chat_index)
 
         def _inject():
@@ -493,7 +493,7 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def route_to_chat_with_mcp(self, context_text, prompt_text, target_tag):
-        chat_index = 1
+        chat_index = 0
         self.sidebar.setCurrentRow(chat_index)
         chat_tool = self.tools[chat_index]
         if chat_tool:
@@ -577,8 +577,9 @@ class MainWindow(QMainWindow):
             self._jump_to_settings()
 
     def _jump_to_settings(self):
-        self.switch_tool(3)
-        self.sidebar.setCurrentRow(3)
+        # Library Manager 下线后顺序为 Chat(0) / RSS(1) / Settings(2) / Logs(3) / About(4)
+        self.switch_tool(2)
+        self.sidebar.setCurrentRow(2)
 
     def check_first_run(self):
         cfg = ConfigManager()

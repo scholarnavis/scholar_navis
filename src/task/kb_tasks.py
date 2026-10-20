@@ -65,15 +65,22 @@ def _worker_load_model(kb_id, config):
     device_str = dev_mgr.parse_device_string(user_device)
     model_id = kb_data.get('model_id', 'embed_auto')
     conf = get_model_conf(model_id, "embedding")
-    repo_id = conf['hf_repo_id'] if conf else "sentence-transformers/all-MiniLM-L6-v2"
+    repo_id = conf['hf_repo_id'] if conf else "Xenova/all-MiniLM-L6-v2"
     try:
         # allow_download=False：模型缺失不再自动联网拉取，而是抛 ModelMissingError，
         # 由上层向用户提示去 "设置 → AI Models" 手动下载。
-        onnx_dir = ensure_onnx_model(repo_id, "embedding", allow_download=False)
+        onnx_dir = ensure_onnx_model(
+            repo_id, "embedding", allow_download=False,
+            preferred_file=(conf or {}).get("onnx_file", ""))
 
         logger.info(f"Loading Embedding Model: {repo_id} on {device_str}")
 
-        return ONNXEmbeddingFunction(onnx_dir, device=device_str)
+        return ONNXEmbeddingFunction(
+            onnx_dir, device=device_str,
+            pooling=(conf or {}).get("pooling", "cls"),
+            query_instruction=(conf or {}).get("query_instruction", ""),
+            onnx_file=(conf or {}).get("onnx_file", ""),
+            max_length=int((conf or {}).get("tokenizer_max_length", 512)))
     except ModelMissingError as e:
         # 模型未下载：原样上抛清晰提示，引导用户去设置手动下载，不自动联网拉取
         raise e
@@ -92,55 +99,105 @@ class ONNXEmbeddingFunction:
     ``__call__(self, input: Documents) -> Embeddings``，参数名必须是 ``input``。
     """
 
-    def __init__(self, onnx_cache_dir, device="cpu"):
-        from optimum.onnxruntime import ORTModelForFeatureExtraction
-        from transformers import AutoTokenizer
+    @staticmethod
+    def _find_onnx_file(root: str, preferred: str = "") -> str:
+        if preferred:
+            candidate = os.path.join(root, preferred)
+            if os.path.isfile(candidate):
+                return candidate
+        for base, _dirs, files in os.walk(root):
+            if "model.onnx" in files:
+                return os.path.join(base, "model.onnx")
+        for base, _dirs, files in os.walk(root):
+            for name in files:
+                if name.endswith(".onnx"):
+                    return os.path.join(base, name)
+        return ""
 
+    def __init__(self, onnx_cache_dir, device="cpu", pooling="cls",
+                 query_instruction="", onnx_file="", max_length=512):
+        from src.core.onnx_tokenizer import OnnxTokenizer
+
+        self.onnx_cache_dir = str(onnx_cache_dir)
+        self.device = str(device)
+        self.pooling = str(pooling or "cls")
+        self.query_instruction = str(query_instruction or "")
+        self.onnx_file = str(onnx_file or "")
+        self.max_length = int(max_length)
+        self._raw_session = None
+        self._raw_inputs = set()
+        self._raw_input_shapes = {}
         logger = logging.getLogger("Worker.ONNXProvider")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(onnx_cache_dir, local_files_only=True)
+        self.tokenizer = OnnxTokenizer(onnx_cache_dir, max_length=max_length)
         available_providers = ort.get_available_providers()
 
         device_str = str(device).lower()
-
         logger.info(f"ONNX Init Requested Device: {device_str}")
         logger.info(f"Available ONNX Providers in Env: {available_providers}")
 
-        # 统一走 onnx_provider 的真实可用性解析：构建期支持 ≠ 运行期可用。
-        # 请求的加速设备不可用时降级到 CPU（只影响速度），绝不因此中断索引。
         resolved = resolve_provider(device_str)
         provider = resolved.provider
-        provider_options = resolved.provider_options
-
         if resolved.degraded:
             logger.warning(f"Embedding device degraded to CPU: {resolved.reason}")
-        logger.info(f"Final Selected ONNX Provider: {provider}")
-        logger.info(f"Provider Options: {provider_options}")
 
-        kwargs = {"provider": provider}
-        if provider_options:
-            kwargs["provider_options"] = provider_options
+        model_path = self._find_onnx_file(onnx_cache_dir, self.onnx_file)
+        if not model_path:
+            raise FileNotFoundError(
+                f"No ONNX model found under {onnx_cache_dir}; download an ONNX-ready model.")
 
-        self.model = ORTModelForFeatureExtraction.from_pretrained(
-            onnx_cache_dir,
-            export=False,
-            local_files_only=True,
-            **kwargs
-        )
+        providers = [provider]
+        if "CPUExecutionProvider" not in providers:
+            providers.append("CPUExecutionProvider")
+        try:
+            self._raw_session = ort.InferenceSession(model_path, providers=providers)
+        except Exception as e:
+            if providers[0] != "CPUExecutionProvider":
+                logger.warning("ONNX GPU embedding failed (%s); retrying on CPU.", e)
+                self._raw_session = ort.InferenceSession(
+                    model_path, providers=["CPUExecutionProvider"])
+            else:
+                raise
+        self._raw_inputs = {i.name for i in self._raw_session.get_inputs()}
+        self._raw_input_shapes = {i.name: i.shape
+                                  for i in self._raw_session.get_inputs()}
+        logger.info("Embedding uses ONNX Runtime on %s (%s).",
+                    self._raw_session.get_providers()[0], model_path)
 
-        actual_providers = self.model.providers
-        if provider != "CPUExecutionProvider" and actual_providers and actual_providers[0] == "CPUExecutionProvider":
-            # 静默回退只降速不降质：记录告警后继续使用已加载的 CPU 模型。
-            logger.error(
-                "Silent fallback detected: requested '%s' but ONNX Runtime activated "
-                "'CPUExecutionProvider'. Continuing on CPU; verify GPU runtime libraries "
-                "in Settings -> Hardware.", provider)
+    def name(self) -> str:
+        """Chroma 1.x EmbeddingFunction 协议要求；用于防止集合函数冲突。"""
+        return "scholar_navis_onnx"
+
+    def get_config(self) -> dict:
+        return {"onnx_cache_dir": self.onnx_cache_dir, "device": self.device,
+                "pooling": self.pooling,
+                "query_instruction": self.query_instruction,
+                "onnx_file": self.onnx_file,
+                "max_length": self.max_length}
+
+    def embed_query(self, input):
+        """Chroma 1.x query path 调用；Qwen3 需要给 query 加 instruction。"""
+        if self.query_instruction:
+            if isinstance(input, str):
+                input = (f"Instruct: {self.query_instruction}\n"
+                         f"Query: {input}")
+            elif isinstance(input, list):
+                input = [f"Instruct: {self.query_instruction}\nQuery: {x}"
+                         if isinstance(x, str) else x for x in input]
+        return self.__call__(input)
+
+    @staticmethod
+    def build_from_config(config: dict):
+        return ONNXEmbeddingFunction(
+            config.get("onnx_cache_dir", ""), config.get("device", "cpu"),
+            config.get("pooling", "cls"),
+            config.get("query_instruction", ""),
+            config.get("onnx_file", ""),
+            config.get("max_length", 512))
 
     def __call__(self, input: "Documents") -> "Embeddings":
-        import torch.nn.functional as F
         if not input:
             return []
-
         if isinstance(input, str):
             texts = [input]
         elif isinstance(input, list):
@@ -150,27 +207,44 @@ class ONNXEmbeddingFunction:
         else:
             texts = [str(input)]
 
-        inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt", max_length=512)
-
-        try:
-            outputs = self.model(**inputs)
-            embeddings = outputs.last_hidden_state[:, 0, :]
-        except KeyError as e:
-
-            logging.getLogger("Worker.ONNXProvider").debug(f"Optimum mapping failed, bypassing to raw ONNX: {e}")
-
-            ort_inputs = {k: v.cpu().numpy() for k, v in inputs.items()}
-            raw_outputs = self.model.model.run(None, ort_inputs)
-
-            emb_array = raw_outputs[0]
-            if len(emb_array.shape) == 3:
-                emb_array = emb_array[:, 0, :]
-
-            import torch
-            embeddings = torch.tensor(emb_array)
-
-        embeddings = F.normalize(embeddings, p=2, dim=1)
-        return embeddings.tolist()
+        import numpy as np
+        enc = self.tokenizer.encode(texts)
+        batch, seq = enc["input_ids"].shape
+        ort_inputs = {}
+        for name in self._raw_inputs:
+            if name in enc:
+                ort_inputs[name] = np.asarray(enc[name])
+            elif name == "position_ids":
+                ort_inputs[name] = np.tile(
+                    np.arange(seq, dtype=np.int64), (batch, 1))
+            elif name.startswith("past_key_values."):
+                # Qwen3 的 ONNX 导出保留了 KV cache 输入；无历史时给 0 长度。
+                shape = self._raw_input_shapes.get(name) or []
+                dims = [d if isinstance(d, int) else (batch if i == 0 else 0)
+                        for i, d in enumerate(shape)]
+                if len(dims) >= 3:
+                    dims[-2:] = [dims[-2] if isinstance(dims[-2], int) else 8,
+                                 dims[-1] if isinstance(dims[-1], int) else 128]
+                ort_inputs[name] = np.zeros(tuple(dims), dtype=np.float32)
+        outputs = self._raw_session.run(None, ort_inputs)
+        if self.pooling == "sentence_embedding" and len(outputs) > 1:
+            out = np.asarray(outputs[1], dtype=np.float32)
+        else:
+            out = np.asarray(outputs[0], dtype=np.float32)
+        if out.ndim == 3:
+            mask = np.asarray(enc["attention_mask"], dtype=np.float32)
+            if self.pooling == "last_token":
+                # Qwen3-Embedding: 取最后一个非 padding token 的 hidden state。
+                last = np.maximum(mask.sum(axis=1).astype(np.int64) - 1, 0)
+                out = out[np.arange(out.shape[0]), last]
+            elif self.pooling == "mean":
+                denom = np.maximum(mask.sum(axis=1, keepdims=True), 1.0)
+                out = (out * mask[..., None]).sum(axis=1) / denom
+            else:
+                out = out[:, 0, :]
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        out = out / np.maximum(norms, 1e-12)
+        return out.tolist()
 
 
 class RerankTask(BackgroundTask):
@@ -386,14 +460,6 @@ class ImportFilesTask(BackgroundTask):
 
             import gc
             gc.collect()
-
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    self.send_log("INFO", "CUDA cache cleared.")
-            except (ImportError, OSError, RuntimeError, AttributeError):
-                pass
 
 
 class DeleteFilesTask(BackgroundTask):

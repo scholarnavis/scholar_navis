@@ -1,26 +1,36 @@
 """参考文献注册表（唯一事实来源）
 ================================
 
-背景与设计目标
---------------
-本模块把"参考文献"从**模型正文**中彻底解耦：
+编号从哪里来
+------------
+**编号由受理来源的工具分配**，不是模型写、也不是事后从正文里猜出来的：
 
-* 过去：模型在答案末尾自己写一段 ``References``，程序再用正则去解析/清洗，
-  格式一旦漂移（漏写、编号错位、被 markdown 改写）整块就丢失或错位。
-* 现在：模型只通过常驻工具 ``cite_references`` 提交**结构化条目**
-  （标题 / 作者 / 年份 / 期刊 / DOI / 链接 / 支撑原文），编号由程序分配并回传，
-  模型只在正文里写 ``[n]``；参考文献列表由 **程序渲染**。
+* 检索类工具（本地技能 / MCP）返回的每条来源在进入模型视野之前就拿到编号，
+  工具结果里随条目附带 :func:`citation_token` 生成的**带超链接的引用文本**
+  （``<a href="ref://cite?n=3">[3]</a>``）；
+* ``cite_references`` 工具受理模型提交的著录时同样当场分配编号，并把 token 回传；
+* 知识库文档在 Context 里已经写成 ``--- [Document n] ---``，编号同样先于正文存在。
+
+模型要做的只是**原样粘贴工具给它的 token**。程序不再扫描正文中的自拟别名
+（``[lariguet2004]`` 一类 ASCII key），因此也不存在"别名无人登记 → 句子失去引文"
+或"编号按首次出现重排导致列表与正文错位"这两类问题：编号在工具调用那一刻就
+固定下来，正文只能引用既有编号。
 
 唯一事实来源（高内聚）
 ----------------------
 ``ReferenceItem`` / ``ReferenceRegistry`` 同时服务三条链路，避免多处各写一套：
 
-1. 编号分配（KB 文档、在线 MCP 来源、模型登记的文献共用同一编号空间）；
+1. 编号分配与引用 token 生成（KB 文档、在线来源、模型登记的文献共用同一编号空间）；
 2. 正文末尾参考文献块的 HTML 渲染（气泡展示 / 导出 Markdown / 复制）；
-3. UI 悬停卡与详情面板所需的结构化数据（``to_dict_list``）。
+3. UI 悬停卡与详情面板所需的结构化数据（``to_dict_list``），以及收尾时"按正文
+   出现顺序定稿编号"（:meth:`ReferenceRegistry.renumber_by_appearance`）。
 
-页脚标记常量集中在此处定义，``follow_ups`` / ``chat_tasks`` / 气泡导出逻辑
-统一引用，保证"同一件事只在一处定义"。
+编号有两个层次，别混用：**内部来源号**（工具受理顺序，模型粘贴 token 时用）与
+**展示编号**（收尾时按出现顺序分配的 1..K）。生成过程中引用标记一律不展示
+（:func:`strip_citation_markers`），用户只会看到后者。
+
+页脚标记与 ``ref://`` 引用路由的形态集中在此处定义，``text_formatter`` /
+``chat_bubble`` / ``prompt_rules`` 统一引用，保证"同一件事只在一处定义"。
 """
 
 from __future__ import annotations
@@ -31,7 +41,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass, asdict, replace
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from src.core.think_tags import strip as strip_think_blocks
 
@@ -53,8 +63,13 @@ FOOTER_MARKER = FOOTER_RULE_HTML + CITES_HEADER_HTML
 PROVENANCE_TITLE = "📊 Provenance (trace log):"
 PROVENANCE_HEADER_HTML = f"<b>{PROVENANCE_TITLE}</b><br>"
 
-#: 正文行内引用标记 ``[n]``（n 为 1~3 位数字；本地 KB 文档等已编号来源使用）。
+#: 正文行内引用标记 ``[n]``（n 为 1~3 位数字）：编号由工具/程序分配，模型只照抄。
 INLINE_CITE_RE = re.compile(r"\[(\d{1,3})\]")
+
+#: 引用 token 的应用内路由（**协议唯一事实来源**）：工具回传的 token、正文渲染出的
+#: 锚点、气泡的悬停/点击识别都只认这一个形态，任何一侧改协议都必须改这里。
+CITE_LINK_TEMPLATE = "ref://cite?n={index}"
+CITE_LINK_RE = re.compile(r"ref://cite\?n=(\d{1,3})", re.IGNORECASE)
 
 #: "未核实"标记文案（**唯一事实来源**）：参考文献列表行尾与导出重排版共用同一
 #: 文案，避免同一条目在不同出口出现两种说法。判定标准见
@@ -63,100 +78,125 @@ UNVERIFIED_LABEL = "未核实"
 UNVERIFIED_MARK_HTML = (
     f" <span style='color:#C0392B; font-size:12px;'>（{UNVERIFIED_LABEL}）</span>")
 
-#: 正文行内引用 key（``[lariguet2004]`` 形态）：字母开头、长度受限的 ASCII slug。
-#: 模型为每个来源自拟 key 并在正文中复用；编号由程序按"首次出现顺序"统一分配，
-#: 从根本上消除"模型猜数字"导致的编号错位（模型写正文与调用工具孰先孰后都不影响）。
-_KEY_TOKEN_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9._:-]{0,63})\]")
-
-#: 统一的正文引用 token 扫描：``[key]`` 或 ``[n]``（用于按序编号与就地改写）。
-INLINE_TOKEN_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9._:-]{0,63}|\d{1,3})\]")
-
-#: key 合法性校验（与 _KEY_TOKEN_RE 同形，整串匹配）。
-_VALID_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]{0,63}$")
-
-# --------------------------------------------------------------------------- #
-#  引用 key 兜底清理口径（唯一事实来源）
-# --------------------------------------------------------------------------- #
-#: 判定"key 形态的 token 是引用别名而非别的方括号用法"的必要条件：内含四位年份。
-#: 年份下限取 1500（而不只是 19xx/20xx）：生物学经典文献的别名（``[mendel1866]``）
-#: 同样是模型自拟 key，收窄到 19xx/20xx 会漏掉它们。
-_CITE_KEY_YEAR_RE = re.compile(r"(?:1[5-9]\d{2}|20\d{2})")
+#: 中文输入法/模型常把编号写成全角 ``［27］`` 或 ``【27】``；先归一成 ASCII，
+#: 否则渲染与"用了哪些条目"的选取都会漏掉它。只归一**数字**编号：字母形态的
+#: 方括号用法是正文自己的内容，不属于引用协议。
+_FULLWIDTH_CITE_RE = re.compile(r"[［【]\s*(\d{1,3})\s*[］】]")
 
 
-def strip_unregistered_cite_keys(text: str) -> Tuple[str, List[str]]:
-    """移除落不到任何著录的引用 key 坏标记，返回 ``(清理后文本, 被移除的 token)``。
+def normalize_citation_brackets(text: str) -> str:
+    if not text:
+        return text or ""
+    return _FULLWIDTH_CITE_RE.sub(lambda m: f"[{m.group(1)}]", str(text))
 
-    必须在 :meth:`ReferenceRegistry.resolve_citations` **之后**调用：那时"能认出来的
-    key"（含被 :meth:`ReferenceRegistry._recognize_key` 近似识别回填的）已就地改写为
-    ``[n]``，文本里剩下的 key 形态 token 只可能是"认不出、也没有近似可落回"的别名——
-    本轮与历史都没登记过，或只出现在思考块里因而拿不到编号——留在屏幕上只会呈现为
-    ``[lariguet2004]`` / ``[hu2019cotton]`` 这样的坏标记。
 
-    清理范围是**全文**（含 ``<think>`` 思考块与工具过程块）：思考面板同样上屏，别名
-    在那里同样是读者不该看到的噪声；只按"正文里未登记的 token 清单"删除会漏掉这一半。
+def citation_href(index: int) -> str:
+    """引用编号的应用内跳转地址（``ref://cite?n=N``）。"""
+    return CITE_LINK_TEMPLATE.format(index=int(index))
 
-    只命中 :data:`_KEY_TOKEN_RE` 的 key 形态（``[lariguet2004]``）；数字型 ``[1]``、
-    无年份的短缩写 ``[EC]``、``[Fig. 2]``、``[the 1990s]`` 这类正文自身的方括号用法
-    一律原样保留——刻意不做"任意含年份短语"的宽匹配：模型被约定的引用形态就是 slug，
-    宽匹配换不来多少覆盖，却会把正常文字误删。
 
-    为什么剩下的不编号：编号必须指向一条真实著录，而这类 token 后面**没有任何来源**
-    （注册表、KB、在线来源、历史快照里都查不到）。凭空给它造一条条目就是捏造文献。
+def citation_token(index: int) -> str:
+    """工具回传给模型的**可粘贴引用 token**：带超链接的编号文本。
+
+    这里的编号是**内部来源号**（受理顺序），只在模型与程序之间流转：用户看到的
+    是收尾时按出现顺序重排后的 1..K（见 :meth:`ReferenceRegistry.renumber_by_appearance`）。
+    模型只负责原样粘贴 token，程序据此知道每一处引用的是哪条来源。
+    """
+    idx = int(index)
+    return f'<a href="{citation_href(idx)}">[{idx}]</a>'
+
+
+#: 正文里的一处引用标记（两种等价写法，含其前面的空白）。
+#: 锚点分支必须整体排在前面：否则锚文本里的 ``[n]`` 会被当成裸编号单独处理。
+CITE_MARK_RE = re.compile(
+    r"[ \t]*(?:<a\b[^>]*href=['\"]" + CITE_LINK_RE.pattern + r"['\"][^>]*>[^<]*</a>"
+    r"|" + INLINE_CITE_RE.pattern + r")",
+    re.IGNORECASE)
+
+
+def _mark_id(match: "re.Match[str]") -> Optional[int]:
+    """取出一处引用标记指向的来源号（锚点分支为 group(1)，裸编号为 group(2)）。"""
+    value = match.group(1) or match.group(2)
+    if not value:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+#: 引用 token 的**开标签**（不含锚文本）：用于识别"只发了半截"的锚点。
+_OPEN_CITE_TAG_RE = re.compile(
+    r"<a\b[^>]*href=['\"]" + CITE_LINK_RE.pattern + r"['\"][^>]*>", re.IGNORECASE)
+
+
+def _drop_unclosed_cite_anchors(text: str) -> str:
+    """把"只发了开标签、还没发 ``</a>``"的引用锚点降级成裸编号。
+
+    流式生成时 token 是一个字符一个字符到达的：锚点可能只到一半，直接渲染会让
+    用户看到 ``<a href="ref://cite?n=3">[3`` 这样的半截 HTML。去掉开标签后，锚文本
+    里的 ``[N]`` 仍在，会被当作裸编号处理（隐藏或重排）。有闭合标签的锚点原样
+    保留，交给正常匹配。
+    """
+    kept: List[str] = []
+    cursor = 0
+    for match in _OPEN_CITE_TAG_RE.finditer(text):
+        if text.find("</a>", match.end()) != -1:
+            continue            # 完整锚点：原样保留
+        kept.append(text[cursor:match.start()])
+        cursor = match.end()
+    if not kept:
+        return text
+    kept.append(text[cursor:])
+    return "".join(kept)
+
+
+#: 代码块 / 行内代码：里面的 ``[1]`` 是代码本身（``arr[1]``、数组示例），
+#: 不是引用。两个处理函数都必须跳过这些片段，否则会把代码改坏。
+_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`\n]+`", re.DOTALL)
+
+
+def _code_segments(text: str) -> List[Tuple[bool, str]]:
+    """把文本切成 ``[(是否代码, 片段), …]``，代码片段原样保留。"""
+    segments: List[Tuple[bool, str]] = []
+    cursor = 0
+    for match in _CODE_SPAN_RE.finditer(text):
+        if match.start() > cursor:
+            segments.append((False, text[cursor:match.start()]))
+        segments.append((True, match.group(0)))
+        cursor = match.end()
+    if cursor < len(text):
+        segments.append((False, text[cursor:]))
+    return segments or [(False, text)]
+
+
+def _map_outside_code(text: str, func) -> str:
+    """只对代码之外的片段应用 ``func``（代码原样保留）。"""
+    return "".join(chunk if is_code else func(chunk)
+                   for is_code, chunk in _code_segments(text))
+
+
+def strip_citation_markers(text: str) -> str:
+    """抹掉正文里的全部引用标记（锚点形态与裸编号），用于生成过程中的中间态显示。
+
+    生成阶段用户不该看到任何引用：编号要等整条回答收尾、按出现顺序统一分配，
+    中途出现的 ``[7]`` 既没有列表可对，收尾时又会被整体改写。标记连同其前面的
+    空格一起去掉，避免"...是必需的 。"这种悬空空格。
+
+    代码块与行内代码不参与处理：``arr[1]`` 里的 ``[1]`` 是代码，不是引用。
     """
     if not text:
-        return text or "", []
+        return text or ""
+    text = _drop_unclosed_cite_anchors(normalize_citation_brackets(str(text)))
+    cleaned = _map_outside_code(text, lambda chunk: CITE_MARK_RE.sub("", chunk))
+    # 流式截断处可能正停在半个标记上（"[3"、`<a href="ref://cite?n=3`）：
+    # 这些残片既点不开，也不该闪给用户看。只在"尾部不在代码里"时清理。
+    tail_is_code = _code_segments(cleaned)[-1][0]
+    if not tail_is_code:
+        cleaned = re.sub(r"<a\b[^>]*ref://cite[^>]*$", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\[\d{0,3}$", "", cleaned)
+    return cleaned
 
-    removed: List[str] = []
-
-    def _drop(match: "re.Match[str]") -> str:
-        token = match.group(1)
-        if not _CITE_KEY_YEAR_RE.search(token):
-            return match.group(0)          # 无年份：不是引用 key，原样保留
-        removed.append(token)
-        return ""
-
-    return _KEY_TOKEN_RE.sub(_drop, text), removed
-
-
-# --------------------------------------------------------------------------- #
-#  key 近似识别（把模型写歪的 key 落回真实著录）
-# --------------------------------------------------------------------------- #
-def _fold_key(value: str) -> str:
-    """key 折叠：小写化并剔除分隔符，使 ``Lariguet-2004`` / ``lariguet_2004`` 等价。"""
-    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
-
-
-#: 模型自拟 key 的约定形态：姓氏 + 四位年份 + 可选主题词（``zhang2026condensate``）。
-#: 识别近似 key 时按该形态把年份与姓氏拆开：**年份必须一致**，姓氏才允许容错——
-#: 年份是模型从著录里抄来的硬信息，姓氏才是最容易被写歪的部分。
-_KEY_YEAR_SPLIT_RE = re.compile(
-    r"^(?P<name>[a-z][a-z0-9]*?)(?P<year>1[5-9]\d{2}|20\d{2})(?P<suffix>[a-z0-9]*)$")
-
-
-def _edit_distance_within(a: str, b: str, limit: int) -> int:
-    """有界编辑距离：超过 ``limit`` 立即返回 ``limit + 1``（只服务近似 key 判定）。"""
-    if abs(len(a) - len(b)) > limit:
-        return limit + 1
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        if min(cur) > limit:
-            return limit + 1
-        prev = cur
-    return prev[-1]
-
-
-def _name_in_text(name: str, text: str) -> bool:
-    """姓名是否以**独立词**出现在（小写）文本里：``hu`` 不应命中 ``Huang``。"""
-    if not name or not text:
-        return False
-    return re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text) is not None
-
-
-#: 思维链 / 工具过程块的识别口径统一在 src/core/think_tags.py（见 strip()）：
-#: 统计"首次出现顺序"时排除，避免模型在思考里的示例编号抢占正文的首次出现位置。
 
 #: 条目文本的展示上限（超出仅用于展示截断，原始数据不丢）。
 _SNIPPET_DISPLAY_MAX = 2000
@@ -185,6 +225,53 @@ _TITLE_ITALIC_RE = re.compile(
 _STRAY_ITALIC_TAG_RE = re.compile(r"</?\s*(?:i|em|italic)\b[^>]*>", re.IGNORECASE)
 
 
+_SUB_TRANSLATION = str.maketrans(
+    "0123456789+-=()aehijklmnoprstuvx",
+    "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ")
+_SUP_TRANSLATION = str.maketrans(
+    "0123456789+-=()ni",
+    "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ")
+
+
+def normalize_bibliographic_text(value: Any, keep_italic: bool = False) -> str:
+    """把标题里的 ``<sub>`` / ``<sup>`` 转成 Unicode，并清掉残留 HTML。
+
+    Crossref/OpenAlex 标题常带 ``CO<sub>2</sub>``、``Ca<sup>2+</sup>``。
+    普通 QTableWidget 不解析富文本，直接显示会露出标签；引用卡虽然用富文本，
+    但 ``title_html`` 会转义标签。统一转成 Unicode 后，表格、引用卡、导出
+    Markdown 都能正确显示，且不引入未转义 HTML。
+    """
+    text = _html.unescape("" if value is None else str(value))
+
+    def _sub(match):
+        return str(match.group(1)).translate(_SUB_TRANSLATION)
+
+    def _sup(match):
+        return str(match.group(1)).translate(_SUP_TRANSLATION)
+
+    text = re.sub(r"<sub\b[^>]*>(.*?)</sub\s*>", _sub, text,
+                  flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<sup\b[^>]*>(.*?)</sup\s*>", _sup, text,
+                  flags=re.IGNORECASE | re.DOTALL)
+    # 不完整的开/闭标签（例如只出现 </sup>）也不应显示成正文。
+    text = re.sub(r"</?su[bp]\b[^>]*>", "", text, flags=re.IGNORECASE)
+    if keep_italic:
+        # 只保留斜体族标签（``i`` / ``em`` / ``italic``，PubMed、Crossref、JATS 三种
+        # 写法都用），其余标签清掉——它们正是 :data:`_TITLE_ITALIC_RE` 要识别的信号，
+        # 一旦在这里被删掉，"来源确实标了斜体"的证据就丢失了。不能写成
+        # ``</?(?!i\b)[^>]+>``：可选斜杠会让 ``</i>`` 从"斜杠"位置开始匹配，
+        # 结果开标签留下、闭标签被删，整段后续都变成斜体。
+        def _strip_non_italic(match):
+            tag = match.group(0)
+            name = re.match(r"</?\s*([A-Za-z]+)", tag)
+            keep = name is not None and name.group(1).lower() in ("i", "em", "italic")
+            return tag if keep else ""
+        text = re.sub(r"</?[^>]+>", _strip_non_italic, text)
+    else:
+        text = re.sub(r"<[^>]+>", "", text)
+    return text.strip()
+
+
 def title_html(title: Any) -> str:
     """把标题渲染为富文本：**默认正体**，只保留原标题自带的斜体信号。
 
@@ -199,7 +286,7 @@ def title_html(title: Any) -> str:
     页脚参考文献（:meth:`ReferenceItem.citation_text_html`）与引用卡标题共用本函数，
     两处"标题该怎么斜"因此只有一个说法。
     """
-    text = "" if title is None else str(title)
+    text = normalize_bibliographic_text(title, keep_italic=True)
     if not text:
         return ""
     parts: List[str] = []
@@ -295,8 +382,7 @@ class ReferenceItem:
 
     字段刻意保持扁平，便于 JSON 序列化后在 UI 线程重建：
 
-    * ``index``    —— 引用编号（= 正文里的 ``[n]``），程序按首次出现顺序分配；
-    * ``key``      —— 正文里的引用 key（``[key]``，模型自拟的 ASCII slug），可空；
+    * ``index``    —— 引用编号（= 正文里的 ``[n]``），由受理来源的工具分配；
     * ``title``    —— 标题；
     * ``authors``  —— 作者（字符串，分号/逗号分隔均可）；
     * ``year``     —— 年份；
@@ -313,7 +399,6 @@ class ReferenceItem:
     """
 
     index: int
-    key: str = ""
     title: str = ""
     authors: str = ""
     year: str = ""
@@ -331,8 +416,7 @@ class ReferenceItem:
     #  规范化
     # ------------------------------------------------------------------ #
     def normalized(self) -> "ReferenceItem":
-        """就地清洗字段：去首尾空白、DOI 去前缀、kind 归一、key 合法性校验。"""
-        self.key = self._normalize_key(self.key)
+        """就地清洗字段：去首尾空白、DOI 去前缀、kind 归一。"""
         self.title = str(self.title or "").strip()
         self.authors = str(self.authors or "").strip()
         self.year = str(self.year or "").strip()
@@ -349,14 +433,6 @@ class ReferenceItem:
             self.page = 1
         self.kind = str(self.kind or "reference").strip().lower() or "reference"
         return self
-
-    @staticmethod
-    def _normalize_key(value: str) -> str:
-        """规整正文引用 key：去方括号/空白，非法形态（含空格、中文、超长）则丢弃。"""
-        raw = str(value or "").strip().strip("[]").strip()
-        if not raw or not _VALID_KEY_RE.match(raw):
-            return ""
-        return raw
 
     # ------------------------------------------------------------------ #
     #  展示
@@ -377,6 +453,11 @@ class ReferenceItem:
     @property
     def authors_display(self) -> str:
         return _truncate_authors(self.authors)
+
+    @property
+    def citation_token(self) -> str:
+        """该条目的可粘贴引用 token（带超链接的编号文本，见 :func:`citation_token`）。"""
+        return citation_token(self.index)
 
     @property
     def needs_manual_review(self) -> bool:
@@ -468,7 +549,8 @@ class ReferenceItem:
             # 句末句点必须落在斜体之外：先补句点，再交给标题渲染器决定局部斜体。
             parts.append(title_html(_ensure_period(self.title)))
         if self.journal:
-            parts.append(_escape(_ensure_period(self.journal)))
+            parts.append(_escape(_ensure_period(
+                normalize_bibliographic_text(self.journal))))
         if not any((self.authors_display, self.year, self.title, self.journal)):
             parts.append(_escape(_ensure_period(self.display_name)))
         html = " ".join(parts)
@@ -499,12 +581,14 @@ class ReferenceItem:
 
     @classmethod
     def from_ai_payload(cls, raw: Dict[str, Any], index: int) -> "ReferenceItem":
-        """把模型工具参数（字段名可能有别名）规整为 :class:`ReferenceItem`。"""
+        """把模型工具参数（字段名可能有别名）规整为 :class:`ReferenceItem`。
+
+        编号一律由注册表在 :meth:`ReferenceRegistry.add` 里分配，模型提交的任何
+        编号字段都会被忽略——这是"编号由工具生成"的口径，不接受模型自报数字。
+        """
         data = raw or {}
         item = cls(
             index=index,
-            key=str(data.get("key") or data.get("ref_key") or data.get("cite_key")
-                    or data.get("slug") or ""),
             title=str(data.get("title") or data.get("name") or ""),
             authors=str(data.get("authors") or data.get("author") or ""),
             year=str(data.get("year") or data.get("date") or ""),
@@ -525,6 +609,8 @@ class ReferenceRegistry:
 
     编号空间统一：本地 KB 文档、在线 MCP 来源、模型通过 ``cite_references``
     登记的文献共用同一自增空间，从根本上避免"同一来源两个号 / 两来源同一个号"。
+    编号一旦分配就固定（来源去重时复用原号），不随正文出现顺序重排——正文只是
+    "引用已有的编号"，因此列表与正文不可能对不上。
 
     线程安全：Agent 循环会并发执行工具调用，多个在线来源可能同时登记，因此
     所有读写都用可重入锁串行化。
@@ -533,14 +619,7 @@ class ReferenceRegistry:
     def __init__(self) -> None:
         self._items: Dict[int, ReferenceItem] = {}
         self._by_key: Dict[str, int] = {}
-        #: 正文引用 key（小写）-> 注册表编号。仅登记模型显式提供 key 的条目。
-        self._key_index: Dict[str, int] = {}
         self._lock = threading.RLock()
-
-    def _index_key(self, item: ReferenceItem, idx: int) -> None:
-        """登记条目的正文引用 key（重复 key 保留首次登记，避免抢占既有编号）。"""
-        if item.key:
-            self._key_index.setdefault(item.key.lower(), idx)
 
     # ------------------------------------------------------------------ #
     #  写入
@@ -558,7 +637,6 @@ class ReferenceRegistry:
             item.index = idx
             item.normalized()
             self._items[idx] = item
-            self._index_key(item, idx)
             key = item.dedupe_key
             if key:
                 self._by_key.setdefault(key, idx)
@@ -579,7 +657,6 @@ class ReferenceRegistry:
             idx = int(index) if index else self._next_index()
             item.index = idx
             self._items[idx] = item
-            self._index_key(item, idx)
             if key:
                 self._by_key[key] = idx
             logger.debug("Reference registered: [%d] %s", idx, item.display_name[:80])
@@ -649,174 +726,66 @@ class ReferenceRegistry:
                 return False
 
     # ------------------------------------------------------------------ #
-    #  引用使用集
+    #  收尾：按出现顺序定稿编号
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def used_indices(text: str) -> Set[int]:
-        """抽取文本中出现的所有 ``[n]`` 编号。"""
-        if not text:
-            return set()
-        return {int(m) for m in INLINE_CITE_RE.findall(text)}
+    def renumber_by_appearance(self, text: str
+                               ) -> Tuple[str, List["ReferenceItem"], List[int]]:
+        """按**正文首次出现顺序**把引用编号定稿为 1..K，并把正文改写过来。
 
-    def lookup_key(self, key: str) -> Optional[int]:
-        """按正文引用 key 查编号（大小写不敏感）；未登记返回 None。"""
-        with self._lock:
-            return self._key_index.get(str(key or "").strip().lower())
+        生成过程中编号一律不展示（见 :func:`strip_citation_markers`），所以用户
+        看到的编号就是这里分配的：第一个被引用的来源拿 ``[1]``、第二个 ``[2]``，
+        列表顺序与阅读顺序天然一致。
 
-    #: 近似 key 修复的最小姓氏长度：短姓氏（li/lu/hu）差一个字符就可能指向另一个人，
-    #: 宁可判定"无法识别"（记日志、由清理环节处理），也不做猜测性关联。
-    _MIN_SURNAME_FOR_FUZZY = 6
+        两条等价写法（工具 token 的 ``ref://cite?n=内部号`` 锚点、知识库文档的裸
+        ``[n]``）都参与排序，改写后统一成裸 ``[n]``，由渲染管线建链。
 
-    def _recognize_key(self, token: str) -> Tuple[Optional[int], str]:
-        """把正文 token 识别为注册表编号，返回 ``(编号, 识别方式)``；认不出返回 ``(None, "")``。
+        ``<think>`` 块不参与排序（面板默认收起，里面的示意不该把编号往后挤），但
+        其中的标记会被改写成同一套编号；只在思考里出现、正文从未引用的来源整条
+        抹掉——它不构成对来源的引用，留着只会让编号跳号。代码块与行内代码同样
+        不参与（``arr[1]`` 是代码，不是引用）。
 
-        识别**由严到宽**逐级尝试，任一级出现多个候选即放弃该级（宁可判定不认识，也不
-        猜测——把一句论断错挂到别人的论文上，比标记缺失严重得多）：
-
-        1. ``exact``：key 完全一致（大小写不敏感）；
-        2. ``folded``：折叠分隔符后一致（``Lariguet-2004`` = ``lariguet2004``）；
-        3. ``prefix``：年份后的主题词被截断或补全（``zhang2026`` ↔ ``zhang2026condensate``）；
-        4. ``typo``：**年份相同**、姓氏编辑距离 ≤1、首字母一致、姓氏长度
-           ≥ :attr:`_MIN_SURNAME_FOR_FUZZY`（``frutani2007`` -> ``furutani2007``）；
-        5. ``metadata``：**年份相同**且姓氏以独立词出现在条目的作者/标题里（模型把在线
-           来源的姓氏直接当 key 用、却没登记该 key 时，仍能落回真实著录）。
-
-        3/4/5 级是有据可依的回填：命中的是注册表里**真实存在**的条目，不是新造的引文；
-        每次命中都会随 :meth:`resolve_citations` 的返回值上报，由调用方记入日志供人工核查。
-        """
-        token = str(token or "").strip()
-        if not token:
-            return None, ""
-        idx = self._key_index.get(token.lower())
-        if idx is not None:
-            return idx, "exact"
-        # 注意：不能因为"注册表里一条 key 都没有"就提前返回——KB / 在线来源只有编号、
-        # 没有 key，第 5 级（作者/标题元数据）正是为它们准备的落回路径。
-        folded = _fold_key(token)
-        hits = sorted({i for k, i in self._key_index.items() if _fold_key(k) == folded})
-        if hits:
-            return (hits[0], "folded") if len(hits) == 1 else (None, "")
-
-        split = _KEY_YEAR_SPLIT_RE.match(folded)
-        if not split:
-            return None, ""
-        name, year = split.group("name"), split.group("year")
-
-        # 3) 年份后主题词差异（截断 / 补全）
-        hits = sorted({i for k, i in self._key_index.items()
-                       if _fold_key(k).startswith(folded) or folded.startswith(_fold_key(k))})
-        if hits:
-            return (hits[0], "prefix") if len(hits) == 1 else (None, "")
-
-        # 4) 姓氏拼写近似（年份必须一致）
-        if len(name) >= self._MIN_SURNAME_FOR_FUZZY:
-            hits = set()
-            for k, i in self._key_index.items():
-                other = _KEY_YEAR_SPLIT_RE.match(_fold_key(k))
-                if not other or other.group("year") != year:
-                    continue
-                other_name = other.group("name")
-                if not other_name or other_name[0] != name[0]:
-                    continue
-                if _edit_distance_within(name, other_name, 1) <= 1:
-                    hits.add(i)
-            if hits:
-                return (hits.pop(), "typo") if len(hits) == 1 else (None, "")
-
-        # 5) 作者 / 标题元数据（同年份、姓氏独立词命中）
-        if len(name) >= 4:
-            hits = set()
-            for i, item in self._items.items():
-                if str(item.year or "").strip() != year:
-                    continue
-                haystack = f"{item.authors} {item.title}".lower()
-                if _name_in_text(name, haystack):
-                    hits.add(i)
-            if hits:
-                return (hits.pop(), "metadata") if len(hits) == 1 else (None, "")
-        return None, ""
-
-    def _resolve_token(self, token: str) -> Tuple[Optional[int], str]:
-        """把正文 token 解析为注册表编号：纯数字按编号，其余按 key（含近似识别）。"""
-        token = str(token or "").strip()
-        if not token:
-            return None, ""
-        if token.isdigit():
-            idx = int(token)
-            return (idx, "exact") if idx in self._items else (None, "")
-        return self._recognize_key(token)
-
-    # ------------------------------------------------------------------ #
-    #  正文引用 -> 编号（唯一权威映射）
-    # ------------------------------------------------------------------ #
-    def resolve_citations(self, text: str):
-        """扫描正文引用（``[key]`` / ``[n]``），按"首次出现顺序"重新编号。
-
-        这是"正文编号 ↔ 参考文献列表"的唯一权威映射：
-
-        * 模型只需为每个来源自拟一个 key 并在正文复用，**不必猜数字**——因此
-          无论它先写正文还是先调用 ``cite_references``，编号都不会错位；
-        * 编号 1..K 严格按正文中该来源的首次出现顺序分配，列表顺序与正文一致
-          （符合学术惯例，也消除了"提交顺序 ≠ 引用顺序"的历史问题）。
-
-        :return: ``(new_text, ordered_items, unresolved, repaired)``
-            - ``new_text``：引用已就地改写为 ``[1..K]`` 后的正文；
-            - ``ordered_items``：按新编号排序的条目副本（``index`` 已改为新编号）；
-            - ``unresolved``：既非已登记 key、也没有近似可落回条目的 token（记日志用）；
-            - ``repaired``：``(token, 识别方式, 分配到的编号)``——写歪但已落回**真实**
-              著录的 key（见 :meth:`_recognize_key`），供调用方记日志、供人工核查。
+        :return: ``(new_text, ordered_items, unmatched)``
+            - ``new_text``：编号已定稿的正文；
+            - ``ordered_items``：按新编号排序的条目副本（``index`` 已改成新号）；
+            - ``unmatched``：正文出现但注册表没有的编号（已从正文抹掉，记日志用）。
         """
         if not text:
-            return text or "", [], [], []
+            return text or "", [], []
+        text = _drop_unclosed_cite_anchors(normalize_citation_brackets(str(text)))
         with self._lock:
-            # 统计首次出现顺序时排除思考块/工具过程块：模型可能在其中写
-            # "用 [x] 引用"这类示意，不应参与正文编号。
-            scan_text = strip_think_blocks(text)
+            # 排序只看正文：思考块里的示意编号不算"引用顺序"，代码里的 [n] 更不是。
+            body = strip_think_blocks(text)
             order: Dict[int, int] = {}
-            unresolved: List[str] = []
-            #: token -> (编号, 识别方式)：同一 token 反复出现（含思考块里的再次出现）
-            #: 只识别一次，避免近似匹配在长正文上被反复重算。
-            cache: Dict[str, Tuple[Optional[int], str]] = {}
-            repaired: List[Tuple[str, str, int]] = []
+            unmatched: List[int] = []
+            for is_code, chunk in _code_segments(body):
+                if is_code:
+                    continue
+                for match in CITE_MARK_RE.finditer(chunk):
+                    old = _mark_id(match)
+                    if old is None:
+                        continue
+                    if old in self._items:
+                        if old not in order:
+                            order[old] = len(order) + 1
+                    elif old not in unmatched:
+                        unmatched.append(old)
 
-            def _lookup(token: str) -> Tuple[Optional[int], str]:
-                if token not in cache:
-                    cache[token] = self._resolve_token(token)
-                return cache[token]
+            def _rewrite(match: "re.Match[str]") -> str:
+                old = _mark_id(match)
+                if old is None or old not in order:
+                    # 未登记的编号、以及只出现在思考块里的引用：整条抹掉。
+                    # 留一个指向空处的编号比不留更糟——用户会去点它。
+                    return ""
+                # 保留标记前面的空白：英文是 "claim [1]."，中文是 "结论[1]。"，
+                # 直接拼上去会把英文的词间距吃没。
+                raw = match.group(0)
+                lead = raw[: len(raw) - len(raw.lstrip(" \t"))]
+                return f"{lead}[{order[old]}]"
 
-            def _scan(m: "re.Match[str]") -> str:
-                token = m.group(1)
-                idx, tier = _lookup(token)
-                if idx is None:
-                    unresolved.append(token)
-                elif idx not in order:
-                    order[idx] = len(order) + 1
-                if idx is not None and tier != "exact":
-                    repaired.append((token, tier, idx))
-                return m.group(0)
-
-            INLINE_TOKEN_RE.sub(_scan, scan_text)
-
-            def _rewrite(m: "re.Match[str]") -> str:
-                idx, _tier = _lookup(m.group(1))
-                if idx is None or idx not in order:
-                    # 认不出的 token / 仅出现在 <think> 中的示意 token：原样保留，
-                    # 交后续清理环节（见 strip_unregistered_cite_keys）。
-                    return m.group(0)
-                return f"[{order[idx]}]"
-
-            new_text = INLINE_TOKEN_RE.sub(_rewrite, text)
+            new_text = _map_outside_code(text, lambda chunk: CITE_MARK_RE.sub(_rewrite, chunk))
             ordered = [replace(self._items[i], index=order[i])
                        for i in sorted(order, key=lambda k: order[k])]
-            reported: List[Tuple[str, str, int]] = []
-            seen = set()
-            for token, tier, idx in repaired:
-                mark = (token.lower(), tier)
-                if mark in seen or idx not in order:
-                    continue
-                seen.add(mark)
-                reported.append((token, tier, order[idx]))
-        return new_text, ordered, unresolved, reported
+        return new_text, ordered, unmatched
 
     # ------------------------------------------------------------------ #
     #  渲染
@@ -832,8 +801,8 @@ class ReferenceRegistry:
     def to_html(self, indices: Optional[Iterable[int]] = None) -> str:
         """渲染正文末尾的参考文献块 HTML（无可用条目时返回空串）。
 
-        保留此接口以兼容历史调用；新流程请用 :meth:`resolve_citations` +
-        :meth:`render_items`（编号按正文首次出现顺序，而非注册顺序）。
+        保留此接口以兼容历史调用；新流程请用
+        :meth:`renumber_by_appearance` + :meth:`render_items`（编号按出现顺序定稿）。
 
         :param indices: 仅渲染这些编号（通常为正文实际引用到的编号）；
                         None 表示渲染全部。

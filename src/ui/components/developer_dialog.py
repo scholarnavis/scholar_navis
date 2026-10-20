@@ -172,14 +172,16 @@ AI_TESTS = {
         "note": (
             "Developer test: exercising the <b>citation / reference numbering</b> "
             "pipeline end to end, in the real Chat panel. Expected: the agent really "
-            "calls <b>search_academic_literature</b> (and/or search_preprints) and "
-            "cites sources inline as <b>[key]</b> (e.g. [sharkey2019]); the app then "
-            "renumbers them by FIRST APPEARANCE and renders the '📚 Cited Sources' "
-            "list. Verify in the reply: (1) every inline [n] matches the list number "
-            "AND the correct paper; (2) list order == order of first appearance in the "
-            "text; (3) hovering a [n] shows the SAME paper; (4) clicking [n] opens the "
-            "matching detail card. Check the log for 'Unresolved inline citations' — "
-            "there should be none when every source was registered."
+            "calls <b>search_academic_literature</b> (and/or search_preprints); each "
+            "tool result item carries a <b>citation_token</b> (hyperlink text such as "
+            "&lt;a href='ref://cite?n=3'&gt;[3]&lt;/a&gt;) whose number the app assigned, "
+            "and the agent pastes that token at the claims it supports. The app only "
+            "looks up which numbers are cited and renders the '📚 Cited Sources' list. "
+            "Verify in the reply: (1) every inline [n] matches the list number AND the "
+            "correct paper; (2) list order == number order (no renumbering); "
+            "(3) hovering a [n] shows the SAME paper; (4) clicking [n] opens the "
+            "matching detail card. Check the log for 'no registered source' — it must "
+            "be empty when every number came from a tool."
         ),
         "prompt": (
             "I'm preparing a short literature briefing for a journal club and I need "
@@ -265,6 +267,7 @@ a live citation marker produced by the real rendering pipeline.
 - A local document backs this one, so its card can open the original file [3].
 - A minimal entry shows the "no passage captured" fallback layout [4].
 - The same source cited a second time reuses its number [1].
+- A tool-returned citation token pasted verbatim renders identically <a href="ref://cite?n=2">[2]</a>.
 
 ### 📚 Cited Sources
 
@@ -561,6 +564,7 @@ class DeveloperDialog(BaseDialog):
         self.btn_typography = self._make_btn("Chat Typography", self._test_chat_typography)
         self.btn_refnum = self._make_btn("Reference Numbering", self._test_reference_citations)
         self.btn_refint = self._make_btn("Reference Integrity", self._test_reference_integrity)
+        self.btn_storage = self._make_btn("Storage Round-Trip", self._test_storage_roundtrip)
         self.btn_citeclick = self._make_btn("Citation Click-Through", self._test_citation_click)
         # 引用可信性。Integrity 为离线反捏造审计（进 Run All）；Literature Trust 会
         # 发起**真实检索 + DOI 解析**，故独立成按钮、不进 Run All，避免默认自检占用
@@ -575,7 +579,8 @@ class DeveloperDialog(BaseDialog):
              self.btn_deep_card, self.btn_hitl, self.btn_render, self.btn_restore,
              self.btn_filetypes, self.btn_textviewer, self.btn_scrollbar,
              self.btn_attachwire, self.btn_typography, self.btn_refnum,
-             self.btn_refint, self.btn_citeclick, self.btn_littrust, self.btn_uiinter),
+             self.btn_refint, self.btn_storage, self.btn_citeclick,
+             self.btn_littrust, self.btn_uiinter),
             cols=4))
 
         # --- Output area（专属源码/日志输出控件：固定最大高度 + 独立滚动条、
@@ -873,149 +878,129 @@ class DeveloperDialog(BaseDialog):
     #  Functional tests
     # ------------------------------------------------------------------ #
     def _test_reference_citations(self, clear: bool = True):
-        """Functional test for the citation-numbering pipeline (key protocol).
+        """引用编号自检：生成期全部隐藏 + 收尾按出现顺序定稿为 1..K。
 
-        Reproduces and guards against "正文编号与参考文献列表对不上"：模型用稳定的
-        ``[key]`` 引用，正文编号由程序按"首次出现顺序"统一分配，因此模型先写正文
-        还是先调用 cite_references 都不影响一致性。断言：
-          * key 解析 + 按首次出现顺序重编号（与注册顺序无关）；
-          * 重复出现的同一 key 复用同一编号；
-          * 数字引用（本地 KB 文档号）仍可解析；
-          * 未登记 key 被如实报告，而非被静默错编；
-          * 渲染出的列表顺序与重编号后的顺序一致。
+        这条链路的硬约束有两条，必须同时成立：
+
+        1. **生成过程中不显示任何引用**（正文与思考面板都不露），否则用户会看到
+           一串还没有列表可对的内部号；
+        2. **收尾按正文首次出现顺序**分配 1..K，列表顺序 = 阅读顺序。
+
+        断言因此覆盖：内部号与 token 的形态、隐藏函数对四种写法的处理、定稿时的
+        排序 / 改写 / 未登记编号抹除 / 思考块处理，以及最终列表编号与条目一致。
         """
         if clear:
             self._clear()
-        self._log("--- Reference Numbering (key protocol) ---", "INFO")
+        self._log("--- Reference Numbering (hidden while streaming, 1..K by appearance) ---",
+                  "INFO")
         try:
-            from src.core.references import ReferenceRegistry, ReferenceItem
+            from src.core.references import (CITE_LINK_RE, ReferenceItem,
+                                             ReferenceRegistry, citation_href,
+                                             citation_token, strip_citation_markers)
 
             reg = ReferenceRegistry()
-            # 注册顺序故意与正文引用顺序不同（复现"模型提交顺序 ≠ 引用顺序"）。
-            reg.add(ReferenceItem(index=0, key="long2006",
+            # 受理顺序与正文引用顺序故意不同：定稿编号只看正文出现顺序。
+            reg.add(ReferenceItem(index=0,
                                   title="Can improvement in photosynthesis increase crop yields?",
-                                  authors="Long", year="2006"))
-            reg.add(ReferenceItem(index=0, key="sharkey2019",
-                                  title="The Calvin-Benson cycle and its regulation",
-                                  authors="Sharkey", year="2019"))
-            # 本地 KB 文档：无 key，只有已分配编号（模拟 '--- [Document 3] ---'）。
+                                  authors="Long", year="2006"))          # 内部号 1
+            token_b = reg.add(ReferenceItem(index=0,
+                                            title="The Calvin-Benson cycle and its regulation",
+                                            authors="Sharkey", year="2019"))   # 内部号 2
+            # 本地 KB 文档：编号来自 '--- [Document 3] ---'，同样先于正文存在。
             reg.seed(3, ReferenceItem(index=3, title="Local KB doc",
                                       path="/tmp/kb.pdf", kind="local_document"))
 
-            body = ("光合作用受光调节 [sharkey2019]，且碳同化参与 [long2006]；"
-                    "再次引用同一来源 [sharkey2019]；本地文档 [3]；"
-                    "未登记 [ghost2020]。")
-            new_text, ordered, unresolved, repaired = reg.resolve_citations(body)
-
             fails = []
-            # 1) 首次出现顺序：sharkey=1, long=2, local=3
-            if [it.index for it in ordered] != [1, 2, 3]:
-                fails.append(f"order != [1,2,3]: {[it.index for it in ordered]}")
-            if [it.key for it in ordered] != ["sharkey2019", "long2006", ""]:
-                fails.append(f"order keys wrong: {[it.key for it in ordered]}")
-            # 2) 正文就地改写 + 重复 key 复用同号
-            expect = ("光合作用受光调节 [1]，且碳同化参与 [2]；再次引用同一来源 [1]；"
-                      "本地文档 [3]；未登记 [ghost2020]。")
-            if new_text != expect:
-                fails.append(f"rewrite mismatch: got={new_text!r} exp={expect!r}")
-            # 3) 未登记 key 被报告；精确命中不应上报任何"识别回填"（否则日志失真）
-            if unresolved != ["ghost2020"]:
-                fails.append(f"unresolved != ['ghost2020']: {unresolved}")
-            if repaired:
-                fails.append(f"exact-only body must not report repairs: {repaired}")
-            # 4) 渲染列表顺序与编号一致
-            html = reg.render_items(ordered)
+            # 1) 内部号递增、重复来源复用（token 因此稳定）
+            again = reg.add(ReferenceItem(index=0,
+                                          title="The Calvin-Benson cycle and its regulation",
+                                          authors="Sharkey", year="2019"))
+            if again != token_b:
+                fails.append(f"duplicate source got a new internal id: {again} != {token_b}")
+            if len(reg) != 3:
+                fails.append(f"duplicate registration inflated the registry: {len(reg)}")
+
+            # 2) token 形态：可粘贴的超链接文本，且内部号可原样解回
+            token = citation_token(token_b)
+            if token != f'<a href="{citation_href(token_b)}">[{token_b}]</a>':
+                fails.append(f"unexpected token shape: {token!r}")
+            match = CITE_LINK_RE.search(token)
+            if not match or int(match.group(1)) != token_b:
+                fails.append(f"token href does not parse back to [{token_b}]: {token!r}")
+
+            # 3) 生成期隐藏：锚点 / 裸编号 / 思考块 / 半截 token 一律不露
+            hidden_src = (f"结论一 {token}。结论二 [1]。"
+                          f"<think>思考里 {token} 与 [3]</think>"
+                          f"半截 <a href=\"ref://cite?n=2\">[2")
+            hidden = strip_citation_markers(hidden_src)
+            for residue in ("ref://cite", "<a ", "[1]", "[2", "[3]"):
+                if residue in hidden:
+                    fails.append(f"citation marker survived during generation: {residue!r}")
+            if "思考里" not in hidden or "结论二" not in hidden:
+                fails.append(f"hiding must not eat the prose: {hidden!r}")
+
+            # 4) 收尾定稿：正文先引 [2] -> [1]，再引 [1] -> [2]，KB 文档 -> [3]
+            body = (f"光合作用受光调节 {token}，且碳同化参与 [1]；"
+                    f"再次引用同一来源 {token}；本地文档 [3]；未登记 [42]。")
+            new_text, cited, unmatched = reg.renumber_by_appearance(body)
+            if "受光调节 [1]" not in new_text or "碳同化参与 [2]" not in new_text:
+                fails.append(f"numbering is not in order of appearance: {new_text!r}")
+            if "本地文档 [3]" not in new_text:
+                fails.append(f"KB document number not folded into the sequence: {new_text!r}")
+            if [it.index for it in cited] != [1, 2, 3]:
+                fails.append(f"cited items != [1,2,3]: {[it.index for it in cited]}")
+            if [it.title[:6] for it in cited] != ["The Ca", "Can im", "Local "]:
+                fails.append(f"list order must follow the text: {[it.title[:6] for it in cited]}")
+            if unmatched != [42]:
+                fails.append(f"unmatched != [42]: {unmatched}")
+            if "[42]" in new_text:
+                fails.append("an unregistered number must be removed from the answer")
+            if len(reg) != 3:
+                fails.append("numbering must not create registry entries")
+            # 全角编号（中文输入法常见）同样参与定稿
+            wide, wide_items, _ = reg.renumber_by_appearance("见［2］与【3】")
+            if wide != "见[1]与[2]" or [it.index for it in wide_items] != [1, 2]:
+                fails.append(f"full-width brackets not normalized: {wide!r}")
+
+            # 5) 思考块不参与排序，但同一套编号；只在思考里出现的来源整条抹掉
+            think_src = "正文 [1]。\n<think>这里 [3] 与 [99]</think>"
+            t5, o5, u5 = reg.renumber_by_appearance(think_src)
+            if "正文[1]" not in t5.replace(" ", ""):
+                fails.append(f"body numbering broken: {t5!r}")
+            if "[3]" in t5 or "[99]" in t5:
+                fails.append(f"think-only citation must be dropped: {t5!r}")
+            if [it.index for it in o5] != [1]:
+                fails.append(f"think-only source leaked into the list: {[it.index for it in o5]}")
+
+            # 6) 代码块 / 行内代码里的 [n] 是代码本身，隐藏与定稿都不得动它
+            code_src = (f"正文 {token}。\n```python\narr = items[1]\n```\n"
+                        f"行内 `x = data[2]` 保持原样。")
+            code_hidden = strip_citation_markers(code_src)
+            if "items[1]" not in code_hidden or "data[2]" not in code_hidden:
+                fails.append(f"code spans were mangled while hiding: {code_hidden!r}")
+            code_final, code_items, _ = reg.renumber_by_appearance(code_src)
+            if "items[1]" not in code_final or "data[2]" not in code_final:
+                fails.append(f"code spans were renumbered as citations: {code_final!r}")
+            if [it.index for it in code_items] != [1]:
+                fails.append(f"code brackets leaked into the list: {[it.index for it in code_items]}")
+
+            # 7) 列表顺序 = 定稿编号顺序，且条目编号与正文一致
+            html = reg.render_items(cited)
             if not (0 <= html.find("[1]") < html.find("[2]") < html.find("[3]")):
-                fails.append("rendered list order != renumbered order")
+                fails.append("rendered list order != appearance order")
             if "<b>[1]</b>" not in html or "Sharkey" not in html:
                 fails.append("rendered list missing [1]/Sharkey")
-
-            # 5) 回归场景：模型"先写正文再登记"（两版草稿同 key）也不应错位
-            reg2 = ReferenceRegistry()
-            reg2.add(ReferenceItem(index=0, key="a2004", title="A", year="2004"))
-            reg2.add(ReferenceItem(index=0, key="b2011", title="B", year="2011"))
-            draft = "第一版 [b2011][a2004] 结束。\n第二版 [b2011][a2004] 结束。"
-            t2, _o2, u2, _r2 = reg2.resolve_citations(draft)
-            if t2.count("[1][2]") != 2 or u2:
-                fails.append(f"duplicate-draft rewrite failed: {t2!r} unresolved={u2}")
-
-            # 6) 兜底清理回归：落不到著录的引用 key 不再上屏——**含思考面板内的残留**
-            #    真实顺序是"先 resolve_citations 重编号，再清理剩余 key 形态 token"；
-            #    不再按 unresolved 清单删除（它只覆盖正文，思考块不参与编号）。
-            from src.core.references import strip_unregistered_cite_keys
-            raw = ("正文 [sharkey2019] 与未登记 [lariguet2004] 混排；"
-                   "思考块里也在用 <think>考虑以 [christie2017] 支撑</think>；"
-                   "经典文献 [mendel1866]；保留项 [EC]、[3]、[Fig. 2]、[the 1990s]。")
-            rewritten6, _o6, unresolved6, _r6 = reg.resolve_citations(raw)
-            cleaned, removed = strip_unregistered_cite_keys(rewritten6)
-            if "[1]" not in cleaned:
-                fails.append(f"registered key not renumbered before cleanup: {cleaned!r}")
-            for bad in ("lariguet2004", "christie2017", "mendel1866"):
-                if bad in cleaned:
-                    fails.append(f"citation-key residue survived cleanup: {bad}")
-            for keep in ("[EC]", "[Fig. 2]", "[the 1990s]"):
-                if keep not in cleaned:
-                    fails.append(f"unrelated bracket usage was dropped: {keep}")
-            # [3] 是已登记的本地 KB 文档号：应被**重编号**（首次出现顺序第 2 条），
-            # 而不是按"未登记"清理掉——这两件事必须区分开。
-            if "[2]" not in cleaned:
-                fails.append(f"registered numeric citation must be renumbered, not dropped: {cleaned!r}")
-            if "lariguet2004" not in unresolved6:
-                fails.append(f"unresolved should report body keys: {unresolved6}")
-            if "christie2017" not in removed:
-                fails.append(f"think-block key not cleaned: removed={removed}")
-
-            # 7) 识别回归：写歪的 key 必须落回**真实著录**并照常编号，而不是被删掉丢引文
-            #    （旧实现把 frutani2007 当"未登记"直接删除，等于让句子无声失去引文）
-            reg3 = ReferenceRegistry()
-            reg3.add(ReferenceItem(index=0, key="furutani2007",
-                                   title="Mutations in the NPH3 gene of Arabidopsis",
-                                   authors="Furutani, M.; Sakamoto, N.", year="2007"))
-            reg3.add(ReferenceItem(index=0, key="zhang2026condensate",
-                                   title="NPH3 condensates", authors="Zhang, Y.", year="2026"))
-            body3 = "姓氏拼写偏差 [frutani2007]；主题词被截断 [zhang2026] 结束。"
-            t3, o3, u3, r3 = reg3.resolve_citations(body3)
-            if t3 != "姓氏拼写偏差 [1]；主题词被截断 [2] 结束。":
-                fails.append(f"near-miss key not repaired into [n]: {t3!r}")
-            if u3:
-                fails.append(f"repaired keys must not be reported unresolved: {u3}")
-            if {tier for _t, tier, _n in r3} != {"typo", "prefix"}:
-                fails.append(f"repair report wrong: {r3}")
-            if [it.index for it in o3] != [1, 2]:
-                fails.append(f"repaired items not in first-appearance order: {[it.index for it in o3]}")
-            if strip_unregistered_cite_keys(t3)[1]:
-                fails.append("fully repaired text should have nothing left to strip")
-
-            # 8) 元数据回填：在线来源只有编号、模型却写成"姓氏+年份"时也能落回真实条目
-            reg4 = ReferenceRegistry()
-            reg4.seed(7, ReferenceItem(index=7, kind="online_source",
-                                       title="Lateral relocation of auxin efflux regulator PIN3",
-                                       authors="Friml, J.; Wisniewska, J.", year="2002"))
-            t4, o4, u4, r4 = reg4.resolve_citations("PIN3 的侧向定位 [friml2002]。")
-            if "[1]" not in t4 or u4 or not o4:
-                fails.append(f"metadata fallback failed: {t4!r} {u4}")
-            elif [tier for _t, tier, _n in r4] != ["metadata"]:
-                fails.append(f"metadata fallback tier wrong: {r4}")
-
-            # 9) 歧义即放弃：前缀能命中两个候选时**不得猜测**（错挂文献比缺标记严重）
-            reg5 = ReferenceRegistry()
-            reg5.add(ReferenceItem(index=0, key="hu2019cotton", title="A", authors="Hu, X.", year="2019"))
-            reg5.add(ReferenceItem(index=0, key="hu2019nph3", title="B", authors="Hu, X.", year="2019"))
-            t5, o5, u5, r5 = reg5.resolve_citations("见 [hu2019] 所述。")
-            if "[hu2019]" not in t5 or u5 != ["hu2019"] or r5 or o5:
-                fails.append(f"ambiguous key must stay unresolved: {t5!r} {u5} {r5}")
 
             if fails:
                 for f in fails:
                     self._log(f"FAIL: {f}", "FAIL")
                 self._log(f"Reference numbering test FAILED ({len(fails)} assertion(s)).", "FAIL")
             else:
-                self._log("Key resolution + first-appearance renumbering OK.", "OK")
-                self._log("Numeric (KB) citation + duplicate-draft key reuse OK.", "OK")
-                self._log("Unresolved-key reporting OK.", "OK")
-                self._log("Key-residue cleanup OK (body + reasoning panel).", "OK")
-                self._log("Near-miss / metadata key repair OK; ambiguity not guessed.", "OK")
-                self._log(f"Sample rewritten body: {new_text}", "INFO")
+                self._log("Nothing citation-like is shown while the answer streams.", "OK")
+                self._log("Final numbers are 1..K in order of appearance (anchors rewritten).", "OK")
+                self._log("Think-block markers follow the same numbering; think-only ones drop.", "OK")
+                self._log("Unregistered numbers are removed and reported.", "OK")
+                self._log(f"Sample token: {token}", "INFO")
                 self._log("Reference numbering test PASSED.", "OK")
         except Exception as e:
             self._log(f"Reference numbering test failed: {e}", "FAIL")
@@ -1023,12 +1008,13 @@ class DeveloperDialog(BaseDialog):
     def _test_reference_integrity(self, clear: bool = True):
         """反捏造审计（离线）：参考文献列表里的每一条都必须有出处。
 
-        列表条目只可能来于三处，逐条钉死其不可捏造性：
+        列表条目只可能来于"工具受理过的来源"，逐条钉死其不可捏造性：
 
-        1. 识别回填（folded/prefix/typo/metadata）——只允许命中**已存在**的条目：
-           整条引用管线前后，注册表的条目数、每个条目的对象身份都必须不变；
-        2. 正文凭空写的 key——识别不中就清理，绝不允许"补造一条列出来"；
-        3. 列表条目必须能落回注册表条目并带可核查标识（标题/DOI/URL/本地路径）。
+        1. 定稿过程（:meth:`ReferenceRegistry.renumber_by_appearance`）只做编号
+           查表，前后注册表的条目数、每个条目的对象身份都必须不变；
+        2. 正文凭空写的编号（没有工具分配过）不会变成条目，只被如实上报并抹掉；
+        3. 模型提交条目时自报的编号一律被忽略，编号只能由注册表分配；
+        4. 列表条目必须能落回注册表条目并带可核查标识（标题/DOI/URL/本地路径）。
 
         联网核查（DOI 解析、标题年份比对）见 Literature Trust (live)。
         """
@@ -1037,61 +1023,56 @@ class DeveloperDialog(BaseDialog):
         self._log("--- Reference Integrity (anti-fabrication) ---", "INFO")
         fails = []
         try:
-            from src.core.references import (ReferenceItem, ReferenceRegistry,
-                                             strip_unregistered_cite_keys)
+            from src.core.references import ReferenceItem, ReferenceRegistry
 
             reg = ReferenceRegistry()
-            reg.add(ReferenceItem(index=0, key="furutani2007",
+            reg.add(ReferenceItem(index=0,
                                   title="Mutations in the NPH3 gene of Arabidopsis",
                                   authors="Furutani, M.; Sakamoto, N.", year="2007"))
-            reg.add(ReferenceItem(index=0, key="zhang2026condensate",
-                                  title="NPH3 condensates", authors="Zhang, Y.", year="2026"))
-            reg.add(ReferenceItem(index=0, key="hu2019cotton",
-                                  title="A", authors="Hu, X.", year="2019"))
-            reg.add(ReferenceItem(index=0, key="hu2019nph3",
-                                  title="B", authors="Hu, X.", year="2019"))
+            reg.add(ReferenceItem(index=0, title="NPH3 condensates",
+                                  authors="Zhang, Y.", year="2026"))
             reg.seed(7, ReferenceItem(index=7, kind="online_source",
                                       title="Lateral relocation of auxin efflux regulator PIN3",
                                       authors="Friml, J.", year="2002"))
             before = {it.index: it for it in reg.items()}
 
-            body = ("拼写偏差 [frutani2007]；主题词截断 [zhang2026]；"
-                    "只有编号的来源 [friml2002]；歧义 [hu2019]；"
-                    "凭空 [fabricated2099]；短姓氏再引一次 [hu2019]。")
-            new_text, ordered, unresolved, repaired = reg.resolve_citations(body)
+            body = ("正文按内部号引用 [1] 与 [7]；"
+                    "另有正文自拟的 [3] 与 [99]。")
+            new_text, cited, unmatched = reg.renumber_by_appearance(body)
 
-            # 1) 识别链不得新建、替换或改写任何注册条目
+            # 1) 定稿不得新建、替换或改写任何注册条目
             after = {it.index: it for it in reg.items()}
             if len(after) != len(before):
                 fails.append(f"registry size changed: {len(before)} -> {len(after)}")
             for idx, item in before.items():
                 if after.get(idx) is not item:
-                    fails.append(f"registry item {idx} was replaced or mutated by recognition")
-            if len(ordered) > len(after):
-                fails.append(f"listed more items ({len(ordered)}) than registered ({len(after)})")
+                    fails.append(f"registry item {idx} was replaced or mutated by numbering")
+            if [it.index for it in cited] != [1, 2]:
+                fails.append(f"final numbers != [1, 2]: {[it.index for it in cited]}")
+            if [it.title[:6] for it in cited] != ["Mutati", "Latera"]:
+                fails.append(f"final order must follow the text: {[it.title[:6] for it in cited]}")
 
             # 2) 列表条目必须落回注册表条目，且带可核查标识
-            fingerprints = {(it.key, it.title, it.url, it.doi, it.path) for it in after.values()}
-            for it in ordered:
-                if (it.key, it.title, it.url, it.doi, it.path) not in fingerprints:
+            fingerprints = {(it.title, it.url, it.doi, it.path) for it in after.values()}
+            for it in cited:
+                if (it.title, it.url, it.doi, it.path) not in fingerprints:
                     fails.append(f"listed item [{it.index}] matches no registry entry")
                 if not (it.title or it.url or it.doi or it.path or it.snippet):
                     fails.append(f"listed item [{it.index}] carries no provenance field at all")
 
-            # 3) 凭空 key：不得进列表，且必须被清理（不补条目、也不留坏标记）
-            if any("fabricated2099" in f"{it.key} {it.title}" for it in ordered):
-                fails.append("fabricated key produced a reference entry")
-            cleaned, removed = strip_unregistered_cite_keys(new_text)
-            if "fabricated2099" not in removed or "fabricated2099" in cleaned:
-                fails.append(f"fabricated key not cleaned: removed={removed}")
+            # 3) 正文自拟编号：不得进列表，也不得"近似"落到别人的条目上
+            if unmatched != [3, 99]:
+                fails.append(f"unregistered numbers not reported: {unmatched}")
+            if "[3]" in new_text or "[99]" in new_text:
+                fails.append(f"unregistered numbers survived into the answer: {new_text!r}")
 
-            # 4) 猜测防护：歧义（两个候选）与短姓氏一律不识别
-            if unresolved.count("hu2019") != 2:
-                fails.append(f"ambiguous / short-surname key must stay unresolved: {unresolved}")
-            if "hu2019" in {tok for tok, _tier, _num in repaired}:
-                fails.append(f"ambiguous key was guessed: {repaired}")
-            if not {"typo", "prefix", "metadata"} <= {tier for _tok, tier, _num in repaired}:
-                fails.append(f"recognition tiers under-tested (fixture wrong): {repaired}")
+            # 4) 模型不能自报编号：payload 里的 index 字段一律被忽略
+            forced = ReferenceItem.from_ai_payload(
+                {"title": "Forced number", "index": 99, "year": "2099"}, index=0)
+            if forced.index != 0:
+                fails.append("model-supplied number leaked into the entry")
+            if reg.add(forced) != 8:
+                fails.append("the registry must assign the next number itself")
 
             # 5) 模型提交的无标识条目仍须可指认（只能人工核查），不得静默隐身
             bare = ReferenceItem.from_ai_payload({"title": "Some paper", "year": "2099"}, index=0)
@@ -1118,6 +1099,47 @@ class DeveloperDialog(BaseDialog):
             parsed = parse_footer_entries(html)
             if [r.index for r in parsed] != [1, 2, 3, 4] or not all(r.text for r in parsed):
                 fails.append(f"unverified mark broke footer round-trip: {parsed}")
+
+            # 6b) 正文"未核实"门禁的判定粒度：以"陈述组 + 依据行"为单位，不是逐行。
+            #     逐行判定会把"陈述一行、依据一行"的学术写法整篇标红（真实回答里
+            #     14 段被标 14 处），提醒随之失效。
+            from src.task.chat_tasks import _apply_evidence_gate
+            gate_mark = "（未核实）"
+            pairs = ("【PIN3 侧向化】→【背光侧分布】\n\n"
+                     "依据：单侧蓝光诱导 PIN3 向背光侧极性化[1]。\n\n"
+                     "【NPH3】→【光依赖去磷酸化后释放】\n\n"
+                     "依据：蓝光依赖的磷酸化决定 NPH3 的质膜定位[2]。")
+            if gate_mark in _apply_evidence_gate(pairs, True, True):
+                fails.append("a statement followed by its 依据 line must count as supported")
+            lone = "【PIN3 侧向化】在 2019 年被证实显著增强生长素的不对称分布。"
+            if _apply_evidence_gate(lone, True, True).count(gate_mark) != 1:
+                fails.append("an uncited high-risk paragraph must be marked exactly once")
+            for label, sample in (("table", "| A | B |\n|---|---|\n| PIN3 | 2019 |"),
+                                  ("code", "```python\nPIN3_2019 = 1\n```"),
+                                  ("think", "<think>PIN3 2019 显著 [1]</think>")):
+                if gate_mark in _apply_evidence_gate(sample, True, True):
+                    fails.append(f"evidence gate must not mark {label} content")
+            # 多段思考块（空行分段）同样不能标：状态必须跨块延续，否则思考正文
+            # 会被当成普通段落，标记直接写进 Reasoning 面板。
+            multi_block_think = ("<think>\n\nThe user wants PIN3 and 2019 data.\n\n"
+                                 "Let me search.\n\n</think>\n\n"
+                                 "PKS1 在 2019 年被证实参与竞争[1]。")
+            marked_think = _apply_evidence_gate(multi_block_think, True, True).split("</think>")[0]
+            if gate_mark in marked_think:
+                fails.append("evidence gate wrote a marker inside the reasoning panel")
+
+            # 6c) 工具调用步骤的"我先检索…"属于过程：收尾要折进过程面板，不能冒充正文。
+            from src.core.agent.runtime import _fold_narration
+            folded = _fold_narration("前言\nI'll gather evidence.\n\n## 结论\nPKS1[1]。",
+                                     ["I'll gather evidence."])
+            if "<mcp_process>I'll gather evidence.</mcp_process>" not in folded:
+                fails.append("tool-step narration must be folded into the process panel")
+            # 6d) 整轮只有思考和检索计划时，必须识别为"没有回答"（否则会留空气泡）。
+            from src.task.chat_tasks import _has_visible_answer
+            if _has_visible_answer("<think>only thinking</think>\n<mcp_process>x</mcp_process>"):
+                fails.append("a reasoning-only turn must be detected as having no answer")
+            if not _has_visible_answer("<think>t</think>\n\n真实结论。"):
+                fails.append("a real answer must be recognised as visible text")
 
             # 7) 标题斜体：**默认正体**，只有原标题自带的斜体信号才保留。整条标题斜体
             #    既不符合学术惯例（斜体只落在物种名/基因名/刊名一类局部成分上），也让
@@ -1147,7 +1169,8 @@ class DeveloperDialog(BaseDialog):
                 fails.append("title escaping must stay injection-safe")
             if "NPH3_R1" not in title_html("Gene NPH3_R1 and DOI 10.1/a_b"):
                 fails.append("underscores must not be read as an italic signal")
-            if title_html("A **x** B").count("<i>") == 0:
+            # Markdown 粗体（``**x**``）不是斜体信号：判定口径见 _TITLE_ITALIC_RE。
+            if title_html("A **x** B").count("<i>") != 0:
                 fails.append("double asterisks must not be read as an italic signal")
 
             # 著录行同样默认正体，且句末句点必须落在斜体之外
@@ -1177,10 +1200,10 @@ class DeveloperDialog(BaseDialog):
                 self._log(f"FAIL: {f}", "FAIL")
             self._log(f"Reference integrity test FAILED ({len(fails)} assertion(s)).", "FAIL")
             return
-        self._log("Recognition never creates, replaces or mutates registry entries.", "OK")
+        self._log("Numbering never creates, replaces or mutates registry entries.", "OK")
         self._log("Every listed item traces back to a registered entry with provenance.", "OK")
-        self._log("Fabricated inline keys are cleaned, never added to the list.", "OK")
-        self._log("Ambiguity / short surnames are never guessed into a citation.", "OK")
+        self._log("Numbers no tool assigned are reported, never turned into entries.", "OK")
+        self._log("Model-supplied numbers are ignored; the registry assigns them.", "OK")
         self._log("Unverified mark: shown only for entries with no DOI/URL/path and no "
                   "verbatim-checked snippet; footer export round-trip intact.", "OK")
         self._log("Titles render upright; italics kept only where the source itself "
@@ -1188,6 +1211,188 @@ class DeveloperDialog(BaseDialog):
         self._log("Note: a FABRICATED DOI/URL still looks 'identified' — only "
                   "Literature Trust (live) can disprove it over the network.", "WARN")
         self._log("Reference integrity test PASSED.", "OK")
+
+    def _test_storage_roundtrip(self, clear: bool = True):
+        """存储往返自检：历史库与导出归档都必须原样带回引用、书签、组件与标签。
+
+        这是"参考文献不能在历史 / 导入导出里丢"的机器可验证版本，覆盖三层：
+
+        1. **历史记录**（``chat_session``，SQLite）：``save_tab`` → ``load_tab``
+           之后 ``references`` / ``bookmarks`` / ``ui_components`` / ``content``
+           与写入前逐字段相等，标签也能读回；
+        2. **导出归档**（``.schat``，SQLite 容器）：``write_archive`` →
+           ``read_archive`` → ``extract_tabs`` 同样逐字段相等，且本地文件被内嵌
+           后重新解到内容寻址仓库（换机器仍能打开）；
+        3. **旧容器兼容**：``archive_version`` 1（纯 JSON）与 4（ZIP + assets）
+           仍能被 ``read_archive`` 读出，参考文献不丢。
+
+        测试全程使用临时目录（临时改写各模块的 ``BASE_DIR``），结束后恢复：
+        自检不许在用户的真实工作区里留下数据库或资产副本。
+        """
+        if clear:
+            self._clear()
+        self._log("--- Storage Round-Trip (history DB / archive / legacy) ---", "INFO")
+        fails = []
+        temp_root = tempfile.mkdtemp(prefix="scholar_navis_storage_")
+        try:
+            import zipfile
+
+            from src.core import chat_archive, chat_assets, chat_session, chat_store
+
+            saved_base = {module: module.BASE_DIR
+                          for module in (chat_archive, chat_assets, chat_session)}
+            for module in saved_base:
+                module.BASE_DIR = temp_root
+            try:
+                fails.extend(self._storage_assertions(
+                    temp_root, chat_archive, chat_assets, chat_session, chat_store,
+                    zipfile))
+            finally:
+                for module, base in saved_base.items():
+                    module.BASE_DIR = base
+        except Exception as e:
+            fails.append(f"exception: {e}")
+        finally:
+            import shutil
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+        if fails:
+            for item in fails:
+                self._log(f"FAIL: {item}", "FAIL")
+            self._log(f"Storage round-trip test FAILED ({len(fails)} assertion(s)).", "FAIL")
+            return
+        self._log("History DB keeps references / bookmarks / cards / tags verbatim.", "OK")
+        self._log("Archive (SQLite .schat) keeps them verbatim and re-extracts assets.", "OK")
+        self._log("Legacy JSON (v1) and ZIP (v4) archives still read with references.", "OK")
+        self._log("Storage round-trip test PASSED.", "OK")
+
+    @staticmethod
+    def _storage_assertions(temp_root, chat_archive, chat_assets, chat_session,
+                            chat_store, zipfile):
+        """存储往返的实际断言（抽成静态方法，便于读、也便于单独调用）。"""
+        fails = []
+        ref = {
+            "index": 1, "kind": "article", "title": "Phototropin blue-light receptors",
+            "authors": "Christie, J. M.", "year": "2007", "journal": "Annu Rev Plant Biol",
+            "doi": "10.1146/annurev.arplant.58.032806.103951",
+            "url": "https://doi.org/10.1146/annurev.arplant.58.032806.103951",
+            "snippet": "Phototropins are blue-light receptors ...", "verified": True,
+            "note": "backs the claim", "asset_placeholder": {"status": "missing", "name": "x.pdf"},
+        }
+        bookmark = {"id": "abc123def456", "title": "关键结论", "text": "claim [1]",
+                    "color": "#05B8CC", "occurrence": 0, "created": 1.0}
+        cards = [{"kind": "ask_user", "key": "probe", "state": {"selected": ["A"]}}]
+        # 正文刻意超过压缩阈值：库内 zlib 路径也要被这条断言覆盖到。
+        usage = {"prompt_tokens": 1234, "completion_tokens": 567,
+                 "estimated": True, "elapsed_ms": 3400.0}
+        message = {"role": "assistant", "content": "claim [1]. " + "长文" * 800,
+                   "references": [dict(ref)], "bookmarks": [dict(bookmark)],
+                   "ui_components": cards, "status": "ok", "usage": dict(usage)}
+
+        # 1) 历史库往返
+        tab_id = "c" * 32
+        chat_session.save_manifest(tab_id, [{"id": tab_id, "name": "Storage probe"}])
+        if not chat_session.save_tab(tab_id, [message], tags=["植物", "光信号"]):
+            fails.append("history: save_tab reported failure")
+        back = chat_session.load_tab(tab_id)
+        if not back:
+            fails.append("history: load_tab returned nothing")
+        else:
+            got = back[0]
+            if got.get("references") != [ref]:
+                fails.append(f"history: references changed -> {got.get('references')}")
+            if got.get("bookmarks") != [bookmark]:
+                fails.append("history: bookmarks changed")
+            if got.get("ui_components") != cards:
+                fails.append("history: ui_components changed")
+            if got.get("usage") != usage:
+                fails.append(f"history: token usage lost -> {got.get('usage')}")
+            if got.get("content") != message["content"]:
+                fails.append("history: content changed (truncated or unescaped?)")
+        if chat_session.load_tab_tags(tab_id) != ["植物", "光信号"]:
+            fails.append("history: tags were not stored")
+        if chat_session.tabs_with_tag("植物") != [tab_id]:
+            fails.append("history: tag query does not return the conversation")
+
+        # 2) 归档往返（含资产内嵌 / 解包）
+        image_path = os.path.join(temp_root, "figure.png")
+        with open(image_path, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"0" * 256)
+        archived_message = dict(message)
+        archived_message["external_files"] = [
+            {"type": "image", "path": image_path, "name": "figure.png"}]
+        archive_path = os.path.join(temp_root, "probe.schat")
+        chat_archive.write_archive(archive_path, [{
+            "name": "Storage probe", "tags": ["植物"],
+            "messages": [archived_message]}])
+        if not chat_store.is_sqlite_file(archive_path):
+            fails.append("archive: container is not SQLite")
+        payload, meta = chat_archive.read_archive(archive_path)
+        if meta.get("container") != "sqlite":
+            fails.append(f"archive: container reported as {meta.get('container')!r}")
+        tabs = chat_archive.extract_tabs(payload)
+        if not tabs:
+            fails.append("archive: no tab extracted")
+        else:
+            tab = tabs[0]
+            if tab.get("name") != "Storage probe":
+                fails.append(f"archive: tab name lost -> {tab.get('name')!r}")
+            if tab.get("tags") != ["植物"]:
+                fails.append(f"archive: tags lost -> {tab.get('tags')}")
+            msg = (tab.get("messages") or [{}])[0]
+            if msg.get("references") != [ref]:
+                fails.append("archive: references changed in round-trip")
+            if msg.get("bookmarks") != [bookmark]:
+                fails.append("archive: bookmarks changed in round-trip")
+            if msg.get("ui_components") != cards:
+                fails.append("archive: ui_components changed in round-trip")
+            if msg.get("usage") != usage:
+                fails.append(f"archive: token usage lost -> {msg.get('usage')}")
+            if msg.get("content") != message["content"]:
+                fails.append("archive: content changed in round-trip")
+        os.remove(image_path)
+        attachment_map = meta.get("attachment_map") or {}
+        if not attachment_map:
+            fails.append("archive: local file was not embedded")
+        elif not all(os.path.isfile(path) and chat_assets.is_asset_store_path(path)
+                     for path in attachment_map.values()):
+            fails.append("archive: embedded file was not restored into the asset store")
+
+        # 3) 旧容器兼容：v1 纯 JSON
+        legacy_json = os.path.join(temp_root, "legacy.json")
+        with open(legacy_json, "w", encoding="utf-8") as f:
+            json.dump({"messages": [{"role": "assistant", "content": "old [1]",
+                                     "references": [dict(ref)]}]}, f, ensure_ascii=False)
+        payload, meta = chat_archive.read_archive(legacy_json)
+        old_tabs = chat_archive.extract_tabs(payload)
+        if meta.get("container") != "json" or not old_tabs:
+            fails.append("legacy: plain-JSON archive is no longer readable")
+        elif old_tabs[0]["messages"][0].get("references") != [ref]:
+            fails.append("legacy: references lost from a plain-JSON archive")
+
+        # 4) 旧容器兼容：v4 ZIP + 内容寻址资产
+        data = b"\x89PNG\r\n\x1a\n" + b"1" * 128
+        digest = hashlib.sha256(data).hexdigest()
+        legacy_zip = os.path.join(temp_root, "legacy.schat")
+        with zipfile.ZipFile(legacy_zip, "w") as zf:
+            zf.writestr(f"assets/{digest}.png", data)
+            zf.writestr(chat_archive.ENTRY_JSON, json.dumps({
+                "format": chat_archive.FORMAT, "version": 1, "archive_version": 4,
+                "tabs": [{"name": "legacy", "messages": [{
+                    "role": "assistant", "content": "zip [1]",
+                    "references": [dict(ref)]}]}],
+                "assets": {"/old/figure.png": {"entry": f"assets/{digest}.png",
+                                               "sha256": digest, "name": "figure.png",
+                                               "size": len(data)}},
+                "placeholders": {}, "attachments": {}}, ensure_ascii=False))
+        payload, meta = chat_archive.read_archive(legacy_zip)
+        if meta.get("container") != "zip" or int(meta.get("archive_version") or 0) != 4:
+            fails.append(f"legacy: ZIP container misdetected -> {meta}")
+        if not (meta.get("attachment_map") or {}):
+            fails.append("legacy: ZIP assets were not extracted")
+        if not chat_archive.extract_tabs(payload)[0]["messages"][0].get("references"):
+            fails.append("legacy: references lost from a ZIP archive")
+        return fails
 
     def _test_citation_click(self, clear: bool = True):
         """引文点击链路测试：离线断言 + 注入真实 Chat 面板供手动点击。
@@ -1197,7 +1402,8 @@ class DeveloperDialog(BaseDialog):
         1. 行内 ``[n]`` 被真实渲染管线改写成 ``ref://cite?n=`` 链接（悬停 / 点击入口），
            且重复出现的同一编号每一处都带链接；
         2. 悬停卡与详情面板的数据来源按 ``(气泡编号, 引用编号)`` 命中**同一条目**；
-        3. 归档序列化（sanitize + JSON）往返后条目一字不差——防"导出再导入引用卡变空"；
+        3. 归档序列化（sanitize）往返后条目一字不差——防"导出再导入引用卡变空"
+          （完整的历史库 / 归档落盘往返见 Storage Round-Trip 自检）；
         4. 导入白名单保留 ``references`` 与 ``ui_components``——这是引用被静默丢掉的
            头号位置，专测它；
         5. 归档会收集 ``references[].path``，并在导入时改写为解包副本——否则引用卡还在、
@@ -1227,7 +1433,8 @@ class DeveloperDialog(BaseDialog):
 
         refs = self._build_citation_click_references(local_path)
 
-        # 1) 行内 [n] → ref://cite?n= 链接
+        # 1) 行内 [n] → ref://cite?n= 链接；工具 token（原样粘贴的超链接）必须归一成
+        #    同一形态，不得产生嵌套锚点或丢失可点击性。
         try:
             from src.ui.components.text_formatter import TextFormatter
             html = TextFormatter.format_response(CITATION_TEST_AI, 0, set(), set(), {})
@@ -1236,6 +1443,10 @@ class DeveloperDialog(BaseDialog):
                 fails.append(f"inline [n] not linked: {missing}")
             if html.count("ref://cite?n=1") < 2:
                 fails.append("reused citation [1] was not linked at every occurrence")
+            if html.count("ref://cite?n=2") < 2:
+                fails.append("pasted citation token was not kept as one clickable link")
+            if re.search(r"<a[^>]*>\s*<a\b", html, re.IGNORECASE):
+                fails.append("pasted citation token produced nested anchors")
         except Exception as e:
             fails.append(f"render pipeline: {e}")
 
@@ -1917,6 +2128,8 @@ class DeveloperDialog(BaseDialog):
         self._test_reference_citations(clear=False)
         # 反捏造审计：纯函数断言，离线可跑，必须进默认自检
         self._test_reference_integrity(clear=False)
+        # 存储往返：历史库 / 归档 / 旧容器兼容，全部在临时目录里跑
+        self._test_storage_roundtrip(clear=False)
         # UI 交互自检：图表复制、悬停卡标记、超宽块拖选自动滚动
         self._test_ui_copy_scroll(clear=False)
         # 历史回灌：分片推进契约、加载遮罩、快照闸口（纯断言 + 控件探针，离线）

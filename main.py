@@ -4,6 +4,10 @@ import sys
 import time
 import traceback
 
+# 冻结产物里 LiteLLM 的远程 cost map 可能在导入期卡住 10s+（网络/SSL 握手）。
+# 强制使用随包携带的本地 backup，之后由后台任务拉官方表并合并，启动不被网络阻塞。
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 # Qt 运行库预检必须发生在**任何 PySide6 导入之前**。Linux 上缺 X11/xkbcommon 等
 # 系统库时，import 抛出的原始 ImportError 无法指导用户修复；本模块把它整理成
 # 可照做的安装指引，并按运行环境注入 Chromium（QtWebEngine）启动参数。
@@ -183,6 +187,39 @@ class StartupWorker(QThread):
             time.sleep(0.1)
             from src.ui.main_window import MainWindow
             from src.core.mcp_manager import MCPManager
+            phase_done("model metadata")
+
+            # LiteLLM 官方模型表可能更新（GPT-6/新 DeepSeek 等）。缓存 7 天有效；
+            # 启动页明确显示正在更新，最多等 2 秒，慢的话转后台继续，不卡启动。
+            self.sig_progress.emit(86, tr("Updating LiteLLM model metadata..."))
+            import threading
+            from src.core.token_estimator import ensure_litellm_model_map_fresh
+
+            refresh_result = {}
+
+            def _refresh_model_metadata():
+                try:
+                    refresh_result["count"] = ensure_litellm_model_map_fresh()
+                    if refresh_result.get("count"):
+                        from src.core.signals import GlobalSignals
+                        GlobalSignals().model_metadata_changed.emit()
+                except Exception as e:
+                    self.logger.debug("LiteLLM model metadata refresh skipped: %s", e)
+
+            refresh_thread = threading.Thread(
+                target=_refresh_model_metadata, daemon=True,
+                name="litellm-model-map")
+            refresh_thread.start()
+            wait_deadline = time.time() + 2.0
+            while refresh_thread.is_alive() and time.time() < wait_deadline:
+                time.sleep(0.05)
+            if refresh_thread.is_alive():
+                self.sig_progress.emit(
+                    92, tr("Model metadata is still updating in the background..."))
+            elif refresh_result.get("count"):
+                self.sig_progress.emit(92, tr("Model metadata updated."))
+            else:
+                self.sig_progress.emit(92, tr("Model metadata is up to date."))
             phase_done("ready")
 
             self.sig_progress.emit(100, tr("Ready. Building workspace..."))
@@ -281,6 +318,12 @@ class AppController(QObject):
         QApplication.processEvents()
 
         self.logger.info("System Launching.")
+
+        # 信号单例必须在主线程创建：启动刷新线程完成时会 emit
+        # model_metadata_changed，若单例在后台线程首次创建，QObject 线程亲和性
+        # 会落到后台线程，后续 UI 连接行为不稳定。
+        from src.core.signals import GlobalSignals
+        GlobalSignals()
 
         self.worker = StartupWorker(self.logger)
         self.worker.sig_progress.connect(self.update_splash)

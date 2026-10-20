@@ -615,6 +615,9 @@ class GlobalRateLimiter:
         limit_type = "rps" if rps else "rph"
 
         with self.queue_lock:
+            # 新接入的服务（arxiv / preprints 等）不在初始表里：先登记计数，
+            # 否则 waiting_counts[service] += 1 会直接 KeyError。
+            self.waiting_counts.setdefault(service, 0)
             self.waiting_counts[service] += 1
             current_queue = self.waiting_counts[service]
             # 每个服务固定一把锁：旧写法 locks.get(service, threading.Lock()) 在

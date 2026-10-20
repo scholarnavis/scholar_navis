@@ -12,9 +12,10 @@
 2. **运行时实测** —— 本表落盘内容。provider 报错时才会吐露真值，例如
    ``"This model's maximum context length is 131072 tokens"`` 或
    ``"max_tokens is too large"``。这类信息**只用于收紧或纠正**，不会凭空放大。
-3. **静态推断** —— ``litellm.model_cost`` + 内置家族表（见
-   :mod:`src.core.token_estimator`）。离线可用、零请求，但可能滞后，也识别不出
-   自建网关的自定义模型名（此时只能落到兜底默认：远程端点 300K、本地推理端点 32K）。
+3. **静态推断** —— LiteLLM 的 ``model_cost`` / ``get_model_info`` 优先，内置
+   家族表只在 LiteLLM 不认识时兜底（见 :mod:`src.core.token_estimator`）。
+   ``get_model_info`` 能处理 provider 前缀、别名和日期后缀；仍识别不出
+   自建网关的自定义模型名时，落到兜底默认：远程端点 1M、本地端点 32K。
 
 调用方（预算推导、请求参数下发、设置页展示）**一律只查本模块**，不要再各自
 判断，否则同一件事会出现多处口径。
@@ -236,11 +237,12 @@ def record_max_output_tokens(base_url: str, model_name: str, value: int) -> bool
                    source="provider-error", only_lower=("max_output_tokens",))
 
 
-def record_context_window(base_url: str, model_name: str, value: int) -> bool:
-    """记录实测的上下文窗口（provider 报错文案里给出的真值）。
+def record_context_window(base_url: str, model_name: str, value: int,
+                          source: str = "provider-error") -> bool:
+    """记录实测/探测到的上下文窗口。
 
-    来源是"我们超限了"，因此这个值是该端点的**真实上限**，可覆盖静态推断值；
-    但仍让位于用户在配置里显式声明（用户可能故意接了不同参数的同名模型）。
+    默认来源是 provider 报错（最权威）；``source="provider-metadata"`` 表示
+    来自 ``/models`` 或 Ollama ``/api/show`` 的元数据，仍让位于用户显式声明。
     """
     try:
         value = int(value)
@@ -249,11 +251,98 @@ def record_context_window(base_url: str, model_name: str, value: int) -> bool:
     if value <= 0:
         return False
     changed = _update(base_url, model_name, {"context_window": value},
-                      source="provider-error")
+                      source=source)
     if changed:
-        logger.info(f"Model '{model_name}': context window learned from provider "
-                    f"error = {value} tokens.")
+        logger.info(f"Model '{model_name}': context window recorded from {source} "
+                    f"= {value} tokens.")
     return changed
+
+
+def _extract_context_length(item: dict) -> int:
+    """从 /models 条目里提取上下文窗口；不同网关字段名不一致。"""
+    if not isinstance(item, dict):
+        return 0
+    keys = ("context_length", "context_window", "max_context_length",
+            "max_model_len", "max_input_tokens", "input_token_limit",
+            "context_size")
+    for key in keys:
+        try:
+            value = int(item.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    for nested_key in ("top_provider", "meta", "model_info", "limits"):
+        nested = item.get(nested_key)
+        value = _extract_context_length(nested) if isinstance(nested, dict) else 0
+        if value:
+            return value
+    return 0
+
+
+def probe_provider_context(base_url: str, model_name: str,
+                           api_key: str = "", timeout: int = 6) -> int:
+    """尝试从 provider 元数据获取上下文窗口；拿不到返回 0。
+
+    支持：
+    * OpenAI 兼容 ``{base}/models``（OpenRouter/vLLM/部分网关会带
+      ``context_length`` / ``max_model_len``）；
+    * Ollama ``/api/show`` 的 ``*.context_length``。
+
+    OpenAI 官方 ``/v1/models`` 不返回窗口，此时返回 0，由静态表/默认值兜底。
+    """
+    if not base_url or not model_name:
+        return 0
+    base = str(base_url).rstrip("/")
+    try:
+        from src.core.network_worker import create_robust_session
+        session = create_robust_session()
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+        # Ollama 原生端点（base 常以 /v1 结尾，但 /api/show 在根路径）。
+        if "11434" in base or "ollama" in base.lower():
+            root = base[:-3] if base.endswith("/v1") else base
+            try:
+                res = session.post(f"{root}/api/show",
+                                   json={"name": model_name}, timeout=timeout)
+                if res.status_code == 200:
+                    payload = res.json()
+                    info = payload.get("model_info") or {}
+                    for key, value in info.items():
+                        if str(key).endswith(".context_length"):
+                            try:
+                                return int(value)
+                            except (TypeError, ValueError):
+                                continue
+                    value = _extract_context_length(payload)
+                    if value:
+                        return value
+            except Exception as e:
+                logger.debug("Ollama context probe failed: %s", e)
+
+        models_url = base + "/models" if base.endswith("/v1") else base + "/v1/models"
+        res = session.get(models_url, headers=headers, timeout=timeout)
+        if res.status_code != 200:
+            return 0
+        payload = res.json()
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        if not isinstance(data, list):
+            return 0
+        norm = str(model_name).lower()
+        matched = None
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or item.get("name") or "")
+            if item_id.lower() == norm or item_id.lower().endswith(norm):
+                matched = item
+                break
+        if matched is None and len(data) == 1:
+            matched = data[0] if isinstance(data[0], dict) else None
+        return _extract_context_length(matched or {})
+    except Exception as e:
+        logger.debug("Context window probe failed for %s: %s", model_name, e)
+        return 0
 
 
 def unsupported_params(base_url: str, model_name: str) -> Set[str]:
@@ -282,7 +371,7 @@ def resolve_window(model_name: str, base_url: str = "",
     1. ``explicit`` —— 用户在该 provider 配置里声明的 ``context_window``；
     2. 实测记录 —— 本表里 provider 报错给出的真值；
     3. 静态推断 —— litellm ``model_cost`` 与内置家族表取较大值；
-    4. 兜底默认 —— 远程端点 300K（现代主流模型的下限），本地推理端点 32K。
+    4. 兜底默认 —— 远程端点 1M（2026 年主流旗舰档），本地推理端点 32K。
 
     ``explicit`` 与实测值都只作用于**记名模型**；静态推断不区分 base_url，
     因此仍可能对自建网关估错——这正是 1/2 两级存在的理由。

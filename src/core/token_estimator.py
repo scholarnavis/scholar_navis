@@ -26,10 +26,17 @@ tiktoken 按需从 ``openaipublic.blob.core.windows.net`` 下载，其内部实�
 
 置 ``SCHOLAR_NAVIS_DISABLE_TIKTOKEN=1`` 可完全关闭 tiktoken（只用启发式）。
 """
+import json
 import logging
 import os
 import threading
+import time
 from functools import lru_cache
+from typing import Any, Dict
+
+# LiteLLM 导入期会尝试拉远程 cost map（无超时/网络差时卡 10s+）。模型窗口
+# 数据必须离线可用，默认强制走随包携带的本地 backup；最新表由后台刷新合并。
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 from src.core import BASE_DIR
 
@@ -200,28 +207,16 @@ def estimate_message_tokens(messages) -> int:
 #  模型上下文窗口解析与治理预算推导
 # ---------------------------------------------------------------------- #
 
-#: 常见模型家族的输入上下文窗口（token）。litellm.model_cost 未收录或
-#: 数据滞后时兜底；与 litellm 解析结果取较大值。命中规则为子串匹配
-#: （按表序，先长后短，如 qwen-long 先于 qwen）。
-_BUILTIN_CONTEXT_HINTS = [
-    ("qwen-long", 10_000_000),
-    ("gpt-5", 1_000_000), ("gpt-4.1", 1_000_000),
-    ("gpt-4o", 128_000), ("o1", 200_000), ("o3", 200_000), ("o4", 200_000),
-    ("gpt-4", 128_000), ("gpt-3.5", 16_384),
-    ("claude", 200_000), ("gemini", 1_000_000), ("deepseek", 1_048_576),
-    ("qwen", 131_072), ("glm-4.6", 200_000), ("glm", 128_000),
-    ("kimi", 256_000), ("moonshot", 131_072), ("minimax", 1_000_000),
-    ("doubao", 256_000), ("hunyuan", 256_000), ("grok", 131_072),
-    ("llama", 128_000), ("mistral", 128_000),
-]
+# 不再维护手写模型窗口表：所有模型信息以 LiteLLM 的 model map 为准，
+# 未收录时由调用方显示 Unknown，只有内部预算保留一个安全默认值。
 
 #: 无法识别模型时，**远程**端点使用的默认窗口（token）。
 #:
-#: 取 300K 而不是早年那种 32K：主流商用模型如今普遍 ≥128K，1M 已不稀奇，"未知 =
-#: 小窗口"会让自建网关/新发布的模型被白白闲置。猜高的代价由运行时兜底：真超限时
+#: 远程未知模型按 1M 兜底：2026 年主流已普遍 ≥128K，1M 已是多家旗舰的默认。
+#: "未知 = 小窗口"会让自建网关/新模型被白白闲置。猜高的代价由运行时兜底：真超限时
 #: AgentRuntime 会压缩最旧历史重试一次，并把 provider 在报错里给出的真值写入能力表
 #: （见 src/core/model_capabilities.py），因此最坏情况只是多一次往返，之后永久正确。
-_DEFAULT_CONTEXT_WINDOW = 300_000
+_DEFAULT_CONTEXT_WINDOW = 1_048_576
 
 #: 本地推理端点（LM Studio / Ollama / llama.cpp 等）的默认窗口（token）。
 #:
@@ -241,40 +236,261 @@ def resolve_context_window(model_name, base_url=None, explicit=None) -> int:
     return resolve_window(model_name, base_url=base_url, explicit=explicit)[0]
 
 
-@lru_cache(maxsize=512)
-def _static_context_window(model_name) -> int:
-    """静态推断窗口（``litellm.model_cost`` 与内置家族表取较大值）。
+def _litellm_context_window(candidates, resolve_aliases: bool = True) -> int:
+    """优先用 LiteLLM 的模型元数据解析输入窗口。
 
-    未命中任何来源时返回 **0**（不是默认值）——调用方据此区分"识别出来了"与
-    "完全没线索"，默认值由 :func:`src.core.model_capabilities.resolve_window`
-    统一兜底。结果按模型名缓存：litellm 元数据在进程内不会变，而本函数在
-    每轮预算推导里都会被调用。
+    ``get_model_info`` 会处理 provider 前缀/别名，比自己翻 ``model_cost`` 准；
+    只取 ``max_input_tokens``，绝不把 ``max_tokens``（输出上限）当输入窗口。
+    """
+    try:
+        import litellm
+    except Exception:
+        return 0
+    # 先查直接表：已知模型不触发 get_model_info 的 provider 解析/告警。
+    for cand in candidates:
+        info = litellm.model_cost.get(cand)
+        if not isinstance(info, dict):
+            continue
+        try:
+            value = int(info.get("max_input_tokens") or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    if not resolve_aliases:
+        return 0
+    # 再让 get_model_info 处理 provider 前缀、别名和带日期的模型名。
+    for cand in candidates:
+        try:
+            info = litellm.get_model_info(cand)
+        except Exception:
+            info = None
+        if isinstance(info, dict) or hasattr(info, "get"):
+            try:
+                value = int(info.get("max_input_tokens") or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                return value
+    return 0
+
+
+_LITELLM_MODEL_MAP_URLS = (
+    # 官方源：非中国大陆通常最快。
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+    "model_prices_and_context_window.json",
+    # jsDelivr 的 GitHub CDN：大陆网络通常比 raw.githubusercontent 更容易连通。
+    "https://gcore.jsdelivr.net/gh/BerriAI/litellm@main/"
+    "model_prices_and_context_window.json",
+    "https://testingcf.jsdelivr.net/gh/BerriAI/litellm@main/"
+    "model_prices_and_context_window.json",
+    "https://cdn.jsdelivr.net/gh/BerriAI/litellm@main/"
+    "model_prices_and_context_window.json",
+)
+_LITELLM_MODEL_MAP_CACHE = os.path.join(
+    BASE_DIR, "scholar_workspace", "litellm_model_cost.json")
+_MODEL_MAP_LOADED = False
+_MODEL_MAP_LOCK = threading.Lock()
+
+
+def _seed_model_map_path() -> str:
+    """PyInstaller 打包时随包携带的 LiteLLM 元数据种子。
+
+    冻结产物里可写数据在 exe 同级目录，而 --add-data 落在 ``_MEIPASS``；
+    两者不是同一个 scholar_workspace，所以单独查资源根目录。
+    """
+    try:
+        from src.core.platform_env import app_resource_root
+        path = os.path.join(app_resource_root(), "scholar_workspace",
+                            "litellm_model_cost.json")
+        if os.path.abspath(path) == os.path.abspath(_LITELLM_MODEL_MAP_CACHE):
+            return ""
+        return path
+    except Exception:
+        return ""
+
+
+def _load_cached_litellm_model_map() -> bool:
+    """加载上次刷新的 LiteLLM 元数据缓存（7 天内有效），只做一次。
+
+    返回是否真的加载到有效数据；缓存过期/损坏返回 False，交给启动刷新。
+    """
+    global _MODEL_MAP_LOADED
+    if _MODEL_MAP_LOADED:
+        return True
+    with _MODEL_MAP_LOCK:
+        if _MODEL_MAP_LOADED:
+            return True
+        _MODEL_MAP_LOADED = True
+        seed = _seed_model_map_path()
+        # 先用户缓存（7 天），再打包种子（保底，不限制年龄；过期后由刷新覆盖）。
+        for path, max_age in ((_LITELLM_MODEL_MAP_CACHE, 7 * 86400),
+                              (seed, None)):
+            if not path:
+                continue
+            try:
+                if max_age is not None and time.time() - os.path.getmtime(path) > max_age:
+                    continue
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict) or not data:
+                    continue
+                import litellm
+                litellm.model_cost.update(data)
+                logger.info("Loaded LiteLLM model map from %s: %d entries",
+                            "bundled seed" if path == seed else "cache", len(data))
+                return True
+            except (OSError, ValueError):
+                continue
+    return False
+
+
+def ensure_litellm_model_map_fresh(max_age_days: int = 7) -> int:
+    """启动时调用：7 天缓存内直接加载；过期/缺失则拉官方表并更新。
+
+    返回值：本次实际刷新的条目数；缓存新鲜或刷新失败返回 0。
+    """
+    try:
+        age = time.time() - os.path.getmtime(_LITELLM_MODEL_MAP_CACHE)
+        if age < max_age_days * 86400 and _load_cached_litellm_model_map():
+            logger.info("LiteLLM model map cache is fresh (%.1f days); skip refresh.",
+                        age / 86400)
+            return 0
+        logger.info("LiteLLM model map cache is stale/invalid (%.1f days); refreshing...",
+                    age / 86400)
+    except OSError:
+        logger.info("LiteLLM model map cache missing; refreshing...")
+    return refresh_litellm_model_map()
+
+
+def fetch_litellm_model_map(timeout: int = 20) -> Dict[str, Any]:
+    """从官方源/大陆可用 CDN 拉取 model map；返回带输入窗口的条目。
+
+    ``timeout`` 是**整次回退链的总预算**，不是每个 URL 给一份：官方源
+    超时会消耗预算，后面的 jsDelivr 只能用剩余时间，避免 4 个源串行拖到
+    一分钟。单个源再限制为最多 8 秒，防止一个半开连接吃光全部预算。
+    """
+    try:
+        from src.core.network_worker import create_robust_session
+        session = create_robust_session()
+    except Exception as e:
+        logger.warning("LiteLLM model map session failed: %s", e)
+        return {}
+
+    total_deadline = time.time() + max(5, int(timeout))
+    per_source = max(4, min(8, int(timeout) // 2))
+    for url in _LITELLM_MODEL_MAP_URLS:
+        remaining = total_deadline - time.time()
+        if remaining <= 0:
+            break
+        try:
+            res = session.get(url, timeout=min(per_source, remaining))
+            if res.status_code != 200:
+                continue
+            data = res.json()
+            if not isinstance(data, dict) or not data:
+                continue
+            useful = {k: v for k, v in data.items()
+                      if isinstance(v, dict) and v.get("max_input_tokens")}
+            if useful:
+                logger.info("Fetched LiteLLM model map from %s: %d entries",
+                            url.split("/")[2], len(useful))
+                return useful
+        except Exception as e:
+            logger.debug("LiteLLM model map source failed (%s): %s",
+                         url.split("/")[2], e)
+    return {}
+
+
+def refresh_litellm_model_map(timeout: int = 20) -> int:
+    """拉取 LiteLLM 官方 model_prices_and_context_window.json 并合并。
+
+    本地 LiteLLM 备份可能滞后（例如不包含 GPT-6 的 provider 变体）；这个
+    函数用应用自己的网络栈拉最新表，成功后写缓存并清空静态窗口缓存。
+    ``timeout`` 为整次回退链的总预算（默认 20 秒）。返回合并的条目数（失败 0）。
+    """
+    useful = fetch_litellm_model_map(timeout=timeout)
+    if not useful:
+        logger.warning("Refresh LiteLLM model map failed: no source reachable.")
+        return 0
+    try:
+        import litellm
+        litellm.model_cost.update(useful)
+        try:
+            os.makedirs(os.path.dirname(_LITELLM_MODEL_MAP_CACHE), exist_ok=True)
+            tmp = _LITELLM_MODEL_MAP_CACHE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(useful, f)
+            os.replace(tmp, _LITELLM_MODEL_MAP_CACHE)
+        except OSError as e:
+            logger.warning("Cache LiteLLM model map failed: %s", e)
+        _static_context_window.cache_clear()
+        logger.info("Refreshed LiteLLM model map: %d entries", len(useful))
+        return len(useful)
+    except Exception as e:
+        logger.warning("Refresh LiteLLM model map failed: %s", e)
+        return 0
+
+
+@lru_cache(maxsize=1024)
+def _static_context_window(model_name, resolve_aliases: bool = True) -> int:
+    """只用 LiteLLM 解析输入窗口；不维护手写模型表。
+
+    先查直接 model_cost，再按 provider 变体后缀匹配，最后让 get_model_info
+    处理别名。仍未知返回 **0**（UI 显示 Unknown）；内部预算的安全默认值由
+    :func:`src.core.model_capabilities.resolve_window` 单独处理。
     """
     name = (model_name or "").strip().lower()
     if not name:
         return 0
-    candidates = {name}
+    _load_cached_litellm_model_map()
+    candidates = [name]
     if "/" in name:
-        candidates.add(name.rsplit("/", 1)[-1])
+        stripped = name.rsplit("/", 1)[-1]
+        if stripped and stripped not in candidates:
+            candidates.append(stripped)
 
-    best = 0
+    litellm_value = _litellm_context_window(candidates, resolve_aliases=False)
+    if litellm_value > 0:
+        return litellm_value
+
+    # 官方 LiteLLM 表里新模型常以 provider 变体存在（azure/gpt-6-sol、
+    # dashscope/qwen3-max）。按最后一段做前缀匹配，取同族最大输入窗口。
     try:
         import litellm
-        for cand in candidates:
-            info = litellm.model_cost.get(cand)
-            if info:
-                v = info.get("max_input_tokens") or info.get("max_tokens") or 0
-                best = max(best, int(v or 0))
+        best = 0
+        for key, info in litellm.model_cost.items():
+            if not isinstance(info, dict):
+                continue
+            last = str(key).rsplit("/", 1)[-1].lower()
+            if not any(last == c or last.startswith(c + "-")
+                       or last.startswith(c + ".") for c in candidates):
+                continue
+            try:
+                value = int(info.get("max_input_tokens") or 0)
+            except (TypeError, ValueError):
+                value = 0
+            best = max(best, value)
+        if best > 0:
+            return best
     except Exception:
         pass
 
-    for key, window in _BUILTIN_CONTEXT_HINTS:
-        for cand in candidates:
-            if key in cand:
-                best = max(best, window)
-                break
+    if not resolve_aliases:
+        return 0
+    # 最后让 get_model_info 处理 provider 前缀、别名和日期后缀；仍未知返回 0。
+    return _litellm_context_window(candidates, resolve_aliases=True)
 
-    return best
+
+def litellm_context_window(model_name: str, resolve_aliases: bool = False) -> int:
+    """只查 LiteLLM 的输入窗口；未知返回 0（不猜、不兜底）。
+
+    供 UI 展示与“严格按 LiteLLM”场景使用。UI 默认 ``resolve_aliases=False``：
+    直接表/ provider 变体已经覆盖绝大多数模型，避免对每个未知自定义模型触发
+    LiteLLM 的 provider 解析告警。内部预算仍走 :func:`resolve_window`
+    （保留用户声明/provider 实测/安全默认）。
+    """
+    return _static_context_window(model_name, resolve_aliases)
 
 
 def derive_context_budgets(context_window: int) -> dict:
@@ -286,11 +502,11 @@ def derive_context_budgets(context_window: int) -> dict:
     ===================  ==========  ==========  ==============
     预算项               占窗口比例  窗口硬上限  1M 窗口实测值
     ===================  ==========  ==========  ==============
-    tool_result_chars      3%          8%         31,457 字符
-    tool_token_budget     20%         35%        209,715 token
-    kb_token_budget        8%         15%         83,886 token
-    kb_chunk_chars       0.5%          4%          5,243 字符
-    history_token_budget  45%         60%        471,859 token
+    tool_result_chars     10%         15%        104,858 字符
+    tool_token_budget     26%         40%        272,630 token
+    kb_token_budget       10%         18%        104,857 token
+    kb_chunk_chars       0.8%          5%          8,388 字符
+    history_token_budget  50%         65%        524,288 token
     ===================  ==========  ==========  ==============
 
     各项都是**上界**而非预定量，实际占用取决于内容多少；"硬上限"只在窗口大到
@@ -301,12 +517,15 @@ def derive_context_budgets(context_window: int) -> dict:
     成本，改这里的比例即可（唯一处定义）。
     """
     window = max(int(context_window or 0), 1_000)
+    # 2026 年的主流窗口已是 128K–1M（DeepSeek/Qwen 128K、Claude 200K、
+    # GPT/Gemini 1M）。旧的 3%/8% 比例在 128K 上只剩几千 token，会把
+    # 工具结果和文献上下文切得过碎；适度提高，同时保留单项硬上限。
     return {
-        "tool_result_chars": _clamp(round(window * 0.03), 4_000, round(window * 0.08)),
-        "tool_token_budget": _clamp(round(window * 0.20), 2_000, round(window * 0.35)),
-        "kb_token_budget": _clamp(round(window * 0.08), 2_000, round(window * 0.15)),
-        "kb_chunk_chars": _clamp(round(window * 0.005), 1_600, round(window * 0.04)),
-        "history_token_budget": _clamp(round(window * 0.45), 4_000, round(window * 0.60)),
+        "tool_result_chars": _clamp(round(window * 0.10), 8_000, round(window * 0.15)),
+        "tool_token_budget": _clamp(round(window * 0.26), 6_000, round(window * 0.40)),
+        "kb_token_budget": _clamp(round(window * 0.10), 4_000, round(window * 0.18)),
+        "kb_chunk_chars": _clamp(round(window * 0.008), 2_000, round(window * 0.05)),
+        "history_token_budget": _clamp(round(window * 0.50), 8_000, round(window * 0.65)),
     }
 
 

@@ -48,14 +48,15 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation,
-                            QRect, Qt, QTimer)
+                            QRect, Qt, QTimer, Signal)
 from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication, QKeyEvent
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
                                QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QTextBrowser, QVBoxLayout, QWidget)
 
-from src.core.references import UNVERIFIED_LABEL, title_html
+from src.core.references import (UNVERIFIED_LABEL, normalize_bibliographic_text,
+                                 title_html)
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.copy_button import CopyButton
 from src.ui.components.toast import ToastManager
@@ -263,9 +264,16 @@ class CitationPopup(QWidget):
         self._btn_open.setCursor(Qt.PointingHandCursor)
         self._btn_open.setFocusPolicy(Qt.NoFocus)
         self._btn_open.clicked.connect(self._open_source)
+        # 付费墙论文：打开内嵌浏览器让用户登录并下载全文；下载后自动入库。
+        self._btn_fulltext = QPushButton("Get full text")
+        self._btn_fulltext.setCursor(Qt.PointingHandCursor)
+        self._btn_fulltext.setFocusPolicy(Qt.NoFocus)
+        self._btn_fulltext.clicked.connect(self._request_fulltext)
+        self._btn_fulltext.setVisible(False)
         self._btn_row.addWidget(self._btn_copy)
         self._btn_row.addWidget(self._btn_copy_link)
         self._btn_row.addWidget(self._btn_open)
+        self._btn_row.addWidget(self._btn_fulltext)
         self._btn_row.addStretch(1)
         lay.addLayout(self._btn_row)
 
@@ -477,6 +485,11 @@ class CitationPopup(QWidget):
         self._lbl_links.setText(self._links_html())
         # 无可复制网址的条目（本地文档）隐藏该按钮：留着只会是"点了没反应"。
         self._btn_copy_link.setVisible(bool(self._link_copy_text()))
+        # 只有尚未拿到本地全文、但有 DOI/URL 的论文才显示"获取全文"。
+        has_external = bool(str(self._data.get("doi") or "").strip()
+                            or str(self._data.get("url") or "").strip())
+        has_local = bool(str(self._data.get("path") or "").strip())
+        self._btn_fulltext.setVisible(has_external and not has_local)
 
         full = (mode == self.MODE_FULL)
         self._btn_close.setVisible(full)
@@ -491,7 +504,8 @@ class CitationPopup(QWidget):
         self._lbl_note.setText(f"Why cited: {note}" if note else "")
 
         if full:
-            snippet = str(self._data.get("snippet") or "").strip()
+            snippet = normalize_bibliographic_text(
+                str(self._data.get("snippet") or "").strip())
             if snippet:
                 self._snippet.setHtml(self._snippet_html(snippet))
             else:
@@ -509,7 +523,8 @@ class CitationPopup(QWidget):
         parts = []
         authors = str(self._data.get("authors") or "").strip()
         year = str(self._data.get("year") or "").strip()
-        journal = str(self._data.get("journal") or "").strip()
+        journal = normalize_bibliographic_text(
+            str(self._data.get("journal") or "")).strip()
         if authors:
             parts.append(authors)
         if year:
@@ -849,6 +864,17 @@ class CitationPopup(QWidget):
         """兼容入口：交由 CopyButton 统一处理（保留供外部历史接线调用）。"""
         self._btn_copy.copy_now()
 
+    def _request_fulltext(self):
+        data = self._data
+        doi = str(data.get("doi") or "").strip()
+        url = str(data.get("url") or "").strip()
+        title = str(data.get("title") or "").strip()
+        if not doi and not url:
+            ToastManager().show("No DOI/URL available for full-text retrieval", "warning")
+            return
+        CitationPopupController.instance().sig_fulltext_requested.emit(doi, title, url)
+        CitationPopupController.instance().dismiss()
+
     def _open_source(self):
         data = self._data
         url = str(data.get("url") or "").strip()
@@ -870,6 +896,9 @@ class CitationPopup(QWidget):
 
 class CitationPopupController(QObject):
     """进程级单例：管理引用信息缓存、悬停意图与卡片的显示生命周期。"""
+
+    #: 用户从引用卡请求获取全文：(doi, title, url)。由对话页接住并打开登录面板。
+    sig_fulltext_requested = Signal(str, str, str)
 
     _instance: Optional["CitationPopupController"] = None
 
@@ -1010,6 +1039,21 @@ class CitationPopupController(QObject):
         # 若卡片正展示同一条目，实时刷新其内容。
         if self._popup is not None and self._popup.isVisible() and self._active_key in self._store:
             self._popup.refresh(self._store[self._active_key])
+
+    def replace_references(self, items, msg_index: int):
+        """用一份**权威**条目整体替换某条消息的引用缓存（收尾定稿时调用）。
+
+        生成过程中可能已按内部号零散合并过条目；编号定稿后这些旧键既不会再被
+        正文用到，却仍会被 ``_attach_references`` 一并快照进历史。收尾整条替换，
+        使"引用缓存里的条目"严格等于"正文实际引用到的条目"。
+        """
+        try:
+            mid = int(msg_index)
+        except (TypeError, ValueError):
+            mid = -1
+        for key in [k for k in self._store if k[0] == mid]:
+            self._store.pop(key, None)
+        self.merge_references(items, mid)
 
     def lookup(self, msg_index: int, index: int) -> Optional[Dict[str, Any]]:
         try:

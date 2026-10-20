@@ -147,14 +147,25 @@ class ChatResponseFlowMixin:
             if self.current_ai_bubble.is_loading:
                 self.current_ai_bubble.set_loading(False)
 
-        self.current_ai_text += token
+        # 只追加到分段缓冲，不在这里做 O(N) 的字符串拼接；真正 join 发生在
+        # 下一次渲染/落盘/收尾读取 current_ai_text 时（见 ChatConversation 属性）。
+        parts = getattr(self, "_ai_text_parts", None)
+        if parts is None:
+            self.current_ai_text = token
+        else:
+            parts.append(token)
+            self._ai_text_len = getattr(self, "_ai_text_len", 0) + len(token)
         self._is_rendering_dirty = True
 
         # 长文本渲染降频：markdown 全量重排（split_follow_ups + format_response
         # + QTextBrowser 重排）随文本长度线性变贵，固定 60ms 间隔在长回答
         # 后期会产生可感知卡顿；按已累计长度自适应放宽节流间隔。
-        n = len(self.current_ai_text)
-        if n > 24000:
+        n = getattr(self, "_ai_text_len", 0)
+        if n > 96000:
+            interval = 800
+        elif n > 48000:
+            interval = 400
+        elif n > 24000:
             interval = 240
         elif n > 12000:
             interval = 160
@@ -165,17 +176,25 @@ class ChatResponseFlowMixin:
         if hasattr(self, '_render_timer') and self._render_timer.interval() != interval:
             self._render_timer.setInterval(interval)
 
-    def _format_response(self, text, index):
-        """统一代理给 TextFormatter，保持内部调用无需修改"""
+    def _format_response(self, text, index, hide_citations=None):
+        """统一代理给 TextFormatter，保持内部调用无需修改。
+
+        :param hide_citations: ``None`` 表示按当前阶段自动判定——生成中隐藏引用
+            标记（编号尚未定稿），收尾换文后展示；历史重渲染则按"这条消息有没有
+            引用列表"显式传入，避免出现有编号却没有列表可对的状态。
+        """
         from src.ui.components.text_formatter import TextFormatter
         if not hasattr(self, 'mermaid_codes'):
             self.mermaid_codes = {}
+        if hide_citations is None:
+            hide_citations = bool(getattr(self, "_citations_hidden", False))
 
         return TextFormatter.format_response(
             text, index,
             getattr(self, 'expanded_thinks', set()),
             getattr(self, 'user_toggled_thinks', set()),
-            self.mermaid_codes
+            self.mermaid_codes,
+            hide_citations=hide_citations,
         )
 
     def _on_chat_progress(self, progress, msg):
@@ -195,14 +214,20 @@ class ChatResponseFlowMixin:
             self._on_query_translated(payload.get("text"))
         elif isinstance(payload, dict) and payload.get("event") == "usage":
             # 本次生成任务的 token 用量 + 本轮耗时：显示在当前 AI 气泡下方。
+            # 同时暂存到 _current_usage，收尾时随历史条目一起落盘——否则重启、
+            # 切换标签页或导入归档后，计数器会整片消失。
+            stats = {
+                "prompt_tokens": int(payload.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(payload.get("completion_tokens", 0) or 0),
+                "estimated": bool(payload.get("estimated", False)),
+                "elapsed_ms": payload.get("elapsed_ms"),
+            }
+            self._current_usage = stats
             bubble = getattr(self, "current_ai_bubble", None)
             if bubble is not None and hasattr(bubble, "set_token_stats"):
                 bubble.set_token_stats(
-                    payload.get("prompt_tokens", 0),
-                    payload.get("completion_tokens", 0),
-                    estimated=bool(payload.get("estimated", False)),
-                    elapsed_ms=payload.get("elapsed_ms"),
-                )
+                    stats["prompt_tokens"], stats["completion_tokens"],
+                    estimated=stats["estimated"], elapsed_ms=stats["elapsed_ms"])
         elif isinstance(payload, dict) and payload.get("event") == "follow_ups":
             # 结构化追问建议（suggest_follow_ups 工具产出）：缓存到收尾时统一渲染，
             # 优先于 on_chat_finished 里的文本解析兜底。
@@ -225,20 +250,22 @@ class ChatResponseFlowMixin:
             logger.debug("Reference data synced to citation popup store: %d item(s) for message #%s.",
                          len(data), msg_index)
         elif isinstance(payload, dict) and payload.get("event") == "answer_final":
-            # 正文引用编号收口：任务端已把 [key]/[n] 按首次出现顺序改写为 [n]，
-            # 这里用"已编号"版本整体替换气泡累计文本（而非追加），保证正文编号与
-            # 参考文献列表严格一致——修正"模型先写正文、编号靠猜"导致的对不上。
+            # 正文收口：任务端已把编号按出现顺序定稿、并渲染好参考列表。这一刻之前
+            # 上屏的是"隐去引用标记"的中间态，从这里开始才显示编号与列表。
             text = payload.get("text") or ""
             if text:
                 self.current_ai_text = text
+                self._citations_hidden = False
                 self._is_rendering_dirty = True
                 self._throttled_render()
             data = payload.get("references") or []
             bubble = getattr(self, "current_ai_bubble", None)
             msg_index = getattr(bubble, "index", -1) if bubble is not None else -1
             from src.ui.components.citation_popup import CitationPopupController
-            CitationPopupController.instance().merge_references(data, msg_index)
-            logger.debug("Final answer (renumbered citations) applied: %d chars, %d reference(s) "
+            # 定稿条目是权威集合：整条替换，避免生成期按内部号合并的旧键残留，
+            # 进而被 _attach_references 一起写进历史。
+            CitationPopupController.instance().replace_references(data, msg_index)
+            logger.debug("Final answer applied: %d chars, %d cited reference(s) "
                          "for message #%s.", len(text), len(data), msg_index)
         elif isinstance(payload, dict) and payload.get("event") == "await_user":
             # deep-plan 等待确认：同样进入等待状态锁定通用发送。
@@ -282,8 +309,12 @@ class ChatResponseFlowMixin:
             # 导致同一问题被重复发送。需要重发时用用户气泡上的编辑/重发入口
             # （ChatSendFlowMixin.handle_edit_resend）。
 
-            entry = {"role": "assistant", "content": self.current_ai_text, "status": "interrupted"}
-            self._attach_references(entry)
+            # 中途停止没有参考文献列表可渲染：正文里的引用标记一并抹掉，历史与
+            # 屏幕保持一致（不留下"有编号、点开却是空卡"的残迹）。
+            entry = {"role": "assistant",
+                     "content": self._without_citation_markers(self.current_ai_text),
+                     "status": "interrupted"}
+            self._attach_usage(entry)
             self._attach_ui_cards(entry)
             self.history.append(entry)
             # 轮次边界落盘（取消也算一轮结束，半条已并入历史）
@@ -342,6 +373,7 @@ class ChatResponseFlowMixin:
 
         entry = {"role": "assistant", "content": self.current_ai_text}
         self._attach_references(entry)
+        self._attach_usage(entry)
         self._attach_ui_cards(entry)
         self.history.append(entry)
         # 轮次边界落盘：回答完整收尾，半条文件随之作废
@@ -349,6 +381,26 @@ class ChatResponseFlowMixin:
         self.current_ai_bubble = None
         self._sync_regenerate_available()   # 回答结束：本轮的重新发起入口此刻出现
         self.logger.info("AI response generation finished and UI updated.")
+
+    @staticmethod
+    def _citations_hidden_for(msg) -> bool:
+        """历史消息是否应隐藏引用标记：没有引用列表就没有可点的编号。
+
+        生成期的隐藏由 :attr:`_citations_hidden` 控制；重放历史消息时改用这条
+        判据——旧记录里可能只剩 ``[n]`` 而条目早已丢失，显示出来只会是空卡。
+        """
+        return not bool((msg or {}).get("references"))
+
+    @staticmethod
+    def _without_citation_markers(text):
+        """抹掉正文里的引用标记（取消 / 报错出口用）。
+
+        这两种出口不会生成参考文献列表，编号也就没有落点；留着标记只会让用户
+        点到一张空卡。抹除口径与生成期隐藏一致，见
+        :func:`src.core.references.strip_citation_markers`。
+        """
+        from src.core.references import strip_citation_markers
+        return strip_citation_markers(text or "")
 
     def _attach_references(self, entry: dict):
         """把当前 AI 气泡的引用条目写入历史条目（导出无损留存的唯一写入点）。
@@ -370,6 +422,32 @@ class ChatResponseFlowMixin:
             entry["references"] = refs
             self.logger.debug("Attached %d reference(s) to history message #%s.",
                               len(refs), idx)
+
+    def _attach_usage(self, entry: dict):
+        """把本轮 token 用量写入历史条目（读数持久化的唯一写入点）。
+
+        计数器原本只活在气泡的按钮行里：重启应用、切换标签页、导出再导入之后
+        一条都对不上。用量是这一轮回答的属性，应与正文、引用一样随历史保存。
+        """
+        usage = getattr(self, "_current_usage", None)
+        if isinstance(usage, dict) and usage:
+            entry["usage"] = dict(usage)
+
+    def _restore_message_usage(self, bubble, msg):
+        """把历史条目里的 token 用量回灌到重建后的气泡（:meth:`_attach_usage` 的读取侧）。"""
+        usage = (msg or {}).get("usage") if isinstance(msg, dict) else None
+        if bubble is None or not isinstance(usage, dict):
+            return
+        setter = getattr(bubble, "set_token_stats", None)
+        if not callable(setter):
+            return
+        try:
+            setter(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                   estimated=bool(usage.get("estimated", False)),
+                   elapsed_ms=usage.get("elapsed_ms"))
+        except Exception as e:      # 纯展示，失败不得影响历史回灌
+            logger.debug("Token stats restore skipped for message #%s: %s",
+                         getattr(bubble, "index", -1), e)
 
     def _attach_ui_cards(self, entry: dict):
         """把当前 AI 气泡内组件的交互结果写入历史条目（自动保存 / 导出共用的写入点）。
@@ -468,13 +546,14 @@ class ChatResponseFlowMixin:
             final_html = self._format_response(self.current_ai_text, idx)
             self.current_ai_bubble.set_content(final_html)
 
-        # 记录到历史避免上下文结构断裂（已同步的引用同样随历史留存）
+        # 记录到历史避免上下文结构断裂。报错同样没有参考文献列表，引用标记一并
+        # 抹掉，避免历史里留下查不到著的编号。
         entry = {
             "role": "assistant",
-            "content": self.current_ai_text,
+            "content": self._without_citation_markers(self.current_ai_text),
             "status": "error"
         }
-        self._attach_references(entry)
+        self._attach_usage(entry)
         self._attach_ui_cards(entry)
         self.history.append(entry)
         # 轮次边界落盘：报错同样是一轮结束，历史与快照保持一致

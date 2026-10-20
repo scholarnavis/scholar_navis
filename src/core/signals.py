@@ -23,6 +23,8 @@ class GlobalSignals(QObject):
     theme_changed = Signal()
     #: 聊天气泡排版参数（字号/字距/行距/段距）已保存：已存在的气泡据此就地重排
     chat_typography_changed = Signal()
+    #: LiteLLM 模型元数据刷新完成：模型下拉重算上下文大小。
+    model_metadata_changed = Signal()
 
     def __new__(cls):
         if cls._instance is None:

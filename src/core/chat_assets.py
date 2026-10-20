@@ -11,18 +11,20 @@
    AI 回答里已缓存的远程图片、高级 UI 组件声明的成品文件；
 2. **哪些能内嵌**：:func:`plan_assets` 按体积策略分为"内嵌"与"占位符"，体积上限
    集中在文件头常量里，不散落到调用方；
-3. **怎么落地**：归档走 ZIP 条目（图片存储、文本压缩），历史快照走
-   ``scholar_workspace/assets`` 内容寻址仓库；两者都按 SHA-256 去重。
+3. **怎么落地**：归档把本体以 BLOB 写进 SQLite 容器，历史快照写
+   ``scholar_workspace/assets`` 内容寻址仓库；两者都按 SHA-256 去重，正文里的
+   路径始终是"原路径"，由 :func:`src.core.chat_archive.remap_attachment_paths`
+   在导入 / 恢复时统一改写。
 
 占位符不是"错误"，而是一种明确的数据状态：文件太大 / 源文件已不在 / 总量超限 /
 旧版本没内嵌，都保留**源文件名**与原因码，界面据此显示"是什么情况"，而不是空白。
 
 兼容
 ----
-旧归档（``archive_version`` 1–3）没有 ``assets`` 字段，仍走
-:mod:`src.core.chat_archive` 的旧解包分支；旧历史快照没有 ``assets`` 字段，
-读取时原路径保持不变。两类旧数据在加载时都会被 :func:`annotate_messages`
-补上"源文件不可用（旧记录未内嵌）"的占位信息。
+旧归档（``archive_version`` 1–3 的 ``attachments`` 目录、4 的 ZIP ``assets``）由
+:mod:`src.core.chat_archive` 的旧解包分支读取（:func:`extract_assets_from_zip`）；
+旧历史快照没有 ``assets`` 字段，读取时原路径保持不变。两类旧数据在加载时都会被
+:func:`annotate_messages` 补上"源文件不可用（旧记录未内嵌）"的占位信息。
 """
 
 from __future__ import annotations
@@ -148,6 +150,68 @@ def store_path_for(digest: str, ext: str) -> str:
     if not _is_digest(digest):
         raise ValueError(f"Invalid asset digest: {digest!r}")
     return os.path.join(asset_store_dir(), digest[:2], f"{digest}{ext}")
+
+
+def file_digest(path: str) -> Optional[str]:
+    """计算文件的 SHA-256（带缓存）；文件不可读时返回 ``None``。"""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return _file_digest(path, stat)
+
+
+def store_blob(digest: str, ext: str, data: bytes,
+               expected_size: int = 0) -> Optional[str]:
+    """把一段字节写入内容寻址仓库，返回落点路径；校验不通过返回 ``None``。
+
+    归档（SQLite BLOB）解包走这里：摘要必须与库内登记一致、体积必须等于登记值
+    （登记为 0 时按实际长度），任何一项不符都拒绝落盘——归档是外部输入，不能
+    让它把错误内容写进本地仓库。已存在同样大小的副本时直接复用，实现跨归档去重。
+    """
+    if not _is_digest(digest) or not isinstance(data, (bytes, bytearray)):
+        return None
+    size = len(data)
+    if size > ASSET_EXTRACT_MAX_BYTES:
+        logger.warning("Asset blob rejected: %d bytes exceeds extraction limit", size)
+        return None
+    if expected_size and size != expected_size:
+        logger.warning("Asset blob rejected: size %d != recorded %d", size, expected_size)
+        return None
+    if hashlib.sha256(bytes(data)).hexdigest() != digest:
+        logger.warning("Asset blob rejected: sha256 mismatch")
+        return None
+
+    dest = store_path_for(digest, _safe_ext(ext))
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.isfile(dest) and os.path.getsize(dest) == size:
+            return dest
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(dest),
+                                        prefix=".asset_", suffix=".part")
+        os.close(fd)
+        try:
+            with open(tmp_path, "wb") as out:
+                out.write(bytes(data))
+            os.replace(tmp_path, dest)
+            try:
+                os.chmod(dest, 0o600)
+            except OSError:
+                pass
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    except OSError as e:
+        logger.warning("Store asset blob failed: %s (%s)", dest, e)
+        return None
+    return dest
+
+
+def remember_store(original: str, stored: str) -> None:
+    """登记"原路径 -> 仓库副本"（导入 / 恢复时调用，供原文件被移走后回退）。"""
+    _remember_store(original, stored)
 
 
 def _remember_store(original: str, stored: str) -> None:
@@ -336,47 +400,8 @@ def plan_assets(paths: Iterable[str],
 
 
 # --------------------------------------------------------------------------- #
-#  归档：写入 / 读出
+#  旧版归档（ZIP）读出：新归档是 SQLite，写入路径见 chat_archive
 # --------------------------------------------------------------------------- #
-def _zip_info(entry: str, is_image: bool) -> zipfile.ZipInfo:
-    """生成 ZIP 条目信息：图片已压缩，直接存储；文本类走 DEFLATE。"""
-    info = zipfile.ZipInfo(entry)
-    info.compress_type = zipfile.ZIP_STORED if is_image else zipfile.ZIP_DEFLATED
-    info.external_attr = 0o600 << 16
-    return info
-
-
-def write_assets_to_zip(zf: zipfile.ZipFile,
-                        embedded: Dict[str, Dict[str, Any]],
-                        placeholders: Dict[str, Dict[str, Any]]) -> int:
-    """把规划好的资产写进 ZIP；写失败的文件降级为占位符。返回写入条目数。"""
-    written_entries = set()
-    written = 0
-    for original, meta in list(embedded.items()):
-        entry = str(meta.get("entry") or "")
-        if not entry:
-            embedded.pop(original, None)
-            placeholders[original] = {"status": STATUS_MISSING,
-                                      "name": meta.get("name") or os.path.basename(original)}
-            continue
-        if entry in written_entries:
-            continue
-        source = str(meta.get("source") or original)
-        try:
-            info = _zip_info(entry, file_extension(original) in IMAGE_EXTS)
-            with open(source, "rb") as src, zf.open(info, "w") as out:
-                shutil.copyfileobj(src, out, _CHUNK)
-        except (OSError, ValueError, KeyError) as e:
-            logger.warning("Embed asset failed (kept as placeholder): %s (%s)", original, e)
-            embedded.pop(original, None)
-            placeholders[original] = {"status": STATUS_MISSING,
-                                      "name": meta.get("name") or os.path.basename(original)}
-            continue
-        written_entries.add(entry)
-        written += 1
-    return written
-
-
 def extract_assets_from_zip(zf: zipfile.ZipFile,
                             assets: Dict[str, Any],
                             placeholders: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
@@ -597,7 +622,8 @@ __all__ = [
     "STATUS_TOO_LARGE", "STATUS_MISSING", "STATUS_TOTAL_LIMIT", "STATUS_STORE_LOST",
     "STATUS_LEGACY", "ATTACHMENT_PATH_KEYS", "REFERENCE_PATH_KEY",
     "asset_store_dir", "is_asset_store_path", "store_path_for",
+    "file_digest", "store_blob", "remember_store",
     "collect_paths", "collect_name_hints", "plan_assets",
-    "write_assets_to_zip", "extract_assets_from_zip",
+    "extract_assets_from_zip",
     "materialize_assets", "annotate_messages",
 ]

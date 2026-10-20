@@ -202,6 +202,7 @@ class SaveFlowMixin:
         self.config.user_settings.update({
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
+            "journal_use_proxy": self.chk_journal_proxy.isChecked(),
             "hf_mirror": self.input_mirror.text().strip(),
             "inference_device": self.combo_device.currentData(),
             "current_model_id": self.combo_embed.currentData(),

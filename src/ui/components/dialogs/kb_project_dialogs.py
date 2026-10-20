@@ -169,7 +169,7 @@ class ProjectEditorDialog(BaseDialog):
         self.form_layout.addRow("Desc:", self.inp_desc)
 
         self.combo_model = BaseComboBox()
-        active_models = EMBEDDING_MODELS
+        active_models = [m for m in EMBEDDING_MODELS if not m.get("hidden")]
         for m in active_models:
             self.combo_model.addItem(m['ui_name'], m['id'])
         self.form_layout.addRow("AI Model:", self.combo_model)

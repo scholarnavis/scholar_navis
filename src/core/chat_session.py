@@ -2,51 +2,59 @@
 
 为什么需要它
 ------------
-对话此前只存在于内存（``ChatTool.history``）：进程一退（手动关闭、崩溃、断电）就全丢，
-唯一的持久化手段是用户手动导出归档。本模块把**每个标签页**的对话持续落盘，
-供下次启动按标签页恢复。
+对话此前只存在于内存（``ChatTool.history``）：进程一退（手动关闭、崩溃、断电）
+就全丢，唯一的持久化手段是用户手动导出归档。本模块把**每个标签页**的对话持续
+落盘，供下次启动按标签页恢复。
 
 存什么、写多勤
 --------------
-目录：``BASE_DIR/scholar_workspace/chat_session/``（与归档解包目录同处工作区，
-见 :mod:`src.core.chat_archive`）。
+单个 SQLite 数据库：``BASE_DIR/scholar_workspace/chat_session/session.sqlite3``
+（表结构与归档共用，见 :mod:`src.core.chat_store`）。与旧的"每标签页一个大
+JSON"相比，改一条书签、存一条半截回答都不必重写整段对话：
 
-* ``tabs.json`` —— 标签页清单（**轻量**：id / 名称 / 当前活动标签页）。每次
-  新建、关闭、改名、切换标签页时覆盖写，体积与标签页数成正比，与对话长度无关；
-* ``tab_<id>.json`` —— 单个标签页的完整会话快照。体积等于该段对话（含思维链与
-  参考文献），因此只在**轮次边界**覆盖写：用户消息入历史后，以及回答收尾
-  （正常 / 取消 / 报错）后。写入是原子的（临时文件 + ``os.replace``）；
-  图片与小体积附件会复制进 ``scholar_workspace/assets``（内容寻址，跨标签页去重），
-  快照里记录 ``assets`` 映射与 ``placeholders`` 占位信息；
-* ``inflight_<id>.json`` —— 某标签页**流式进行中**的半条回答，让"崩溃时正在生成的
-  那段"也能恢复。为控制写放大，本模块自带节流（默认 :data:`INFLIGHT_MIN_INTERVAL`
-  秒且文本有变化才写），超过 :data:`INFLIGHT_MAX_CHARS` 的部分直接截断。
+* ``tabs`` —— 标签页清单（id / 名称 / 顺序 / 活动项）。每次新建、关闭、改名、
+  切换标签页时写入，成本与标签页数成正比，与对话长度无关；
+* ``messages`` / ``message_references`` / ``message_bookmarks`` —— 会话正文、
+  **参考文献逐条成行**、书签逐条成行。整页覆盖写发生在**轮次边界**：用户消息
+  入历史后，以及回答收尾（正常 / 取消 / 报错）后。超长正文在库内 zlib 压缩；
+* ``inflight`` —— 某标签页**流式进行中**的半条回答，让"崩溃时正在生成的那段"
+  也能恢复。为控制写放大，本模块自带节流（默认 :data:`INFLIGHT_MIN_INTERVAL`
+  秒且文本有变化才写），超过 :data:`INFLIGHT_MAX_CHARS` 的部分直接截断；
+* ``assets`` / ``asset_links`` —— 图片与小体积附件仍落在内容寻址仓库
+  （``scholar_workspace/assets``，跨标签页去重），库里只登记"原路径 -> 仓库
+  副本"；仓库文件缺失时降级为占位说明，不会让整次恢复失败；
+* ``tags`` / ``tab_tags`` —— 对话标签（一个标签下多个对话、一段对话多个标签）。
 
-标签页 id 只由 :func:`new_tab_id` 生成（32 位十六进制），并且**每次构造文件路径前
-都会校验**：外部（归档 / 手工编辑的清单）永远无法把 ``../`` 之类的相对路径塞进来。
+标签页 id 只由 :func:`new_tab_id` 生成（32 位十六进制），并且**每次进入存储层
+前都会校验**：外部（归档 / 手工编辑的文件）永远无法把 ``../`` 之类的相对路径
+塞进来。
 
 恢复语义
 --------
-:func:`load_manifest` 返回 ``(活动标签页 id, [{"id", "name"}, …])``；每个标签页的消息由
-:func:`load_tab` 单独读取，并合并 ``inflight_<id>.json`` 里的半条（``status="interrupted"``）。
-**只回灌消息，不触发任何模型请求** —— 由调用方（标签页容器）保证。
+:func:`load_manifest` 返回 ``(活动标签页 id, [{"id", "name"}, …])``；每个标签页
+的消息由 :func:`load_tab` 单独读取，并合并 ``inflight`` 里的半条
+（``status="interrupted"``）。**只回灌消息，不触发任何模型请求** —— 由调用方
+（标签页容器）保证。
 
 旧版迁移
 --------
-历史版本的单一快照（``autosave.json`` / ``inflight.json``，无标签页概念）在首次
-:func:`load_manifest` 时被就地迁移为一个标签页，随后删除旧文件：升级后用户看到的
-就是"上次那段对话仍在一个标签页里"，而不是被丢弃。
+历史版本的 ``tabs.json`` + ``tab_<id>.json``（以及更早的单文件
+``autosave.json`` / ``inflight.json``）在第一次打开数据库时被就地迁入，随后
+**移动到** ``chat_session/legacy/`` 而不是删除：升级后用户看到的就是"上次那段
+对话仍在一个标签页里"，同时留一份原始文件以便回退排查。迁移是幂等的——目标库
+已有标签页时不会重跑。
 
 清理语义
 --------
-:func:`clear_tab` 删除某标签页的两个文件，是"用户明确清空该标签页对话 / 关闭该标签页"
-的唯一落点：清掉之后下次启动不再恢复。**不删除** ``scholar_workspace/assets`` 里的
-内容寻址副本——它们可能被其它标签页或已导入的归档共享，按引用删除会误伤。
+:func:`clear_tab` 删除某标签页的消息、引用、书签与半条，是"用户明确清空该标签页
+对话 / 关闭该标签页"的唯一落点：清掉之后下次启动不再恢复。**不删除**资产仓库里
+的内容寻址副本——它们可能被其它标签页或已导入的归档共享，按引用删除会误伤。
 
 线程约定
 --------
-调用方都在 GUI 线程（对话流、窗口关闭、崩溃处理器）。写盘是原子替换，故即便将来出现
-并发调用，最坏也只是"后写覆盖先写"，不会产生读得出来的半截文件。
+调用方都在 GUI 线程（对话流、窗口关闭、崩溃处理器）。会话库使用 WAL：单写者、
+崩溃后自动回滚未提交事务，最坏情况是"丢掉最后一次未提交的写入"，不会留下读得
+出来的半截记录。每次操作独立开关连接，避免把连接对象暴露给其它线程。
 """
 
 from __future__ import annotations
@@ -55,42 +63,39 @@ import json
 import logging
 import os
 import re
-import tempfile
+import sqlite3
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.core import BASE_DIR
-from src.core import chat_assets
+from src.core import chat_assets, chat_store
 from src.core.chat_archive import (DEFAULT_TAB_NAME, clean_tab_name,
-                                   remap_attachment_paths, sanitize)
+                                   remap_attachment_paths)
 
 logger = logging.getLogger("Core.ChatSession")
 
 #: 快照目录名（位于 ``BASE_DIR/scholar_workspace`` 下，该目录已被 .gitignore 忽略）。
 SESSION_DIRNAME = "chat_session"
-#: 标签页清单文件名。
-MANIFEST_NAME = "tabs.json"
-#: 单标签页快照 / 半条回答的文件名前缀。
-TAB_SNAPSHOT_PREFIX = "tab_"
-INFLIGHT_PREFIX = "inflight_"
-
-#: 旧版（无标签页）快照文件名，仅用于迁移。
+#: 会话数据库文件名（历史记录的唯一落点）。
+DB_NAME = "session.sqlite3"
+#: 旧版文件名：仅用于迁移，迁移后移动到 ``legacy/``。
+LEGACY_MANIFEST_NAME = "tabs.json"
+LEGACY_TAB_PREFIX = "tab_"
+LEGACY_INFLIGHT_PREFIX = "inflight_"
 LEGACY_AUTOSAVE_NAME = "autosave.json"
 LEGACY_INFLIGHT_NAME = "inflight.json"
+LEGACY_DIRNAME = "legacy"
 
-#: 快照格式标识与版本（与归档的 ``FORMAT`` / ``VERSION`` 解耦，两者可各自演进）。
-#: 1 = 旧版单文件；2 = 清单 + 每标签页一个文件；3 = 增加内容寻址资产与占位符。
-SESSION_FORMAT = "scholar_navis_chat_tabs"
-SESSION_VERSION = 3
+#: 快照格式标识（与归档的 ``FORMAT`` 解耦，两者可各自演进）。结构版本由
+#: :data:`src.core.chat_store.SCHEMA_VERSION` 统一记录在库的 ``meta`` 表里，
+#: 这里不再维护第二份版本号。
+SESSION_FORMAT = chat_store.FORMAT_CHAT_TABS
 
 #: 流式半条的最小落盘间隔（秒）：低于它且文本未变化的重复调用不再写盘。
 INFLIGHT_MIN_INTERVAL = 2.0
 #: 流式半条的字符上限：超长思维链不值得每 2 秒写一份完整副本，直接截断。
 INFLIGHT_MAX_CHARS = 200_000
-
-#: 合法标签页 id：仅 32 位十六进制（:func:`new_tab_id` 的产物）。
-_TAB_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 #: 每个标签页的半条节流状态（``tab_id -> {"at": float, "text": str}``）。
 _inflight_last: Dict[str, Dict[str, Any]] = {}
@@ -107,108 +112,74 @@ def session_dir() -> str:
     return os.path.join(BASE_DIR, "scholar_workspace", SESSION_DIRNAME)
 
 
+def db_path() -> str:
+    """会话数据库的绝对路径。"""
+    return os.path.join(session_dir(), DB_NAME)
+
+
 def manifest_path() -> str:
-    """标签页清单的绝对路径。"""
-    return os.path.join(session_dir(), MANIFEST_NAME)
+    """标签页清单所在文件（历史名字保留：清单如今是数据库里的 ``tabs`` 表）。"""
+    return db_path()
 
 
 def new_tab_id() -> str:
-    """生成一个新的标签页 id（32 位十六进制，可直接作文件名）。"""
+    """生成一个新的标签页 id（32 位十六进制）。"""
     return uuid.uuid4().hex
 
 
 def is_valid_tab_id(tab_id: Any) -> bool:
-    """标签页 id 是否合法（非法 id 一律拒绝构造文件路径，防目录穿越）。"""
-    return bool(_TAB_ID_RE.match(str(tab_id or "")))
-
-
-def tab_snapshot_path(tab_id: str) -> Optional[str]:
-    """单标签页快照路径；``tab_id`` 非法时返回 ``None``。"""
-    if not is_valid_tab_id(tab_id):
-        logger.warning("Rejected invalid tab id for snapshot path: %r", tab_id)
-        return None
-    return os.path.join(session_dir(), f"{TAB_SNAPSHOT_PREFIX}{tab_id}.json")
-
-
-def tab_inflight_path(tab_id: str) -> Optional[str]:
-    """单标签页半条回答路径；``tab_id`` 非法时返回 ``None``。"""
-    if not is_valid_tab_id(tab_id):
-        return None
-    return os.path.join(session_dir(), f"{INFLIGHT_PREFIX}{tab_id}.json")
-
-
-def _legacy_autosave_path() -> str:
-    return os.path.join(session_dir(), LEGACY_AUTOSAVE_NAME)
-
-
-def _legacy_inflight_path() -> str:
-    return os.path.join(session_dir(), LEGACY_INFLIGHT_NAME)
+    """标签页 id 是否合法（判定口径在 :func:`src.core.chat_store.is_valid_id`）。"""
+    return chat_store.is_valid_id(tab_id)
 
 
 # --------------------------------------------------------------------------- #
-#  底层读写
+#  连接
 # --------------------------------------------------------------------------- #
-def _write_json_atomic(path: str, payload: Any) -> bool:
-    """原子写入 JSON（0o600）；任何失败只记日志并返回 ``False``，绝不抛出。
+def _open() -> Optional[sqlite3.Connection]:
+    """打开（必要时创建）会话数据库；不可用时返回 ``None`` 而不是抛出。
 
-    对话里可能含未公开的研究内容与 API 相关的推理过程，故文件按 0o600 落盘
-    （Windows 上 chmod 基本无效，靠用户级目录隔离，与 ``secrets.json`` 同策略）。
+    对话持久化是"尽力而为"的旁路：磁盘只读、文件被占用、库文件损坏，都不该让
+    应用启动失败。此时本轮不落盘、日志留痕，用户至少还能用完整功能。
+
+    目录按 0o700 收紧：对话里可能有未公开的研究内容与推理过程。库文件本身是
+    0o600；WAL / SHM 伴生文件沿用 umask，靠目录权限保证他人不可读。
     """
-    directory = os.path.dirname(path)
     try:
-        os.makedirs(directory, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".session_", text=False)
-        os.close(fd)
-    except OSError as e:
-        logger.error("Cannot create session temp file in '%s': %s", directory, e)
-        return False
-
+        os.makedirs(session_dir(), mode=0o700, exist_ok=True)
+    except OSError:
+        pass
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass    # Windows 无 POSIX 权限位，忽略即可
-        os.replace(tmp_path, path)
-        return True
-    except (OSError, TypeError, ValueError) as e:
-        logger.error("Failed to write session snapshot '%s': %s", path, e)
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        return False
-
-
-def _read_json(path: str) -> Optional[Any]:
-    """读取 JSON 快照；缺失或损坏时返回 ``None``（绝不因它中断启动）。"""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
+        conn = chat_store.create_database(db_path(), fmt=SESSION_FORMAT,
+                                          kind=chat_store.KIND_SESSION, wal=True)
+    except Exception as e:      # 数据库不可用不得中断应用
+        logger.error("Cannot open session database '%s': %s", db_path(), e)
         return None
-    except (OSError, ValueError) as e:
-        logger.warning("Cannot read session snapshot '%s': %s", path, e)
+    try:
+        os.chmod(db_path(), 0o600)
+    except OSError:
+        pass    # Windows 无 POSIX 权限位，忽略即可
+    return conn
+
+
+def _open_existing() -> Optional[sqlite3.Connection]:
+    """只读打开已存在的会话库；文件不存在时返回 ``None``（首次启动的常态）。"""
+    path = db_path()
+    if not os.path.isfile(path):
         return None
-
-
-def _messages_of(payload: Any) -> List[Dict[str, Any]]:
-    """从快照 payload 取出消息列表，兼容 ``{"messages": [...]}`` 与裸列表两种形态。"""
-    if isinstance(payload, dict):
-        payload = payload.get("messages")
-    if not isinstance(payload, list):
-        return []
-    return [m for m in payload if isinstance(m, dict)]
+    try:
+        return chat_store.connect(path, readonly=True)
+    except Exception as e:
+        logger.error("Cannot read session database '%s': %s", path, e)
+        return None
 
 
 # --------------------------------------------------------------------------- #
 #  标签页清单
 # --------------------------------------------------------------------------- #
 def save_manifest(active_id: Optional[str], tabs: Any) -> bool:
-    """覆盖写入标签页清单（id / 名称 / 当前活动标签页），返回是否落盘成功。
+    """写入标签页清单（id / 名称 / 顺序 / 活动项），返回是否落盘成功。
 
-    只写清单，不触碰任何标签页的会话内容：本函数成本与标签页**数量**相关，
+    只动清单，不触碰任何标签页的会话内容：本函数成本与标签页**数量**相关，
     与对话长度无关，因此在新建 / 关闭 / 改名 / 切换标签页时调用都是安全的。
     """
     entries: List[Dict[str, str]] = []
@@ -234,154 +205,118 @@ def save_manifest(active_id: Optional[str], tabs: Any) -> bool:
     if not is_valid_tab_id(active) or active not in seen:
         active = entries[0]["id"]
 
-    payload = {
-        "format": SESSION_FORMAT,
-        "version": SESSION_VERSION,
-        "saved_at": time.time(),
-        "active": active,
-        "tabs": entries,
-    }
-    return _write_json_atomic(manifest_path(), payload)
+    conn = _open()
+    if conn is None:
+        return False
+    try:
+        return chat_store.put_manifest(conn, active, entries)
+    except Exception as e:
+        logger.error("Failed to save tab manifest: %s", e)
+        return False
+    finally:
+        conn.close()
 
 
 def load_manifest() -> Tuple[Optional[str], List[Dict[str, str]]]:
     """读取标签页清单，返回 ``(活动标签页 id, [{"id", "name"}, …])``。
 
     没有清单（首次启动，或用户从未打开过标签页）时返回 ``(None, [])``；
-    若存在旧版单文件快照，则先迁移成"一个标签页"再返回（见模块 docstring）。
+    若存在旧版 JSON 快照，则先迁移进数据库再返回（见模块 docstring）。
     """
-    payload = _read_json(manifest_path())
-    active, tabs = _parse_manifest(payload)
-    if tabs:
-        return active, tabs
-
-    migrated = _migrate_legacy_session()
-    if migrated is not None:
-        return migrated
-    return None, []
-
-
-def _parse_manifest(payload: Any) -> Tuple[Optional[str], List[Dict[str, str]]]:
-    """校验清单结构：丢弃非法条目、修正活动标签页、名称回退默认值。"""
-    if not isinstance(payload, dict):
+    conn = _open()
+    if conn is None:
         return None, []
-    raw_tabs = payload.get("tabs")
-    if not isinstance(raw_tabs, list):
+    try:
+        active, tabs = chat_store.read_manifest(conn)
+        if tabs:
+            return active, _normalize_entries(tabs)
+        migrated = _migrate_legacy_json(conn)
+        if migrated:
+            active, tabs = chat_store.read_manifest(conn)
+            return active, _normalize_entries(tabs)
         return None, []
+    except Exception as e:
+        logger.error("Failed to load tab manifest: %s", e)
+        return None, []
+    finally:
+        conn.close()
 
-    tabs: List[Dict[str, str]] = []
+
+def _normalize_entries(tabs: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """清单条目归一：名称限长、空名回退默认值、丢弃非法 id。"""
+    entries: List[Dict[str, str]] = []
     seen = set()
-    for raw in raw_tabs:
+    for raw in tabs or []:
         if not isinstance(raw, dict):
             continue
         tab_id = str(raw.get("id") or "")
         if not is_valid_tab_id(tab_id) or tab_id in seen:
             continue
         seen.add(tab_id)
-        tabs.append({
-            "id": tab_id,
-            "name": clean_tab_name(raw.get("name")) or DEFAULT_TAB_NAME,
-        })
-    if not tabs:
-        return None, []
-
-    active = str(payload.get("active") or "")
-    if not is_valid_tab_id(active) or active not in seen:
-        active = tabs[0]["id"]
-    return active, tabs
-
-
-def _migrate_legacy_session() -> Optional[Tuple[str, List[Dict[str, str]]]]:
-    """把旧版单文件快照迁移为一个标签页；无可迁移内容时返回 ``None``。
-
-    迁移是**幂等**的：成功后旧文件被删除，再次调用只会读清单（已被写入）。
-    """
-    legacy_snapshot = _read_json(_legacy_autosave_path())
-    legacy_inflight = _read_json(_legacy_inflight_path())
-    if legacy_snapshot is None and legacy_inflight is None:
-        return None
-
-    tab_id = new_tab_id()
-    name = DEFAULT_TAB_NAME
-    ok = True
-    if legacy_snapshot is not None:
-        snapshot = dict(legacy_snapshot) if isinstance(legacy_snapshot, dict) else {}
-        snapshot.update({"format": SESSION_FORMAT, "version": SESSION_VERSION})
-        snapshot.setdefault("message_count", len(_messages_of(legacy_snapshot)))
-        ok = _write_json_atomic(tab_snapshot_path(tab_id), snapshot) and ok
-    if legacy_inflight is not None and isinstance(legacy_inflight, dict):
-        inflight = dict(legacy_inflight)
-        inflight.update({"format": SESSION_FORMAT, "version": SESSION_VERSION})
-        ok = _write_json_atomic(tab_inflight_path(tab_id), inflight) and ok
-
-    if not ok:
-        # 迁移失败：保留旧文件原样，下次启动再试（宁可不迁移，也不能丢内容）。
-        logger.error("Legacy chat session migration failed; legacy files are kept as-is.")
-        return None
-
-    if not save_manifest(tab_id, [{"id": tab_id, "name": name}]):
-        logger.error("Legacy chat session migrated but manifest write failed.")
-        return None
-
-    for path in (_legacy_autosave_path(), _legacy_inflight_path()):
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            logger.warning("Failed to remove migrated legacy snapshot '%s': %s", path, e)
-    logger.info("Migrated legacy single-conversation snapshot into tab %s.", tab_id)
-    return tab_id, [{"id": tab_id, "name": name}]
+        entries.append({"id": tab_id,
+                        "name": clean_tab_name(raw.get("name")) or DEFAULT_TAB_NAME})
+    return entries
 
 
 # --------------------------------------------------------------------------- #
 #  单标签页快照：写
 # --------------------------------------------------------------------------- #
-def save_tab(tab_id: str, messages: Any) -> bool:
-    """覆盖写入某标签页的完整会话快照，返回是否落盘成功。
+def save_tab(tab_id: str, messages: Any, name: str = "",
+             tags: Optional[List[str]] = None) -> bool:
+    """覆盖写入某标签页的完整会话，返回是否落盘成功。
 
-    只在轮次边界调用：单次成本与对话长度成正比（序列化 + 写盘），轮内高频调用
-    请用 :func:`save_inflight`。
+    只在轮次边界调用：单次成本与对话长度成正比（序列化 + 压缩 + 写库），轮内
+    高频调用请用 :func:`save_inflight`。
 
-    自 v3 起，小体积附件与图片会先复制进 ``scholar_workspace/assets`` 内容寻址
-    仓库，快照里只记录"原路径 -> 仓库副本"的映射；大文件 / 源文件缺失只记录
-    占位信息。恢复时按映射把消息里的原路径改写成本机仓库路径，因此原文件被移动
-    或删除后，图片与常用附件仍能一起恢复。
+    参考文献与书签由 :func:`src.core.chat_store.put_tab` 写进各自的表：正文里
+    ``[n]`` 指向的著录、支撑原文、书签锚点因此有独立位置，不会因为"消息字典少
+    抄一个字段"而丢失。小体积附件与图片先复制进内容寻址仓库，库里只登记
+    "原路径 -> 仓库副本"，原文件被移动或删除后仍能恢复。
     """
-    path = tab_snapshot_path(tab_id)
-    if path is None:
+    if not is_valid_tab_id(tab_id):
+        logger.warning("Rejected save for invalid tab id: %r", tab_id)
         return False
-    msgs = [sanitize(m) for m in (messages or []) if isinstance(m, dict)]
+    msgs = [chat_store.sanitize(m) for m in (messages or []) if isinstance(m, dict)]
 
-    # 规划 -> 复制到仓库 -> 标注占位符。快照消息保留原始路径，恢复时再由
-    # assets 映射统一改写；这样原路径始终是稳定的匹配键。
+    # 规划 -> 复制到仓库 -> 标注占位符。消息里保留原始路径，恢复时再由资产
+    # 映射统一改写；这样原路径始终是稳定的匹配键。
     embedded, placeholders = chat_assets.plan_assets(
         chat_assets.collect_paths(msgs),
         chat_assets.collect_name_hints(msgs))
     asset_map = chat_assets.materialize_assets(embedded, placeholders)
     chat_assets.annotate_messages(msgs, placeholders, detect_missing=False)
 
-    # 快照里的消息保留**原始路径**，只额外记录"原路径 -> 仓库副本"的映射：
-    #   * 原始路径是稳定的匹配键，工作区整体搬家后仍能通过映射找回副本；
-    #   * 若仓库副本被清理而原文件还在，旧路径依然可用，不会因映射失效而丢图。
-    relative_map = {
-        original: (os.path.relpath(stored, BASE_DIR)
-                   if os.path.abspath(stored).startswith(os.path.abspath(BASE_DIR) + os.sep)
-                   else stored)
-        for original, stored in asset_map.items()
-    }
+    assets = []
+    for original, stored in asset_map.items():
+        meta = embedded.get(original) or {}
+        assets.append({
+            "original": original,
+            "sha256": str(meta.get("sha256") or chat_assets.file_digest(stored) or ""),
+            "name": str(meta.get("name") or os.path.basename(str(original)) or original),
+            "size": int(meta.get("size") or 0),
+            "relpath": _relative_to_base(stored),
+        })
 
-    payload = {
-        "format": SESSION_FORMAT,
-        "version": SESSION_VERSION,
-        "saved_at": time.time(),
-        "message_count": len(msgs),
-        "messages": msgs,
-        # 原路径 -> 仓库路径（相对 BASE_DIR）：恢复时据此改写消息
-        "assets": relative_map,
-        "placeholders": placeholders,
-    }
-    return _write_json_atomic(path, payload)
+    conn = _open()
+    if conn is None:
+        return False
+    try:
+        chat_store.put_tab(conn, tab_id, msgs, name=clean_tab_name(name) or "",
+                           assets=assets, placeholders=placeholders,
+                           tags=tags if tags is not None else None)
+        return True
+    except Exception as e:
+        logger.error("Failed to save chat tab %s: %s", tab_id, e)
+        return False
+    finally:
+        conn.close()
+
+
+def _relative_to_base(path: str) -> str:
+    """仓库路径转成相对 ``BASE_DIR`` 的形式（工作区整体搬家后仍能找回）。"""
+    absolute = os.path.abspath(str(path))
+    root = os.path.abspath(BASE_DIR) + os.sep
+    return os.path.relpath(absolute, BASE_DIR) if absolute.startswith(root) else str(path)
 
 
 def save_inflight(tab_id: str, content: str, force: bool = False) -> bool:
@@ -391,10 +326,8 @@ def save_inflight(tab_id: str, content: str, force: bool = False) -> bool:
         与历史条目同构，恢复时走同一渲染管线）。
     :param force: 为 ``True`` 时跳过节流（退出 / 崩溃兜底用，必须拿到最后一段文本）。
     """
-    path = tab_inflight_path(tab_id)
-    if path is None:
+    if not is_valid_tab_id(tab_id):
         return False
-
     text = str(content or "")
     if not text.strip():
         return False
@@ -411,119 +344,128 @@ def save_inflight(tab_id: str, content: str, force: bool = False) -> bool:
         if (now - state["at"]) < INFLIGHT_MIN_INTERVAL:
             return True
 
-    payload = {
-        "format": SESSION_FORMAT,
-        "version": SESSION_VERSION,
-        "saved_at": time.time(),
-        "content": text,
-    }
-    if not _write_json_atomic(path, payload):
+    conn = _open()
+    if conn is None:
         return False
+    try:
+        chat_store.ensure_tab(conn, tab_id)
+        chat_store.put_inflight(conn, tab_id, text)
+    except Exception as e:
+        logger.error("Failed to save inflight snapshot for %s: %s", tab_id, e)
+        return False
+    finally:
+        conn.close()
     state["at"] = now
     state["text"] = text
     return True
 
 
 def clear_inflight(tab_id: str) -> None:
-    """删除某标签页的半条文件并复位其节流状态（一轮结束、或用户清空对话时调用）。"""
+    """删除某标签页的半条记录并复位其节流状态（一轮结束、或用户清空对话时调用）。"""
     _inflight_last.pop(tab_id, None)
-    path = tab_inflight_path(tab_id)
-    if path is None:
+    if not is_valid_tab_id(tab_id):
+        return
+    if not os.path.isfile(db_path()):
+        return              # 从未落过盘：没有半条可删
+    conn = _open()          # 删除是写操作，必须可写打开
+    if conn is None:
         return
     try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        logger.warning("Failed to remove inflight snapshot: %s", e)
+        chat_store.delete_inflight(conn, tab_id)
+    except Exception as e:
+        logger.warning("Failed to clear inflight snapshot for %s: %s", tab_id, e)
+    finally:
+        conn.close()
 
 
 def clear_tab(tab_id: str) -> None:
-    """删除某标签页的整份会话快照（用户清空对话 / 关闭标签页的唯一落点）。
+    """删除某标签页的全部会话内容（用户清空对话 / 关闭标签页的唯一落点）。
 
-    只删内容文件，**不改清单**：调用方（标签页容器）决定该标签页是"留在清单里
-    （清空）"还是"从清单中移出（关闭）"。
+    只删内容，**不改清单**：调用方（标签页容器）决定该标签页是"留在清单里
+    （清空）"还是"从清单中移出（关闭）"。资产仓库里的副本刻意保留——它们可能
+    被其它标签页或已导入的归档共享。
     """
     _inflight_last.pop(tab_id, None)
-    for path in (tab_snapshot_path(tab_id), tab_inflight_path(tab_id)):
-        if path is None:
-            continue
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            logger.warning("Failed to remove session snapshot '%s': %s", path, e)
-            continue
-        logger.info("Removed chat tab snapshot: %s", path)
+    if not is_valid_tab_id(tab_id):
+        return
+    if not os.path.isfile(db_path()):
+        return
+    conn = _open()          # 删除是写操作，必须可写打开
+    if conn is None:
+        return
+    try:
+        chat_store.delete_tab(conn, tab_id)
+        logger.info("Removed chat tab content: %s", tab_id)
+    except Exception as e:
+        logger.warning("Failed to clear chat tab %s: %s", tab_id, e)
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------- #
 #  单标签页快照：读
 # --------------------------------------------------------------------------- #
-def _restore_snapshot_assets(messages: List[Dict[str, Any]], payload: Any) -> int:
-    """把快照里的资产映射与占位信息应用到内存消息，返回改写处数。
+def _restore_assets(messages: List[Dict[str, Any]], assets: List[Dict[str, Any]],
+                    placeholders: Dict[str, Dict[str, Any]]) -> int:
+    """把库里的资产映射与占位信息应用到内存消息，返回路径改写处数。
 
     仓库文件缺失时（用户手工清理、迁移了工作区）不抛错，而是把该条降级为
     ``store_lost`` 占位符，界面会显示文件名与"内嵌副本缺失"。
     """
-    if not isinstance(payload, dict):
-        return 0
-
-    raw_assets = payload.get("assets")
     asset_map: Dict[str, str] = {}
     lost: Dict[str, Dict[str, Any]] = {}
-    if isinstance(raw_assets, dict):
-        for original, stored in raw_assets.items():
-            if not isinstance(stored, str) or not stored:
-                continue
-            # v3 起存相对 BASE_DIR 的路径：工作区整体搬家后仍能找回；
-            # 早期/绝对路径原样判断，兼容已经落盘的快照。
-            resolved = stored if os.path.isabs(stored) else os.path.join(BASE_DIR, stored)
-            # 只接受仓库内文件：快照可被手工编辑，不能让它把消息路径指向任意本机文件
-            if os.path.isfile(resolved) and chat_assets.is_asset_store_path(resolved):
-                asset_map[str(original)] = resolved
-            else:
-                lost[str(original)] = {
-                    "status": chat_assets.STATUS_STORE_LOST,
-                    "name": os.path.basename(str(original)) or str(original),
-                }
+    for row in assets or []:
+        original = str(row.get("original") or "")
+        stored = str(row.get("relpath") or "")
+        if not original or not stored:
+            continue
+        # 存的是相对 BASE_DIR 的路径：工作区整体搬家后仍能找回；早期绝对路径
+        # （以及仓库外路径）按原样判断，兼容已经落盘的旧快照。
+        resolved = stored if os.path.isabs(stored) else os.path.join(BASE_DIR, stored)
+        # 只接受仓库内文件：库文件可被手工编辑，不能让它把消息路径指向任意本机文件
+        if os.path.isfile(resolved) and chat_assets.is_asset_store_path(resolved):
+            asset_map[original] = resolved
+        else:
+            lost[original] = {
+                "status": chat_assets.STATUS_STORE_LOST,
+                "name": str(row.get("name") or os.path.basename(original) or original),
+            }
 
-    placeholders: Dict[str, Dict[str, Any]] = {}
-    raw_placeholders = payload.get("placeholders")
-    if isinstance(raw_placeholders, dict):
-        placeholders = {str(k): v for k, v in raw_placeholders.items()
-                        if isinstance(v, dict)}
-    placeholders.update(lost)
-
+    merged = dict(placeholders or {})
+    merged.update(lost)
     changed = remap_attachment_paths(messages, asset_map) if asset_map else 0
-    chat_assets.annotate_messages(messages, placeholders, detect_missing=True)
+    chat_assets.annotate_messages(messages, merged, detect_missing=True)
     return changed
 
 
 def load_tab(tab_id: str) -> List[Dict[str, Any]]:
-    """读取某标签页的会话（含未完成的半条）；无可用快照时返回空列表。
+    """读取某标签页的会话（含未完成的半条）；无可用内容时返回空列表。
 
-    快照里的 ``assets`` 会在内存中改写成仓库路径，``placeholders``（以及旧快照里
-    本机不存在的路径）会标注到对应文件条目上，供气泡显示"文件名 + 原因"。
-    旧版快照（无 ``assets``）仍按原路径恢复，不会因此报错。
+    库里的资产映射会在内存中改写成仓库路径，占位说明会标注到对应文件条目上，
+    供气泡显示"文件名 + 原因"。
     """
-    snapshot_path = tab_snapshot_path(tab_id)
-    if snapshot_path is None:
+    if not is_valid_tab_id(tab_id):
+        logger.warning("Rejected load for invalid tab id: %r", tab_id)
         return []
+    conn = _open_existing()
+    if conn is None:
+        return []
+    try:
+        messages, assets, placeholders = chat_store.read_tab(conn, tab_id)
+        inflight = chat_store.read_inflight(conn, tab_id)
+    except Exception as e:
+        logger.error("Failed to load chat tab %s: %s", tab_id, e)
+        return []
+    finally:
+        conn.close()
 
-    payload = _read_json(snapshot_path)
-    messages = _messages_of(payload)
     if not messages:
         # 没有已完成轮次时，孤立的半条回答没有上下文可言，不恢复
         return []
 
-    _restore_snapshot_assets(messages, payload)
+    _restore_assets(messages, assets, placeholders)
 
-    inflight = _read_json(tab_inflight_path(tab_id) or "")
-    text = ""
-    if isinstance(inflight, dict):
-        text = str(inflight.get("content") or "").strip()
+    text = str(inflight or "").strip()
     if not text:
         return messages
 
@@ -534,6 +476,221 @@ def load_tab(tab_id: str) -> List[Dict[str, Any]]:
         # 半条按"被中断"补进历史：与用户主动 Stop 时的状态一致，气泡与续问都按此渲染
         messages.append({"role": "assistant", "content": text, "status": "interrupted"})
     return messages
+
+
+# --------------------------------------------------------------------------- #
+#  标签（一个标签下多个对话 / 一段对话多个标签）
+# --------------------------------------------------------------------------- #
+def load_tab_tags(tab_id: str) -> List[str]:
+    """读取某对话的标签名列表（无库/无标签时为空）。"""
+    if not is_valid_tab_id(tab_id):
+        return []
+    conn = _open_existing()
+    if conn is None:
+        return []
+    try:
+        return chat_store.tab_tags(conn, tab_id)
+    except Exception as e:
+        logger.warning("Failed to read tags of %s: %s", tab_id, e)
+        return []
+    finally:
+        conn.close()
+
+
+def save_tab_tags(tab_id: str, tags: List[str]) -> List[str]:
+    """覆盖写入某对话的标签，返回归一后的标签名。"""
+    if not is_valid_tab_id(tab_id):
+        return []
+    conn = _open()
+    if conn is None:
+        return []
+    try:
+        chat_store.ensure_tab(conn, tab_id)
+        return chat_store.set_tab_tags(conn, tab_id, tags)
+    except Exception as e:
+        logger.warning("Failed to save tags of %s: %s", tab_id, e)
+        return []
+    finally:
+        conn.close()
+
+
+def tabs_with_tag(tag: str) -> List[str]:
+    """某标签下的全部对话 id。"""
+    conn = _open_existing()
+    if conn is None:
+        return []
+    try:
+        return chat_store.tabs_with_tag(conn, tag)
+    except Exception as e:
+        logger.warning("Failed to query tag %r: %s", tag, e)
+        return []
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------- #
+#  旧版 JSON 快照迁移
+# --------------------------------------------------------------------------- #
+def _read_json(path: str) -> Optional[Any]:
+    """读取旧版 JSON 快照；缺失或损坏时返回 ``None``（迁移不得中断启动）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        logger.warning("Cannot read legacy session snapshot '%s': %s", path, e)
+        return None
+
+
+def _messages_of(payload: Any) -> List[Dict[str, Any]]:
+    """从快照 payload 取出消息列表，兼容 ``{"messages": [...]}`` 与裸列表两种形态。"""
+    if isinstance(payload, dict):
+        payload = payload.get("messages")
+    if not isinstance(payload, list):
+        return []
+    return [m for m in payload if isinstance(m, dict)]
+
+
+_DIGEST_IN_NAME_RE = re.compile(r"([0-9a-f]{64})")
+
+
+def _legacy_asset_rows(payload: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """把旧快照的 ``assets`` / ``placeholders`` 转成库里的资产行。
+
+    旧格式是 ``{原路径: 仓库路径}``；这里补上摘要与体积（摘要优先从仓库文件名
+    解析，解析不出就现算一次哈希），其余字段与新版完全一致。
+    """
+    if not isinstance(payload, dict):
+        return [], {}
+    rows: List[Dict[str, Any]] = []
+    raw_assets = payload.get("assets")
+    if isinstance(raw_assets, dict):
+        for original, stored in raw_assets.items():
+            if not isinstance(stored, str) or not stored:
+                continue
+            resolved = stored if os.path.isabs(stored) else os.path.join(BASE_DIR, stored)
+            match = _DIGEST_IN_NAME_RE.search(os.path.basename(resolved))
+            digest = match.group(1) if match else (chat_assets.file_digest(resolved) or "")
+            if not digest:
+                # 找不到本体也拿不到摘要：留给占位说明，别写一条无主的资产行。
+                continue
+            try:
+                size = os.path.getsize(resolved)
+            except OSError:
+                size = 0
+            rows.append({
+                "original": str(original),
+                "sha256": digest,
+                "name": os.path.basename(str(original)) or str(original),
+                "size": size,
+                "relpath": stored,
+            })
+    raw_placeholders = payload.get("placeholders")
+    placeholders = {}
+    if isinstance(raw_placeholders, dict):
+        placeholders = {str(k): v for k, v in raw_placeholders.items()
+                        if isinstance(v, dict)}
+    return rows, placeholders
+
+
+def _legacy_files() -> List[str]:
+    """需要迁移的旧文件（只返回真实存在的）。"""
+    directory = session_dir()
+    found: List[str] = []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return found
+    for name in names:
+        if name in (LEGACY_MANIFEST_NAME, LEGACY_AUTOSAVE_NAME, LEGACY_INFLIGHT_NAME) \
+                or (name.startswith(LEGACY_TAB_PREFIX) and name.endswith(".json")) \
+                or (name.startswith(LEGACY_INFLIGHT_PREFIX) and name.endswith(".json")):
+            path = os.path.join(directory, name)
+            if os.path.isfile(path):
+                found.append(path)
+    return found
+
+
+def _migrate_legacy_json(conn) -> int:
+    """把旧版 JSON 快照迁进数据库，返回迁移的对话数（0 表示无可迁移内容）。
+
+    迁移完成后旧文件被**移动**到 ``legacy/`` 子目录：既保证下次启动不会重跑，
+    又给用户留一份原始数据。
+    """
+    files = _legacy_files()
+    if not files:
+        return 0
+
+    directory = session_dir()
+    migrated = 0
+    try:
+        manifest = _read_json(os.path.join(directory, LEGACY_MANIFEST_NAME))
+    except Exception:   # pragma: no cover - _read_json 已吞异常
+        manifest = None
+
+    tabs: List[Dict[str, str]] = []
+    if isinstance(manifest, dict) and isinstance(manifest.get("tabs"), list):
+        for raw in manifest["tabs"]:
+            if not isinstance(raw, dict):
+                continue
+            tab_id = str(raw.get("id") or "")
+            if not is_valid_tab_id(tab_id):
+                continue
+            tabs.append({"id": tab_id,
+                         "name": clean_tab_name(raw.get("name")) or DEFAULT_TAB_NAME})
+
+    if tabs:
+        active = str(manifest.get("active") or "")
+        for entry in tabs:
+            payload = _read_json(os.path.join(
+                directory, f"{LEGACY_TAB_PREFIX}{entry['id']}.json"))
+            messages = _messages_of(payload)
+            assets, placeholders = _legacy_asset_rows(payload)
+            if messages or assets:
+                chat_store.put_tab(conn, entry["id"], messages,
+                                   name=entry["name"], assets=assets,
+                                   placeholders=placeholders)
+                migrated += 1
+            inflight = _read_json(os.path.join(
+                directory, f"{LEGACY_INFLIGHT_PREFIX}{entry['id']}.json"))
+            if isinstance(inflight, dict) and str(inflight.get("content") or "").strip():
+                chat_store.put_inflight(conn, entry["id"],
+                                        str(inflight.get("content"))[:INFLIGHT_MAX_CHARS])
+        chat_store.put_manifest(conn, active, tabs)
+    else:
+        # 更早的形态：单一 autosave.json（+ inflight.json），没有标签页概念。
+        autosave = _read_json(os.path.join(directory, LEGACY_AUTOSAVE_NAME))
+        inflight = _read_json(os.path.join(directory, LEGACY_INFLIGHT_NAME))
+        if autosave is not None or inflight is not None:
+            tab_id = new_tab_id()
+            messages = _messages_of(autosave)
+            assets, placeholders = _legacy_asset_rows(autosave)
+            chat_store.put_tab(conn, tab_id, messages, name=DEFAULT_TAB_NAME,
+                               assets=assets, placeholders=placeholders)
+            if isinstance(inflight, dict) and str(inflight.get("content") or "").strip():
+                chat_store.put_inflight(conn, tab_id,
+                                        str(inflight.get("content"))[:INFLIGHT_MAX_CHARS])
+            chat_store.put_manifest(conn, tab_id,
+                                    [{"id": tab_id, "name": DEFAULT_TAB_NAME}])
+            migrated += 1
+
+    if not migrated:
+        return 0
+
+    legacy_dir = os.path.join(directory, LEGACY_DIRNAME)
+    try:
+        os.makedirs(legacy_dir, exist_ok=True)
+    except OSError as e:
+        logger.warning("Cannot create legacy dir '%s': %s", legacy_dir, e)
+    for path in files:
+        try:
+            os.replace(path, os.path.join(legacy_dir, os.path.basename(path)))
+        except OSError as e:
+            logger.warning("Failed to archive legacy snapshot '%s': %s", path, e)
+    logger.info("Migrated %d legacy JSON conversation(s) into %s (originals kept in %s).",
+                migrated, DB_NAME, legacy_dir)
+    return migrated
 
 
 # --------------------------------------------------------------------------- #

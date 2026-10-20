@@ -350,6 +350,9 @@ def _clean_ui_token(raw_token: str) -> str:
     clean = re.sub(r'<i.*?>.*?</i>\n*', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'<div.*?class=[\'"]header-.*?</div>\n*', '', clean, flags=re.IGNORECASE | re.DOTALL)
     clean = re.sub(r"<a[^>]*href=['\"]cite://[^>]*>.*?<b>\[(\d+)\]</b>.*?</a>", r"[\1]", clean, flags=re.IGNORECASE)
+    # 行内引用 token（ref://cite?n=N）在 API 输出里还原为裸编号，客户端无需理解内部路由
+    clean = re.sub(r"<a[^>]*href=['\"]ref://cite\?n=(\d+)['\"][^>]*>.*?</a>", r"[\1]", clean,
+                   flags=re.IGNORECASE | re.DOTALL)
     clean = re.sub(r'<br\s*/?>', '\n', clean, flags=re.IGNORECASE)
     clean = re.sub(r'<hr.*?>', '\n---\n', clean, flags=re.IGNORECASE)
     clean = re.sub(r'<b>(.*?)</b>', r'**\1**', clean, flags=re.IGNORECASE)

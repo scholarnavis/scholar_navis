@@ -171,13 +171,15 @@ class ChatTool(BaseTool):
     #  标签页操作
     # ------------------------------------------------------------------ #
     def add_tab(self, name=None, messages=None, activate: bool = True,
-                tab_id: Optional[str] = None) -> str:
+                tab_id: Optional[str] = None, tags=None) -> str:
         """新建标签页并（默认）激活；返回标签页 id。
 
         :param messages: 非空时表示该标签页自带历史（导入 / 恢复场景），
             首次激活时直接回灌，不再读盘。
         :param name: 期望的名称；与现有标签重名时自动追加 `` (n)`` 编号
             （见 :meth:`_unique_tab_name`），因此新建 / 导入都拿不到重名标签。
+        :param tags: 对话标签（导入的归档可能自带）。一个标签下可以放多个对话，
+            一段对话也可以挂多个标签；存储由 :mod:`src.core.chat_session` 负责。
         """
         tab_id = tab_id or chat_session.new_tab_id()
         display = self._unique_tab_name(name)
@@ -187,6 +189,7 @@ class ChatTool(BaseTool):
             "conv": None,
             # 注意：空列表与"无自带历史"语义不同（前者是导入的空对话），统一收敛为 None
             "messages": list(messages) if messages else None,
+            "tags": list(tags or []),
         }
         self._tabs.append(tab)
         if self._tab_bar is not None:
@@ -194,7 +197,7 @@ class ChatTool(BaseTool):
         if tab["messages"]:
             # 自带历史的标签页（导入）立刻落盘：用户完全可能不激活它就直接退出，
             # 只留在内存里等于白丢一份刚导入的对话。
-            chat_session.save_tab(tab_id, tab["messages"])
+            chat_session.save_tab(tab_id, tab["messages"], tags=tab["tags"])
         if activate:
             self.activate_tab(tab_id)
         else:
@@ -244,7 +247,12 @@ class ChatTool(BaseTool):
                 widget.setParent(None)
                 widget.deleteLater()
 
-        # 关闭 = 丢弃该标签页的对话：磁盘快照同步删除，下次启动不再恢复
+        # 关闭 = 丢弃该标签页的对话：私有证据与磁盘快照同步删除。
+        try:
+            from src.core.auto_evidence import delete_conversation_evidence
+            delete_conversation_evidence(tab_id)
+        except Exception as e:
+            logger.warning("Failed to delete private evidence for tab %s: %s", tab_id, e)
         chat_session.clear_tab(tab_id)
         if self._tab_bar is not None:
             self._tab_bar.remove_tab_item(tab_id)
@@ -321,8 +329,10 @@ class ChatTool(BaseTool):
         return chat_session.load_tab(tab["id"])
 
     def collect_tabs_payload(self) -> List[Dict[str, Any]]:
-        """汇总所有标签页的消息，供"导出全部标签页"写出无损归档。"""
-        return [{"name": tab["name"], "messages": self._tab_messages(tab)}
+        """汇总所有标签页的消息与标签，供"导出全部标签页"写出无损归档。"""
+        return [{"name": tab["name"],
+                 "tags": tab.get("tags") or chat_session.load_tab_tags(tab["id"]),
+                 "messages": self._tab_messages(tab)}
                 for tab in self._tabs]
 
     def import_tabs(self, tabs) -> int:
@@ -340,7 +350,8 @@ class ChatTool(BaseTool):
             messages = [m for m in (raw.get("messages") or []) if isinstance(m, dict)]
             if not messages:
                 continue
-            tab_id = self.add_tab(name=raw.get("name"), messages=messages, activate=False)
+            tab_id = self.add_tab(name=raw.get("name"), messages=messages,
+                                  activate=False, tags=raw.get("tags"))
             if first is None:
                 first = tab_id
             created += 1

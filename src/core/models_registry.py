@@ -1,17 +1,22 @@
-import gc
+import glob
 import logging
 import os
 import shutil
 import sys
 import json
-import warnings
+import time
+
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "15")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 from src.core.config_manager import ConfigManager
 from src.core.device_manager import DeviceManager
 
 # 说明：本模块位于启动导入链上（主窗口/工具面板 → models_registry），因此不在
-# 顶层导入 torch 与 KBManager：torch 自带 CUDA 运行库、KBManager 会拉起 chromadb，
-# 二者合计约 1.2 s，而实际都只在个别函数里用到（torch 见 unload_models，
-# KBManager 见 ModelManager.verify_chat_models），按需在函数内导入即可。
+# 顶层导入 KBManager（它会拉起 chromadb）；只在需要的函数内按需导入。
+# 模型下载只接受 ONNX-ready 仓库，不再依赖 torch/optimum 现场导出。
 
 
 
@@ -42,34 +47,91 @@ def _display_name_for(repo_id):
     return repo_id
 
 
+# hf_repo_id 指向已包含 ONNX 的镜像仓库；运行时只下载 ONNX + tokenizer，
+# 不再从 PyTorch 权重现场导出。
 EMBEDDING_MODELS = [
     {
-        "id": "embed_nano_fast",
-        "ui_name": "Nano (Speed Priority) - Snowflake Arctic XS",
-        "hf_repo_id": "Snowflake/snowflake-arctic-embed-xs",
-        "description": "Minimal parameters, suitable for pure CPU environments.",
-        "tags": ["Ultra-Fast", "CPU"],
-        "max_tokens": 512,
-        "dimensions": 384,
+        "id": "embed_qwen3_06b",
+        "ui_name": "Best - Qwen3-Embedding-0.6B",
+        "hf_repo_id": "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+        "onnx_file": "onnx/model_int8.onnx",
+        "description": "Best open multilingual quality under 1B; 32K context, last-token pooling.",
+        "tags": ["Best Quality", "Multilingual", "GPU Recommended"],
+        "params": "0.6B",
+        "max_tokens": 32768,
+        "tokenizer_max_length": 2048,
+        "dimensions": 1024,
         "trust_remote_code": False,
-        "chunk_size": 400,
-        "chunk_overlap": 80,
-        "batch_size": 64,
+        "pooling": "last_token",
+        "query_instruction": ("Given a scientific question, retrieve passages "
+                              "that answer the question"),
+        "chunk_size": 1200,
+        "chunk_overlap": 200,
+        "batch_size": 16,
         "recommended_config": {
-            "device_priority": "CPU",
-            "min_ram": "512 MB",
-            "disk_space": "100 MB"
+            "device_priority": "GPU Recommended",
+            "min_ram": "4 GB",
+            "disk_space": "800 MB"
+        }
+    },
+    {
+        "id": "embed_bge_large_en",
+        "ui_name": "English Fast - BGE-Large-EN-v1.5",
+        "hf_repo_id": "Xenova/bge-large-en-v1.5",
+        "onnx_file": "onnx/model_int8.onnx",
+        "description": "Strong English retrieval; 512 tokens, 1024 dims; much faster than 0.6B models.",
+        "tags": ["English", "Fast", "CPU Friendly"],
+        "params": "335M",
+        "max_tokens": 512,
+        "tokenizer_max_length": 512,
+        "dimensions": 1024,
+        "trust_remote_code": False,
+        "pooling": "cls",
+        "chunk_size": 1000,
+        "chunk_overlap": 160,
+        "batch_size": 16,
+        "recommended_config": {
+            "device_priority": "CPU Friendly",
+            "min_ram": "1 GB",
+            "disk_space": "400 MB"
+        }
+    },
+    {
+        "id": "embed_gemma_300m",
+        "ui_name": "CPU/Edge - EmbeddingGemma 308M",
+        "hf_repo_id": "onnx-community/embeddinggemma-300m-ONNX",
+        "onnx_file": "onnx/model_quantized.onnx",
+        "description": ("308M multilingual, 2K tokens, 768 dims, built-in "
+                        "sentence embedding. Low RAM; Gemma license, check commercial terms."),
+        "tags": ["CPU Friendly", "Multilingual", "On-device"],
+        "params": "308M",
+        "max_tokens": 2048,
+        "tokenizer_max_length": 2048,
+        "dimensions": 768,
+        "trust_remote_code": False,
+        "pooling": "sentence_embedding",
+        "chunk_size": 1000,
+        "chunk_overlap": 160,
+        "batch_size": 16,
+        "recommended_config": {
+            "device_priority": "CPU Friendly",
+            "min_ram": "1 GB",
+            "disk_space": "400 MB"
         }
     },
     {
         "id": "embed_scientific_m3",
         "ui_name": "Scientific (Best for Bio) - BGE-M3",
-        "hf_repo_id": "BAAI/bge-m3",
+        "hf_repo_id": "Xenova/bge-m3",
+        "onnx_file": "onnx/model_int8.onnx",
         "description": "Flagship model. Excellent understanding of rare terminology. Supports 8k context.",
         "tags": ["Academic", "Multilingual"],
+        "params": "568M",
         "max_tokens": 8192,
+        "tokenizer_max_length": 2048,
         "dimensions": 1024,
         "trust_remote_code": True,
+        "pooling": "cls",
         "chunk_size": 1200,
         "chunk_overlap": 200,
         "batch_size": 16,
@@ -82,13 +144,30 @@ EMBEDDING_MODELS = [
     }
 ]
 
+# 只用于已存在的 KB 读取，不再出现在模型选择列表/新库里。
+LEGACY_EMBEDDING_MODELS = {
+    "embed_nano_fast": {
+        "id": "embed_nano_fast",
+        "ui_name": "Legacy - Snowflake Arctic XS",
+        "hf_repo_id": "Snowflake/snowflake-arctic-embed-xs",
+        "max_tokens": 512,
+        "dimensions": 384,
+        "trust_remote_code": False,
+        "pooling": "cls",
+        "chunk_size": 400,
+        "chunk_overlap": 80,
+        "batch_size": 64,
+    },
+}
+
 RERANKER_MODELS = [
     {
         "id": "rerank_lite",
         "ui_name": "Lite - BGE-Reranker-Base",
-        "hf_repo_id": "BAAI/bge-reranker-base",
-        "description": "Fast, CPU-friendly. Window limit: 512 tokens.",
+        "hf_repo_id": "Xenova/bge-reranker-base",
+        "description": "Legacy fast model kept only for existing configurations.",
         "max_chunk_size": 400,
+        "hidden": True,
         "recommended_config": {
             "device_priority": "CPU Friendly",
             "min_ram": "2 GB",
@@ -97,15 +176,39 @@ RERANKER_MODELS = [
     },
     {
         "id": "rerank_pro_m3",
-        "ui_name": "Pro (Standard) - BGE-Reranker-v2-M3",
-        "hf_repo_id": "BAAI/bge-reranker-v2-m3",
-        "description": "Multi-language & long text support. GPU recommended.",
+        "ui_name": "Balanced - BGE-Reranker-v2-M3",
+        "hf_repo_id": "onnx-community/bge-reranker-v2-m3-ONNX",
+        "onnx_file": "onnx/model_quantized.onnx",
+        "description": "0.6B multilingual cross-encoder; best drop-in classifier; 512-token window.",
+        "params": "0.6B",
+        "scoring": "classifier",
+        "tokenizer_max_length": 512,
         "max_chunk_size": 2000,
         "recommended_config": {
             "device_priority": "GPU Recommended",
             "min_ram": "8 GB",
             "min_vram": "6 GB",
             "disk_space": "2.5 GB"
+        }
+    },
+    {
+        "id": "rerank_qwen3_06b",
+        "ui_name": "Quality - Qwen3-Reranker-0.6B",
+        "hf_repo_id": "onnx-community/Qwen3-Reranker-0.6B-ONNX",
+        "onnx_file": "onnx/model_quantized.onnx",
+        "description": ("0.6B causal reranker; strong multilingual ranking; 32K context. "
+                        "Scores yes/no logits; slower than BGE classifier."),
+        "params": "0.6B",
+        "scoring": "qwen3_yes_no",
+        "query_instruction": ("Given a scientific question, retrieve passages "
+                              "that answer the question"),
+        "tokenizer_max_length": 4096,
+        "max_chunk_size": 2000,
+        "recommended_config": {
+            "device_priority": "GPU Recommended",
+            "min_ram": "4 GB",
+            "min_vram": "3 GB",
+            "disk_space": "1.3 GB"
         }
     }
 ]
@@ -125,9 +228,9 @@ def get_optimal_chunk_settings(embedding_model_id: str, reranker_model_id: str):
 
     # 解析 AUTO 宏
     if embedding_model_id == "embed_auto":
-        embedding_model_id = resolve_auto_model("embedding", dev) or "embed_nano_fast"
+        embedding_model_id = resolve_auto_model("embedding", dev) or "embed_qwen3_06b"
     if reranker_model_id == "rerank_auto":
-        reranker_model_id = resolve_auto_model("reranker", dev) or "rerank_lite"
+        reranker_model_id = resolve_auto_model("reranker", dev) or "rerank_pro_m3"
 
     embed_conf = get_model_conf(embedding_model_id, "embedding") or EMBEDDING_MODELS[0]
     rerank_conf = get_model_conf(reranker_model_id, "reranker") or RERANKER_MODELS[0]
@@ -150,25 +253,13 @@ def get_optimal_chunk_settings(embedding_model_id: str, reranker_model_id: str):
 
 
 def resolve_auto_model(model_type="embedding", device="cpu"):
-    # DeviceManager 返回的是带序号的设备串（"cuda:0" / "dml:1" / "rocm:0" / "coreml"），
-    # 精确匹配会永远判定为"无 GPU"，导致 auto 永远落到最小模型。按前缀识别。
-    # 任一硬件加速前缀都算 GPU：漏判会让选了加速器的用户反而拿到最小模型。
-    device_str = str(device or "").strip().lower()
-    has_gpu = device_str.startswith((
-        "cuda", "dml", "directml", "rocm", "coreml", "mps",
-    ))
-
     if model_type == "embedding":
-        if has_gpu:
-            return "embed_scientific_m3"
-        else:
-            return "embed_nano_fast"
+        # Qwen3-Embedding 0.6B 是当前兼顾质量与体积的最佳默认；
+        # BGE-M3 保留为兼容/备选，Snowflake XS 仅服务旧知识库。
+        return "embed_qwen3_06b"
 
     elif model_type == "reranker":
-        if has_gpu:
-            return "rerank_pro_m3"
-        else:
-            return "rerank_lite"
+        return "rerank_pro_m3"
 
     return None
 
@@ -176,7 +267,10 @@ def resolve_auto_model(model_type="embedding", device="cpu"):
 def get_model_conf(model_id, model_type="embedding"):
     target_list = EMBEDDING_MODELS if model_type == "embedding" else RERANKER_MODELS
     for m in target_list:
-        if m['id'] == model_id: return m
+        if m['id'] == model_id:
+            return m
+    if model_type == "embedding":
+        return LEGACY_EMBEDDING_MODELS.get(model_id)
     return None
 
 
@@ -187,21 +281,37 @@ def init_external_models_file():
         cfg.save_external_models(default_structure)
 
 
+_LEGACY_ONNX_REPOS = {
+    "Xenova/snowflake-arctic-embed-xs": "Snowflake/snowflake-arctic-embed-xs",
+    "Xenova/bge-m3": "BAAI/bge-m3",
+    "Xenova/bge-reranker-base": "BAAI/bge-reranker-base",
+    "onnx-community/bge-reranker-v2-m3-ONNX": "BAAI/bge-reranker-v2-m3",
+    "Xenova/bge-reranker-v2-m3": "BAAI/bge-reranker-v2-m3",
+}
+
+
+def _repo_candidates(repo_id):
+    legacy = _LEGACY_ONNX_REPOS.get(repo_id)
+    return [repo_id] + ([legacy] if legacy else [])
+
+
 def check_model_exists(repo_id):
     if not repo_id:
         return False
 
     hf_home = _get_hf_home()
-    onnx_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
+    for candidate in _repo_candidates(repo_id):
+        onnx_dir = os.path.join(hf_home, "models--" + candidate.replace("/", "--"))
+        logger.info(f"Detecting ONNX model path: {onnx_dir}")
+        if os.path.exists(onnx_dir):
+            for root, dirs, files in os.walk(onnx_dir):
+                if any(f.endswith('.onnx') for f in files):
+                    logger.info(f"Success! .onnx file found at this path.")
+                    return True
 
-    logger.info(f"Detecting ONNX model path: {onnx_dir}")
-
-    if os.path.exists(onnx_dir):
-        for root, dirs, files in os.walk(onnx_dir):
-            if any(f.endswith('.onnx') for f in files):
-                logger.info(f"Success! .onnx file found at this path.")
-                return True
-
+    for candidate in _repo_candidates(repo_id):
+        if _official_check(candidate) or _manual_check(candidate):
+            return True
     logger.warning(f"Failed! No .onnx file found at path {onnx_dir}, or directory does not exist.")
     return False
 
@@ -286,7 +396,7 @@ def _repair_model_links(repo_id):
         for folder in ["snapshots", "refs"]:
             p = os.path.join(repo_dir, folder)
             if os.path.exists(p): shutil.rmtree(p, ignore_errors=True)
-        snapshot_download(repo_id, resume_download=True)
+        snapshot_download(repo_id, etag_timeout=15)
         return True
     except (ImportError, OSError, ValueError, RuntimeError): return False
 
@@ -344,99 +454,84 @@ def get_model_type_by_repo(repo_id):
     return "embedding"
 
 
-def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False, allow_download=True):
+def _preferred_onnx_file(repo_id):
+    for m in EMBEDDING_MODELS + RERANKER_MODELS:
+        if m.get("hf_repo_id") == repo_id and m.get("onnx_file"):
+            return str(m["onnx_file"])
+    return ""
+
+
+def ensure_onnx_model(repo_id, model_type=None, onnx_files_available=False,
+                      allow_download=True, preferred_file=None):
+    """确保本地有可直接运行的 ONNX 模型。
+
+    模型仓库必须是 ONNX-ready（例如 Xenova/*-ONNX 镜像）。不再从 PyTorch
+    权重现场导出：那一步需要 torch/optimum，已从基础依赖中移除。
+    ``preferred_file`` 可避免把仓库里所有量化变体都下载下来。
+    """
     hf_home = _get_hf_home()
     onnx_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
     logger.info(f"Requesting model: {repo_id} | Target ONNX cache dir: {onnx_dir}")
-    # 检查本地是否已有 ONNX 缓存
-    if os.path.exists(onnx_dir):
-        for root, dirs, files in os.walk(onnx_dir):
-            if any(f.endswith('.onnx') for f in files):
-                logger.info("Local ONNX cache hit, skipping download and conversion.")
-                return onnx_dir
-    # 禁止自动下载（如仅在使用/加载时调用）：模型缺失直接抛清晰提示，
-    # 引导用户去设置里手动下载，避免后台悄悄联网拉取大模型。
+    for candidate in _repo_candidates(repo_id):
+        candidate_dir = os.path.join(hf_home, "models--" + candidate.replace("/", "--"))
+        if not os.path.exists(candidate_dir):
+            continue
+        for _root, _dirs, files in os.walk(candidate_dir):
+            if any(f.endswith(".onnx") for f in files):
+                logger.info("Local ONNX cache hit: %s", candidate_dir)
+                return candidate_dir
     if not allow_download:
         raise ModelMissingError(repo_id, _display_name_for(repo_id), model_type or "model")
-    logger.info("Local ONNX cache miss, preparing for download and conversion...")
-    logger.info("Loading heavy AI frameworks (Transformers/Optimum) into memory...")
+
     from huggingface_hub import snapshot_download
-    from transformers import AutoTokenizer
-    from optimum.onnxruntime import ORTModelForFeatureExtraction, ORTModelForSequenceClassification
-    # 根据 onnx_files_available 标志位决定下载策略
-    if onnx_files_available:
-        logger.info("Remote ONNX detected. Downloading optimized fileset (skipping large weights).")
-        # 使用 ignore_patterns 过滤掉大权重文件，只下载 ONNX 和配置文件
-        ignore_patterns = ["*.bin", "*.safetensors", "*.h5", "*.msgpack", "*.pt", "*.pth"]
-        model_path = snapshot_download(repo_id=repo_id, ignore_patterns=ignore_patterns)
-        source_has_onnx = True  # 既然是远程检测到的，这里必然为 True
+    preferred = preferred_file or _preferred_onnx_file(repo_id)
+    logger.info("Downloading ONNX fileset (no PyTorch conversion)%s...",
+                f", preferred={preferred}" if preferred else "")
+    # 直接落到应用缓存目录；ONNX 仓库通常把模型放在 onnx/ 子目录，递归查找。
+    allow_patterns = ["*.json", "*.txt", "*.model", "*.spm"]
+    if preferred:
+        # 只取首选变体及其外部权重，避免为了 model.onnx_data 顺带拉 2GB。
+        allow_patterns.extend([preferred, preferred + "_data",
+                               preferred + ".data"])
     else:
-        # 原有逻辑：下载所有文件
-        model_path = snapshot_download(repo_id=repo_id)
-        source_has_onnx = False
-        for root, dirs, files in os.walk(model_path):
-            if any(f.endswith('.onnx') for f in files):
-                source_has_onnx = True
-                break
-    should_export = not source_has_onnx
-    if source_has_onnx:
-        logger.info("Official ONNX model detected in downloaded source, skipping format conversion.")
-    else:
-        logger.info("No official ONNX model detected, starting PyTorch to ONNX engine...")
-    if not model_type:
-        model_type = get_model_type_by_repo(repo_id)
-    is_trust_remote = False
-    for m in EMBEDDING_MODELS + RERANKER_MODELS:
-        if m.get('hf_repo_id') == repo_id:
-            is_trust_remote = m.get('trust_remote_code', False)
+        allow_patterns.extend(["*.onnx", "*.onnx_data*"])
+    # 清理上次异常退出的下载锁；否则 hf_hub 会无限等待 “acquire lock”。
+    if os.path.isdir(onnx_dir):
+        for lock_file in glob.glob(
+                os.path.join(onnx_dir, "**", "*.lock"), recursive=True):
+            try:
+                os.remove(lock_file)
+                logger.warning("Removed stale model download lock: %s", lock_file)
+            except OSError as e:
+                logger.warning("Cannot remove model download lock %s: %s",
+                               lock_file, e)
+    last_error = None
+    for attempt in range(4):
+        try:
+            snapshot_download(
+                repo_id=repo_id,
+                local_dir=onnx_dir,
+                allow_patterns=allow_patterns,
+                ignore_patterns=["*.bin", "*.safetensors", "*.h5", "*.msgpack",
+                                 "*.pt", "*.pth", "*.ckpt"],
+                etag_timeout=15,
+                max_workers=1,
+            )
             break
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=is_trust_remote
-        )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            if model_type == "embedding":
-                model = ORTModelForFeatureExtraction.from_pretrained(
-                    model_path,
-                    export=should_export,
-                    provider="CPUExecutionProvider",
-                    trust_remote_code=is_trust_remote
-                )
-            else:
-                model = ORTModelForSequenceClassification.from_pretrained(
-                    model_path,
-                    export=should_export,
-                    provider="CPUExecutionProvider",
-                    trust_remote_code=is_trust_remote
-                )
-        os.makedirs(onnx_dir, exist_ok=True)
-        model.save_pretrained(onnx_dir)
-        tokenizer.save_pretrained(onnx_dir)
-        logger.info(f"ONNX processing complete and saved to: {onnx_dir}")
-    except Exception as e:
-        logger.error(f"ONNX Export Failed (Possible Out of Memory for 7B+ models): {str(e)}")
-        raise e
-    finally:
-        # 无论成功失败，尝试释放内存
-        if 'model' in locals(): del model
-        if 'tokenizer' in locals(): del tokenizer
-        gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-    folder_name = "models--" + repo_id.replace("/", "--")
-    hf_model_dir = os.path.join(hf_home, "hub", folder_name)
-    if os.path.exists(hf_model_dir):
-        try:
-            shutil.rmtree(hf_model_dir)
-            logger.info(f"Cleaned up original PyTorch cache to save disk space: {hf_model_dir}")
         except Exception as e:
-            logger.warning(f"Failed to clean original cache: {e}")
+            last_error = e
+            logger.warning("ONNX download attempt %d/4 failed: %s", attempt + 1, e)
+            if attempt < 3:
+                time.sleep(min(2 ** attempt, 8))
+    else:
+        raise last_error
+    if not any(f.endswith(".onnx")
+               for _root, _dirs, files in os.walk(onnx_dir) for f in files):
+        raise RuntimeError(
+            f"{repo_id} does not contain an ONNX file. "
+            "Automatic PyTorch-to-ONNX conversion has been removed; "
+            "choose an ONNX-ready model repository.")
+    logger.info("ONNX model ready: %s", onnx_dir)
     return onnx_dir
 
 

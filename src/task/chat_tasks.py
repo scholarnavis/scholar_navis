@@ -5,6 +5,8 @@ import os
 import re
 import time
 import uuid
+from typing import List, Tuple
+
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask, TaskState
 from src.core.device_manager import DeviceManager
@@ -13,9 +15,9 @@ from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
-from src.core.references import (FOOTER_RULE_HTML, PROVENANCE_HEADER_HTML,
-                                 ReferenceItem, ReferenceRegistry,
-                                 strip_unregistered_cite_keys)
+from src.core.references import (CITE_LINK_RE, FOOTER_RULE_HTML,
+                                 PROVENANCE_HEADER_HTML, ReferenceItem,
+                                 ReferenceRegistry, citation_href)
 from src.core.evidence import EvidenceStore, is_usable_source_text
 from src.core.prompt_rules import (CITATION_TOKEN_RULE,
                                    LANGUAGE_AND_PUNCTUATION_RULE)
@@ -39,6 +41,237 @@ logger = logging.getLogger(__name__)
 # 或关闭本轮 deep 模式。
 _DEEP_PLAN_CONFIRMED_TAG = "[DEEP_PLAN_CONFIRMED]"
 _DEEP_PLAN_SKIPPED_TAG = "[DEEP_PLAN_SKIPPED]"
+
+
+_EVIDENCE_CITE_RE = re.compile(r"\[\d+(?:\s*[,–\-]\s*\d+)*\]")
+_EVIDENCE_HIGH_RISK_RE = re.compile(
+    r"(?:\b(?:19|20)\d{2}\b"
+    r"|\b[A-Z]{2,}[0-9]{1,4}\b"
+    r"|\b\d+(?:\.\d+)?\s*(?:%|mg|g|mM|μM|nM|nm|kDa|bp|kb)\b"
+    r"|研究表明|研究发现|结果显示|已被证实|显著|已知"
+    r"|studies?\s+(?:show|found|reported|demonstrated)"
+    r"|was\s+(?:shown|found|reported|demonstrated))",
+    re.IGNORECASE,
+)
+
+
+_RESEARCH_CONTEXT_HINTS = (
+    "研究", "文献", "论文", "综述", "机制", "基因", "蛋白", "通路", "表达",
+    "突变", "表型", "信号", "文献", "reference", "paper", "study", "literature",
+    "mechanism", "gene", "protein", "pathway", "mutation", "phenotype",
+)
+
+
+def _looks_research_query(query: str) -> bool:
+    low = str(query or "").lower()
+    return any(hint in low for hint in _RESEARCH_CONTEXT_HINTS)
+
+
+_NON_GENE_ACRONYMS = {
+    "DNA", "RNA", "ATP", "GTP", "PCR", "ROS", "ABA", "IAA", "GA", "JA",
+    "SA", "ET", "WT", "SD", "SE", "CI", "ANOVA", "UV", "IR", "MS", "NMR",
+    "PBS", "BSA", "EDTA", "SDS", "PAGE", "HPLC", "LC", "GC", "FPKM", "TPM",
+}
+_CITE_NUMBER_RE = re.compile(r"\[(\d+(?:\s*[,–\-]\s*\d+)*)\]")
+_SIGNAL_TOKEN_RE = re.compile(
+    r"\b[A-Za-z]{2,}\d+\b"
+    r"|\b[A-Z]{2,}\b"
+    r"|\b(?:19|20)\d{2}\b"
+    r"|\b\d+(?:\.\d+)?\s*(?:%|mg|g|mM|μM|nM|nm|kDa|bp|kb)\b")
+
+
+def _verify_citation_support(text: str, ordered) -> str:
+    """检查句子里的基因名/年份/数值是否真的出现在对应引用片段中。
+
+    这不是完整的语义蕴含，但能抓住最常见的一类错误：引用了 A 文献，句子却
+    在说 B 文献里的基因/数字（典型如 "Cys39 是燕麦编号"）。只要句中出现
+    高辨识度 token，而所有被引片段的原文都不包含它，就标记为“引用未直接支持”。
+    """
+    items = {getattr(it, "index", None): it for it in (ordered or [])}
+    if not items:
+        return text
+    out = []
+    flagged = 0
+    in_hidden = False
+    in_code = False
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        # 思考 / 工具过程块与代码块不参与：它们是过程与代码，不是待校验的论断。
+        opens = stripped.count("<think>") + stripped.count("<mcp_process>")
+        closes = stripped.count("</think>") + stripped.count("</mcp_process>")
+        if in_hidden:
+            if closes >= opens:
+                in_hidden = False
+            out.append(line)
+            continue
+        if opens:
+            if opens > closes:
+                in_hidden = True
+            out.append(line)
+            continue
+        if stripped.startswith("```"):
+            in_code = not in_code
+            out.append(line)
+            continue
+        if in_code:
+            out.append(line)
+            continue
+        nums = []
+        for group in _CITE_NUMBER_RE.findall(line):
+            for part in re.split(r"[,–\-]", group):
+                part = part.strip()
+                if part.isdigit():
+                    nums.append(int(part))
+        signals = {s for s in _SIGNAL_TOKEN_RE.findall(line)
+                   if not re.fullmatch(r"(?:19|20)\d{2}", s)}
+        snippets = [str(getattr(items.get(n), "snippet", "") or "")
+                    for n in nums if n in items]
+        snippets = [s for s in snippets if s.strip()]
+        if nums and signals and snippets:
+            corpus = " ".join(snippets).lower()
+            genes = {s for s in signals
+                     if re.fullmatch(r"(?:[A-Za-z]{2,}\d+|[A-Z]{2,})", s)
+                     and s.upper() not in _NON_GENE_ACRONYMS}
+            # 摘要往往只提一个基因/一个年份，不能要求句子里所有 token 都出现。
+            # 只要引用的任一片段里出现了任一关键 token，就不标“未直接支持”；
+            # 全都没出现才提示——宁可少标，也不要把正常学术句误伤成红色。
+            supported = any(sig.lower() in corpus
+                            for sig in (genes or signals))
+            if not supported:
+                out.append(line.rstrip() + "（引用未直接支持）")
+                flagged += 1
+                continue
+        out.append(line)
+    body = "\n".join(out)
+    if flagged:
+        body += ("\n\n> 引用校验 / Citation check: 标有“引用未直接支持”的句子中，"
+                 "关键基因名/年份/数值未出现在对应来源原文里。")
+    return body
+
+
+#: 证据行：模型在这些行里给出某条结论的出处（"依据：…[3]"、"Source: …"）。
+#: 它本身不是待判定的论断，而是**前面那组陈述**的来源说明。
+_EVIDENCE_TAIL_RE = re.compile(
+    r"^[\s\-*•]*(?:依据|证据|来源|出处|对应文献|参考文献"
+    r"|evidence|sources?|refs?|references?)\s*[:：]",
+    re.IGNORECASE,
+)
+
+
+def _split_blocks(body: str):
+    """按空行把正文切成 ``[(kind, text), …]``，``kind`` 为 ``"block"``/``"sep"``。
+
+    判定粒度必须是**段落**而不是行：学术回答常写成"陈述一行、依据一行"，
+    按行判会把每条陈述都判成"无来源"——那正是满屏"（未核实）"的来源。
+    """
+    parts = re.split(r"(\n[ \t]*\n)", body)
+    return [("sep" if index % 2 else "block", part) for index, part in enumerate(parts)]
+
+
+def _apply_evidence_gate(text: str, has_sources: bool,
+                         research_context: bool = True) -> str:
+    """给没有来源的高风险段落加“未核实”，不删原文。
+
+    ``research_context`` 为 False 时直接放行：代码/普通问答不应该因为出现
+    年份或数字就被扣上“未核实”。
+
+    - 有证据库来源：只标出含数字/年份/基因名/“研究表明”等高风险信号、
+      却没有任何 ``[n]`` 引用的**陈述组**；
+    - 没有来源：整段回答末尾加一条明确的证据状态说明。
+
+    判定以"陈述组"为单位：连续的陈述段落 + 紧随其后的"依据：…"行算一组，组内
+    任意一处有编号即视为已落来源；整组都没有编号时，只在**组内最后一段**标一次。
+    按行逐句标会把"陈述一行、依据一行"的写法整篇标红（实测一条 14 段的回答被
+    标了 14 处），提醒反而失效。
+
+    这是**展示层门禁**，不替换模型内容；目的是让用户一眼看到哪些段落没有
+    落到具体文献，而不是把整段答案删掉或强行改写。
+    """
+    body = str(text or "")
+    if not body.strip() or not research_context:
+        return body
+
+    flagged = 0
+    if has_sources:
+        segments = _split_blocks(body)
+        in_code = False
+        in_hidden = False
+        pending: List[int] = []          # 尚未落来源的陈述块（当前组）
+        groups: List[Tuple[List[int], bool]] = []
+
+        for index, (kind, chunk) in enumerate(segments):
+            if kind == "sep":
+                continue
+            stripped = chunk.strip()
+            if not stripped:
+                continue
+            # 代码块整段跳过；思考 / 工具过程块同样不参与判定。三者都要**跨块**
+            # 维护状态：块与块之间只隔一个空行，标签只出现在块首/块尾，若只看
+            # 当前块，思考正文会被当成普通段落——之前正是这样把"（未核实）"标进了
+            # Reasoning 面板里。
+            if "```" in stripped:
+                if stripped.count("```") % 2:
+                    in_code = not in_code
+                continue
+            if in_code:
+                continue
+            opens = stripped.count("<think>") + stripped.count("<mcp_process>")
+            closes = stripped.count("</think>") + stripped.count("</mcp_process>")
+            if in_hidden:
+                if closes >= opens:
+                    in_hidden = False
+                continue
+            if opens:
+                if opens > closes:
+                    in_hidden = True
+                continue
+
+            lines = [line for line in stripped.splitlines() if line.strip()]
+            first = lines[0].strip()
+            cited = bool(_EVIDENCE_CITE_RE.search(stripped))
+            if _EVIDENCE_TAIL_RE.match(first):
+                # 依据行：给前面那组陈述背书；有编号即整组已落来源。
+                groups.append((pending, cited))
+                pending = []
+                continue
+            if first.startswith(("#", "|", ">", "<", "!")) or first.startswith("---"):
+                groups.append((pending, False))
+                pending = []
+                continue
+            if cited:
+                groups.append((pending + [index], True))
+                pending = []
+            else:
+                pending.append(index)
+        if pending:
+            groups.append((pending, False))
+
+        for block_ids, supported in groups:
+            if supported or not block_ids:
+                continue
+            group_text = " ".join(segments[i][1].strip() for i in block_ids)
+            if not _EVIDENCE_HIGH_RISK_RE.search(group_text):
+                continue
+            target = block_ids[-1]
+            kind, chunk = segments[target]
+            if "未核实" in chunk or "引用未直接支持" in chunk:
+                continue
+            marker = ("（未核实）" if any("\u4e00" <= ch <= "\u9fff" for ch in chunk)
+                      else " [unverified]")
+            segments[target] = (kind, chunk.rstrip() + marker)
+            flagged += 1
+        body = "".join(chunk for _kind, chunk in segments)
+        if flagged:
+            body += ("\n\n> 证据状态 / Evidence: 标有未核实的段落未附具体文献来源 / "
+                     "paragraphs marked unverified have no attached source.")
+    else:
+        if len(body.strip()) >= 80 and _EVIDENCE_HIGH_RISK_RE.search(body):
+            body += ("\n\n> 证据状态 / Evidence: 本轮没有检索到可用文献 / "
+                     "no usable literature evidence was retrieved this turn; "
+                     "以上内容未核实 / the response above is unverified.")
+    if flagged:
+        logger.info("Evidence gate flagged %d uncited paragraph group(s).", flagged)
+    return body
 
 
 def _source_dedupe_key(meta):
@@ -66,6 +299,34 @@ def _source_dedupe_key(meta):
     return None
 
 
+def _has_visible_answer(text: str) -> bool:
+    """正文里是否真有"回答"（去掉思考块、过程块、控制标记与纯 HTML 后仍非空）。
+
+    工具循环跑满却没有产出结论时，缓存里只剩思考与"我先检索…"的过程文本；若照原样
+    上屏，用户看到的是一个只有页脚的空气泡——那是比报错更糟的结果。
+    """
+    body = strip_think_blocks(str(text or ""))
+    body = re.sub(r"\[(?:CLEAR_SEARCH|START_LLM_NETWORK)\]", "", body)
+    body = re.sub(r"<[^>]+>", "", body)
+    return bool(body.strip())
+
+
+def _absorb_usage(target, usage) -> None:
+    """把一份 ``{"prompt_tokens", "completion_tokens", "estimated"}`` 累加进 ``target``。
+
+    深度模式是"N 路并行子 Agent + 一次合成"：每路都有自己的 runtime 统计，不汇总
+    的话外层 agent 用量恒为 0，UI 的 token 计数器整轮都不显示。
+    """
+    if not isinstance(target, dict) or not isinstance(usage, dict):
+        return
+    target["prompt_tokens"] = (int(target.get("prompt_tokens", 0) or 0)
+                               + int(usage.get("prompt_tokens", 0) or 0))
+    target["completion_tokens"] = (int(target.get("completion_tokens", 0) or 0)
+                                   + int(usage.get("completion_tokens", 0) or 0))
+    if usage.get("estimated"):
+        target["estimated"] = True
+
+
 def _registry_item_from_source(index, meta):
     """把 sources_map 的来源元数据规整为参考文献条目（单一映射定义）。
 
@@ -85,10 +346,30 @@ def _registry_item_from_source(index, meta):
     if not is_usable_source_text(snippet):
         snippet = ""
     verified = bool(snippet)
+
+    # 论文级元数据优先：自动检索 / 付费墙下载 / 用户上传都应生成
+    # "论文"引用，而不是笼统的 local_document / 知识库。
+    doi = str(meta.get("doi") or "").strip().replace("https://doi.org/", "")
+    title = str(meta.get("title") or "").strip()
+    authors = str(meta.get("authors") or "").strip()
+    year = str(meta.get("year") or "").strip()
+    journal = str(meta.get("journal") or "").strip()
+    url = str(meta.get("url") or "").strip()
+    kind = str(meta.get("kind") or "").strip()
+
     if path.lower().startswith(("http://", "https://")):
-        title = re.sub(r"^\[Online\]\s*", "", name).strip() or path
-        return ReferenceItem(index=index, title=title, url=path,
-                             snippet=snippet, kind="web", verified=verified)
+        kind = kind or "web"
+        return ReferenceItem(index=index, title=title or re.sub(r"^\[Online\]\s*", "", name).strip() or path,
+                             authors=authors, year=year, journal=journal, doi=doi,
+                             url=url or path, snippet=snippet, kind=kind, verified=verified)
+
+    if doi or url or title:
+        return ReferenceItem(index=index, title=title or name or os.path.basename(path) or "Local paper",
+                             authors=authors, year=year, journal=journal, doi=doi,
+                             url=url or (f"https://doi.org/{doi}" if doi else ""),
+                             snippet=snippet, path=path, page=int(meta.get("page") or 1),
+                             kind=kind or "article", verified=verified)
+
     return ReferenceItem(index=index, path=path,
                          page=int(meta.get("page") or 1),
                          title=name or os.path.basename(path) or "Local document",
@@ -123,21 +404,19 @@ def _seed_registry_from_sources(registry, sources_map, evidence_store=None):
 def _seed_registry_from_history(registry, messages):
     """把历史回答里已登记过的引用补录进本轮注册表（跨轮连续性）。
 
-    注册表在每轮任务内新建，但模型在追问轮里会**复用上一条回答的引用**：
-    或复述编号（``[1]``），或复用自拟 key（``[christie2017]``）。若不回灌，
-    本轮注册表为空，这些 token 既解析不出编号、也渲染不出参考文献列表——正是
-    "正文残留 [key]、末尾没有 References"的来源。
+    注册表在每轮任务内新建，但模型在追问轮里会**复用上一条回答的编号**
+    （``[1]`` 或原样粘贴的引用 token）。若不回灌，本轮注册表为空，这些编号
+    既查不到条目、也渲染不出参考文献列表。
 
     历史条目的 ``references`` 字段就是"该轮已登记条目"的无损快照（由 UI 收尾时
     写入，见 ``ChatResponseFlowMixin._attach_references``）。此处按消息**从新到旧**
-    回灌：key 始终登记；编号仅在未被占用时沿用（最近一次回答的编号优先），
-    与 KB/在线来源已有的编号冲突时退化为新编号，避免占用既有编号空间。
+    回灌：编号在未被占用时沿用（最近一次回答的编号优先），与 KB/在线来源已有的
+    编号冲突时退化为新编号，避免占用既有编号空间。
 
     :return: 回灌的条目数（供日志）。
     """
     if not messages:
         return 0
-    seeded_keys = set()
     seeded = 0
     for msg in reversed(messages):
         if not isinstance(msg, dict):
@@ -148,14 +427,9 @@ def _seed_registry_from_history(registry, messages):
         for entry in refs:
             if not isinstance(entry, dict):
                 continue
-            key = str(entry.get("key") or "").strip().lower()
-            if key and key in seeded_keys:
-                continue
             item = ReferenceItem.from_dict(entry)
             if not (item.title or item.url or item.doi or item.path):
                 continue
-            if key:
-                seeded_keys.add(key)
             try:
                 idx = int(entry.get("index") or 0)
             except (TypeError, ValueError):
@@ -166,6 +440,29 @@ def _seed_registry_from_history(registry, messages):
                 registry.add(item)
             seeded += 1
     return seeded
+
+
+_FOLLOWUP_ONLY_PATTERNS = (
+    r"^(?:请|麻烦)?(?:用)?中文(?:回答|回复|说|解释|输出|重写|翻译)?(?:我|一下|一遍)?(?:啊|呀|吧|谢谢)?$",
+    r"^(?:请|麻烦)?(?:用)?英文(?:回答|回复|说|解释|输出|重写|翻译)?(?:我|一下|一遍)?(?:啊|呀|吧|谢谢)?$",
+    r"^(?:请)?(?:继续|接着|往下|继续说|接着说|展开|展开说|详细|再详细|具体|简单|简短|总结|重写|重新回答|翻译|translate|answer\s*in\s*(?:chinese|english)|in\s*(?:chinese|english)|thanks|thank\s*you|ok|好的|可以|谢谢|收到|明白|知道了)(?:一下|一点|说说|讲|啊|呀|吧|谢谢)?$",
+)
+
+
+def _is_followup_only_query(text: str) -> bool:
+    """判断“中文回答我啊/继续/详细一点”这类纯追问，而不是新检索主题。
+
+    这类消息如果照常走自动文献检索，会把“中文回答我啊”当成学术 query，
+    检索回来一堆语言学/教育学好文，直接把上一轮植物学引用替换掉。
+    """
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 40:
+        return False
+    compact = re.sub(r"\s+", "", raw).strip("，。！？,.!?;；:：\"'“”‘’")
+    if not compact:
+        return True
+    return any(re.fullmatch(p, compact, flags=re.IGNORECASE)
+               for p in _FOLLOWUP_ONLY_PATTERNS)
 
 
 def _trim_history_for_budget(history, token_budget):
@@ -396,7 +693,7 @@ class ChatGenerationTask(BackgroundTask):
                 f"only accept English (e.g. academic literature search, NCBI, Semantic Scholar), "
                 f"internally translate the user's intent into an accurate English query in your tool "
                 f"arguments, while the final prose answer remains in {reply_lang}. Structural protocol "
-                f"tokens, in-text citation markers ([key] or [1]) and code blocks remain ASCII "
+                f"tokens, citation tokens / [n] markers and code blocks remain ASCII "
                 f"unchanged.\n"
             )
         return (
@@ -404,8 +701,8 @@ class ChatGenerationTask(BackgroundTask):
             f"The user's query was automatically translated to English for tool "
             f"retrieval, but the user originally wrote in {reply_lang}. You MUST compose "
             f"your final answer in {reply_lang} (do NOT reply in English), and use that "
-            f"language's native punctuation. Structural protocol tokens, in-text citation "
-            f"markers ([key] or [1]) and code blocks remain ASCII and unchanged.\n"
+            f"language's native punctuation. Structural protocol tokens, citation "
+            f"tokens / [n] markers and code blocks remain ASCII and unchanged.\n"
         )
 
     def cancel(self):
@@ -487,6 +784,10 @@ class ChatGenerationTask(BackgroundTask):
         self.trans_config = self.kwargs.get('trans_config')
         self.messages = self.kwargs.get('messages', [])
         self.kb_id = self.kwargs.get('kb_id')
+        # 所属对话 id / 是否启用自动文献证据。自动库按 conversation_id 隔离私有
+        # PDF；公开文献则全局复用。
+        self.conversation_id = str(self.kwargs.get('conversation_id') or "")
+        self.auto_evidence = bool(self.kwargs.get('auto_evidence', True))
         # 语言检测（下方 ~371 行）之前就需 config 与翻译开关：独立翻译往返默认关闭，
         # 非英文输入交由主模型首轮内化；此处提前初始化以决定回复语言约束是否生效。
         self.config = ConfigManager()
@@ -783,15 +1084,73 @@ class ChatGenerationTask(BackgroundTask):
                         "function": schema.get("function", {})
                     })
 
-        # Phase 2: Vector Retrieval & Reranking (Local KB)
-        # 本地 embedding/rerank 属重量级且易崩溃的 ONNX/torch 推理。聊天任务现运行
-        # 在 GUI 进程内（THREAD 模式），为避免把这类推理压在 GUI 进程里，统一交给
-        # _run_kb_retrieval：优先独立短命子进程隔离执行并回传结果，失败则回退内联。
-        if self.kb_id:
+        # Phase 2: 自动文献证据（全局库）优先；没有命中再回退到用户手选的 KB。
+        # 纯追问（“中文回答我啊/继续/详细一点”）沿用历史文献，不发起新检索；
+        # 否则会把追问本身当学术 query，抓回一堆无关论文并替换上一轮引用。
+        followup_only = (
+            _is_followup_only_query(search_query)
+            and any(isinstance(m, dict)
+                    and m.get("role") == "assistant"
+                    and str(m.get("content") or "").strip()
+                    for m in (self.messages or []))
+        )
+        if followup_only:
+            self.logger.info(
+                "Follow-up-only query detected; reusing conversation evidence "
+                "instead of running a new literature search.")
+        auto_handled = False
+        if followup_only and self.auto_evidence:
+            # 不只“跳过检索”，而是把上一轮真正进入上下文的证据原样带回来；
+            # 否则“详细一点”只能看到上一轮答案，看不到支撑原文。
+            try:
+                from src.core.auto_evidence import load_conversation_context
+                cached_context, cached_sources = load_conversation_context(
+                    self.conversation_id)
+            except Exception as e:
+                self.logger.debug("Load conversation context failed: %s", e)
+                cached_context, cached_sources = "", {}
+            if cached_context.strip():
+                context_str = cached_context
+                sources_map = cached_sources
+                auto_handled = True
+                _seed_registry_from_sources(
+                    reference_registry, sources_map, evidence_store)
+                self.logger.info(
+                    "Follow-up reused cached evidence: %d source(s), %d chars.",
+                    len(sources_map), len(context_str))
+            else:
+                self.logger.info(
+                    "Follow-up cache empty; relying on conversation history.")
+        if self.auto_evidence and not followup_only:
+            self.send_log("INFO", "Initiating automatic literature evidence retrieval...")
+            self._emit_token("[CLEAR_SEARCH]")
+            self._emit_token(
+                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Searching for relevant papers and reading the most relevant sources...</div>\n\n")
+            time.sleep(0.05)
+            auto_context, auto_sources = self._run_auto_evidence(search_query)
+            if auto_context.strip():
+                context_str = auto_context
+                sources_map = auto_sources
+                auto_handled = True
+                _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
+                try:
+                    from src.core.auto_evidence import save_conversation_context
+                    save_conversation_context(
+                        self.conversation_id, search_query,
+                        auto_context, auto_sources)
+                except Exception as e:
+                    self.logger.debug("Save conversation context failed: %s", e)
+                self.logger.info("Auto evidence: %d citation(s) prepared.", len(sources_map))
+            else:
+                self.logger.info("Auto evidence returned no usable documents for this turn.")
+
+        # 兼容旧的手动 KB：只有自动证据为空、且用户仍显式挂了一个库时才走。
+        # 本地 embedding/rerank 属重量级 ONNX/torch 推理，统一交给子进程隔离。
+        if self.kb_id and not auto_handled and not followup_only:
             self.send_log("INFO", "Initiating local Vector RAG retrieval...")
             self._emit_token("[CLEAR_SEARCH]")
             self._emit_token(
-                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>📚 Searching local knowledge base and reranking documents...</div>\n\n")
+                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Searching local knowledge base and reranking documents...</div>\n\n")
             time.sleep(0.05)
 
             kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
@@ -812,6 +1171,24 @@ class ChatGenerationTask(BackgroundTask):
         images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
             IMAGE_EXTENSIONS)]
         docs = [c for c in external_chunks if c not in images]
+
+        # 附件页文本在本轮结束后仍需可检索：后台写入当前会话的私有证据库。
+        # 不阻塞本轮生成（当前轮已经通过 external_context 直接使用附件内容）。
+        if self.auto_evidence and docs and self.conversation_id:
+            try:
+                import threading
+                from src.core.auto_evidence import run_private_docs_ingest
+
+                def _persist(docs_snapshot=docs, cid=self.conversation_id):
+                    ok, message = run_private_docs_ingest(
+                        docs_snapshot, cid, origin="manual_upload")
+                    self.logger.info("Attachment evidence ingest: ok=%s msg=%s",
+                                     ok, (message or "")[:160])
+
+                threading.Thread(target=_persist, daemon=True,
+                                 name="attachment-evidence-ingest").start()
+            except Exception as e:
+                self.logger.debug("Attachment evidence ingest skipped: %s", e)
 
         # 附件文档正文同样进入逐字证据库：模型引用用户上传文件内容时可校验。
         for d in docs:
@@ -1068,7 +1445,7 @@ class ChatGenerationTask(BackgroundTask):
             "the run automatically; the user's answer arrives as the next user message.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
             f"1. IN-TEXT CITATIONS (STRICT): {CITATION_TOKEN_RULE} Attach the token inline IMMEDIATELY after the claim it supports, and NEVER claim a fact without an inline citation.\n"
-            f"2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): For every source you cite that does NOT already carry a number, you MUST register it by calling cite_references ONCE, passing its 'key' (the exact key you used inline) plus its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'). Registration is PER REPLY: keys registered in an earlier turn remain resolvable, but any source you cite that has NOT been registered before MUST be registered again in THIS reply — never write an inline key that has no matching cite_references entry (an unregistered key is dropped from the text and produces no reference list). Sources that already carry a number (knowledge-base '--- [Document n] ---' entries, tool results with '{AgentRuntime.TOOL_CITE_ID_FIELD}') are already registered by the app — cite their number and do NOT register them again under a new key. The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. The app assigns the numbered reference list automatically by order of first appearance — so do NOT invent numeric citation numbers yourself.\n"
+            f"2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): For every source you cite that carries no 'citation_token' and no pre-assigned number, you MUST register it by calling cite_references ONCE, passing its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'); the tool returns a 'citation_token' for each entry — paste that token at the claim it supports. Sources that already carry a token or a number (knowledge-base '--- [Document n] ---' entries, tool results with '{AgentRuntime.TOOL_CITE_TOKEN_FIELD}') are already registered by the app — reuse THAT token/number and do NOT register them again. The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. Every number is assigned by the app: do NOT invent, shift or renumber one, and never fall back to an ASCII alias such as [lariguet2004].\n"
             "3. NEVER WRITE A REFERENCES SECTION YOURSELF: do NOT output a 'References' / 'Bibliography' heading or a manually numbered citation list in your answer text. The app generates that list from your cite_references call; writing one yourself duplicates it and can contradict it.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
             f"{LANGUAGE_AND_PUNCTUATION_RULE}\n\n"
@@ -1100,6 +1477,11 @@ class ChatGenerationTask(BackgroundTask):
                     # 只服务 UI 渲染；卡片语义已由当轮 tool_calls / 正文保留，
                     # 回传上下文前剥除以节约 token。
                     content = self._strip_interactive_markers(content)
+                    # 历史里的思考/工具过程不是回答内容：剥掉后再发给 provider，
+                    # 避免工具参数/搜索结果里的词触发内容审查 400。
+                    content = strip_think_blocks(content)
+                    content = re.sub(r"\[Status:\s*Executing\][^\n]*", "",
+                                     content, flags=re.IGNORECASE)
                 msg = {"role": m["role"], "content": content}
                 if m.get("tool_calls"): msg["tool_calls"] = m["tool_calls"]
                 if m.get("tool_call_id"): msg["tool_call_id"] = m["tool_call_id"]
@@ -1252,69 +1634,72 @@ class ChatGenerationTask(BackgroundTask):
                 "elapsed_ms": self._turn_elapsed_ms(),
             })
 
-        # Phase 6: 参考文献与正文引用编号的统一收口（程序生成，单一事实来源）
-        # 正文里的 [key]（模型自拟别名）与 [n]（KB 文档号 / 工具结果 id）由注册表
-        # 按"首次出现顺序"统一重新编号，并就地改写正文。因此：
-        #   * 模型不必猜数字，先写正文还是先调 cite_references 都不会编号错位；
-        #   * 列表顺序 = 正文首次引用顺序（符合学术惯例）。
+        # Phase 6: 参考文献收口（**编号在这一刻定稿**）
+        # 生成过程中所有引用标记都不展示（见 references.strip_citation_markers），
+        # 因此"用户看到的编号"只在这里产生：按正文首次出现顺序分配 1..K，正文就
+        # 地改写，列表按同一顺序渲染。工具侧的内部号只在模型与程序之间流转。
         _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
-        # 跨轮引用连续性：回灌历史回答里已登记的引用，使追问轮复用 [n]/[key] 也能
-        # 解析、并渲染出参考文献列表（见 _seed_registry_from_history 说明）。
-        restored = _seed_registry_from_history(reference_registry, self.messages)
+        # 跨轮引用连续性：仅在**本轮没有新来源**时回灌历史引用。
+        # 如果本轮已有自动检索/知识库来源，历史里另一主题的 [8]/[9] 会占用
+        # 相同编号，模型复述旧编号时就会被渲染成完全无关的论文（例如植物学
+        # 回答末尾出现文学/电影文献）。有当前来源时只认当前来源，宁可为旧编号
+        # 报缺失，也不能把错误论文挂上去。
+        restored = 0
+        if not sources_map:
+            restored = _seed_registry_from_history(reference_registry, self.messages)
         if restored:
             self.send_log(
                 "INFO",
                 f"Historical references restored for cross-turn continuity: {restored} item(s).")
         # Agent 的返回缓存里混有 UI 控制标记（[CLEAR_SEARCH]/[START_LLM_NETWORK] 等，
         # 由 AgentRuntime._emit 一并计入）；作为"上屏正文"前必须先剥离，否则这些
-        # 字面量会在整段替换时漏成正文。
+        # 字面量会在整段替换时漏成正文。全角编号（［3］/【3】）由定稿函数归一。
         display_text = re.sub(
             r"\[(?:CLEAR_SEARCH|START_LLM_NETWORK)\]", "", self.full_response_cache or "")
-        new_text, ordered, unresolved, repaired = reference_registry.resolve_citations(display_text)
-        # 写歪的 key（大小写/分隔符差异、主题词截断、姓氏拼写偏差、把姓氏当 key 用）
-        # 已在识别阶段落回**真实存在**的条目并编号，这里只做留痕，便于人工核查。
-        if repaired:
-            self.send_log(
-                "INFO",
-                "Citation key(s) matched to registered sources: "
-                + ", ".join(f"{t}->[{n}] ({tier})" for t, tier, n in repaired)[:200])
-        # 兜底清理：仍认不出、也落不到任何著录的引用 key（[lariguet2004] 这类别名）
-        # 从正文与思考面板整体移除，避免坏标记上屏；数字型与不含年份的短缩写原样保留。
-        # 必须对**清理后的全文**扫描，而不是只按 unresolved 列表删除：unresolved
-        # 只覆盖正文（思考块不参与编号），只看它会漏掉思考面板里的同类残留。
-        # 口径与实现见 src/core/references.strip_unregistered_cite_keys（唯一事实来源）。
-        new_text, dropped_keys = strip_unregistered_cite_keys(new_text)
-        if dropped_keys:
-            self.send_log(
-                "WARNING",
-                "Unregistered citation key(s) removed from the answer text: "
-                f"{', '.join(dict.fromkeys(dropped_keys))[:200]}")
-        kept_unresolved = [t for t in unresolved if t not in set(dropped_keys)]
-        if kept_unresolved:
+        # 编号定稿 + 正文改写（含思考块内的同一套编号；全角编号一并归一）。
+        new_text, cited, unmatched = reference_registry.renumber_by_appearance(display_text)
+        # 空回答兜底：整轮都在检索/思考、没有产出结论时明确告诉用户，而不是留一个
+        # 只有页脚的空气泡（也没有"被引用的条目"可列）。
+        if not _has_visible_answer(new_text):
+            self.send_log("WARNING", "No final answer text was produced this turn.")
+            if "Chinese" in str(getattr(self, "reply_lang", "")):
+                new_text = ("**本轮没有产出最终回答**：模型一直在检索与思考，没有给出结论。"
+                            "可以重新发送这个问题，或把它拆成一个更小的子问题再试。")
+            else:
+                new_text = ("**No final answer was produced this turn**: the model kept searching "
+                            "and reasoning without concluding. Resend the question, or narrow it "
+                            "to a single sub-question.")
+            cited = []
+            unmatched = []
+        # 正文出现、注册表却没有的编号：如实记日志并从正文抹掉（多为模型自拟数字
+        # 或历史残留）。不补条目——凭空造一条著录就是捏造文献。
+        if unmatched:
             self.send_log(
                 "WARNING",
-                "Unresolved inline citations (not registered, left as-is): "
-                f"{', '.join(dict.fromkeys(kept_unresolved))[:200]}")
-        if ordered:
-            self.full_response_cache = new_text + reference_registry.render_items(ordered)
+                "Inline citation number(s) with no registered source (removed from the answer): "
+                + ", ".join(f"[{n}]" for n in unmatched[:20]))
+        # 证据门禁：有来源时标出无引用的高风险段落；没有来源时明确标注未核实。
+        new_text = _verify_citation_support(new_text, cited)
+        new_text = _apply_evidence_gate(
+            new_text, bool(sources_map or cited),
+            research_context=_looks_research_query(search_query))
+        self.full_response_cache = new_text
+        if cited:
+            self.full_response_cache = new_text + reference_registry.render_items(cited)
             self.send_log(
                 "INFO",
                 f"References rendered: {len(reference_registry)} registered, "
-                f"{len(ordered)} cited (ordered by first appearance).")
-        elif dropped_keys:
-            # 无条目可渲染，但正文已因清理而变化：仍需回传，保证上屏与落历史一致。
-            self.full_response_cache = new_text
-        else:
-            self.full_response_cache = display_text
-            if len(reference_registry):
-                self.send_log("INFO", "No cited reference matched the registry; reference block skipped.")
-        if ordered or dropped_keys:
-            # 结构化收口：用"已编号/已清理"正文替换上屏，并把引用数据直达悬停卡/详情面板。
-            self._emit_state(TaskState.PROCESSING, -1, "", payload={
-                "event": "answer_final",
-                "text": self.full_response_cache,
-                "references": [it.to_dict() for it in ordered],
-            })
+                f"{len(cited)} cited (numbered 1..{len(cited)} by first appearance).")
+        elif len(reference_registry):
+            self.send_log("INFO", "No cited reference matched the registry; reference block skipped.")
+        # 结构化收口：把正文实际引用到的条目送到悬停卡/详情面板与历史快照。
+        # 无论是否有引用都回传正文——证据门禁可能已给段落追加标记，只改缓存不改
+        # 上屏会让"屏幕所见"与"落历史/导出"两处不一致。
+        self._emit_state(TaskState.PROCESSING, -1, "", payload={
+            "event": "answer_final",
+            "text": self.full_response_cache,
+            "references": [it.to_dict() for it in cited],
+        })
 
         # Phase 7: Persist Provenance evidence chain + show summary to user
         self._emit_provenance()
@@ -1598,15 +1983,17 @@ class ChatGenerationTask(BackgroundTask):
             except Exception as e:
                 self.logger.warning(f"Sub-task '{st.query[:40]}' failed: {e}")
                 text = f"[Sub-investigation unavailable: {e}]"
-            return idx, text, local_sources
+            return idx, text, local_sources, dict(getattr(sub_agent, "last_usage", {}) or {})
 
         with ThreadPoolExecutor(max_workers=len(sub_tasks)) as pool:
             futures = [pool.submit(_run_sub, i, st) for i, st in enumerate(sub_tasks)]
             done_count = 0
             for fut in as_completed(futures):
                 try:
-                    idx, text, local_sources = fut.result()
+                    idx, text, local_sources, sub_usage = fut.result()
                     results[idx] = (text, local_sources)
+                    # 子 Agent 的用量在主线程累加，避免多线程同时改同一个 dict
+                    _absorb_usage(getattr(agent, "last_usage", None), sub_usage)
                     # 完成即上屏一行状态：消除"确认计划后长时间黑箱等待"，
                     # 用户可提前感知各路进度（as_completed 顺序不定，标注原编号）。
                     done_count += 1
@@ -1684,6 +2071,15 @@ class ChatGenerationTask(BackgroundTask):
             search_query, merged,
             output_lang=getattr(self, "reply_lang", "English"),
         )
+
+        # 合成阶段同样消耗 token：synthesizer 走 main_llm 的流式接口，provider 不
+        # 回传 usage，按输入（各路子调查正文 + 查询）与输出估算后并入累计。
+        _absorb_usage(getattr(agent, "last_usage", None), {
+            "prompt_tokens": estimate_tokens(search_query) + sum(
+                estimate_tokens(str(m.get("text") or "")) for m in merged),
+            "completion_tokens": estimate_tokens(final_text),
+            "estimated": True,
+        })
 
         # 合成后把 R 绘图卡片标记追加回最终文本，保证 UI 端仍能渲染固定卡片
         if plot_markers:
@@ -1776,9 +2172,18 @@ class ChatGenerationTask(BackgroundTask):
 
     @staticmethod
     def _remap_citations(text, remap):
-        """将文本中 `[id]` 按 remap 映射替换为新的全局 id（仅替换映射内 id）。"""
+        """将文本中 `[id]` 与引用 token 的 ``ref://cite?n=id`` 换成新的全局 id。
+
+        子 Agent 的编号是局部号（工具结果里回传的 token 也带局部号），合并阶段
+        必须两者一起改写，否则 token 里的超链接会指向一个不存在/别人的条目。
+        只替换映射内 id，其余原样保留。
+        """
         if not text or not remap:
             return text or ""
+        text = CITE_LINK_RE.sub(
+            lambda m: citation_href(remap[int(m.group(1))])
+            if int(m.group(1)) in remap else m.group(0), text)
+
         def _repl(m):
             cid = int(m.group(1))
             return f"[{remap[cid]}]" if cid in remap else m.group(0)
@@ -1838,6 +2243,18 @@ class ChatGenerationTask(BackgroundTask):
             RerankEngine().preload()
         except Exception as e:
             self.logger.warning(f"Reranker preload failed: {e}")
+
+    def _run_auto_evidence(self, search_query):
+        """自动文献证据：搜索 -> 摘要/全文入库 -> 按会话检索。
+
+        整个链路在短命子进程里跑（搜索的 HTTP、embedding、rerank 都不占 GUI
+        进程），父线程只等 JSON 结果；超时/模型缺失时返回空证据。
+        """
+        from src.core.auto_evidence import run_auto_evidence
+        model_name, base_url, declared_window = self._main_model_facts()
+        return run_auto_evidence(search_query, self.conversation_id,
+                                 model_name, base_url, declared_window,
+                                 cancel_check=self.is_cancelled)
 
     def _run_kb_retrieval(self, search_query, domain):
         """在 GUI 进程内执行 Phase 2 的本地 KB 检索与重排。
@@ -1960,9 +2377,10 @@ class ChatGenerationTask(BackgroundTask):
 class ExportChatTask(BackgroundTask):
     """后台任务：把一段或全部对话写入 ``.schat`` 归档。
 
-    归档是**唯一**的导出格式：正文、思考链、参考文献、书签、组件状态全部保留；
-    图片与小体积附件按内容寻址内嵌，超过上限的文件留下文件名占位符。读写口径
-    统一在 :mod:`src.core.chat_archive` 与 :mod:`src.core.chat_assets`。
+    归档是**唯一**的导出格式（SQLite 容器）：正文、思考链、参考文献、书签、
+    标签与组件状态全部保留；图片与小体积附件按内容寻址内嵌，超过上限的文件留下
+    文件名占位符。读写口径统一在 :mod:`src.core.chat_archive` 与
+    :mod:`src.core.chat_store`。
     """
 
     def _execute(self):
@@ -1984,16 +2402,20 @@ class ExportChatTask(BackgroundTask):
 
 
 class ImportChatHistoryTask(BackgroundTask):
-    """后台任务：解析并导入对话归档（``.schat`` / ``.json``）。
+    """后台任务：解析并导入对话归档（``.schat`` / ``.sqlite3`` / ``.db`` / ``.json``）。
 
-    只接受 Scholar Navis 归档：新格式按内容寻址资产恢复内嵌文件；旧格式
-    （``archive_version`` 1–3）按原路径恢复，源文件已不在的条目会补上
+    只接受 Scholar Navis 归档：新容器（SQLite）按内容寻址资产恢复内嵌文件；旧容器
+    （ZIP / 纯 JSON，``archive_version`` 1–4）按原路径恢复，源文件已不在的条目会补上
     "文件名 + 原因"占位信息，用户能看出缺了什么、为什么缺。
 
-    返回 ``{"success": True, "tabs": [{"name", "messages"}, …],
+    返回 ``{"success": True, "tabs": [{"name", "tags", "messages"}, …],
     "lossless": True, "placeholders": int}``；每个标签页的消息已规范化为可写入
     ``self.history`` 的条目。
     """
+
+    #: 允许导入的扩展名。容器类型由文件头判定（见 ``chat_archive.read_archive``），
+    #: 扩展名只做初步过滤：用户可能把归档存成 ``.db`` / ``.sqlite3``。
+    IMPORT_SUFFIXES = (".schat", ".sqlite3", ".sqlite", ".db", ".json")
 
     def _execute(self):
         path = self.kwargs.get("path")
@@ -2001,9 +2423,10 @@ class ImportChatHistoryTask(BackgroundTask):
             return {"success": False, "msg": f"File not found: {path}"}
 
         lower = str(path).lower()
-        if not lower.endswith((".schat", ".json")):
+        if not lower.endswith(self.IMPORT_SUFFIXES):
             return {"success": False,
-                    "msg": "Unsupported format. Please import a .schat or .json archive."}
+                    "msg": "Unsupported format. Please import a .schat, .sqlite3, "
+                           ".db or .json archive."}
 
         try:
             tabs, placeholders = self._parse_lossless(path)
@@ -2063,14 +2486,16 @@ class ImportChatHistoryTask(BackgroundTask):
 
         tabs = []
         annotated = 0
-        for raw_name, raw_messages in extract_tabs(payload):
-            messages = [self._normalize_msg(m) for m in raw_messages]
+        for entry in extract_tabs(payload):
+            messages = [self._normalize_msg(m) for m in entry.get("messages") or []]
             if messages:
                 if attachment_map:
                     remap_attachment_paths(messages, attachment_map)
                 annotated += chat_assets.annotate_messages(
                     messages, placeholders, detect_missing=True)
-            tabs.append({"name": self._tab_name(raw_name), "messages": messages})
+            tabs.append({"name": self._tab_name(entry.get("name")),
+                         "tags": entry.get("tags") or [],
+                         "messages": messages})
         return tabs, annotated
 
 
