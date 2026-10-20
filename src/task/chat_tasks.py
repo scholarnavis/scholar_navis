@@ -21,7 +21,6 @@ from src.core.prompt_rules import (CITATION_TOKEN_RULE,
                                    LANGUAGE_AND_PUNCTUATION_RULE)
 from src.core import plot_styles
 from src.core.think_tags import strip as strip_think_blocks
-from src.core.theme_manager import strong_weight_css
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
 
@@ -1959,366 +1958,120 @@ class ChatGenerationTask(BackgroundTask):
 
 
 class ExportChatTask(BackgroundTask):
-    """后台任务：异步导出聊天记录。
+    """后台任务：把一段或全部对话写入 ``.schat`` 归档。
 
-    两类产物，语义刻意不同：
-
-    * **PDF / MD / TXT** —— 只导出**正文 + 规范参考文献**。思考链与 Provenance
-      追溯日志属于运行过程信息，不进这些"给人读"的文件；清洗口径统一在
-      :meth:`TextFormatter.clean_text_for_export`。
-    * **JSON / .schat** —— 无损归档：正文、思考链、参考文献、附件全部保留，
-      用 ZIP 压缩并内嵌附件本体，读写口径见 :mod:`src.core.chat_archive`。
-      归档内容是**若干个标签页**：传 ``tabs`` 导出全部标签页，只传 ``history``
-      则导出单个标签页（两者产出同一个容器格式，不存在"只导一个标签页"的特例）。
+    归档是**唯一**的导出格式：正文、思考链、参考文献、书签、组件状态全部保留；
+    图片与小体积附件按内容寻址内嵌，超过上限的文件留下文件名占位符。读写口径
+    统一在 :mod:`src.core.chat_archive` 与 :mod:`src.core.chat_assets`。
     """
+
     def _execute(self):
-        history = self.kwargs.get('history') or []
-        tabs = self.kwargs.get('tabs')
-        path = self.kwargs.get('path')
-        export_fmt = self.kwargs.get('export_fmt')
-        colors = self.kwargs.get('colors', {})
-        font_family = self.kwargs.get('font_family', 'sans-serif')
-        # 等宽族同样由调用方（主线程，能访问 QFontDatabase）解析后传入：
-        # 硬编码 Consolas 在 Linux 上不存在，导出文档会整体回退到默认字体。
-        mono_font_family = self.kwargs.get('mono_font_family', 'monospace')
-        user_icon = self.kwargs.get('user_icon', '')
-        ai_icon = self.kwargs.get('ai_icon', '')
-
-        import datetime
-        import csv
-        from src.ui.components.text_formatter import TextFormatter
-
-        # 说明：不再静默过滤 interrupted/error 消息 —— 它们往往含部分已生成内容，
-        # 直接丢弃会导致导出对话"不全/断档"。改为在各格式正文前标注其未完成状态。
+        history = self.kwargs.get("history") or []
+        tabs = self.kwargs.get("tabs")
+        path = self.kwargs.get("path")
+        tab_name = self.kwargs.get("tab_name")
         if not history and not tabs:
             return {"success": False, "msg": "No valid chat records to export."}
 
-        def _status_note(msg):
-            st = msg.get("status")
-            if st == "interrupted":
-                return "⚠ This response was interrupted and may be incomplete."
-            if st == "error":
-                return "⚠ This response ended in an error and may be incomplete."
-            return ""
-
-        clean_history = history
         try:
-            if export_fmt == ".pdf":
-                from PySide6.QtGui import QPdfWriter, QTextDocument, QPageSize
-                from PySide6.QtCore import QMarginsF
-
-                doc = QTextDocument()
-                date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                doc.setDefaultStyleSheet(f"""
-                    body {{ font-family: {font_family}; font-size: 10.5pt; line-height: 1.6; color: #24292e; background-color: #ffffff; }}
-                    h1, h2, h3 {{ color: {colors.get('title_blue')}; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }}
-                    .msg-box {{ margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px dashed #dddddd; page-break-inside: avoid; }}
-                    .header-user {{ color: {colors.get('academic_blue')}; font-weight: {strong_weight_css()}; font-size: 12pt; margin-bottom: 8px; }}
-                    .header-ai {{ color: {colors.get('success')}; font-weight: {strong_weight_css()}; font-size: 12pt; margin-bottom: 8px; }}
-                    .content {{ margin-top: 5px; }}
-                    pre {{ background-color: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 12px; white-space: pre-wrap; font-family: {mono_font_family}; font-size: 9.5pt; }}
-                    code {{ font-family: {mono_font_family}; background-color: #f3f4f6; padding: 2px 4px; border-radius: 3px; color: #d73a49; font-size: 9.5pt; }}
-                    pre code {{ background-color: transparent; padding: 0; color: #24292e; }}
-                    blockquote {{ border-left: 4px solid #dfe2e5; color: #6a737d; padding-left: 15px; margin-left: 0; }}
-                    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }}
-                    th, td {{ border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; word-break: break-all; }}
-                    th {{ background-color: #f6f8fa; font-weight: {strong_weight_css()}; }}
-                    .doc-header {{ text-align: center; border-bottom: 2px solid {colors.get('title_blue')}; padding-bottom: 15px; margin-bottom: 30px; }}
-                    .doc-title {{ font-size: 22pt; font-weight: {strong_weight_css()}; color: {colors.get('title_blue')}; font-family: {font_family}; }}
-                    .doc-meta {{ font-size: 10pt; color: #586069; margin-top: 5px; }}
-                """)
-
-                html = f"<html><body><div class='doc-header'><div class='doc-title'>Scholar Navis - Analysis Report</div><div class='doc-meta'>Generated on: {date_str} | Document Type: Academic Chat Log</div></div>"
-
-                for msg in clean_history:
-                    is_user = (msg['role'] == "user")
-                    # 与 .md 导出走同一条正文管线（markdown 目标）：表格/图片/列表
-                    # 先转成 Markdown 再由 markdown_to_html 渲染，避免"先剥标签
-                    # 再渲染"把表格压成一行文字。
-                    clean_content = TextFormatter.clean_text_for_export(
-                        msg['content'], target="markdown")
-                    # PDF 版式固定白底浅色文档（见上方 setDefaultStyleSheet），
-                    # 传 theme_key="light" 使代码块/链接等内联主题色与版式
-                    # 一致，不随应用当前主题漂移。
-                    rendered_html = TextFormatter.markdown_to_html(clean_content, theme_key="light")
-
-                    if is_user:
-                        header = f"<div class='header-user'><img src='{user_icon}' width='16' height='16' style='vertical-align:middle;'> User Inquiry</div>"
-                    else:
-                        header = f"<div class='header-ai'><img src='{ai_icon}' width='16' height='16' style='vertical-align:middle;'> AI Analysis</div>"
-
-                    note = _status_note(msg)
-                    note_html = f"<div style='color:#b8860b; font-style:italic; margin-bottom:4px;'>{note}</div>" if note else ""
-                    html += f"<div class='msg-box'>{header}{note_html}<div class='content'>{rendered_html}</div></div>"
-
-                html += "</body></html>"
-                doc.setHtml(html)
-
-                writer = QPdfWriter(path)
-                writer.setPageSize(QPageSize(QPageSize.A4))
-                writer.setPageMargins(QMarginsF(15, 20, 15, 20))
-                writer.setResolution(300)
-                doc.print_(writer)
-
-            elif export_fmt == ".md":
-                md_lines = [
-                    "# Scholar Navis - Analysis Report\n\n",
-                    f"> **Generated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n",
-                    "---\n\n"
-                ]
-                for msg in clean_history:
-                    role = "🧑‍💻 User Inquiry" if msg['role'] == "user" else "🤖 AI Analysis"
-                    # markdown_mode：残留 HTML 转成 Markdown 语法（表格 / 图片 / 加粗…），
-                    # 而不是把标签直接剥掉——.md 文件里应当尽量是 Markdown，只有
-                    # Markdown 表达不了的结构才保留精简 HTML。
-                    content = TextFormatter.clean_text_for_export(msg['content'], target="markdown")
-                    note = _status_note(msg)
-                    note_text = f"> {note}\n\n" if note else ""
-                    md_lines.append(f"### {role}\n\n{note_text}{content}\n\n---\n\n")
-
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write("".join(md_lines))
-
-            elif export_fmt == ".txt":
-                txt_lines = [
-                    "================ SCHOLAR NAVIS ACADEMIC REPORT ================",
-                    f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    "===============================================================\n\n"
-                ]
-                for msg in clean_history:
-                    role = "USER INQUIRY" if msg['role'] == "user" else "AI ANALYSIS"
-                    content = TextFormatter.clean_text_for_export(msg['content'], target="plain")
-                    content = TextFormatter.markdown_to_plain_text(content)
-                    note = _status_note(msg)
-                    txt_lines.append(f"[{role}]")
-                    if note:
-                        txt_lines.append(f"[NOTE] {note}")
-                    txt_lines.append(content)
-                    txt_lines.append(f"\n{'-' * 70}\n")
-
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write("\n".join(txt_lines))
-
-            elif export_fmt in (".json", ".schat"):
-                # 无损归档：正文、思考链、参考文献、附件引用全部保留，供 Import
-                # 还原为可继续对话的上下文。容器为 ZIP（DEFLATE）+ 内嵌附件本体：
-                # 纯 JSON 体积过大，且附件只存本机绝对路径换机器即失效。
-                # 读写口径统一在 src/core/chat_archive.py。
-                from src.core.chat_archive import write_archive
-                export_tabs = tabs if tabs else [{"name": None, "messages": history}]
-                stats = write_archive(path, export_tabs)
-                return {"success": True, "path": path, "stats": stats}
-
-            return {"success": True, "path": path}
+            from src.core.chat_archive import write_archive
+            export_tabs = tabs if tabs else [{"name": tab_name, "messages": history}]
+            stats = write_archive(path, export_tabs)
+            return {"success": True, "path": path, "stats": stats}
         except Exception as e:
             self.send_log("ERROR", f"Export task failed: {str(e)}")
             return {"success": False, "msg": str(e)}
 
 
 class ImportChatHistoryTask(BackgroundTask):
-    """
-    后台任务：解析并导入聊天记录。
+    """后台任务：解析并导入对话归档（``.schat`` / ``.json``）。
 
-    支持的输入：
-    - ``.schat`` / ``.json``：Scholar Navis 无损格式（ZIP 压缩归档，含正文 /
-      思考链 / 引文 / 附件本体），导入后附件按归档内容解包并改写路径；归档可含
-      **一个或多个标签页**（旧版单标签页归档按一个未命名标签页处理）。
-    - ``.md`` / ``.txt``：纯文本导出格式，尽力还原为文本气泡（有损，单个标签页）。
+    只接受 Scholar Navis 归档：新格式按内容寻址资产恢复内嵌文件；旧格式
+    （``archive_version`` 1–3）按原路径恢复，源文件已不在的条目会补上
+    "文件名 + 原因"占位信息，用户能看出缺了什么、为什么缺。
 
-    返回 ``{"success": True, "tabs": [{"name", "messages"}, …], "lossless": bool}``，
-    每个标签页的消息结构已规范化为可写入 ``self.history`` 的条目。
+    返回 ``{"success": True, "tabs": [{"name", "messages"}, …],
+    "lossless": True, "placeholders": int}``；每个标签页的消息已规范化为可写入
+    ``self.history`` 的条目。
     """
-    _TXT_USER = "[USER INQUIRY]"
-    _TXT_AI = "[AI ANALYSIS]"
 
     def _execute(self):
         path = self.kwargs.get("path")
         if not path or not os.path.exists(path):
             return {"success": False, "msg": f"File not found: {path}"}
 
-        lower = path.lower()
-        try:
-            if lower.endswith((".schat", ".json")):
-                tabs, lossless = self._parse_lossless(path), True
-            elif lower.endswith(".md"):
-                tabs, lossless = [self._single_tab(self._parse_markdown(path))], False
-            elif lower.endswith((".txt", ".csv")):
-                tabs, lossless = [self._single_tab(self._parse_text(path))], False
-            else:
-                return {"success": False,
-                        "msg": "Unsupported format. Please import a .schat/.json/.md/.txt file."}
+        lower = str(path).lower()
+        if not lower.endswith((".schat", ".json")):
+            return {"success": False,
+                    "msg": "Unsupported format. Please import a .schat or .json archive."}
 
+        try:
+            tabs, placeholders = self._parse_lossless(path)
             tabs = [t for t in tabs if t["messages"]]
             if not tabs:
                 return {"success": False,
                         "msg": "No chat messages could be parsed from this file."}
-
-            return {"success": True, "tabs": tabs, "lossless": lossless}
+            return {"success": True, "tabs": tabs, "lossless": True,
+                    "placeholders": placeholders}
         except Exception as e:
             self.send_log("ERROR", f"Import task failed: {str(e)}")
             return {"success": False, "msg": str(e)}
 
     @staticmethod
     def _tab_name(raw_name):
-        """标签页名：归档自带名字 > 默认名（"默认对话"）。
+        """对话名：归档自带名字 > 默认名（"默认对话"）。
 
-        命名口径只在这里定义一次，单标签页 / 多标签页 / 纯文本导入全部走它：
-        未命名者一律落到 :data:`src.core.chat_archive.DEFAULT_TAB_NAME`，
-        界面上就是"默认对话"。
+        命名口径只在这里定义一次，单对话 / 多对话导入全部走它。
         """
         from src.core.chat_archive import DEFAULT_TAB_NAME, clean_tab_name
-
         return clean_tab_name(raw_name) or DEFAULT_TAB_NAME
-
-    def _single_tab(self, messages):
-        """把"一个扁平消息列表"包装成单个标签页（纯文本类导入用）。"""
-        return {"name": self._tab_name(None), "messages": list(messages or [])}
 
     @staticmethod
     def _normalize_msg(raw):
-        """把原始记录条目规范化为可写回 self.history 的 user/assistant 条目。"""
-        role = raw.get("role", "")
-        content = raw.get("content")
+        """把原始记录条目规范化为可写回 ``self.history`` 的 user/assistant 条目。
+
+        采用"**整体复制 + 规范化已知字段**"而不是字段白名单：白名单每新增一种
+        消息字段（书签、远程图片缓存等）就要改一次，漏改会静默丢数据。未知字段
+        原样保留，落盘前统一由 ``sanitize`` 处理。
+        """
+        source = dict(raw) if isinstance(raw, dict) else {}
+        role = source.get("role", "")
         if role not in ("user", "assistant"):
             role = "assistant"
-        msg = {"role": role}
+        content = source.get("content")
         if isinstance(content, str):
-            msg["content"] = content
+            text = content
         elif isinstance(content, dict):
-            msg["content"] = content.get("text") or content.get("content") or ""
+            text = content.get("text") or content.get("content") or ""
         elif content is None:
-            msg["content"] = ""
+            text = ""
         else:
-            msg["content"] = str(content)
-        # 保留供气泡渲染的富字段：references 为引用条目（回灌后恢复 [n] 悬停著录与
-        # 引用卡），ui_components 为交互卡 / 高级 UI 组件的用户交互结果（回灌后重建
-        # 为只读组件）。两者都是"导出无损留存、导入原样恢复"的必要字段。
-        for key in ("display_text", "context_html", "external_files", "status",
-                    "references", "ui_components"):
-            if key in raw:
-                msg[key] = raw[key]
-        return msg
+            text = str(content)
+        source["role"] = role
+        source["content"] = text
+        return source
 
     def _parse_lossless(self, path):
-        """解析无损归档：ZIP 压缩容器（含内嵌附件）与历史纯 JSON 都走这里。
-
-        容器判别、标签页结构抽取与附件解包口径统一在 :mod:`src.core.chat_archive`；
-        本方法只负责把每个标签页的消息规范化，并把解包后的附件路径写回消息。
-        """
-        from src.core.chat_archive import extract_tabs, read_archive, remap_attachment_paths
+        """解析归档：容器判别、标签页抽取、资产解包统一在 chat_archive。"""
+        from src.core import chat_assets
+        from src.core.chat_archive import (extract_tabs, read_archive,
+                                           remap_attachment_paths)
 
         payload, meta = read_archive(path)
         attachment_map = meta.get("attachment_map") or {}
+        placeholders = meta.get("asset_placeholders") or {}
 
         tabs = []
+        annotated = 0
         for raw_name, raw_messages in extract_tabs(payload):
             messages = [self._normalize_msg(m) for m in raw_messages]
-            if messages and attachment_map:
-                remap_attachment_paths(messages, attachment_map)
+            if messages:
+                if attachment_map:
+                    remap_attachment_paths(messages, attachment_map)
+                annotated += chat_assets.annotate_messages(
+                    messages, placeholders, detect_missing=True)
             tabs.append({"name": self._tab_name(raw_name), "messages": messages})
-        return tabs
-
-    def _parse_markdown(self, path):
-        # 按历史消息的 `### ... User Inquiry / AI Analysis` 标题切分。
-        # 标题可能带角色 emoji（如 🧑💻 / 🤖），因此仅在标题行内检索角色关键字。
-        import re as _re
-        _user_kw = _re.compile(r"User Inquiry", _re.IGNORECASE)
-        _ai_kw = _re.compile(r"AI Analysis", _re.IGNORECASE)
-        _header_re = _re.compile(r"^\s*#{1,6}\s+.*$")
-        seps = _re.compile(r"^\s*---\s*$")
-
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-
-        lines = text.splitlines()
-        markers = []  # (line_index, role)
-        for i, line in enumerate(lines):
-            if _header_re.match(line):
-                if _user_kw.search(line):
-                    markers.append((i, "user"))
-                elif _ai_kw.search(line):
-                    markers.append((i, "assistant"))
-
-        if not markers:
-            body = self._strip_report_header(text)
-            return [{"role": "assistant", "content": body.strip()}] if body.strip() else []
-
-        messages = []
-        for idx, (start_i, role) in enumerate(markers):
-            end_i = markers[idx + 1][0] if idx + 1 < len(markers) else len(lines)
-            body_lines = lines[start_i + 1:end_i]
-            # 去除段落末尾的空行与水平分隔线
-            while body_lines and (not body_lines[0].strip() or seps.match(body_lines[0])):
-                body_lines.pop(0)
-            while body_lines and (not body_lines[-1].strip() or seps.match(body_lines[-1])):
-                body_lines.pop()
-            content = "\n".join(body_lines).strip()
-            if content:
-                messages.append({"role": role, "content": content})
-        return messages
-
-    def _strip_report_header(self, text):
-        # 去除导出文件顶部的报告头（标题 + Generated 元信息）
-        lines = text.splitlines()
-        out = []
-        for line in lines:
-            if line.strip().startswith("# Scholar Navis") or line.strip().startswith("> **Generated:**"):
-                continue
-            out.append(line)
-        return "\n".join(out)
-
-    def _parse_text(self, path):
-        with open(path, "r", encoding="utf-8-sig") as f:
-            text = f.read()
-
-        user_re = None
-        ai_re = None
-        lower = path.lower()
-        if lower.endswith(".csv"):
-            import csv as _csv
-            import io as _io
-            messages = []
-            reader = _csv.DictReader(_io.StringIO(text))
-            for row in reader:
-                role = row.get("Role", "").strip().lower()
-                content = row.get("Content", "")
-                if role.startswith("user"):
-                    messages.append({"role": "user", "content": content})
-                elif role.startswith("ai") or role.startswith("assistant"):
-                    messages.append({"role": "assistant", "content": content})
-            return messages
-
-        # TXT 格式：行式 `[USER INQUIRY]` / `[AI ANALYSIS]`
-        lines = text.splitlines()
-        messages = []
-        cur_role = None
-        buf = []
-        sep = "-" * 70
-
-        def flush():
-            nonlocal cur_role, buf
-            body = "\n".join(buf).strip()
-            # 剥离行内环绕分隔线
-            body = "\n".join(l for l in body.splitlines() if l.strip() != sep)
-            if cur_role and body:
-                messages.append({"role": cur_role, "content": body})
-            cur_role = None
-            buf = []
-
-        for line in lines:
-            stripped = line.strip()
-            if stripped.upper().startswith(self._TXT_USER) or stripped == "USER INQUIRY":
-                flush()
-                cur_role = "user"
-            elif stripped.upper().startswith(self._TXT_AI) or stripped == "AI ANALYSIS":
-                flush()
-                cur_role = "assistant"
-            elif cur_role is not None:
-                buf.append(line)
-            # 报告头/分隔线忽略（无 cur_role 时）
-        flush()
-        return messages
+        return tabs, annotated
 
 
 class DownloadImageTask(BackgroundTask):

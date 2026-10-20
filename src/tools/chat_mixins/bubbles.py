@@ -28,7 +28,8 @@ class ChatBubblesMixin:
             logger.warning("Chat UI not built yet; building lazily before bubble ops.")
             self.get_ui_widget()
 
-    def add_bubble(self, text, is_user, context_html=None, image_files=None):
+    def add_bubble(self, text, is_user, context_html=None, image_files=None,
+                   placeholder_files=None):
         self._ensure_chat_ui()
         if is_user:
             self.remove_old_follow_ups()
@@ -49,6 +50,9 @@ class ChatBubblesMixin:
         # 用户消息携带的图片附件：在气泡内渲染可点击的缩略图条
         if image_files:
             bubble.set_image_files(image_files)
+        # 未能内嵌 / 源文件缺失的附件：在气泡内显示文件名与原因
+        if placeholder_files:
+            bubble.set_file_placeholders(placeholder_files)
 
         # Inject the translator config so plot-plan cards can translate non-English
         # user edits back to English before the plan is confirmed and re-sent.
@@ -65,6 +69,17 @@ class ChatBubblesMixin:
 
         # 交互卡 / 高级 UI 组件的状态落定：立即回写该条历史并落盘（见 card_registry）
         bubble.sig_card_state_changed.connect(self._on_bubble_cards_changed)
+
+        # 书签：气泡只负责"选区 → 锚点载荷"与"画下划线"，落历史 / 落盘由会话层负责。
+        # 都带气泡自身作为默认参数，避免信号只传 id 时无法确定是哪条消息。
+        bubble.sig_bookmark_requested.connect(
+            lambda payload, b=bubble: self._on_bubble_bookmark_requested(b, payload))
+        bubble.sig_bookmark_remove_requested.connect(
+            lambda bid, b=bubble: self._on_bubble_bookmark_remove(b, bid))
+        bubble.sig_bookmark_hover.connect(
+            lambda bid, rect, b=bubble: self._on_bubble_bookmark_hover(b, bid, rect))
+        bubble.sig_bookmark_move.connect(self._on_bubble_bookmark_move)
+        bubble.sig_bookmark_leave.connect(self._on_bubble_bookmark_leave)
 
         # 链接路由统一走气泡的 sig_link_clicked：正文块（lbl_text）与拆分出的
         # 滚动块（表格 / 引用 / 代码块 / 思考链）内部的 anchorClicked 都会转发到

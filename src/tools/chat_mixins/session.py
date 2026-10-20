@@ -44,6 +44,11 @@ class ChatSessionMixin:
         if not history or not self._snapshot_writable():
             return
         self._sync_all_bubble_cards()
+        # 远程图片可能在本轮结束之后才下载完成：落盘前统一对账一次，归档 /
+        # 快照才能把它们一起内嵌。
+        sync_images = getattr(self, "_sync_all_bubble_remote_images", None)
+        if callable(sync_images):
+            sync_images()
         if chat_session.save_tab(self._tab_id(), history):
             chat_session.clear_inflight(self._tab_id())
 
@@ -137,6 +142,9 @@ class ChatSessionMixin:
         if history:
             # 先对账再落盘：界面上的组件状态才是"当前真实状态"
             self._sync_all_bubble_cards()
+            sync_images = getattr(self, "_sync_all_bubble_remote_images", None)
+            if callable(sync_images):
+                sync_images()
             chat_session.save_tab(self._tab_id(), history)
 
         text = getattr(self, "current_ai_text", "") or ""

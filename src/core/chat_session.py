@@ -16,6 +16,8 @@
 * ``tab_<id>.json`` —— 单个标签页的完整会话快照。体积等于该段对话（含思维链与
   参考文献），因此只在**轮次边界**覆盖写：用户消息入历史后，以及回答收尾
   （正常 / 取消 / 报错）后。写入是原子的（临时文件 + ``os.replace``）；
+  图片与小体积附件会复制进 ``scholar_workspace/assets``（内容寻址，跨标签页去重），
+  快照里记录 ``assets`` 映射与 ``placeholders`` 占位信息；
 * ``inflight_<id>.json`` —— 某标签页**流式进行中**的半条回答，让"崩溃时正在生成的
   那段"也能恢复。为控制写放大，本模块自带节流（默认 :data:`INFLIGHT_MIN_INTERVAL`
   秒且文本有变化才写），超过 :data:`INFLIGHT_MAX_CHARS` 的部分直接截断。
@@ -38,7 +40,8 @@
 清理语义
 --------
 :func:`clear_tab` 删除某标签页的两个文件，是"用户明确清空该标签页对话 / 关闭该标签页"
-的唯一落点：清掉之后下次启动不再恢复。
+的唯一落点：清掉之后下次启动不再恢复。**不删除** ``scholar_workspace/assets`` 里的
+内容寻址副本——它们可能被其它标签页或已导入的归档共享，按引用删除会误伤。
 
 线程约定
 --------
@@ -58,7 +61,9 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.core import BASE_DIR
-from src.core.chat_archive import DEFAULT_TAB_NAME, clean_tab_name, sanitize
+from src.core import chat_assets
+from src.core.chat_archive import (DEFAULT_TAB_NAME, clean_tab_name,
+                                   remap_attachment_paths, sanitize)
 
 logger = logging.getLogger("Core.ChatSession")
 
@@ -75,9 +80,9 @@ LEGACY_AUTOSAVE_NAME = "autosave.json"
 LEGACY_INFLIGHT_NAME = "inflight.json"
 
 #: 快照格式标识与版本（与归档的 ``FORMAT`` / ``VERSION`` 解耦，两者可各自演进）。
-#: 1 = 旧版单文件；2 = 清单 + 每标签页一个文件。
+#: 1 = 旧版单文件；2 = 清单 + 每标签页一个文件；3 = 增加内容寻址资产与占位符。
 SESSION_FORMAT = "scholar_navis_chat_tabs"
-SESSION_VERSION = 2
+SESSION_VERSION = 3
 
 #: 流式半条的最小落盘间隔（秒）：低于它且文本未变化的重复调用不再写盘。
 INFLIGHT_MIN_INTERVAL = 2.0
@@ -337,17 +342,44 @@ def save_tab(tab_id: str, messages: Any) -> bool:
 
     只在轮次边界调用：单次成本与对话长度成正比（序列化 + 写盘），轮内高频调用
     请用 :func:`save_inflight`。
+
+    自 v3 起，小体积附件与图片会先复制进 ``scholar_workspace/assets`` 内容寻址
+    仓库，快照里只记录"原路径 -> 仓库副本"的映射；大文件 / 源文件缺失只记录
+    占位信息。恢复时按映射把消息里的原路径改写成本机仓库路径，因此原文件被移动
+    或删除后，图片与常用附件仍能一起恢复。
     """
     path = tab_snapshot_path(tab_id)
     if path is None:
         return False
     msgs = [sanitize(m) for m in (messages or []) if isinstance(m, dict)]
+
+    # 规划 -> 复制到仓库 -> 标注占位符。快照消息保留原始路径，恢复时再由
+    # assets 映射统一改写；这样原路径始终是稳定的匹配键。
+    embedded, placeholders = chat_assets.plan_assets(
+        chat_assets.collect_paths(msgs),
+        chat_assets.collect_name_hints(msgs))
+    asset_map = chat_assets.materialize_assets(embedded, placeholders)
+    chat_assets.annotate_messages(msgs, placeholders, detect_missing=False)
+
+    # 快照里的消息保留**原始路径**，只额外记录"原路径 -> 仓库副本"的映射：
+    #   * 原始路径是稳定的匹配键，工作区整体搬家后仍能通过映射找回副本；
+    #   * 若仓库副本被清理而原文件还在，旧路径依然可用，不会因映射失效而丢图。
+    relative_map = {
+        original: (os.path.relpath(stored, BASE_DIR)
+                   if os.path.abspath(stored).startswith(os.path.abspath(BASE_DIR) + os.sep)
+                   else stored)
+        for original, stored in asset_map.items()
+    }
+
     payload = {
         "format": SESSION_FORMAT,
         "version": SESSION_VERSION,
         "saved_at": time.time(),
         "message_count": len(msgs),
         "messages": msgs,
+        # 原路径 -> 仓库路径（相对 BASE_DIR）：恢复时据此改写消息
+        "assets": relative_map,
+        "placeholders": placeholders,
     }
     return _write_json_atomic(path, payload)
 
@@ -429,16 +461,64 @@ def clear_tab(tab_id: str) -> None:
 # --------------------------------------------------------------------------- #
 #  单标签页快照：读
 # --------------------------------------------------------------------------- #
+def _restore_snapshot_assets(messages: List[Dict[str, Any]], payload: Any) -> int:
+    """把快照里的资产映射与占位信息应用到内存消息，返回改写处数。
+
+    仓库文件缺失时（用户手工清理、迁移了工作区）不抛错，而是把该条降级为
+    ``store_lost`` 占位符，界面会显示文件名与"内嵌副本缺失"。
+    """
+    if not isinstance(payload, dict):
+        return 0
+
+    raw_assets = payload.get("assets")
+    asset_map: Dict[str, str] = {}
+    lost: Dict[str, Dict[str, Any]] = {}
+    if isinstance(raw_assets, dict):
+        for original, stored in raw_assets.items():
+            if not isinstance(stored, str) or not stored:
+                continue
+            # v3 起存相对 BASE_DIR 的路径：工作区整体搬家后仍能找回；
+            # 早期/绝对路径原样判断，兼容已经落盘的快照。
+            resolved = stored if os.path.isabs(stored) else os.path.join(BASE_DIR, stored)
+            # 只接受仓库内文件：快照可被手工编辑，不能让它把消息路径指向任意本机文件
+            if os.path.isfile(resolved) and chat_assets.is_asset_store_path(resolved):
+                asset_map[str(original)] = resolved
+            else:
+                lost[str(original)] = {
+                    "status": chat_assets.STATUS_STORE_LOST,
+                    "name": os.path.basename(str(original)) or str(original),
+                }
+
+    placeholders: Dict[str, Dict[str, Any]] = {}
+    raw_placeholders = payload.get("placeholders")
+    if isinstance(raw_placeholders, dict):
+        placeholders = {str(k): v for k, v in raw_placeholders.items()
+                        if isinstance(v, dict)}
+    placeholders.update(lost)
+
+    changed = remap_attachment_paths(messages, asset_map) if asset_map else 0
+    chat_assets.annotate_messages(messages, placeholders, detect_missing=True)
+    return changed
+
+
 def load_tab(tab_id: str) -> List[Dict[str, Any]]:
-    """读取某标签页的会话（含未完成的半条）；无可用快照时返回空列表。"""
+    """读取某标签页的会话（含未完成的半条）；无可用快照时返回空列表。
+
+    快照里的 ``assets`` 会在内存中改写成仓库路径，``placeholders``（以及旧快照里
+    本机不存在的路径）会标注到对应文件条目上，供气泡显示"文件名 + 原因"。
+    旧版快照（无 ``assets``）仍按原路径恢复，不会因此报错。
+    """
     snapshot_path = tab_snapshot_path(tab_id)
     if snapshot_path is None:
         return []
 
-    messages = _messages_of(_read_json(snapshot_path))
+    payload = _read_json(snapshot_path)
+    messages = _messages_of(payload)
     if not messages:
         # 没有已完成轮次时，孤立的半条回答没有上下文可言，不恢复
         return []
+
+    _restore_snapshot_assets(messages, payload)
 
     inflight = _read_json(tab_inflight_path(tab_id) or "")
     text = ""

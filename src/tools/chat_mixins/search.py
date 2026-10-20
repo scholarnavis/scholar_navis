@@ -15,7 +15,7 @@ import logging
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut, QTextCursor, QTextCharFormat
-from PySide6.QtWidgets import QPushButton, QTextEdit
+from PySide6.QtWidgets import QPushButton, QSizePolicy, QTextEdit
 
 from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager, strong_weight_css
@@ -42,6 +42,8 @@ class ChatSearchMixin:
         self.btn_toggle_search = QPushButton(tr(" Search"))
         self.btn_toggle_search.setToolTip("Ctrl+F")
         self.btn_toggle_search.setCursor(Qt.PointingHandCursor)
+        # 与书签按钮一样固定宽度：KB 行没有可拉伸项时不能被布局拉成巨型按钮
+        self.btn_toggle_search.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_toggle_search.clicked.connect(self.open_chat_search)
         # 插到最后一个控件（收起按钮）之前
         row2_layout.insertWidget(row2_layout.count() - 1, self.btn_toggle_search)

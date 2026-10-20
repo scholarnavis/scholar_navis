@@ -5,15 +5,21 @@ import os
 import re
 import tempfile
 import time
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize, QRect
-from PySide6.QtGui import (QGuiApplication, QPixmap, QTextBlockFormat,
-                           QTextCursor, QFont)
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSize, QRect, QRectF
+from PySide6.QtGui import (QBrush, QColor, QGuiApplication, QPainter, QPixmap,
+                           QTextBlockFormat, QTextCharFormat, QTextCursor, QTextFormat,
+                           QFont)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QTextEdit, QPushButton, QFrame, QSizePolicy, QMenu, QScrollArea, QTextBrowser)
 
+from src.core.bookmarks import (ANCHOR_TEXT_MAX, CONTEXT_LEN, find_anchor,
+                                normalize_bookmarks, normalize_plain)
+from src.core.chat_assets import (STATUS_LEGACY, STATUS_MISSING, STATUS_STORE_LOST,
+                                  STATUS_TOO_LARGE, STATUS_TOTAL_LIMIT)
 from src.core.chat_typography import read as read_typography, scope_values
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
@@ -40,7 +46,7 @@ from src.ui.components.image_viewer import open_image_viewer
 
 #: 独立滚动块的高度上限（逻辑像素）。取值兼顾「一次能看到足够内容」与
 #: 「不让单个块吃掉整屏」：思考链约 20 行、代码块约 24 行、引用约 18 行。
-_THINK_MAX_HEIGHT = 340
+_THINK_MAX_HEIGHT = 420
 _CODE_MAX_HEIGHT = 420
 _QUOTE_MAX_HEIGHT = 300
 
@@ -68,6 +74,64 @@ _BROWSER_OBJECT_NAME = "BubbleText"
 _BLOCK_OBJECT_NAME = "BubbleBlock"
 #: 用户气泡的行内编辑框。
 _EDIT_OBJECT_NAME = "BubbleEdit"
+
+#: 书签在字符格式里的**私有属性**：用 ``QTextFormat`` 的用户属性区段存书签 id，
+#: 悬停时从光标所在字符的格式里直接读出"这是哪条书签"，不必再按坐标反查范围。
+#: 取值须避开 Qt 已占用的内置属性（用户区段从 0x100000 起）。
+_BOOKMARK_PROPERTY = int(getattr(QTextFormat.Property, "UserProperty", 0x100000)) + 1
+#: 书签文字的背景染色透明度（0~255）。下划线是主视觉，染色只负责"扫一眼能看到"，
+#: 取值过大会盖住行内代码/表格自带的底色。
+_BOOKMARK_TINT_ALPHA = 26
+
+
+# --------------------------------------------------------------------------- #
+#  资产占位文案
+# --------------------------------------------------------------------------- #
+def _mb_text(size) -> str:
+    """字节数转 MB 文本（保留一位小数，去掉无意义的 .0）。"""
+    try:
+        value = float(size) / (1024 * 1024)
+    except (TypeError, ValueError):
+        return "?"
+    text = f"{value:.1f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _placeholder_full_reason(meta: Dict[str, Any]) -> str:
+    """占位原因（完整句式，用于悬停提示 / 横幅）。"""
+    status = str((meta or {}).get("status") or STATUS_MISSING)
+    if status == STATUS_TOO_LARGE:
+        return tr("Too large to embed (limit {limit} MB). Only the file name is kept.").format(
+            limit=_mb_text(meta.get("limit")))
+    if status == STATUS_TOTAL_LIMIT:
+        return tr("The conversation reached its embedding limit ({limit} MB). "
+                  "Only the file name is kept.").format(
+            limit=_mb_text(meta.get("limit")))
+    if status == STATUS_STORE_LOST:
+        return tr("The embedded copy is missing from local storage. "
+                  "Only the file name is kept.")
+    if status == STATUS_LEGACY or meta.get("legacy"):
+        return tr("This conversation was saved by an older version that did not embed "
+                  "files. Only the file name is kept.")
+    return tr("The source file is no longer available. Only the file name is kept.")
+
+
+def _placeholder_short_reason(meta: Dict[str, Any]) -> str:
+    """占位原因（短语，用于缩略图方块与紧凑行）。"""
+    status = str((meta or {}).get("status") or STATUS_MISSING)
+    if status == STATUS_TOO_LARGE:
+        return tr("Not embedded (over {limit} MB)").format(limit=_mb_text(meta.get("limit")))
+    if status == STATUS_TOTAL_LIMIT:
+        return tr("Not embedded (storage limit)")
+    if status == STATUS_STORE_LOST:
+        return tr("Embedded copy missing")
+    if status == STATUS_LEGACY or meta.get("legacy"):
+        return tr("Not embedded by an older version")
+    return tr("Source file unavailable")
+
+
+def _placeholder_name(meta: Dict[str, Any], fallback: str = "") -> str:
+    return str((meta or {}).get("name") or os.path.basename(str(fallback or "")) or "?")
 
 #: 上述控件的**带 id 选择器**：QSS 与开发者模式自检共用同一份，避免别处硬拼
 #: 选择器字符串后与 objectName 对不上（对不上就会静默退回"被宿主样式盖住"）。
@@ -127,11 +191,20 @@ class ImageAwareTextBrowser(QTextBrowser):
     sig_image_activated = Signal(str)
     #: (引用编号, 锚点全局矩形)；编号 <= 0 表示鼠标已离开引用锚点。
     sig_citation_hover = Signal(int, object)
+    #: (书签 id, 锚点全局矩形)：悬停在带书签的文本上。
+    sig_bookmark_hover = Signal(str, object)
+    #: 仍在同一条书签文字内移动：只带新的锚点，用于让预览卡跟随光标。
+    sig_bookmark_move = Signal(object)
+    #: 鼠标离开书签文本（上层据此收起预览卡）。
+    sig_bookmark_leave = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
         self._hover_ref_index = -1
+        self._hover_bookmark_id = ""
+        #: 书签下划线：(起, 止, 颜色)。由气泡在书签定位后写入，按当前排版实时绘制。
+        self._bookmark_marks: List[Tuple[int, int, str]] = []
 
     # ---- 行内引用悬停 ----
     @staticmethod
@@ -208,14 +281,161 @@ class ImageAwareTextBrowser(QTextBrowser):
         else:
             self.sig_citation_hover.emit(-1, None)
 
+    # ---- 书签悬停 ----
+    def bookmark_id_at(self, pos) -> str:
+        """取鼠标位置所在字符的书签 id；不在书签上时返回空串。
+
+        ``cursorForPosition`` 的落点可能偏向字符前/后，因此同时探测
+        ``position`` 与其前一个字符——否则在文字边缘移动时悬停会时有时无。
+        """
+        try:
+            doc = self.document()
+            total = doc.characterCount()
+            cursor = self.cursorForPosition(pos)
+            candidates = [cursor.position(), cursor.position() - 1,
+                          cursor.position() + 1]
+            for probe in candidates:
+                if not (0 <= probe < total):
+                    continue
+                reader = QTextCursor(doc)
+                # charFormat() 读的是光标**前一个**字符的格式，故右移一位再读
+                reader.setPosition(min(probe + 1, total - 1))
+                value = reader.charFormat().property(_BOOKMARK_PROPERTY)
+                if value:
+                    return str(value)
+        except Exception as e:      # pragma: no cover - 纯防御
+            logger.debug("Bookmark hit test failed: %s", e)
+        return ""
+
+    # ---- 书签下划线（自绘，QTextCharFormat 的下划线无法调粗细） ----
+    def set_bookmark_marks(self, marks):
+        """写入需要绘制的书签区间：``[(start, end, color), …]``。"""
+        cleaned = []
+        for item in marks or []:
+            try:
+                start, end, color = int(item[0]), int(item[1]), str(item[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if end > start:
+                cleaned.append((start, end, color))
+        if cleaned == self._bookmark_marks:
+            return
+        self._bookmark_marks = cleaned
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._bookmark_marks:
+            return
+        painter = QPainter(self.viewport())
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            painter.setPen(Qt.NoPen)
+            for start, end, color in self._bookmark_marks:
+                painter.setBrush(QColor(color))
+                try:
+                    rects = self._bookmark_line_rects(start, end)
+                except (RuntimeError, ValueError) as e:  # 文档正在重建时跳过这一帧
+                    logger.debug("Bookmark underline layout skipped: %s", e)
+                    continue
+                for rect in rects:
+                    painter.drawRect(rect)
+        finally:
+            painter.end()
+
+    @staticmethod
+    def _cursor_at(doc, position: int) -> QTextCursor:
+        cursor = QTextCursor(doc)
+        cursor.setPosition(max(0, min(int(position), doc.characterCount() - 1)))
+        return cursor
+
+    def _bookmark_line_rects(self, start: int, end: int):
+        """按当前排版把字符区间拆成逐行矩形：2px 下划线，位于基线下方。"""
+        doc = self.document()
+        total = doc.characterCount()
+        start = max(0, min(int(start), total - 1))
+        end = max(start + 1, min(int(end), total - 1))
+        rects = []
+        block = doc.findBlock(start)
+        while block.isValid() and block.position() < end:
+            layout = block.layout()
+            block_start = block.position()
+            if layout is not None and layout.lineCount() > 0:
+                local_start = max(0, start - block_start)
+                local_end = min(end - block_start, max(0, block.length() - 1))
+                if local_end > local_start:
+                    for i in range(layout.lineCount()):
+                        line = layout.lineAt(i)
+                        line_start = line.textStart()
+                        line_end = line_start + line.textLength()
+                        seg_start = max(local_start, line_start)
+                        seg_end = min(local_end, line_end)
+                        if seg_end <= seg_start:
+                            continue
+                        # 用 cursorRect 取两端：QTextLine.cursorToX 在折行后的
+                        # 第 2 行起会返回 0（PySide 下的实测行为），不能依赖。
+                        line_rect = self.cursorRect(self._cursor_at(doc, block_start + line_start))
+                        if line_rect.isNull():
+                            continue
+                        start_rect = self.cursorRect(self._cursor_at(doc, block_start + seg_start))
+                        if start_rect.isNull():
+                            continue
+                        x1 = start_rect.left()
+                        if seg_end >= line_end:
+                            x2 = line_rect.left() + line.naturalTextWidth()
+                        else:
+                            end_rect = self.cursorRect(self._cursor_at(doc, block_start + seg_end))
+                            if end_rect.isNull() or end_rect.top() != start_rect.top():
+                                x2 = line_rect.left() + line.naturalTextWidth()
+                            else:
+                                x2 = end_rect.left()
+                        if x2 < x1:
+                            x1, x2 = x2, x1
+                        if x2 - x1 < 0.5:
+                            continue
+                        y = start_rect.top() + line.ascent() + 1
+                        rects.append(QRectF(x1, y, x2 - x1, 2.0))
+            block = block.next()
+        return rects
+
+    def _bookmark_anchor(self, pos) -> QRect:
+        """把浏览器内的光标位置换成全局锚点矩形（2px 宽，避免挡住命中判定）。"""
+        return QRect(self.viewport().mapToGlobal(pos), QSize(2, 16))
+
+    def _update_bookmark_hover(self, pos):
+        bookmark_id = self.bookmark_id_at(pos)
+        anchor = self._bookmark_anchor(pos)
+        if bookmark_id == self._hover_bookmark_id:
+            # 同一条书签内移动：刷新锚点，让预览卡不会因为"光标离开最初那个点"
+            # 而被当成已走开自动收起。基类 mouseMoveEvent 可能已把光标改回 I 形，
+            # 这里一并复位，保证整段下划线内都是手型。
+            if bookmark_id:
+                self.sig_bookmark_move.emit(anchor)
+                self.viewport().setCursor(Qt.PointingHandCursor)
+            return
+        self._hover_bookmark_id = bookmark_id
+        if bookmark_id:
+            self.sig_bookmark_hover.emit(bookmark_id, anchor)
+            self.viewport().setCursor(Qt.PointingHandCursor)
+        else:
+            self.sig_bookmark_leave.emit()
+            self.viewport().setCursor(Qt.IBeamCursor)
+
     def mouseMoveEvent(self, event):
         self._update_citation_hover(event.pos())
+        # 先交给 QTextBrowser（它会按锚点/选区切换光标形状），再设置书签光标：
+        # 顺序反过来会被基类覆盖，"悬停在书签上显示手型"就永远看不到。
         super().mouseMoveEvent(event)
+        self._update_bookmark_hover(event.pos())
 
     def leaveEvent(self, event):
         if self._hover_ref_index > 0:
             self._hover_ref_index = -1
             self.sig_citation_hover.emit(-1, None)
+        if self._hover_bookmark_id:
+            self._hover_bookmark_id = ""
+            self.sig_bookmark_leave.emit()
+            self.viewport().setCursor(Qt.IBeamCursor)
         super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -538,7 +758,12 @@ class _ImageThumb(QLabel):
     def __init__(self, info, parent=None):
         super().__init__(parent)
         self.info = info
-        self.image_path = info.get("path", "")
+        primary = str(info.get("path") or "")
+        fallback = str(info.get("image_path") or "")
+        # SVG 的 path 是源文件、image_path 是栅格化 PNG：源文件被移走时仍可显示 PNG
+        self.image_path = primary if (primary and os.path.exists(primary)) else (fallback or primary)
+        self._placeholder = dict(info.get("asset_placeholder") or {})
+        self._is_placeholder = False
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Click or double-click to view the image\nRight-click: Save / Copy")
         self._load_pixmap()
@@ -547,7 +772,7 @@ class _ImageThumb(QLabel):
     def _load_pixmap(self):
         path = self.image_path
         pix = None
-        if path and path.lower().endswith('.svg'):
+        if path and path.lower().endswith('.svg') and os.path.exists(path):
             try:
                 from PySide6.QtSvg import QSvgRenderer
                 from PySide6.QtGui import QPainter, QImage
@@ -568,24 +793,45 @@ class _ImageThumb(QLabel):
             pix = QPixmap(path)
 
         if pix is None or pix.isNull():
-            self.setText("Image unavailable")
-            self.setFixedSize(120, 90)
-            self.setAlignment(Qt.AlignCenter)
+            self._show_placeholder()
             return
 
         scaled = pix.scaledToHeight(96, Qt.SmoothTransformation)
         self.setPixmap(scaled)
         self.setFixedSize(scaled.size() + QSize(2, 2))
 
+    def _show_placeholder(self):
+        """图片本体不可用：用**源文件名 + 原因**占位，而不是一块空白。"""
+        meta = self._placeholder
+        self._is_placeholder = True
+        name = _placeholder_name(meta, self.image_path)
+        short = _placeholder_short_reason(meta)
+        full = _placeholder_full_reason(meta)
+        self.setText(f"🖼 {name}\n{short}")
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedSize(180, 100)
+        self.setToolTip(f"{name}\n{full}")
+        self.setCursor(Qt.ArrowCursor)
+
     def _style(self):
-        self.setStyleSheet(
-            "QLabel { border: 1px solid rgba(128, 128, 128, 0.4); border-radius: 6px; background: rgba(128, 128, 128, 0.08); }")
+        if self._is_placeholder:
+            self.setStyleSheet(
+                "QLabel { border: 1px dashed rgba(128, 128, 128, 0.55); border-radius: 6px; "
+                "background: rgba(128, 128, 128, 0.08); color: rgba(150, 150, 150, 0.95); "
+                "font-size: 11px; padding: 4px; }")
+        else:
+            self.setStyleSheet(
+                "QLabel { border: 1px solid rgba(128, 128, 128, 0.4); border-radius: 6px; "
+                "background: rgba(128, 128, 128, 0.08); }")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and os.path.exists(self.image_path):
             self.sig_activated.emit(self.image_path)
         elif event.button() == Qt.LeftButton:
-            ToastManager().show(f"Image file not found: {os.path.basename(self.image_path)}", "error")
+            ToastManager().show(
+                f"{_placeholder_name(self._placeholder, self.image_path)}: "
+                f"{_placeholder_full_reason(self._placeholder)}", "warning")
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -619,8 +865,10 @@ class _ImageThumb(QLabel):
             ToastManager().show(f"Image file not found: {os.path.basename(self.image_path)}", "error")
             return
         from src.ui.components.file_dialogs import save_file_name
+        # 仓库里的文件名是内容哈希：保存对话框优先用消息里保留的原始文件名
+        display_name = str(self.info.get("name") or os.path.basename(self.image_path))
         target, _ = save_file_name(
-            self, "Save Image As", os.path.basename(self.image_path),
+            self, "Save Image As", display_name,
             "Image (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg)")
         if not target:
             return
@@ -658,6 +906,14 @@ class ChatBubbleWidget(QWidget):
     #: 组件（交互卡 / 高级 UI 组件）交互落定后发出，携带本气泡：上层据此把
     #: ``ui_components`` 回写历史条目并落盘（见 card_registry 与 ChatSessionMixin）。
     sig_card_state_changed = Signal(object)
+    #: 用户请求为选中文字添加书签，携带锚点载荷（见 ChatBubbleWidget._bookmark_payload）。
+    sig_bookmark_requested = Signal(object)
+    #: 用户请求移除某条书签，携带书签 id。
+    sig_bookmark_remove_requested = Signal(str)
+    #: 悬停某条书签 / 在同一条书签内移动 / 离开书签文本。
+    sig_bookmark_hover = Signal(str, object)
+    sig_bookmark_move = Signal(object)
+    sig_bookmark_leave = Signal()
 
     # 由 init_ui/add_translation_widget 创建，仅作静态检查声明
     main_layout: QHBoxLayout
@@ -720,6 +976,10 @@ class ChatBubbleWidget(QWidget):
         self.download_failed_urls = {}
         self.download_timeouts = {}
         self.image_task_mgrs = {}
+        #: 归档 / 历史快照记录的"远程图未内嵌"原因：url -> {status, name, ...}
+        self.remote_image_placeholders = {}
+        #: 非图片附件的占位横幅（缺失 / 过大时显示文件名与原因）
+        self._placeholder_frame = None
 
         self.image_loading_timer = QTimer(self)
         self.image_loading_timer.timeout.connect(self._animate_image_loading)
@@ -732,6 +992,11 @@ class ChatBubbleWidget(QWidget):
         self._height_sync_pending = False
         #: 最近一次悬停的行内引用锚点全局矩形：点击展开详情面板时用于定位。
         self._last_citation_rect = None
+        #: 本消息的书签（历史条目里的同一份数据的界面副本）与"书签 id -> 文档范围"。
+        #: 范围缓存用于滚动条定位与跳转后高亮脉冲，重新渲染时由 apply_bookmarks 重建。
+        self._bookmarks = []
+        self._bookmark_index = {}
+        self._bookmark_ranges = {}
 
         #: 本气泡作用域（LLM / 用户）下的排版参数。必须在 init_ui 之前读取：
         #: init_ui 末尾的 set_content 就会用到字号 / 行距 / 段距。
@@ -844,7 +1109,10 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.setOpenLinks(False)
         self.lbl_text.setFrameShape(QFrame.NoFrame)
         self.lbl_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.lbl_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # 正文只允许按视口换行，不允许横向滚动：超宽内容（表格 / 代码）由拆分出的
+        # OverflowBlock 自己承担横向滚动，气泡正文出现横向滚动条是纯噪声。
+        self.lbl_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.lbl_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.lbl_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.lbl_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_text.customContextMenuRequested.connect(self.show_context_menu)
@@ -853,6 +1121,7 @@ class ChatBubbleWidget(QWidget):
         self.lbl_text.sig_image_activated.connect(self.open_image_viewer)
         # 行内引用 [n] 的悬停探测：弹出引用预览卡（编号 -1 表示已离开锚点）
         self.lbl_text.sig_citation_hover.connect(self._on_citation_hover)
+        self._wire_bookmark_hover(self.lbl_text)
         self.blocks_layout.addWidget(self.lbl_text)
 
         # 文档尺寸变化只做"合并调度"：流式期间 documentSizeChanged 会高频触发，
@@ -861,20 +1130,20 @@ class ChatBubbleWidget(QWidget):
             lambda *_: self._schedule_height_sync())
 
         # 布局逻辑：MSG_ERROR 靠左（类似 AI 气泡）。
-        # 气泡与弹簧按 17:3 的 stretch 比例分配宽度（气泡约 85%）：此前
+        # 气泡与弹簧按 18:2 的 stretch 比例分配宽度（气泡约 90%）：此前
         # 两者同为 Expanding 策略会被平分为各约 50%，气泡永远只占半窗宽，
-        # 文本过早换行；stretch 比例使气泡无论内容长短都稳定填充 85%。
+        # 文本过早换行；stretch 比例使气泡无论内容长短都稳定填充 90%。
         if self.msg_type == self.MSG_ERROR:
-            self.main_layout.addWidget(self.content_container, 17)
-            self.main_layout.addWidget(self.spacer, 3)
+            self.main_layout.addWidget(self.content_container, 18)
+            self.main_layout.addWidget(self.spacer, 2)
             btn_alignment = Qt.AlignLeft
         elif self.is_user:
-            self.main_layout.addWidget(self.spacer, 3)
-            self.main_layout.addWidget(self.content_container, 17)
+            self.main_layout.addWidget(self.spacer, 2)
+            self.main_layout.addWidget(self.content_container, 18)
             btn_alignment = Qt.AlignRight
         else:
-            self.main_layout.addWidget(self.content_container, 17)
-            self.main_layout.addWidget(self.spacer, 3)
+            self.main_layout.addWidget(self.content_container, 18)
+            self.main_layout.addWidget(self.spacer, 2)
             btn_alignment = Qt.AlignLeft
 
         self.set_content(self.original_text, msg_type=self.msg_type)
@@ -883,6 +1152,7 @@ class ChatBubbleWidget(QWidget):
         self.edit_input.setObjectName(_EDIT_OBJECT_NAME)
         self.edit_input.setVisible(False)
         self.edit_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.edit_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.edit_input.installEventFilter(self)
         self.edit_input.textChanged.connect(self.adjust_edit_height)
 
@@ -955,6 +1225,77 @@ class ChatBubbleWidget(QWidget):
             self.content_layout.addWidget(self.edit_btn_widget)
 
     # --- 3.1 用户消息图片缩略图条 ---
+    def set_remote_image_placeholders(self, mapping):
+        """登记正文远程图的占位原因（``url -> {status, name, ...}``）。"""
+        if not isinstance(mapping, dict):
+            return
+        self.remote_image_placeholders = {
+            str(url): dict(meta) for url, meta in mapping.items()
+            if isinstance(meta, dict)
+        }
+
+    def set_file_placeholders(self, items):
+        """在附件上下文下方显示"未内嵌文件"的说明横幅。
+
+        :param items: 带 ``asset_placeholder`` 的 ``external_files`` 条目（非图片）。
+        """
+        items = [it for it in (items or [])
+                 if isinstance(it, dict) and isinstance(it.get("asset_placeholder"), dict)]
+        if not items or self._placeholder_frame is not None:
+            return
+
+        frame = QFrame()
+        frame.setObjectName("AssetPlaceholderFrame")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(3)
+
+        header = QLabel(tr("Some attached files were not embedded"))
+        header.setObjectName("AssetPlaceholderHeader")
+        layout.addWidget(header)
+
+        for item in items:
+            meta = item.get("asset_placeholder") or {}
+            name = _placeholder_name(meta, item.get("path"))
+            row = QLabel(f"• {name} — {_placeholder_full_reason(meta)}")
+            row.setObjectName("AssetPlaceholderRow")
+            row.setWordWrap(True)
+            row.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            layout.addWidget(row)
+
+        insert_idx = 0
+        if getattr(self, "ctx_frame", None) is not None:
+            insert_idx += 1
+        if getattr(self, "_image_strip", None) is not None:
+            insert_idx += 1
+        self.content_layout.insertWidget(
+            min(insert_idx, self.content_layout.count()), frame)
+        self._placeholder_frame = frame
+        self._style_placeholder_frame()
+
+    def _style_placeholder_frame(self):
+        """占位横幅的主题配色（创建时与主题切换时共用一处）。"""
+        frame = getattr(self, "_placeholder_frame", None)
+        if frame is None:
+            return
+        tm = ThemeManager()
+        frame.setStyleSheet(f"""
+            QFrame#AssetPlaceholderFrame {{
+                background-color: {hex_to_rgba(tm.color('danger'), 0.08)};
+                border-left: 3px solid {hex_to_rgba(tm.color('danger'), 0.7)};
+                border-radius: 4px;
+            }}
+        """)
+        header = frame.findChild(QLabel, "AssetPlaceholderHeader")
+        if header is not None:
+            header.setStyleSheet(
+                f"color: {tm.color('danger')}; font-size: 11px; "
+                f"font-weight: {strong_weight_css()}; border: none; background: transparent;")
+        for row in frame.findChildren(QLabel, "AssetPlaceholderRow"):
+            row.setStyleSheet(
+                f"color: {tm.color('text_muted')}; font-size: 11px; "
+                f"border: none; background: transparent;")
+
     def set_image_files(self, image_infos):
         """在气泡中渲染上传图片的缩略图条（用户消息）。
 
@@ -1015,6 +1356,12 @@ class ChatBubbleWidget(QWidget):
             controller.hover(self.index, index, anchor_rect, host=self.window())
         else:
             controller.leave_hover()
+
+    def _wire_bookmark_hover(self, browser):
+        """把浏览器上的书签悬停信号转发给上层（气泡不持有预览卡片）。"""
+        browser.sig_bookmark_hover.connect(self.sig_bookmark_hover.emit)
+        browser.sig_bookmark_move.connect(self.sig_bookmark_move.emit)
+        browser.sig_bookmark_leave.connect(self.sig_bookmark_leave.emit)
 
     def _on_anchor_clicked(self, url):
         """锚点点击统一入口：行内引用展开详情面板，其余链接照旧路由。"""
@@ -1079,6 +1426,252 @@ class ChatBubbleWidget(QWidget):
 
         self.set_content(self.original_text)
 
+    # --- 3.3 书签：锚点提取、彩色下划线、悬停与跳转定位 ---
+    def _iter_bookmark_browsers(self):
+        """按文档顺序产出 ``(块下标, 块类型, 浏览器)``。
+
+        块下标 0 固定是正文浏览器；拆分出的表格/代码/引用/思考链从 1 起。
+        书签记录里保存块下标只用于"优先在原地找回"，找不到时仍会遍历全部块。
+        """
+        yield 0, "text", self.lbl_text
+        for index, block in enumerate(getattr(self, "_extra_blocks", ()) or ()):
+            browser = getattr(block, "browser", None)
+            if browser is not None:
+                yield index + 1, getattr(block, "_block_kind", "text"), browser
+
+    def _block_ref_of(self, browser):
+        for block_index, kind, candidate in self._iter_bookmark_browsers():
+            if candidate is browser:
+                return block_index, kind
+        return 0, "text"
+
+    def _bookmark_payload(self, browser):
+        """把"当前选区"变成可持久化的锚点载荷；没有选区时返回 ``None``。
+
+        锚点 = 归一化后的选中文字 + 前后各一小段上下文 + 创建时它是第几次出现。
+        重渲染后字符偏移量会变，但这四项合起来足以在文档里重新找回同一段文字。
+        """
+        try:
+            cursor = browser.textCursor()
+            if not cursor.hasSelection():
+                return None
+            doc = browser.document()
+            raw = doc.toPlainText()
+            start, end = cursor.selectionStart(), cursor.selectionEnd()
+            if end <= start:
+                return None
+
+            selection = raw[start:end]
+            lead = len(selection) - len(selection.lstrip())
+            trail = len(selection) - len(selection.rstrip())
+            start += lead
+            end -= trail
+            if end <= start:
+                return None
+            if end - start > ANCHOR_TEXT_MAX:
+                end = start + ANCHOR_TEXT_MAX
+
+            plain = normalize_plain(raw)
+            selected = normalize_plain(raw[start:end])
+            if not selected.strip():
+                return None
+
+            block_index, block_kind = self._block_ref_of(browser)
+            return {
+                "message_index": self.index,
+                "text": selected,
+                "prefix": plain[max(0, start - CONTEXT_LEN):start],
+                "suffix": plain[end:end + CONTEXT_LEN],
+                "occurrence": plain[:start].count(selected),
+                "block": block_index,
+                "block_kind": block_kind,
+            }
+        except Exception as e:      # pragma: no cover - 纯防御
+            logger.warning("Failed to build bookmark anchor for message #%s: %s",
+                           getattr(self, "index", -1), e)
+            return None
+
+    def _locate_bookmark(self, bookmark):
+        """在当前的（可能已重渲染的）文档里重新定位书签，返回落点三元组。"""
+        preferred = int(bookmark.get("block", 0) or 0)
+        preferred_kind = str(bookmark.get("block_kind") or "")
+        browsers = list(self._iter_bookmark_browsers())
+        browsers.sort(key=lambda item: 0 if item[0] == preferred else 1)
+
+        best = None
+        for block_index, kind, browser in browsers:
+            try:
+                plain = normalize_plain(browser.document().toPlainText())
+            except RuntimeError:
+                continue
+            hit = find_anchor(plain, bookmark)
+            if hit is None:
+                continue
+            score = 2.0 if block_index == preferred else 0.0
+            if preferred_kind and kind == preferred_kind:
+                score += 0.5
+            if best is None or score > best[0]:
+                best = (score, browser, hit[0], hit[1])
+            if score >= 2.5:        # 原地且块类型一致：不必再看其它块
+                break
+        if best is None:
+            return None
+        return best[1], best[2], best[3]
+
+    def bookmarks(self):
+        return list(self._bookmarks)
+
+    def apply_bookmarks(self, bookmarks, animate_ids=None):
+        """整体替换本气泡的书签并重绘下划线（流式/主题重渲染后也会被调用）。"""
+        self._bookmarks = normalize_bookmarks(bookmarks)
+        self._bookmark_index = {b["id"]: b for b in self._bookmarks}
+        self._apply_bookmark_highlights(animate_ids=animate_ids)
+
+    def refresh_bookmarks(self, bookmarks):
+        """书签内容变化（例如删除）后刷新：优先整篇重渲染，彻底清掉旧下划线。"""
+        self._bookmarks = normalize_bookmarks(bookmarks)
+        self._bookmark_index = {b["id"]: b for b in self._bookmarks}
+        tool = getattr(self, "_owner_tool", None)
+        if tool is not None and hasattr(tool, "rerender_bubble_from_source"):
+            try:
+                if tool.rerender_bubble_from_source(self):
+                    return
+            except Exception as e:
+                logger.warning("Bookmark refresh re-render failed; falling back: %s", e)
+        self._clear_bookmark_marks()
+        self._apply_bookmark_highlights()
+
+    def _apply_bookmark_highlights(self, animate_ids=None):
+        self._bookmark_ranges = {}
+        # 先清掉所有浏览器上的旧下划线：书签被删 / 重新定位后不能留下残线
+        for _index, _kind, browser in self._iter_bookmark_browsers():
+            setter = getattr(browser, "set_bookmark_marks", None)
+            if callable(setter):
+                setter([])
+        if not self._bookmarks:
+            return
+
+        animate = set(animate_ids or ())
+        marks = {}
+        for bookmark in self._bookmarks:
+            located = self._locate_bookmark(bookmark)
+            if located is None:
+                logger.debug("Bookmark %s not found after re-render (message #%s)",
+                             bookmark.get("id"), getattr(self, "index", -1))
+                continue
+            browser, start, end = located
+            alpha = 0 if bookmark["id"] in animate else _BOOKMARK_TINT_ALPHA
+            self._merge_bookmark_format(browser, start, end, bookmark, alpha)
+            self._bookmark_ranges[bookmark["id"]] = (browser, start, end)
+            marks.setdefault(browser, []).append((start, end, bookmark["color"]))
+
+        for browser, segments in marks.items():
+            setter = getattr(browser, "set_bookmark_marks", None)
+            if callable(setter):
+                setter(segments)
+
+        if animate:
+            # 新书签先只画下划线，再让背景色淡入：避免"啪"地出现一块色条。
+            QTimer.singleShot(0, self, lambda ids=tuple(animate): self._fade_in_bookmarks(ids))
+        self._schedule_height_sync()
+
+    def _merge_bookmark_format(self, browser, start, end, bookmark, alpha):
+        """写入书签 id 与背景染色。
+
+        下划线不交给 ``QTextCharFormat``：Qt 的下划线固定 1px、无法调粗细，
+        统一由 :meth:`ImageAwareTextBrowser.paintEvent` 自绘 2px。
+        """
+        try:
+            doc = browser.document()
+            cursor = QTextCursor(doc)
+            cursor.setPosition(max(0, start))
+            cursor.setPosition(min(end, doc.characterCount() - 1), QTextCursor.KeepAnchor)
+            fmt = QTextCharFormat()
+            fmt.setProperty(_BOOKMARK_PROPERTY, bookmark["id"])
+            if alpha > 0:
+                tint = QColor(bookmark["color"])
+                tint.setAlpha(max(0, min(255, int(alpha))))
+                fmt.setBackground(tint)
+            cursor.mergeCharFormat(fmt)
+        except RuntimeError:        # 控件已销毁（切换标签页 / 清空历史）
+            pass
+        except Exception as e:      # pragma: no cover - 纯防御
+            logger.debug("Apply bookmark format failed: %s", e)
+
+    def _fade_in_bookmarks(self, bookmark_ids, step=0):
+        """书签背景染色的 4 帧淡入（约 150ms），下划线始终可见。"""
+        steps = (8, 16, _BOOKMARK_TINT_ALPHA)
+        if step >= len(steps):
+            return
+        alpha = steps[step]
+        for bookmark_id in bookmark_ids:
+            self._tint_bookmark(bookmark_id, alpha)
+        QTimer.singleShot(
+            45, self,
+            lambda ids=tuple(bookmark_ids), s=step + 1: self._fade_in_bookmarks(ids, s))
+
+    def _tint_bookmark(self, bookmark_id, alpha):
+        entry = self._bookmark_ranges.get(bookmark_id)
+        bookmark = self._bookmark_index.get(bookmark_id)
+        if entry is None or bookmark is None:
+            return
+        browser, start, end = entry
+        self._merge_bookmark_format(browser, start, end, bookmark, alpha)
+
+    def pulse_bookmark(self, bookmark_id):
+        """跳转到书签后做一次短暂的高亮脉冲，指示"就是这一段"。"""
+        if bookmark_id not in self._bookmark_ranges:
+            return
+        for delay, alpha in ((0, 95), (150, _BOOKMARK_TINT_ALPHA),
+                             (300, 75), (450, _BOOKMARK_TINT_ALPHA)):
+            QTimer.singleShot(
+                delay, self,
+                lambda a=alpha, bid=bookmark_id: self._tint_bookmark(bid, a))
+
+    def _clear_bookmark_marks(self):
+        """清掉已记录区间上的染色与 id（整篇重渲染不可用时的兜底）。
+
+        不下发 ``NoUnderline``：书签不再使用字符格式下划线，若在这里清掉会把
+        链接自带的默认下划线一并抹掉。自绘下划线随 ``set_bookmark_marks([])``
+        消失。
+        """
+        for browser, start, end in list(self._bookmark_ranges.values()):
+            try:
+                doc = browser.document()
+                cursor = QTextCursor(doc)
+                cursor.setPosition(max(0, start))
+                cursor.setPosition(min(end, doc.characterCount() - 1),
+                                    QTextCursor.KeepAnchor)
+                fmt = QTextCharFormat()
+                fmt.setBackground(QBrush())
+                fmt.setProperty(_BOOKMARK_PROPERTY, "")
+                cursor.mergeCharFormat(fmt)
+            except RuntimeError:
+                continue
+        for _index, _kind, browser in self._iter_bookmark_browsers():
+            setter = getattr(browser, "set_bookmark_marks", None)
+            if callable(setter):
+                setter([])
+        self._bookmark_ranges = {}
+
+    def bookmark_anchor_point(self, bookmark_id):
+        """书签在**气泡坐标系**中的落点；定位失败时返回 ``None``。"""
+        entry = self._bookmark_ranges.get(bookmark_id)
+        if entry is None:
+            return None
+        browser, start, _end = entry
+        try:
+            cursor = QTextCursor(browser.document())
+            cursor.setPosition(start)
+            rect = browser.cursorRect(cursor)
+            return browser.viewport().mapTo(self, rect.topLeft())
+        except RuntimeError:
+            return None
+
+    def bookmark_id_at(self, browser, pos):
+        getter = getattr(browser, "bookmark_id_at", None)
+        return getter(pos) if callable(getter) else ""
+
     def show_context_menu(self, pos):
         tm = ThemeManager()
         menu = QMenu(self)
@@ -1087,6 +1680,30 @@ class ChatBubbleWidget(QWidget):
                     QMenu::item {{ padding: 6px 20px; border-radius: 2px; }}
                     QMenu::item:selected {{ background-color: {tm.color('btn_hover')}; }}
                 """)
+
+        source = self.sender()
+        if not isinstance(source, QWidget):
+            source = self.lbl_text
+
+        # 书签：只有存在选区时才可添加；右键落在已有书签上时额外给出移除入口。
+        has_selection = False
+        try:
+            has_selection = bool(source.textCursor().hasSelection())
+        except (AttributeError, RuntimeError):
+            has_selection = False
+        act_bookmark = menu.addAction(tm.icon("bookmark", "text_main"), tr("Add Bookmark"))
+        act_bookmark.setEnabled(has_selection)
+        act_bookmark.setToolTip(tr("Select some text first."))
+        act_bookmark.triggered.connect(lambda: self._request_bookmark(source))
+
+        hovered_bookmark = self.bookmark_id_at(source, pos)
+        if hovered_bookmark:
+            act_remove = menu.addAction(
+                tm.icon("delete", "danger"), tr("Remove Bookmark"))
+            act_remove.triggered.connect(
+                lambda _=False, bid=hovered_bookmark:
+                self.sig_bookmark_remove_requested.emit(bid))
+        menu.addSeparator()
 
         act_copy = menu.addAction(tm.icon("copy", "text_main"), "Copy Plain Text")
         act_copy.triggered.connect(self.copy_plain_text)
@@ -1099,10 +1716,17 @@ class ChatBubbleWidget(QWidget):
             act_edit = menu.addAction(tm.icon("edit", "text_main"), "编辑 (Edit)")
             act_edit.triggered.connect(self.toggle_edit)
 
-        source = self.sender()
-        if not isinstance(source, QWidget):
-            source = self.lbl_text
         menu.exec(source.mapToGlobal(pos))
+
+    def _request_bookmark(self, browser):
+        payload = self._bookmark_payload(browser)
+        if payload is None:
+            ToastManager().show(tr("Select some text first."), "warning")
+            return
+        logger.info("Bookmark requested: message #%s, %d chars, block=%s",
+                    getattr(self, "index", -1), len(payload.get("text", "")),
+                    payload.get("block"))
+        self.sig_bookmark_requested.emit(payload)
 
     def disable_edit(self):
         """"只作用于最新一条问题"的入口一并收起：编辑 + 重新发起。
@@ -1281,6 +1905,9 @@ class ChatBubbleWidget(QWidget):
                 f"color: {tm.color('accent')}; font-size: 11px; font-weight: {strong_weight_css()}; border: none; background: transparent; font-family: {css_family};")
             self.ctx_content.setStyleSheet(
                 f"color: {tm.color('text_muted')}; font-size: 12px; border: none; background: transparent; font-family: {css_family}; margin: 0px; padding: 0px;")
+
+        # 未内嵌附件的占位横幅：主题切换后同步配色
+        self._style_placeholder_frame()
 
         # QSS 重新应用（polish）会改变控件字体并可能同步覆盖文档默认字体，
         # 必须在其后重新固化无衬线默认字体，保证正文渲染命中预定字体。
@@ -1907,8 +2534,9 @@ class ChatBubbleWidget(QWidget):
                     return f'<a href="{src_url}">{new_img_tag}</a>'
 
                 if src_url.startswith("http"):
-                    if src_url in self.downloaded_images:
-                        local_path = self.downloaded_images[src_url].replace('\\', '/')
+                    cached_path = self.downloaded_images.get(src_url)
+                    if cached_path and os.path.exists(cached_path):
+                        local_path = cached_path.replace('\\', '/')
                         if not local_path.startswith('/'):
                             local_uri = f"file:///{local_path}"
                         else:
@@ -1917,22 +2545,25 @@ class ChatBubbleWidget(QWidget):
                         new_img_tag = f'<img width="420" style="max-width: 100%; border-radius: 8px; margin-top: 5px;" src="{local_uri}" title="Click to view full image" />'
                         return f'<a href="{local_uri}">{new_img_tag}</a>'
 
-                    elif src_url in getattr(self, 'download_failed_urls', {}):
-                        error_msg = self.download_failed_urls[src_url]
-                        return f'<div style="color:{_danger}; padding: 15px; border: 2px dashed {_danger}; border-radius: 8px; width: 400px; margin-top: 5px;">❌ <b>Image download failed.</b><br><span style="font-size: 12px;">{error_msg}</span></div>'
+                    if cached_path:
+                        # 缓存文件被清理（临时目录 / 历史迁移）：丢掉失效映射，重新下载
+                        self.downloaded_images.pop(src_url, None)
 
-                    else:
-                        import time
-                        if src_url not in self.downloading_urls:
-                            self.downloading_urls.add(src_url)
-                            self.download_timeouts[src_url] = time.time() + 30
-                            self._start_image_download(src_url)
+                    if src_url in getattr(self, 'download_failed_urls', {}):
+                        return self._remote_image_placeholder_html(
+                            src_url, self.download_failed_urls[src_url])
 
-                            if not self.image_loading_timer.isActive():
-                                self.image_loading_timer.start(500)
+                    import time
+                    if src_url not in self.downloading_urls:
+                        self.downloading_urls.add(src_url)
+                        self.download_timeouts[src_url] = time.time() + 30
+                        self._start_image_download(src_url)
 
-                        dots = "." * getattr(self, 'image_loading_dots', 0)
-                        return f'<div style="color:{_accent}; padding: 20px; border: 2px dashed {_accent}; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">Downloading image to local cache, please wait. {dots}</span></div>'
+                        if not self.image_loading_timer.isActive():
+                            self.image_loading_timer.start(500)
+
+                    dots = "." * getattr(self, 'image_loading_dots', 0)
+                    return f'<div style="color:{_accent}; padding: 20px; border: 2px dashed {_accent}; border-radius: 8px; width: 400px; margin-top: 5px;">⏳ <span style="vertical-align: middle;">Downloading image to local cache, please wait. {dots}</span></div>'
 
                 return match.group(0)
 
@@ -1940,6 +2571,9 @@ class ChatBubbleWidget(QWidget):
 
             self._ensure_document_font()
             self._render_blocks(html)
+            # 正文/块已按最新内容重建：把书签下划线重新找回并画上。
+            # 没有书签时该方法立刻返回，流式高频渲染下不产生额外开销。
+            self._apply_bookmark_highlights()
 
         except Exception as e:
             logger.warning(f"Failed to render bubble content: {e}")
@@ -2076,6 +2710,7 @@ class ChatBubbleWidget(QWidget):
         browser.anchorClicked.connect(self._on_anchor_clicked)
         browser.sig_image_activated.connect(self.open_image_viewer)
         browser.sig_citation_hover.connect(self._on_citation_hover)
+        self._wire_bookmark_hover(browser)
 
         self._style_block(block)
         return block
@@ -2100,12 +2735,26 @@ class ChatBubbleWidget(QWidget):
             block.sync_layout()
 
     def clean_up_images(self):
-        for path in self.downloaded_images.values():
+        """清理本气泡下载到**临时目录**的图片。
+
+        历史快照恢复的图片指向 ``scholar_workspace/assets`` 内容寻址仓库，那里
+        可能被多个对话共享，绝不能跟着气泡销毁一起删——只删临时目录内的缓存。
+        """
+        from src.core.chat_assets import is_asset_store_path
+
+        temp_root = os.path.abspath(tempfile.gettempdir()) + os.sep
+        for path in list(self.downloaded_images.values()):
             try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except OSError:
-                pass
+                absolute = os.path.abspath(str(path))
+            except (TypeError, ValueError):
+                continue
+            if (absolute.startswith(temp_root)
+                    and not is_asset_store_path(absolute)
+                    and os.path.exists(absolute)):
+                try:
+                    os.remove(absolute)
+                except OSError:
+                    pass
         self.downloaded_images.clear()
 
     def add_translation_widget(self, translated_text):
@@ -2205,11 +2854,8 @@ class ChatBubbleWidget(QWidget):
         反复写入相同高度会持续触发父布局失效，形成「改高度 → 重排 → 再改高度」的
         抖动（视觉上表现为闪烁）。
 
-        横向滚动条只在**实际可见**时计入高度。旧实现在它不可见时用 ``idealWidth()``
-        预测"将来会出现滚动条"并额外预留一行，再叠加固定 +15px：一旦文档短暂超过
-        视口宽度（固定宽度图片、超宽表格行），气泡就会长期高出一行且不回落——表现
-        即"气泡高度与内容量不匹配"。去掉预测后，滚动条真正出现时会触发一次
-        resize/重排，本函数会再算一次，形成闭环修正。
+        正文浏览器的横向滚动条已永久关闭（超宽内容交给拆分出的块控件），因此高度
+        只由文档高度决定，不再为"可能出现的横向滚动条"预留空行。
         """
         if not self.lbl_text.isVisible():
             return
@@ -2217,9 +2863,7 @@ class ChatBubbleWidget(QWidget):
         # 向上取整：文档高度是浮点的，截断会让最后一行被吃掉不到 1px（并且浏览器
         # 内部多出一个隐藏滚动范围）。
         doc_height = int(math.ceil(doc.size().height()))
-        sb = self.lbl_text.horizontalScrollBar()
-        sb_height = sb.height() if sb.isVisible() else 0
-        target = doc_height + sb_height + _BROWSER_HEIGHT_SLACK
+        target = doc_height + _BROWSER_HEIGHT_SLACK
         if target != self._lbl_last_height:
             self._lbl_last_height = target
             self.lbl_text.setFixedHeight(target)
@@ -2236,6 +2880,25 @@ class ChatBubbleWidget(QWidget):
         for block in getattr(self, '_extra_blocks', ()):
             block.sync_layout(force=True)
 
+
+    def _remote_image_placeholder_html(self, url, error=None):
+        """远程图片无法显示时的占位块：源文件名 + 原因，避免正文出现空白。"""
+        import html as _html
+        from urllib.parse import urlparse
+
+        name = os.path.basename(urlparse(str(url)).path) or str(url)
+        meta = self.remote_image_placeholders.get(url) or {}
+        reason = _placeholder_full_reason(meta) if meta \
+            else tr("The source image is not available.")
+        if error:
+            reason = tr("Download failed: {err}").format(err=error) + " " + reason
+        danger = ThemeManager().color('danger')
+        return (
+            f'<div style="color:{danger}; padding: 14px; border: 2px dashed {danger}; '
+            f'border-radius: 8px; width: 400px; margin-top: 5px;">'
+            f'🖼 <b>{_html.escape(name)}</b><br>'
+            f'<span style="font-size: 12px;">{_html.escape(reason)}</span></div>'
+        )
 
     def _start_image_download(self, url):
         ext = url.split("?")[0].split(".")[-1]

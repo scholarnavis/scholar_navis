@@ -272,7 +272,8 @@ class AutoResizingTextEdit(QPlainTextEdit):
         doc_margins = self.document().documentMargin()
         base_padding = self.contentsMargins().top() + self.contentsMargins().bottom() + int(doc_margins * 2)
 
-        fixed_height = int((line_h * 5) + base_padding + 2)
+        # 3 行足够日常提问：输入框不再默认吃掉 5 行高度，多出的垂直空间还给对话区。
+        fixed_height = int((line_h * 3) + base_padding + 2)
         self.setFixedHeight(fixed_height)
 
     def canInsertFromMimeData(self, source):
@@ -433,13 +434,13 @@ class ChatInputContainer(QFrame):
         # 避免浅色主题下首帧闪出硬编码深色。
         self.btn_export = QPushButton(tr("Export"))
         self.btn_export.setCursor(Qt.PointingHandCursor)
+        self.btn_export.setToolTip(tr("Export the current or all conversations to a .schat archive"))
         self.btn_export.clicked.connect(self.sig_export_clicked.emit)
 
         self.btn_import = QPushButton(tr("Import"))
         self.btn_import.setCursor(Qt.PointingHandCursor)
         self.btn_import.setToolTip(tr(
-            "Load a previously exported chat history (.schat / .json lossless, "
-            "or best-effort .md / .txt / .csv)"))
+            "Load a previously exported conversation archive (.schat / .json)"))
         self.btn_import.clicked.connect(self.sig_import_clicked.emit)
 
         self.btn_clear = QPushButton(tr("Clear"))

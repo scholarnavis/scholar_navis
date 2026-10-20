@@ -1,11 +1,10 @@
-"""Attachment mixin: file attach, KB file pick, chat history export & import.
+"""Attachment mixin: file attach, KB file pick, conversation archive export & import.
 
-拆分自 src/tools/chat_tool.py：负责外部附件管理与聊天记录导入 / 导出任务。
+拆分自 src/tools/chat_tool.py：负责外部附件管理、对话归档导入 / 导出，以及
+"哪些文件被内嵌、哪些只剩文件名"的界面说明。
 """
-import base64
 import logging
 import os
-import re
 import time
 from urllib.parse import quote
 
@@ -20,7 +19,6 @@ from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager
 from src.ui.components.file_dialogs import (open_file_name, open_file_names,
                                           save_file_name)
-from src.ui.components.text_formatter import mono_font_family_css
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -29,24 +27,6 @@ logger = logging.getLogger(__name__)
 def _glob_patterns(exts) -> str:
     """把扩展名集合转成 QFileDialog 过滤串（排序保证各平台顺序稳定）。"""
     return " ".join(f"*.{ext}" for ext in sorted(exts))
-
-
-def _colored_svg_data_uri(icon_name: str, color_hex: str) -> str:
-    """把 ``Assets/Icons/<name>.svg`` 读成按指定颜色着色的 data URI。
-
-    仅供导出文档（PDF/MD）内嵌角色图标使用：导出文件脱离应用后没有主题，
-    必须在写出时就把颜色固化进 SVG 本身。
-    """
-    svg_path = ThemeManager.get_resource_path("assets", "icons", f"{icon_name}.svg")
-    try:
-        with open(svg_path, "r", encoding="utf-8") as f:
-            svg_content = f.read()
-        if "<svg" in svg_content:
-            svg_content = re.sub(r'<svg', f'<svg fill="{color_hex}"', svg_content, count=1)
-        encoded = base64.b64encode(svg_content.encode('utf-8')).decode('utf-8')
-        return f"data:image/svg+xml;base64,{encoded}"
-    except Exception:
-        return ""
 
 
 class ChatAttachmentsMixin:
@@ -430,12 +410,12 @@ class ChatAttachmentsMixin:
         self.input_container.hide_context_preview()
 
     def export_chat_history(self):
-        """导出**当前标签页**的对话：PDF / MD / TXT / 无损归档，或无损导出全部标签页。"""
-        if not self.history:
-            ToastManager().show(tr("There are currently no chat records to export."), "warning")
-            self.logger.warning("Attempted to export empty chat history.")
-            return
+        """导出对话：当前对话（单归档）或全部对话（多归档）。
 
+        导出格式只有 ``.schat`` 一种：正文、思考链、参考文献、书签、组件状态与
+        小体积附件都在同一个容器里，导入后可继续对话。PDF/MD/TXT 已移除。
+        """
+        has_current = bool(self.history)
         tm = ThemeManager()
         menu = QMenu(self.widget)
         menu.setStyleSheet(f"""
@@ -444,90 +424,84 @@ class ChatAttachmentsMixin:
             QMenu::item:selected {{ background-color: {tm.color('accent')}; color: #fff; }}
         """)
 
-        act_pdf = menu.addAction(tm.icon("article", "text_main"), tr("Export as PDF"))
-        act_md = menu.addAction(tm.icon("markdown", "text_main"), tr("Export as MD"))
-        act_txt = menu.addAction(tm.icon("file-text", "text_main"), tr("Export as TXT"))
-        menu.addSeparator()
-        act_json = menu.addAction(tm.icon("archive", "text_main"), tr("Export as Archive"))
-        act_all = menu.addAction(tm.icon("archive", "text_main"), tr("Export All Tabs"))
+        act_current = menu.addAction(tm.icon("archive", "text_main"),
+                                     tr("Export Current Conversation"))
+        act_current.setEnabled(has_current)
+        act_all = menu.addAction(tm.icon("archive", "text_main"),
+                                 tr("Export All Conversations"))
 
-        # 在鼠标位置弹出菜单
         action = menu.exec(QCursor.pos())
         if not action:
             return
-
         if action == act_all:
-            self.export_all_tabs()
+            self.export_all_conversations()
+            return
+        if not has_current:
+            ToastManager().show(tr("There are currently no chat records to export."), "warning")
             return
 
-        if action == act_pdf:
-            filter_str, default_ext = tr("PDF Document (*.pdf)"), ".pdf"
-        elif action == act_md:
-            filter_str, default_ext = tr("Markdown File (*.md)"), ".md"
-        elif action == act_json:
-            filter_str, default_ext = tr("Scholar Navis Archive (*.schat)"), ".schat"
-        else:
-            filter_str, default_ext = tr("Text File (*.txt)"), ".txt"
-
-        # 弹出系统保存对话框
         path, _ = save_file_name(
-            self.widget, tr("Export Log"), f"Scholar_Navis_Log{default_ext}", filter_str
-        )
-
+            self.widget, tr("Export Current Conversation"),
+            "Scholar_Navis_Conversation.schat",
+            tr("Scholar Navis Conversation (*.schat)"))
         if not path:
             return
+        # 归档是 ZIP 容器，扩展名必须与容器一致（用户可能手输 .json）
+        if not path.lower().endswith(".schat"):
+            path = os.path.splitext(path)[0] + ".schat"
 
-        if default_ext == ".schat":
-            # 无损导出是 ZIP 压缩容器，扩展名必须与容器一致：用户若把名字写成
-            # .json，会出现"名为 JSON 实为压缩包"的文件，jq/编辑器都会解析失败。
-            if not path.endswith(".schat"):
-                path = os.path.splitext(path)[0] + ".schat"
-        elif not path.endswith(default_ext):
-            path += default_ext
+        self._start_export(path, tabs=[{
+            "name": self._current_conversation_name(),
+            "messages": self.history,
+        }])
 
-        self._start_export(path, default_ext)
-
-    def export_all_tabs(self):
-        """**无损**导出全部标签页到一个归档文件（内容与"逐个导出"等价、可再导入）。
+    def export_all_conversations(self):
+        """导出全部对话到一个归档文件（内容与"逐个导出"等价、可再导入）。
 
         消息来源由容器给出（见 :meth:`ChatTool.collect_tabs_payload`）：已打开过的
-        标签页取内存里的历史，未打开过的直接读磁盘快照，因此"导出全部"不需要先把
-        所有标签页都渲染一遍。
+        对话取内存里的历史，未打开过的直接读磁盘快照，因此"导出全部"不需要先把
+        所有对话都渲染一遍。
         """
         container = getattr(self, 'tabs_container', None)
         tabs = container.collect_tabs_payload() if container is not None else []
         if not any(tab.get("messages") for tab in tabs):
             ToastManager().show(tr("There are currently no chat records to export."), "warning")
-            self.logger.warning("Attempted to export all tabs while every tab is empty.")
+            self.logger.warning("Attempted to export all conversations while every tab is empty.")
             return
 
         path, _ = save_file_name(
-            self.widget, tr("Export All Tabs"), "Scholar_Navis_All_Tabs.schat",
-            tr("Scholar Navis Archive (*.schat)"))
+            self.widget, tr("Export All Conversations"),
+            "Scholar_Navis_All_Conversations.schat",
+            tr("Scholar Navis Conversation (*.schat)"))
         if not path:
             return
-        if not path.endswith(".schat"):
+        if not path.lower().endswith(".schat"):
             path = os.path.splitext(path)[0] + ".schat"
 
-        self._start_export(path, ".schat", tabs=tabs)
+        self._start_export(path, tabs=tabs)
 
-    def _start_export(self, path, export_fmt, tabs=None):
-        """启动后台导出任务并挂上进度弹窗（单标签页 / 全部标签页共用同一条链路）。
+    def _current_conversation_name(self):
+        """当前标签页的显示名（用于归档里的对话名）。"""
+        container = getattr(self, "tabs_container", None)
+        getter = getattr(container, "tab_name", None)
+        if callable(getter):
+            return getter(self._tab_id())
+        return None
 
-        :param tabs: 传入时按"多标签页归档"导出（供"导出全部"使用）；``None``
-            表示导出当前标签页的 ``self.history``。
+    def _start_export(self, path, tabs=None):
+        """启动后台导出任务并挂上进度弹窗（当前对话 / 全部对话共用同一条链路）。
+
+        :param tabs: 传入时按"多对话归档"导出；``None`` 表示导出当前对话的
+            ``self.history``。
         """
-        tm = ThemeManager()
-        colors = {
-            'title_blue': tm.color('title_blue'),
-            'academic_blue': tm.color('academic_blue'),
-            'success': tm.color('success')
-        }
+        # 导出前把气泡里已缓存的远程图片同步回历史，否则归档会漏掉这些图片
+        sync = getattr(self, "_sync_all_bubble_remote_images", None)
+        if callable(sync):
+            sync()
 
-        # 初始化后台导出任务并连接弹窗
         from src.ui.components.dialog import ProgressDialog
-        self.export_pd = ProgressDialog(self.widget, tr("Exporting Chat"),
-                                        tr("Processing file in background..."))
+        self.export_pd = ProgressDialog(self.widget, tr("Exporting Conversation"),
+                                        tr("Packing conversation and embedded files..."))
         self.export_pd.show()
 
         self.export_task_mgr = TaskManager()
@@ -536,22 +510,21 @@ class ChatAttachmentsMixin:
         self.export_task_mgr.sig_result.connect(self._on_export_result)
 
         from src.task.chat_tasks import ExportChatTask
-        kwargs = dict(
+        from src.core.chat_archive import normalize_tabs
+        export_tabs = tabs if tabs is not None else [{
+            "name": self._current_conversation_name(),
+            "messages": self.history,
+        }]
+        # 在 UI 线程先做一次 JSON 化快照：后台任务不再直接读正在被编辑/流式追加
+        # 的 history 字典，避免跨线程读写同一对象。
+        export_tabs = normalize_tabs(export_tabs)
+        self.export_task_mgr.start_task(
+            ExportChatTask,
             task_id="export_chat",
             mode=TaskMode.THREAD,
             path=path,
-            export_fmt=export_fmt,
-            colors=colors,
-            font_family=tm.font_family(),
-            mono_font_family=mono_font_family_css(),
-            user_icon=_colored_svg_data_uri("user", tm.color('academic_blue')),
-            ai_icon=_colored_svg_data_uri("ai_model", tm.color('success')),
+            tabs=export_tabs,
         )
-        if tabs is not None:
-            kwargs["tabs"] = tabs
-        else:
-            kwargs["history"] = self.history
-        self.export_task_mgr.start_task(ExportChatTask, **kwargs)
 
     def _on_export_state_changed(self, state, msg):
         from src.core.core_task import TaskState
@@ -562,42 +535,42 @@ class ChatAttachmentsMixin:
         if result and result.get("success"):
             detail = tr("Saved to {name}").format(name=os.path.basename(result.get('path', '')))
             stats = result.get("stats") or {}
-            if stats.get("attachments"):
-                detail += "\n" + tr("{n} attachment(s) embedded.").format(n=stats["attachments"])
-            missing = stats.get("missing_attachments") or []
-            if missing:
-                detail += "\n" + tr("{n} attachment(s) not found (original path kept).").format(n=len(missing))
+            embedded = int(stats.get("attachments") or 0)
+            placeholders = int(stats.get("placeholders") or 0)
+            if embedded:
+                detail += "\n" + tr("{n} file(s) embedded into the archive.").format(n=embedded)
+            if placeholders:
+                detail += "\n" + tr("{n} file(s) kept as name placeholders (too large or unavailable).").format(
+                    n=placeholders)
             self.export_pd.show_finish_state(True, tr("Export Complete"), detail)
-            ToastManager().show(tr("Document successfully exported."), "success")
-            self.logger.info(f"Chat history successfully exported to: {result.get('path')}")
+            ToastManager().show(tr("Conversation exported."), "success")
+            self.logger.info("Conversation archive written: %s (assets=%s, placeholders=%s)",
+                             result.get("path"), embedded, placeholders)
         else:
             self.export_pd.show_finish_state(
                 False, tr("Export Failed"),
                 result.get("msg", tr("Unknown error")) if result else tr("Unknown error"))
-            self.logger.error(f"Failed to export document: {result.get('msg') if result else 'None'}")
+            self.logger.error(f"Failed to export conversation: {result.get('msg') if result else 'None'}")
 
     # ---------- Import ----------
     def import_chat_history(self):
-        """选择并导入一份聊天记录（.schat/.json 无损 或 .md/.txt 尽力还原）。
+        """选择并导入对话归档（``.schat`` / ``.json``）。
 
-        归档可含**一个或多个标签页**：单标签页归档替换当前标签页的对话，
-        多标签页归档则新建对应数量的标签页（见 :meth:`ChatTool.import_tabs`）。
+        归档可含一个或多个对话：单对话归档替换当前对话，多对话归档则新建对应
+        数量的标签页（见 :meth:`ChatTool.import_tabs`）。PDF/MD/TXT 已移除。
         """
         from src.task.chat_tasks import ImportChatHistoryTask
         from src.ui.components.dialog import ProgressDialog
 
         # 空历史也允许导入（直接填充），因此不做前置判空
         path, _ = open_file_name(
-            self.widget, tr("Import Chat History"), "",
-            tr("Chat History (*.schat *.json *.md *.txt *.csv);;"
-               "Scholar Navis Lossless (*.schat *.json);;"
-               "Markdown (*.md);;Text (*.txt);;CSV (*.csv)")
-        )
+            self.widget, tr("Import Conversations"), "",
+            tr("Scholar Navis Conversation (*.schat *.json)"))
         if not path:
             return
 
-        pd = ProgressDialog(self.widget, tr("Importing Chat"),
-                            tr("Reading and parsing chat history..."))
+        pd = ProgressDialog(self.widget, tr("Importing Conversations"),
+                            tr("Reading conversation archive and extracting files..."))
         pd.show()
 
         self.import_task_mgr = TaskManager()
@@ -614,12 +587,10 @@ class ChatAttachmentsMixin:
         if not result or not result.get("success"):
             msg = result.get("msg", "Unknown error") if result else "Unknown error"
             pd.show_finish_state(False, tr("Import Failed"), msg)
-            self.logger.error("Chat history import failed: %s", msg)
+            self.logger.error("Conversation import failed: %s", msg)
             return
 
-        lossless = result.get("lossless", False)
-        # 兼容只返回 messages 的旧口径：统一收敛成"标签页列表"再往下走，
-        # 单标签页与多标签页因此只有一条处理路径。
+        # 兼容只返回 messages 的旧口径：统一收敛成"对话列表"再往下走。
         tabs = result.get("tabs")
         if not tabs:
             tabs = [{"name": None, "messages": result.get("messages", [])}]
@@ -629,26 +600,39 @@ class ChatAttachmentsMixin:
                                  tr("No chat messages were found in the file."))
             return
 
+        placeholders = int(result.get("placeholders") or 0)
+        note = tr("Lossless (full fidelity).")
+        if placeholders:
+            note += "\n" + tr("{n} file(s) were not embedded (too large or unavailable); "
+                              "their file names are kept.").format(n=placeholders)
+
         from src.ui.components.dialog import StandardDialog
-        fmt_note = tr("Lossless (full fidelity).") if lossless else \
-            tr("Best-effort text import (rich content such as citations/images may be reduced to plain text).")
         if len(tabs) > 1:
-            self._import_into_new_tabs(tabs, path, pd, fmt_note)
+            self._import_into_new_tabs(tabs, path, pd, note, placeholders)
             return
 
         messages = tabs[0]["messages"]
         # 确认是否用导入内容替换当前对话上下文
         dlg = StandardDialog(
             self.widget,
-            tr("Import Chat History"),
+            tr("Import Conversations"),
             tr("Found {n} message(s).\n{note}\n\n"
                "This will replace the current conversation. Continue?").format(
-                n=len(messages), note=fmt_note),
+                n=len(messages), note=note),
             show_cancel=True,
         )
         if not dlg.exec():
             pd.close_safe()
             return
+
+        # 归档里带了有意义的对话名时，一并恢复到当前标签页；默认名不覆盖
+        # 用户现有的命名（否则一次导入会把自定义名字冲掉）。
+        from src.core.chat_archive import DEFAULT_TAB_NAME
+        imported_name = str(tabs[0].get("name") or "")
+        container = getattr(self, "tabs_container", None)
+        rename = getattr(container, "rename_tab", None)
+        if imported_name and imported_name != DEFAULT_TAB_NAME and callable(rename):
+            rename(self._tab_id(), imported_name)
 
         # 重建阶段（逐条渲染气泡）比解析慢得多，且全程在 UI 线程：这里改用异步
         # 分片推进（见 _apply_imported_history），进度对话框在这期间才能继续滚动
@@ -657,16 +641,18 @@ class ChatAttachmentsMixin:
 
         def _on_rebuilt(success):
             if success:
-                pd.show_finish_state(
-                    True, tr("Import Complete"),
-                    tr("Imported {n} message(s) from:\n{name}").format(
-                        n=len(messages), name=os.path.basename(path)))
-                self.logger.info("Imported %d chat message(s) from %s (lossless=%s)",
-                                 len(messages), path, lossless)
+                detail = tr("Imported {n} message(s) from:\n{name}").format(
+                    n=len(messages), name=os.path.basename(path))
+                if placeholders:
+                    detail += "\n" + tr("{n} file(s) were not embedded; their names are kept.").format(
+                        n=placeholders)
+                pd.show_finish_state(True, tr("Import Complete"), detail)
+                self.logger.info("Imported %d message(s) from %s (placeholders=%d)",
+                                 len(messages), path, placeholders)
             else:
                 pd.show_finish_state(False, tr("Import Error"),
                                      tr("Some messages could not be rendered."))
-                self.logger.error("Imported %d chat message(s) from %s, "
+                self.logger.error("Imported %d message(s) from %s, "
                                   "but some messages failed to render.", len(messages), path)
 
         try:
@@ -676,17 +662,17 @@ class ChatAttachmentsMixin:
             pd.show_finish_state(False, tr("Import Error"),
                                  tr("Failed to render chat history:\n{err}").format(err=e))
 
-    def _import_into_new_tabs(self, tabs, path, pd, fmt_note):
-        """多标签页归档：确认后交给容器新建标签页（不覆盖任何现有对话）。"""
+    def _import_into_new_tabs(self, tabs, path, pd, note, placeholders=0):
+        """多对话归档：确认后交给容器新建标签页（不覆盖任何现有对话）。"""
         from src.ui.components.dialog import StandardDialog
 
         total = sum(len(t["messages"]) for t in tabs)
         dlg = StandardDialog(
             self.widget,
-            tr("Import Chat History"),
-            tr("Found {tabs} tab(s) with {n} message(s).\n{note}\n\n"
-               "They will be opened as new tabs. Continue?").format(
-                tabs=len(tabs), n=total, note=fmt_note),
+            tr("Import Conversations"),
+            tr("Found {tabs} conversation(s) with {n} message(s).\n{note}\n\n"
+               "They will be opened as new conversations. Continue?").format(
+                tabs=len(tabs), n=total, note=note),
             show_cancel=True,
         )
         if not dlg.exec():
@@ -697,10 +683,10 @@ class ChatAttachmentsMixin:
         if container is None:
             pd.show_finish_state(False, tr("Import Error"),
                                  tr("No chat tab is available to receive the imported conversations."))
-            self.logger.error("Multi-tab import failed: chat tab container is unavailable.")
+            self.logger.error("Multi-conversation import failed: chat tab container is unavailable.")
             return
 
-        pd.update_progress(-1, tr("Opening {tabs} tab(s)...").format(tabs=len(tabs)))
+        pd.update_progress(-1, tr("Opening {tabs} conversation(s)...").format(tabs=len(tabs)))
         try:
             created = container.import_tabs(tabs)
         except Exception as e:
@@ -713,12 +699,62 @@ class ChatAttachmentsMixin:
             pd.show_finish_state(False, tr("Import Failed"),
                                  tr("No chat messages were found in the file."))
             return
-        pd.show_finish_state(
-            True, tr("Import Complete"),
-            tr("Imported {tabs} tab(s), {n} message(s) from:\n{name}").format(
-                tabs=created, n=total, name=os.path.basename(path)))
-        self.logger.info("Imported %d tab(s), %d message(s) from %s.",
+        detail = tr("Imported {tabs} conversation(s), {n} message(s) from:\n{name}").format(
+            tabs=created, n=total, name=os.path.basename(path))
+        if placeholders:
+            detail += "\n" + tr("{n} file(s) were not embedded; their names are kept.").format(
+                n=placeholders)
+        pd.show_finish_state(True, tr("Import Complete"), detail)
+        self.logger.info("Imported %d conversation(s), %d message(s) from %s.",
                          created, total, path)
+
+    def _restore_message_remote_images(self, bubble, msg):
+        """把历史里记录的"远程图片 -> 本地缓存"映射注入气泡，供正文渲染使用。"""
+        remote = msg.get("remote_images")
+        if isinstance(remote, dict):
+            for url, path in remote.items():
+                if (isinstance(url, str) and isinstance(path, str)
+                        and os.path.isfile(path)):
+                    bubble.downloaded_images[url] = path
+        bubble.set_remote_image_placeholders(msg.get("remote_image_placeholders") or {})
+
+    def _sync_all_bubble_remote_images(self) -> int:
+        """把气泡里已下载的远程图片映射回写历史，供快照与归档内嵌。
+
+        调用点是每次落盘前的"对账"：图片可能在本轮回答已经写入历史之后才下载
+        完成，只看历史会漏掉它们。只同步 http(s) 且文件确实存在的条目。
+        """
+        layout = getattr(self, "chat_layout", None)
+        history = getattr(self, "history", None) or []
+        if layout is None:
+            return 0
+        changed = 0
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            bubble = item.widget() if item is not None else None
+            idx = getattr(bubble, "index", -1)
+            if not (0 <= idx < len(history)):
+                continue
+            remote = getattr(bubble, "downloaded_images", None)
+            if not isinstance(remote, dict) or not remote:
+                continue
+            entry = history[idx]
+            current = entry.get("remote_images")
+            if not isinstance(current, dict):
+                current = {}
+                entry["remote_images"] = current
+            for url, path in remote.items():
+                if not (isinstance(url, str)
+                        and url.startswith(("http://", "https://"))
+                        and isinstance(path, str)
+                        and os.path.isfile(path)):
+                    continue
+                if current.get(url) != path:
+                    current[url] = path
+                    changed += 1
+        if changed:
+            logger.debug("Synced %d remote image cache path(s) into history.", changed)
+        return changed
 
     #: 历史回灌的分片时间预算（毫秒）：每片最多占用 UI 线程这么久，随后让出事件
     #: 循环一拍。取值低于一帧（约 16ms），保证加载动画持续有节拍可动、窗口不会被
@@ -868,8 +904,21 @@ class ChatAttachmentsMixin:
         ctx_html = msg.get("context_html")
         msg_images = [c for c in msg.get("external_files", []) if c.get("type") == "image"] \
             if msg.get("external_files") else []
+        # 非图片附件若未能内嵌（过大 / 源文件缺失 / 旧版本），在气泡里列出
+        # "文件名 + 原因"；图片由缩略图自己的占位块承担，避免重复。
+        placeholder_files = [
+            c for c in (msg.get("external_files") or [])
+            if isinstance(c, dict) and c.get("type") != "image"
+            and isinstance(c.get("asset_placeholder"), dict)
+        ]
         bubble = self.add_bubble(display_text, is_user=is_user, context_html=ctx_html,
-                                 image_files=msg_images)
+                                 image_files=msg_images,
+                                 placeholder_files=placeholder_files)
+        if bubble is not None:
+            # 远程图片的本地缓存映射必须在正文渲染前注入，否则 set_content 仍会
+            # 把正文里的 URL 当成"未下载"并重新联网。图片文件缺失时这里不会注入，
+            # 正文会按占位说明展示或尝试重新下载。
+            self._restore_message_remote_images(bubble, msg)
 
         rendered = True
         try:
@@ -898,6 +947,11 @@ class ChatAttachmentsMixin:
                 # 正文写入即"组件由标记重建完毕"的时刻（见 ChatBubbleWidget.set_content）。
                 bubble.set_content(final_html or content)
                 yield
+
+            # 书签锚点依赖正文已经写成最终 HTML（用户消息走 add_bubble 时也已渲染完毕），
+            # 因此放在这里回灌；它不依赖卡片，先于卡片恢复即可。
+            self._restore_message_bookmarks(bubble, msg)
+            yield
 
             # 组件的用户交互结果必须在**卡片已经从正文标记重建出来之后**再回灌：
             # restore_card_states 是"按 (kind, key) 匹配气泡里已有的卡片"，先于建卡

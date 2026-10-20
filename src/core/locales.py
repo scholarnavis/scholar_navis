@@ -627,8 +627,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Send": "发送",
         "Stop": "停止",
         "Stopping...": "正在停止…",
-        "Load a previously exported chat history (.schat / .json lossless, or best-effort .md / .txt / .csv)":
-            "载入此前导出的聊天记录（.schat / .json 无损，或尽力还原的 .md / .txt / .csv）",
+        "Load a previously exported conversation archive (.schat / .json)":
+            "载入此前导出的对话归档（.schat / .json）",
+        "Export the current or all conversations to a .schat archive":
+            "把当前对话或全部对话导出为 .schat 归档",
         "Clear all attached contexts": "清除所有已附加的上下文",
         "Please wait for file upload to complete...": "请等待文件上传完成…",
         "Answer the pending question card in the chat first.": "请先回答对话中的待答问题卡。",
@@ -668,56 +670,101 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Image file not found: {name}": "图片文件未找到：{name}",
         "File not found: {name}": "文件未找到：{name}",
 
-        # ================= 对话助手：导出 / 导入记录 =================
+        # ================= 对话助手：导出 / 导入对话 =================
         "There are currently no chat records to export.": "当前没有可导出的聊天记录。",
-        "Export as PDF": "导出为 PDF",
-        "Export as MD": "导出为 MD",
-        "Export as TXT": "导出为 TXT",
-        "Export as Archive": "导出为归档",
-        "PDF Document (*.pdf)": "PDF 文档 (*.pdf)",
-        "Markdown File (*.md)": "Markdown 文件 (*.md)",
-        "Scholar Navis Archive (*.schat)": "Scholar Navis 归档 (*.schat)",
-        "Text File (*.txt)": "文本文件 (*.txt)",
-        "Export Log": "导出记录",
-        "Exporting Chat": "正在导出对话",
-        "Processing file in background...": "正在后台处理文件…",
+        "Export Current Conversation": "导出当前对话",
+        "Export All Conversations": "导出全部对话",
+        "Scholar Navis Conversation (*.schat)": "Scholar Navis 对话归档 (*.schat)",
+        "Scholar Navis Conversation (*.schat *.json)":
+            "Scholar Navis 对话归档 (*.schat *.json)",
+        "Exporting Conversation": "正在导出对话",
+        "Packing conversation and embedded files...": "正在打包对话与内嵌文件…",
         "Export Complete": "导出完成",
         "Saved to {name}": "已保存至 {name}",
-        "{n} attachment(s) embedded.": "已内嵌 {n} 个附件。",
-        "{n} attachment(s) not found (original path kept).": "有 {n} 个附件未找到（保留原路径）。",
-        "Document successfully exported.": "文档导出成功。",
-        "Import Chat History": "导入聊天记录",
-        "Chat History (*.schat *.json *.md *.txt *.csv);;Scholar Navis Lossless (*.schat *.json);;Markdown (*.md);;Text (*.txt);;CSV (*.csv)":
-            "聊天记录 (*.schat *.json *.md *.txt *.csv);;Scholar Navis 无损 (*.schat *.json);;Markdown (*.md);;文本 (*.txt);;CSV (*.csv)",
-        "Importing Chat": "正在导入对话",
-        "Reading and parsing chat history...": "正在读取并解析聊天记录…",
+        "{n} file(s) embedded into the archive.": "已内嵌 {n} 个文件。",
+        "{n} file(s) kept as name placeholders (too large or unavailable).":
+            "有 {n} 个文件以文件名占位（体积过大或源文件不可用）。",
+        "Conversation exported.": "对话导出成功。",
+        "Import Conversations": "导入对话",
+        "Importing Conversations": "正在导入对话",
+        "Reading conversation archive and extracting files...":
+            "正在读取对话归档并解包文件…",
         "Rendering {n} message(s)...": "正在渲染 {n} 条消息…",
         "Some messages could not be rendered.": "部分消息未能渲染。",
         "No chat messages were found in the file.": "文件中未找到任何聊天消息。",
         "Lossless (full fidelity).": "无损（完整保真）。",
-        "Best-effort text import (rich content such as citations/images may be reduced to plain text).":
-            "尽力还原的文本导入（引用/图片等富内容可能被降级为纯文本）。",
         "Found {n} message(s).\n{note}\n\nThis will replace the current conversation. Continue?":
             "找到 {n} 条消息。\n{note}\n\n这将替换当前对话。是否继续？",
         "Import Complete": "导入完成",
         "Imported {n} message(s) from:\n{name}": "从以下位置导入 {n} 条消息：\n{name}",
         "Failed to render chat history:\n{err}": "渲染聊天记录失败：\n{err}",
         "Imported {n} message(s).": "已导入 {n} 条消息。",
+        "{n} file(s) were not embedded (too large or unavailable); their file names are kept.":
+            "有 {n} 个文件未内嵌（体积过大或源文件不可用），仅保留文件名。",
+        "{n} file(s) were not embedded; their names are kept.":
+            "有 {n} 个文件未内嵌，仅保留文件名。",
+
+        # ================= 对话助手：资产占位 =================
+        "Too large to embed (limit {limit} MB). Only the file name is kept.":
+            "文件过大，未内嵌（上限 {limit} MB），仅保留文件名。",
+        "The conversation reached its embedding limit ({limit} MB). Only the file name is kept.":
+            "对话内嵌总量已达上限（{limit} MB），仅保留文件名。",
+        "The embedded copy is missing from local storage. Only the file name is kept.":
+            "本地内嵌副本缺失，仅保留文件名。",
+        "This conversation was saved by an older version that did not embed files. Only the file name is kept.":
+            "该对话由旧版本保存，未内嵌文件，仅保留文件名。",
+        "The source file is no longer available. Only the file name is kept.":
+            "源文件已不可用，仅保留文件名。",
+        "Not embedded (over {limit} MB)": "未内嵌（超过 {limit} MB）",
+        "Not embedded (storage limit)": "未内嵌（总量超限）",
+        "Embedded copy missing": "内嵌副本缺失",
+        "Not embedded by an older version": "旧版本未内嵌",
+        "Source file unavailable": "源文件不可用",
+        "Some attached files were not embedded": "部分附件未内嵌",
+        "The source image is not available.": "源图片不可用。",
+        "Download failed: {err}": "下载失败：{err}",
 
         # ================= 对话助手：标签页 =================
         "Default Conversation": "默认对话",
         "New Tab": "新建标签页",
         "Close Tab": "关闭标签页",
         "Rename Tab": "重命名标签页",
-        "Export All Tabs": "导出全部标签页",
         "At least one tab must remain open.": "至少需要保留一个标签页。",
-        "Found {tabs} tab(s) with {n} message(s).\n{note}\n\nThey will be opened as new tabs. Continue?":
-            "找到 {tabs} 个标签页、共 {n} 条消息。\n{note}\n\n将把它们作为新的标签页打开。是否继续？",
-        "Opening {tabs} tab(s)...": "正在打开 {tabs} 个标签页…",
-        "Imported {tabs} tab(s), {n} message(s) from:\n{name}":
-            "已从以下位置导入 {tabs} 个标签页、共 {n} 条消息：\n{name}",
+        "Found {tabs} conversation(s) with {n} message(s).\n{note}\n\nThey will be opened as new conversations. Continue?":
+            "找到 {tabs} 个对话、共 {n} 条消息。\n{note}\n\n将把它们作为新的对话打开。是否继续？",
+        "Opening {tabs} conversation(s)...": "正在打开 {tabs} 个对话…",
+        "Imported {tabs} conversation(s), {n} message(s) from:\n{name}":
+            "已从以下位置导入 {tabs} 个对话、共 {n} 条消息：\n{name}",
         "No chat tab is available to receive the imported conversations.":
             "当前没有可接收导入对话的标签页。",
+
+        # ================= 对话助手：书签 =================
+        " Bookmarks": " 书签",
+        "Show all bookmarks in this conversation": "查看本对话的全部书签",
+        "Add Bookmark": "添加书签",
+        "Remove Bookmark": "移除书签",
+        "Select some text first.": "请先选中一段文字。",
+        "New Bookmark": "新建书签",
+        "Title (required)": "标题（必填）",
+        "A short name for this bookmark": "为这段文字起一个简短的名字",
+        "Description (optional)": "介绍（可选）",
+        "Why is this passage worth keeping?": "这段文字为什么值得留存？",
+        "Selected text": "选中文字",
+        "Color": "颜色",
+        "Custom...": "自定义…",
+        "Save": "保存",
+        "Pick a bookmark color": "选择书签颜色",
+        "Bookmarks": "书签集",
+        "{n} bookmark(s) in this conversation": "本对话共有 {n} 条书签",
+        "No bookmarks yet. Select text in a message, right-click, and choose \"Add Bookmark\".":
+            "还没有书签。在消息中选中文字后右键，选择“添加书签”。",
+        "Jump": "跳转",
+        "Delete": "删除",
+        "Close": "关闭",
+        "Bookmark added.": "书签已添加。",
+        "Bookmark removed.": "书签已移除。",
+        "This message cannot be bookmarked.": "这条消息无法添加书签。",
+        "A bookmark needs a title.": "书签需要一个标题。",
 
         # ================= 对话助手：链接路由与内置查看器 =================
         "Cannot open the viewer: the QtWebEngine runtime could not be loaded.":

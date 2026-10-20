@@ -162,6 +162,11 @@ class ChatTool(BaseTool):
     def tab_count(self) -> int:
         return len(self._tabs)
 
+    def tab_name(self, tab_id: str) -> Optional[str]:
+        """标签页显示名；不存在时返回 ``None``（供导出归档写入对话名）。"""
+        tab = self._find(str(tab_id or ""))
+        return tab["name"] if tab else None
+
     # ------------------------------------------------------------------ #
     #  标签页操作
     # ------------------------------------------------------------------ #

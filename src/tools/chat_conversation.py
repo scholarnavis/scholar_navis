@@ -41,9 +41,10 @@ from src.core.theme_manager import ThemeManager, overlay_scrollbar_qss
 from src.tools.base_tool import BaseTool
 from src.tools.chat_input_widgets import (ChatDropTargetWidget,
                                          ChatInputContainer)
-from src.tools.chat_mixins import (ChatAttachmentsMixin, ChatBubblesMixin,
-                                   ChatResponseFlowMixin, ChatSearchMixin,
-                                   ChatSendFlowMixin, ChatSessionMixin)
+from src.tools.chat_mixins import (ChatAttachmentsMixin, ChatBookmarksMixin,
+                                   ChatBubblesMixin, ChatResponseFlowMixin,
+                                   ChatSearchMixin, ChatSendFlowMixin,
+                                   ChatSessionMixin)
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.model_selector import ModelSelectorWidget
@@ -55,7 +56,8 @@ logger = logging.getLogger(__name__)
 
 
 class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin,
-                       ChatBubblesMixin, ChatAttachmentsMixin, ChatSessionMixin, BaseTool):
+                       ChatBookmarksMixin, ChatBubblesMixin, ChatAttachmentsMixin,
+                       ChatSessionMixin, BaseTool):
     # 由 get_ui_widget 与信号槽流程创建，仅作静态检查声明
     top_bar_wrapper: QWidget
     model_selector: ModelSelectorWidget
@@ -141,7 +143,11 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         top_bar.setSpacing(8)
         top_bar.setContentsMargins(0, 0, 0, 10)
 
-        row1_layout = QHBoxLayout()
+        # 第 1 行包成独立 Widget：Collapsed 状态直接整行隐藏，不再留一条空白带。
+        self.ribbon_row = QWidget()
+        row1_layout = QHBoxLayout(self.ribbon_row)
+        row1_layout.setContentsMargins(0, 0, 0, 0)
+        row1_layout.setSpacing(8)
         # enable_vision=True：允许为聊天单独配置 Vision 模型，当主模型不支持
         # 图片时，可由该模型把附件图片转成文字描述（Auto 表示跟随主模型）。
         self.model_selector = ModelSelectorWidget(label_text=tr(" Main Model:"), config_key="chat_llm_id",
@@ -172,21 +178,29 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         row2_layout.setContentsMargins(0, 0, 0, 0)
         row2_layout.addWidget(self.lbl_kb)
         row2_layout.addWidget(self.combo_kb, 1)
+        # KB 下拉隐藏（Collapsed/Hover）时由这个弹簧吸掉剩余宽度：否则行里只剩
+        # 按钮，QBoxLayout 会把按钮拉成横跨整行的巨型块。
+        row2_layout.addStretch(1)
         row2_layout.addWidget(self.btn_ribbon_state)
 
-        top_bar.addLayout(row1_layout)
+        top_bar.addWidget(self.ribbon_row)
         top_bar.addLayout(row2_layout)
 
         # 会话搜索：按钮插入 row2（收起按钮前），搜索条在顶栏下方整行展开
         self.setup_chat_search(row2_layout, top_bar)
+        # 书签集入口：插在搜索按钮之前（同一行的状态按钮组）
+        self.setup_bookmark_button(row2_layout)
 
         main_layout.addWidget(self.top_bar_wrapper)
 
         self.ribbon_state = self.config.user_settings.get("chat_ribbon_state", "Pinned")
 
-        def set_ribbon_visible(visible):
+        def set_ribbon_visible(visible, show_row=True):
+            # Collapsed：整行收起（不留空白带）；Hover：保留一行占位，鼠标进入
+            # 顶栏时再展开模型选择器。
+            self.ribbon_row.setVisible(show_row)
             self.model_selector.setVisible(visible)
-            self.collapsed_placeholder.setVisible(not visible)
+            self.collapsed_placeholder.setVisible(not visible and show_row)
             self.lbl_kb.setVisible(visible)
             self.combo_kb.setVisible(visible)
 
@@ -207,7 +221,7 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
             elif state == "Collapsed":
                 self.btn_ribbon_state.setText(tr(" Collapsed"))
                 self.btn_ribbon_state.setIcon(tm.icon("down", "text_muted"))
-                set_ribbon_visible(False)
+                set_ribbon_visible(False, show_row=False)
 
         def toggle_ribbon_state():
             if self.ribbon_state == "Pinned":
@@ -230,6 +244,8 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         # 3. 对话展示滚动区 (仅存放消息气泡)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
+        # 对话区只做纵向滚动：横向滚动条既没有用途，也会被过宽内容带出来
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # 滚动条走 overlay 样式：常态为浅色滑块（能看出可滚动），交互时加深
         self.scroll_area.setStyleSheet(
             "QScrollArea { border: none; background-color: transparent; }"
@@ -246,6 +262,8 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
 
         self.scroll_area.setWidget(self.chat_container)
         main_layout.addWidget(self.scroll_area, stretch=1)
+        # 书签在滚动条上的彩色标注（滚动区浮层，不遮挡滚动条本体）
+        self.setup_bookmark_strip()
 
         main_layout.addSpacing(5)
 
@@ -378,6 +396,10 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
             ThemeManager().theme_changed.disconnect(self._apply_ribbon_button_style)
         except (RuntimeError, TypeError):
             pass
+        try:
+            ThemeManager().theme_changed.disconnect(self._apply_bookmark_button_theme)
+        except (RuntimeError, TypeError):
+            pass
 
     def _apply_ribbon_button_style(self):
         """按当前主题刷新顶栏 ribbon 状态按钮（Pinned / Hover / Collapsed）。"""
@@ -417,6 +439,10 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
             # 窗口缩放时按钮直接跟手就位（无动画），避免连续 resize 期间
             # 动画反复重启产生抖动
             self._layout_overlay_buttons(animate=False)
+
+        # 标签页被切走：书签集是独立窗口，必须跟着收起，否则会浮在别的标签页上
+        if obj == self.widget and event.type() == QEvent.Hide:
+            self._hide_bookmark_overlays()
 
         if obj == self.top_bar_wrapper:
             if self.ribbon_state == "Hover":
@@ -551,8 +577,10 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
             # 其余可见按钮若有位移则走归并动画
             self._layout_overlay_buttons(animate=False)
 
-    # 悬浮按钮竖排布局参数：距滚动区右/下边缘 16px，按钮间距 8px
+    # 悬浮按钮竖排布局参数：距滚动区下边缘 16px，按钮间距 8px。
+    # 右侧额外让出 16px：书签标注条紧贴滚动条，按钮不能压在它的命中区上。
     _OVERLAY_MARGIN = 16
+    _OVERLAY_SIDE_EXTRA = 16
     _OVERLAY_GAP = 8
     _OVERLAY_BTN_SIZE = 40
     # 对话容器底部留白 = 一颗悬浮按钮 + 其右/下边距 + 间距：保证滚到底时
@@ -591,7 +619,8 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         pos 动画（OutCubic），不可见按钮直接就位。
         """
         area = self.scroll_area
-        x = area.width() - self.btn_scroll_bottom.width() - self._OVERLAY_MARGIN
+        x = (area.width() - self.btn_scroll_bottom.width()
+             - self._OVERLAY_MARGIN - self._OVERLAY_SIDE_EXTRA)
         y_bottom = area.height() - self.btn_scroll_bottom.height() - self._OVERLAY_MARGIN
         both = self._overlay_state.get("bottom") and self._overlay_state.get("jump")
         jump_y = (y_bottom - self.btn_jump_msg_top.height() - self._OVERLAY_GAP) if both else y_bottom

@@ -1264,20 +1264,23 @@ class DeveloperDialog(BaseDialog):
         except Exception as e:
             fails.append(f"sanitize round-trip: {e}")
 
-        # 4) 导入白名单必须保留 references / ui_components
+        # 4) 导入规范化必须保留 references / ui_components / bookmarks
         try:
             from src.task.chat_tasks import ImportChatHistoryTask
             comps = [{"kind": "ask_user", "key": "probe",
                       "state": {"selected": ["A"], "custom": ""}}]
+            marks = [{"id": "deadbeef0001", "title": "probe", "text": "x"}]
             norm = ImportChatHistoryTask._normalize_msg(
                 {"role": "assistant", "content": "x",
-                 "references": refs, "ui_components": comps})
+                 "references": refs, "ui_components": comps, "bookmarks": marks})
             if norm.get("references") != refs:
-                fails.append("import whitelist dropped or altered references")
+                fails.append("import normalization dropped or altered references")
             if norm.get("ui_components") != comps:
-                fails.append("import whitelist dropped or altered ui_components")
+                fails.append("import normalization dropped or altered ui_components")
+            if norm.get("bookmarks") != marks:
+                fails.append("import normalization dropped or altered bookmarks")
         except Exception as e:
-            fails.append(f"import whitelist: {e}")
+            fails.append(f"import normalization: {e}")
 
         # 5) 归档收集 + 导入路径改写（引用卡的"打开原文"）
         try:
@@ -1305,7 +1308,7 @@ class DeveloperDialog(BaseDialog):
             self._log("Hover/click store keyed by (message, citation) returns the same entry: OK",
                       "OK")
             self._log("Archive sanitize + JSON round-trip keeps every field: OK", "OK")
-            self._log("Import whitelist keeps references + ui_components: OK", "OK")
+            self._log("Import normalization keeps references + ui_components + bookmarks: OK", "OK")
             self._log("Local original file collected + path remapped on import: OK", "OK")
 
         # Part B: 注入真实 Chat 面板（不进 history，不调用模型）
