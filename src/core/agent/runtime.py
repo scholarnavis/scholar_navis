@@ -2072,7 +2072,11 @@ class AgentRuntime:
     #: 可用性判据统一在 :func:`src.core.evidence.is_usable_source_text`：检索列表里的
     #: 占位串（``"No abstract"`` / ``"Fetch via ..."`` 一类）长度远不及一条摘要，
     #: 会被同一门槛挡下，无需在本处再维护一份占位串字面量清单。
-    _EVIDENCE_TEXT_KEYS = ("abstract", "abstractText", "snippet", "summary", "content")
+    #: 采集优先级（**信息面从大到小**）：OA 正文 > 摘要 > 片段。引用校验与逐字命中
+    #: 都要尽可能完整的原文——只拿摘要比对，正文里的基因名/数值一律对不上，正文结论
+    #: 会被误判成"引用未直接支持"。
+    _EVIDENCE_TEXT_KEYS = ("full_text", "abstract", "abstractText", "snippet",
+                           "summary", "content")
     _EVIDENCE_URL_KEYS = ("url", "pdf_url", "landing_page_url", "link")
     _EVIDENCE_TITLE_KEYS = ("title", "name")
 
@@ -2099,20 +2103,21 @@ class AgentRuntime:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            text = ""
-            for key in self._EVIDENCE_TEXT_KEYS:
-                val = str(item.get(key) or "").strip()
-                if is_usable_source_text(val):
-                    text = val
-                    break
-            if not text:
+            texts = [str(item.get(key) or "").strip()
+                     for key in self._EVIDENCE_TEXT_KEYS]
+            texts = [text for text in texts if is_usable_source_text(text)]
+            if not texts:
                 continue
             url = next((str(item.get(k) or "").strip()
                         for k in self._EVIDENCE_URL_KEYS if item.get(k)), "")
             title = next((str(item.get(k) or "").strip()
                           for k in self._EVIDENCE_TITLE_KEYS if item.get(k)), "")
-            self.evidence_store.add_source(
-                text, doi=str(item.get("doi") or ""), url=url, title=title)
+            # 按优先级**反向**入库：``source_for`` 取最新一条，于是同一 DOI 的正文
+            # 优先于摘要返回；被 ``evidence._MAX_SOURCE_CHARS`` 拒掉的超长正文也不会
+            # 连累摘要——摘要已在库里，来源不会整条消失。
+            for text in reversed(texts):
+                self.evidence_store.add_source(
+                    text, doi=str(item.get("doi") or ""), url=url, title=title)
 
     #: 注入到工具结果条目里的引用编号字段名（**唯一事实来源**）：模型正文写 ``[该编号]``
     #: 即可引用该来源，无需自拟 key，也不需要 cite_references 登记。系统提示词
@@ -2187,7 +2192,6 @@ class AgentRuntime:
 
         query = _short(args.get("query") or args.get("term") or args.get("q"), 100)
         doi = _short(args.get("doi") or args.get("paper_doi"), 80)
-        pmid = _short(args.get("pmid") or args.get("pmcid"), 40)
 
         if name in ("search_academic_literature", "search_literature"):
             step = f"Searching the literature: {query}" if query else "Searching the literature"

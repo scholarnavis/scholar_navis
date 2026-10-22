@@ -18,7 +18,7 @@ from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.references import (CITE_LINK_RE, FOOTER_RULE_HTML,
                                  PROVENANCE_HEADER_HTML, ReferenceItem,
                                  ReferenceRegistry, citation_href)
-from src.core.evidence import EvidenceStore, is_usable_source_text
+from src.core.evidence import EvidenceStore, is_usable_source_text, normalize_for_match
 from src.core.prompt_rules import (CITATION_TOKEN_RULE,
                                    LANGUAGE_AND_PUNCTUATION_RULE)
 from src.core import plot_styles
@@ -79,12 +79,55 @@ _SIGNAL_TOKEN_RE = re.compile(
     r"|\b(?:19|20)\d{2}\b"
     r"|\b\d+(?:\.\d+)?\s*(?:%|mg|g|mM|μM|nM|nm|kDa|bp|kb)\b")
 
-def _verify_citation_support(text: str, ordered) -> str:
-    """检查句子里的基因名/年份/数值是否真的出现在对应引用片段中。
+_GENE_ALIAS_RE = re.compile(r"([a-z]{3,})(\d+)")
+
+
+def _citation_corpus(item, evidence_store) -> str:
+    """一条引用可供校验的**全部**原文（信息面从大到小）。
+
+    只看注册片段会误伤：模型引用的是正文里的结论时，登记的片段往往只是摘要中的
+    一句话，句子里的基因名逐字找不到就被判成"引用未直接支持"。证据库持有检索采集
+    到的 OA 正文与摘要，是信息面最大的那一份原文。
+    """
+    parts = [str(getattr(item, "snippet", "") or ""), str(getattr(item, "note", "") or ""),
+             str(getattr(item, "title", "") or "")]
+    if evidence_store is not None:
+        held = evidence_store.source_for(
+            doi=str(getattr(item, "doi", "") or ""),
+            url=str(getattr(item, "url", "") or ""),
+            title=str(getattr(item, "title", "") or ""))
+        if held:
+            parts.append(held)
+    return " ".join(part for part in parts if part.strip())
+
+
+def _signal_hit(sig: str, corpus: str) -> bool:
+    """高辨识度 token 是否落在原文里：先逐字，再容忍"缩写 vs 全称 + 编号"。
+
+    同一基因在摘要里写 ``phototropin 1``、在正文里写 ``phot1`` 是常态，逐字匹配会把
+    正确引用判成"未直接支持"。放宽只到"词干 + 紧随其后的同一编号"一级
+    （``phot1`` ≈ ``phototropin1``），``pif1`` 与 ``pif3`` 这类同词干不同编号仍然
+    判得出来。``corpus`` 必须是 :func:`~src.core.evidence.normalize_for_match` 的结果。
+    """
+    token = normalize_for_match(sig)
+    if not token or not corpus:
+        return False
+    if token in corpus:
+        return True
+    alias = _GENE_ALIAS_RE.fullmatch(token)
+    if not alias:
+        return False
+    stem, digits = alias.group(1), alias.group(2)
+    return re.search(rf"{re.escape(stem)}[a-z]{{0,12}}{digits}(?![0-9])", corpus) is not None
+
+
+def _verify_citation_support(text: str, ordered, evidence_store=None) -> str:
+    """检查句子里的基因名/年份/数值是否真的出现在对应引用的原文里。
 
     这不是完整的语义蕴含，但能抓住最常见的一类错误：引用了 A 文献，句子却
-    在说 B 文献里的基因/数字（典型如 "Cys39 是燕麦编号"）。只要句中出现
-    高辨识度 token，而所有被引片段的原文都不包含它，就标记为“引用未直接支持”。
+    在说 B 文献里的基因/数字（典型如 "Cys39 是燕麦编号"）。判定用的原文是该引用
+    手上全部可查文本（证据库正文 > 摘要 > 注册片段 > 引用理由），只在哪一份里都
+    找不到高辨识度 token 时才标记为“引用未直接支持”。
     """
     items = {getattr(it, "index", None): it for it in (ordered or [])}
     if not items:
@@ -93,6 +136,7 @@ def _verify_citation_support(text: str, ordered) -> str:
     flagged = 0
     in_hidden = False
     in_code = False
+    corpora_by_index: dict = {}   # 编号 -> 归一化原文：同一编号在整篇里只取一次
     for line in str(text or "").splitlines():
         stripped = line.strip()
         # 思考 / 工具过程块与代码块不参与：它们是过程与代码，不是待校验的论断。
@@ -123,19 +167,26 @@ def _verify_citation_support(text: str, ordered) -> str:
                     nums.append(int(part))
         signals = {s for s in _SIGNAL_TOKEN_RE.findall(line)
                    if not re.fullmatch(r"(?:19|20)\d{2}", s)}
-        snippets = [str(getattr(items.get(n), "snippet", "") or "")
-                    for n in nums if n in items]
-        snippets = [s for s in snippets if s.strip()]
-        if nums and signals and snippets:
-            corpus = " ".join(snippets).lower()
+        corpora = []
+        for n in nums:
+            item = items.get(n)
+            if item is None:
+                continue
+            corpus = corpora_by_index.get(n)
+            if corpus is None:
+                corpus = normalize_for_match(_citation_corpus(item, evidence_store))
+                corpora_by_index[n] = corpus
+            if corpus:
+                corpora.append(corpus)
+        if nums and signals and corpora:
             genes = {s for s in signals
                      if re.fullmatch(r"(?:[A-Za-z]{2,}\d+|[A-Z]{2,})", s)
                      and s.upper() not in _NON_GENE_ACRONYMS}
             # 摘要往往只提一个基因/一个年份，不能要求句子里所有 token 都出现。
-            # 只要引用的任一片段里出现了任一关键 token，就不标“未直接支持”；
+            # 只要引用的任一原文里出现了任一关键 token，就不标“未直接支持”；
             # 全都没出现才提示——宁可少标，也不要把正常学术句误伤成红色。
-            supported = any(sig.lower() in corpus
-                            for sig in (genes or signals))
+            supported = any(_signal_hit(sig, corpus)
+                            for sig in (genes or signals) for corpus in corpora)
             if not supported:
                 out.append(line.rstrip() + "（引用未直接支持）")
                 flagged += 1
@@ -1608,7 +1659,7 @@ class ChatGenerationTask(BackgroundTask):
                 "Inline citation number(s) with no registered source (removed from the answer): "
                 + ", ".join(f"[{n}]" for n in unmatched[:20]))
         # 证据门禁：有来源时标出无引用的高风险段落；没有来源时明确标注未核实。
-        new_text = _verify_citation_support(new_text, cited)
+        new_text = _verify_citation_support(new_text, cited, evidence_store)
         new_text = _apply_evidence_gate(
             new_text, bool(sources_map or cited),
             research_context=_looks_research_query(search_query))

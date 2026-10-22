@@ -1128,6 +1128,34 @@ class DeveloperDialog(BaseDialog):
             if gate_mark in marked_think:
                 fails.append("evidence gate wrote a marker inside the reasoning panel")
 
+            # 6b2) 引用校验的信息面：证据库里的 OA 正文必须参与判定。只看登记片段时，
+            #      模型引用正文结论（正文写 phot1/phot2，摘要只写家族名）会被判成
+            #      "引用未直接支持"——这正是提醒最常误报的一类。
+            import types as _types
+
+            from src.core.evidence import EvidenceStore
+            from src.task.chat_tasks import _verify_citation_support
+            probe_doi = "10.1038/probe-phot"
+            probe_abstract = ("Phototropins are blue-light receptors mediating chloroplast "
+                              "relocation and photomorphogenesis in Arabidopsis thaliana.")
+            probe_body = ("Here we show that phot1 mediates the low-fluence response, whereas at "
+                          "high fluence rates phot1 and phot2 act redundantly in chloroplast "
+                          "movement. ")
+            probe_store = EvidenceStore()
+            probe_store.add_source(probe_abstract, doi=probe_doi, title="Phototropin receptors")
+            probe_store.add_source(probe_body, doi=probe_doi, title="Phototropin receptors")
+            probe_item = _types.SimpleNamespace(index=2, snippet=probe_abstract, note="",
+                                                doi=probe_doi, url="",
+                                                title="Phototropin receptors")
+            support_mark = "（引用未直接支持）"
+            if support_mark in _verify_citation_support(
+                    "感知端：低强度蓝光由 phot1 感知；高光强下 phot1 与 phot2 冗余作用[2]。",
+                    [probe_item], probe_store):
+                fails.append("captured source text must take part in the citation support check")
+            if support_mark not in _verify_citation_support(
+                    "Cys39 是燕麦 PKS1 的关键位点[2]。", [probe_item], probe_store):
+                fails.append("citation support check must still flag a mismatched passage")
+
             # 6c) 工具调用步骤的"我先检索…"属于过程：收尾要折进过程面板，不能冒充正文。
             from src.core.agent.runtime import _fold_narration
             folded = _fold_narration("前言\nI'll gather evidence.\n\n## 结论\nPKS1[1]。",
