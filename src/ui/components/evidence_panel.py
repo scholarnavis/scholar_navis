@@ -19,6 +19,27 @@ from src.core.theme_manager import ThemeManager, strong_weight_css
 logger = logging.getLogger("UI.EvidencePanel")
 
 
+#: 检索源给的 type 五花八门（article / journal-article / book-chapter /
+#: proceedings-article / posted-content / dataset …），这里统一折叠成用户能一眼
+#: 分清的几类。未知值原样显示，避免"其他"吃掉真实信息。
+_TYPE_LABELS = {
+    "article": "Journal article", "journal-article": "Journal article",
+    "review": "Review",
+    "book": "Book", "book-chapter": "Book chapter", "monograph": "Monograph",
+    "proceedings-article": "Conference paper", "conference-paper": "Conference paper",
+    "preprint": "Preprint", "posted-content": "Preprint",
+    "dataset": "Dataset", "thesis": "Thesis", "report": "Report",
+    "patent": "Patent", "web": "Web page",
+}
+
+
+def _type_label(kind) -> str:
+    raw = str(kind or "").strip().lower()
+    if not raw:
+        return "—"
+    return tr(_TYPE_LABELS.get(raw, raw[:24]))
+
+
 class EvidencePanel(QDialog):
     """非模态证据面板；每次打开按当前 conversation_id 重新读取。"""
 
@@ -46,15 +67,16 @@ class EvidencePanel(QDialog):
         self.lbl_summary.setWordWrap(True)
         outer.addWidget(self.lbl_summary)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels([
-            tr("Title"), tr("Year"), tr("Journal"), tr("Source"), tr("Status")])
+            tr("Title"), tr("Type"), tr("Year"), tr("Journal"), tr("Source"),
+            tr("Status")])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for col in (1, 2, 3, 4):
+        for col in (1, 2, 3, 4, 5):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.table.itemDoubleClicked.connect(self._open_item)
         self.table.itemSelectionChanged.connect(self._sync_buttons)
@@ -88,13 +110,21 @@ class EvidencePanel(QDialog):
     def refresh(self, conversation_id: str | None = None):
         if conversation_id is not None:
             self._conversation_id = str(conversation_id)
-        from src.core.auto_evidence import list_conversation_evidence
+        from src.core.auto_evidence import (list_conversation_evidence,
+                                            purge_orphan_evidence)
+        # 打开面板时先扫一遍"对话已不存在却还挂着"的证据：旧版本清空对话、导入失败、
+        # 进程被杀都可能留下这种孤儿，用户会以为"明明清空了，证据里还有东西"。
+        try:
+            purge_orphan_evidence()
+        except Exception as e:
+            logger.debug("Evidence sweep on open skipped: %s", e)
         self.lbl_status.setText(tr("Loading evidence..."))
         self._items = list_conversation_evidence(self._conversation_id)
         self.table.setRowCount(len(self._items))
         for row, item in enumerate(self._items):
             values = [
                 normalize_bibliographic_text(item.get("title")) or "Untitled",
+                _type_label(item.get("type")),
                 item.get("year") or "",
                 normalize_bibliographic_text(item.get("journal")),
                 ", ".join(item.get("origins") or []),

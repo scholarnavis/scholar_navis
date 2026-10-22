@@ -5,10 +5,26 @@ from src.core.theme_manager import ThemeManager
 
 class BaseComboBox(QComboBox):
 
-    def __init__(self, parent=None, min_height=None, min_width=None, max_width=None):
+    def __init__(self, parent=None, min_height=None, min_width=None, max_width=None,
+                 searchable: bool = False, max_popup_height: int = 0):
         super().__init__(parent)
 
         self.setView(QListView(self))
+        # 长列表（模型有上百个）默认会把弹层拉到屏幕高度，既难找又难看：
+        # 限高 + 可输入过滤，才是能用的选择器。
+        if max_popup_height > 0:
+            self.setMaxVisibleItems(18)
+            self.view().setMaximumHeight(int(max_popup_height))
+        if searchable:
+            from PySide6.QtWidgets import QCompleter
+            self.setEditable(True)
+            self.setInsertPolicy(QComboBox.NoInsert)
+            self.lineEdit().setPlaceholderText(self.lineEdit().placeholderText() or "Search…")
+            completer = self.completer()
+            if completer is not None:
+                completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+                completer.setFilterMode(Qt.MatchContains)
+                completer.setCaseSensitivity(Qt.CaseInsensitive)
         # 参数化控制尺寸
         if min_height is not None:
             self.setMinimumHeight(min_height)

@@ -56,7 +56,7 @@ logger = logging.getLogger("Core.ChatStore")
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
 #: 表结构版本（``meta.schema_version``）。新增列时要能容忍"旧库没有它"。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: ``meta.format``：会话快照与归档各自一个标识，读取侧可据此拒绝错配文件。
 FORMAT_CHAT_TABS = "scholar_navis_chat_tabs"
@@ -68,6 +68,9 @@ KIND_ARCHIVE = "archive"
 
 #: 归档内所有资产共用一个 scope；会话里 scope 就是标签页 id。
 ARCHIVE_SCOPE = "archive"
+
+#: ``tab_payloads.kind``：证据快照（文献元数据 + 检索正文），随会话库与归档一起走。
+PAYLOAD_EVIDENCE = "evidence"
 
 #: 由独立表承载的消息字段：**不**再抄进 payload，避免同一份数据两处副本。
 _STRUCTURED_KEYS = ("references", "bookmarks")
@@ -163,6 +166,18 @@ CREATE TABLE IF NOT EXISTS tab_tags (
     tag_id INTEGER NOT NULL,
     PRIMARY KEY (tab_id, tag_id)
 );
+-- 标签页附属负载：目前只有"证据快照"（文献元数据 + 检索正文）。放在会话库
+-- 而不是向量库，是因为它必须随历史 / 导出 / 导入一起走，且**不依赖 embedding
+-- 模型**——换模型时向量索引可以重建，这份正文不能丢。
+CREATE TABLE IF NOT EXISTS tab_payloads (
+    tab_id     TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    body_z     INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (tab_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_tab_payloads_tab ON tab_payloads(tab_id);
 """
 
 
@@ -253,8 +268,12 @@ def init_schema(conn: sqlite3.Connection, *, fmt: str, kind: str) -> None:
     conn.executescript(_SCHEMA_SQL)
     now = time.time()
     with conn:
-        for key, value in (("schema_version", str(SCHEMA_VERSION)),
-                           ("format", str(fmt)),
+        # 版本号必须**无条件**推进：否则旧库永远停在旧版本，`_schema_ready` 恒为
+        # False，每次打开都要重跑一遍建表脚本。其余元数据只补空值，不覆盖既有值。
+        conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                     (str(SCHEMA_VERSION),))
+        for key, value in (("format", str(fmt)),
                            ("kind", str(kind)),
                            ("created_at", str(now))):
             conn.execute(
@@ -561,14 +580,55 @@ def read_tab(conn: sqlite3.Connection, tab_id: str
 
 
 def delete_tab(conn: sqlite3.Connection, tab_id: str) -> None:
-    """删除标签页及其消息、资产链接、占位说明、半条与标签关系（资产本体保留）。"""
+    """删除标签页及其消息、资产链接、占位说明、半条、标签关系与附属负载。
+
+    附属负载（证据快照）必须一起删：否则"清除对话"只清掉了消息，证据面板还能
+    列出这个已不存在的对话用过的文献。
+    """
     with conn:
         conn.execute("DELETE FROM messages WHERE tab_id = ?", (tab_id,))
         conn.execute("DELETE FROM asset_links WHERE scope = ?", (tab_id,))
         conn.execute("DELETE FROM placeholders WHERE scope = ?", (tab_id,))
         conn.execute("DELETE FROM inflight WHERE tab_id = ?", (tab_id,))
         conn.execute("DELETE FROM tab_tags WHERE tab_id = ?", (tab_id,))
+        conn.execute("DELETE FROM tab_payloads WHERE tab_id = ?", (tab_id,))
         conn.execute("DELETE FROM tabs WHERE id = ?", (tab_id,))
+
+
+# --------------------------------------------------------------------------- #
+#  标签页附属负载（证据快照等）
+# --------------------------------------------------------------------------- #
+def put_tab_payload(conn: sqlite3.Connection, tab_id: str, kind: str,
+                    data: Dict[str, Any]) -> None:
+    """覆盖写入某标签页的附属负载（超长时压缩）。``kind`` 见 ``PAYLOAD_EVIDENCE``。"""
+    tid = str(tab_id or "")
+    if not is_valid_id(tid) or not isinstance(data, dict):
+        return
+    body, compressed = _encode_payload(data)
+    with conn:
+        conn.execute(
+            "INSERT INTO tab_payloads(tab_id, kind, body, body_z, updated_at) "
+            "VALUES(?, ?, ?, ?, ?) ON CONFLICT(tab_id, kind) DO UPDATE SET "
+            "body = excluded.body, body_z = excluded.body_z, updated_at = excluded.updated_at",
+            (tid, str(kind or ""), body, int(compressed), time.time()))
+
+
+def read_tab_payload(conn: sqlite3.Connection, tab_id: str,
+                     kind: str) -> Optional[Dict[str, Any]]:
+    """读取附属负载；没有或损坏时返回 ``None``。"""
+    row = conn.execute(
+        "SELECT body, body_z FROM tab_payloads WHERE tab_id = ? AND kind = ?",
+        (str(tab_id or ""), str(kind or ""))).fetchone()
+    if row is None:
+        return None
+    data = _decode_payload(row["body"], int(row["body_z"] or 0))
+    return data or None
+
+
+def delete_tab_payload(conn: sqlite3.Connection, tab_id: str, kind: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM tab_payloads WHERE tab_id = ? AND kind = ?",
+                     (str(tab_id or ""), str(kind or "")))
 
 
 def list_tabs(conn: sqlite3.Connection) -> List[str]:
@@ -731,10 +791,12 @@ def tabs_with_tag(conn: sqlite3.Connection, name: str) -> List[str]:
 __all__ = [
     "SQLITE_MAGIC", "SCHEMA_VERSION", "FORMAT_CHAT_TABS", "FORMAT_CHAT_HISTORY",
     "KIND_SESSION", "KIND_ARCHIVE", "ARCHIVE_SCOPE", "DETACHED_POSITION",
+    "PAYLOAD_EVIDENCE",
     "sanitize", "is_sqlite_file", "connect", "create_database", "init_schema",
     "get_meta", "set_meta", "is_valid_id",
     "put_manifest", "read_manifest", "ensure_tab", "put_tab", "read_tab",
     "delete_tab", "list_tabs",
+    "put_tab_payload", "read_tab_payload", "delete_tab_payload",
     "put_inflight", "read_inflight", "delete_inflight",
     "put_assets", "read_assets", "put_placeholders", "read_placeholders",
     "normalize_tag_names", "set_tab_tags", "tab_tags", "all_tags", "tabs_with_tag",

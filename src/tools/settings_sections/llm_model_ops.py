@@ -22,55 +22,11 @@ class LlmModelOpsMixin:
     """LLM 模型条目操作与远程任务（Fetch / Test）。"""
 
     # ---------- Params ----------
+    # 自定义参数编辑器已从界面移除（见 llm_section）；下方方法只保留空实现，
+    # 防止旧的模型切换路径在缺控件时抛 AttributeError。
     def _on_copy_params_clicked(self):
-
-        provider_params = self.editor_provider_params.extract_data()
-        if not provider_params:
-            ToastManager().show(tr("Provider has no parameters to copy."), "info")
-            return
-
-        model_params = self.editor_model_params.extract_data()
-        model_params_dict = {p['name']: p for p in model_params if p.get('name')}
-
-        merged_params = list(model_params)
-
-        for p_param in provider_params:
-            name = p_param.get("name", "").strip()
-            if not name:
-                continue
-
-            if name in model_params_dict:
-                m_param = model_params_dict[name]
-                msg = tr(
-                    "Parameter '{name}' already exists in this model.\n\n"
-                    "【Current Model Parameter】\n"
-                    "  • Type: {cur_type}\n"
-                    "  • Value: {cur_value}\n\n"
-                    "【Provider Parameter to Copy】\n"
-                    "  • Type: {new_type}\n"
-                    "  • Value: {new_value}\n\n"
-                    "Do you want to overwrite the model's parameter with the provider's?"
-                ).format(name=name, cur_type=m_param.get('type'), cur_value=m_param.get('value'),
-                         new_type=p_param.get('type'), new_value=p_param.get('value'))
-
-                dlg = StandardDialog(self.widget, tr("Duplicate Parameter"), msg, show_cancel=True)
-                reply = dlg.exec()
-
-                if reply:
-                    for i, mp in enumerate(merged_params):
-                        if mp.get('name') == name:
-                            merged_params[i] = p_param.copy()
-                            break
-            else:
-                merged_params.append(p_param.copy())
-
-        try:
-            self.editor_model_params.load_data(merged_params, append=False)
-        except TypeError:
-            self.editor_model_params.load_data(merged_params)
-
-        self._sync_llm_data_execute()
-        ToastManager().show(tr("Parameters copied and merged successfully."), "success")
+        """参数复制入口已随参数编辑器一起移除（无 UI 可复制）。"""
+        return
 
     def _on_model_index_changed(self, index):
         if self._is_updating_model_ui or index < 0: return
@@ -136,23 +92,9 @@ class LlmModelOpsMixin:
     def _load_model_params_to_ui(self, conf, model_name):
         self._is_updating_model_ui = True
 
-        models_config = conf.get("models_config", {})
-        m_conf = models_config.get(model_name, {})
-        mode = m_conf.get("mode", "inherit")
-        params = m_conf.get("params", [])
-
-        reverse_map = {"inherit": 0, "custom": 1, "closed": 2}
-
-        self.combo_model_param_strategy.blockSignals(True)
-        self.combo_model_param_strategy.setCurrentIndex(reverse_map.get(mode, 0))
-        self.combo_model_param_strategy.blockSignals(False)
-
-        self.model_param_container.setVisible(mode == "custom")
-
-        self.editor_model_params.blockSignals(True)
-        self.editor_model_params.load_data(params)
-        self.editor_model_params.blockSignals(False)
-
+        # 参数编辑器已移除：这里不再回填任何控件。已有配置里的
+        # models_config[*].params / provider_params 原样保留（保存时也不再覆盖），
+        # 只是不再提供编辑入口。
         self._is_updating_model_ui = False
 
     def _refresh_model_combo(self, conf):

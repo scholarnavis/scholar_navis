@@ -52,6 +52,10 @@ class SaveFlowMixin:
 
     # ---------- Save ----------
     def on_save_clicked(self, on_success=None):
+        # 区块是延迟构建的：极短时间内点保存时先同步补齐，否则后面读到的都是
+        # 尚未创建的控件。
+        if hasattr(self, "_ensure_sections_built") and not self._ensure_sections_built():
+            return
         self._pending_route_callback = on_success
         self.widget.setFocus()
 

@@ -191,6 +191,23 @@ def _repo_license_add_data(root: Path) -> List[Tuple[str, str]]:
     return add_data
 
 
+def _bundled_asset_lines() -> List[str]:
+    """随程序分发、但不来自依赖包的第三方素材（图标等）的归属声明。
+
+    这些文件不属于任何 wheel，``collect_license_files`` 收不到它们，必须在声明里
+    单独列出，否则发行包只声明了"依赖库"，漏掉了实际分发的美术资源。
+    """
+    return [
+        "## Bundled assets",
+        "",
+        "* **Material Symbols** icons (`Assets/Icons/*.svg`, Google LLC) — "
+        "Apache License 2.0 (`Apache-2.0`). The SVG path data is used unmodified; "
+        "the application recolors it at runtime to match the active theme. "
+        f"Full text: `{REPO_LICENSE_DIR}/Apache-2.0.txt`.",
+        "",
+    ]
+
+
 def render_notices(app_name: str, version: str, source_url: str,
                    total_distributions: int = 0, license_file_count: int = 0,
                    missing_text: Sequence[str] = (),
@@ -230,6 +247,7 @@ def _render_source_notices(app_name: str, version: str, source_url: str) -> str:
         f"<{source_url}>.",
         "",
     ]
+    lines += _bundled_asset_lines()
     lines += _not_redistributed_lines()
     lines += [
         "## Notes",
@@ -286,6 +304,7 @@ def _render_binary_notices(app_name: str, version: str, source_url: str,
     else:
         lines.append("*(none)*")
 
+    lines += _bundled_asset_lines()
     lines += _not_redistributed_lines()
     lines += [
         "## Notes",

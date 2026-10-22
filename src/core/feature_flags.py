@@ -18,4 +18,4 @@ EXTERNAL_TOOLS_SETTINGS_SECTION_ENABLED = False
 #:
 #: 关闭时开关不进布局且强制置 False，避免"入口隐藏但功能仍在后台
 #: 生效"的不可见状态。
-EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED = True
+EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED = False

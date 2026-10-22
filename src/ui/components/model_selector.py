@@ -54,7 +54,9 @@ class ModelSelectorWidget(QWidget):
         row1.addWidget(lbl_main)
 
         self.combo_provider = BaseComboBox(min_width=120, max_width=300)
-        self.combo_model = BaseComboBox(min_width=180, max_width=2000)
+        # 模型动辄上百个：弹层限高 + 可输入过滤，避免下拉占满整屏。
+        self.combo_model = BaseComboBox(min_width=180, max_width=2000,
+                                        searchable=True, max_popup_height=340)
         row1.addWidget(self.combo_provider, 1)
         row1.addWidget(self.combo_model, 3)
         main_layout.addLayout(row1)
@@ -70,7 +72,8 @@ class ModelSelectorWidget(QWidget):
             lbl_vision.setToolTip("Select a vision model for image parsing (Optional. Useful if main model is text-only)")
             row2.addWidget(lbl_vision)
 
-            self.combo_vision = BaseComboBox(min_width=180, max_width=2000)
+            self.combo_vision = BaseComboBox(min_width=180, max_width=2000,
+                                             searchable=True, max_popup_height=320)
             row2.addWidget(self.combo_vision, 4)
             main_layout.addLayout(row2)
 
@@ -254,8 +257,20 @@ class ModelSelectorWidget(QWidget):
         provider_id = cfg.get("id")
 
         clean_model = str(self.combo_model.currentData() or "").strip()
-        # 显示文本现在带 “· 128K” 后缀，写回配置必须用 currentData 的纯模型名。
-        display_name = clean_model or str(self.combo_model.currentText() or "").strip()
+        if not clean_model:
+            # 可输入下拉：用户打了半截文本但没从列表里选（回车/失焦都会走到这里），
+            # 不能把这段自由文本当成模型名写进配置——那会让后续请求直接 404。
+            matched = self.combo_model.findText(
+                self.combo_model.currentText(), Qt.MatchContains | Qt.MatchFixedString)
+            if matched < 0:
+                return
+            clean_model = str(self.combo_model.itemData(matched) or "").strip()
+            if not clean_model:
+                return
+            self.combo_model.setCurrentIndex(matched)
+            return              # setCurrentIndex 会再次触发本槽，交给那次处理
+
+        display_name = clean_model
 
         if provider_id and clean_model:
             self.config_manager.user_settings[f"{self.model_key}_{provider_id}"] = clean_model
@@ -268,8 +283,17 @@ class ModelSelectorWidget(QWidget):
         if not cfg: return
 
         provider_id = cfg.get("id")
-        vision_name = str(self.combo_vision.currentData() or self.combo_vision.currentText() or "").strip()
-        if vision_name == "auto": vision_name = "auto"
+        vision_name = str(self.combo_vision.currentData() or "").strip()
+        if not vision_name:
+            matched = self.combo_vision.findText(
+                self.combo_vision.currentText(), Qt.MatchContains | Qt.MatchFixedString)
+            if matched < 0:
+                return
+            vision_name = str(self.combo_vision.itemData(matched) or "").strip()
+            if not vision_name:
+                return
+            self.combo_vision.setCurrentIndex(matched)
+            return
 
         if provider_id:
             self.config_manager.user_settings[f"{self.vision_key}_{provider_id}"] = vision_name

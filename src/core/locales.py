@@ -182,11 +182,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Custom Parameter Guide": "自定义参数指南",
         "You can specify request parameters (e.g., temperature, top_p, max_tokens) for the provider or specifically for a model.\n\n• Priority: Model Custom > Provider Inherit\n• If 'Closed' is selected for a model, no parameters are appended.\n• The model dropdown indicates your configuration with (⚙️ Custom) or (🚫 Closed).":
             "你可以为 Provider 或某个具体模型指定请求参数（例如 temperature、top_p、max_tokens）。\n\n• 优先级：模型自定义 > Provider 继承\n• 若某模型选择 'Closed'，则不附加任何参数。\n• 模型下拉框用 (⚙️ Custom) 或 (🚫 Closed) 标示你的配置。",
+        "Loading settings...": "正在加载设置…",
         "Service Provider:": "服务提供商：",
         "Provider Name:": "Provider 名称：",
         "API Base URL:": "API 基础地址：",
         "API Key:": "API 密钥：",
         "Provider Params:": "Provider 参数：",
+        "Model Capacity:": "模型容量：",
+        "Auto": "自动",
+        "Declare this model's input context window in tokens (e.g. 128000).\nLeave empty to infer automatically: litellm metadata → built-in family\ntable → measured value reported by the provider when a request overflows.":
+            "声明该模型的输入上下文窗口（token，如 128000）。\n留空则自动推断：litellm 元数据 → 内置模型族表 → 请求溢出时服务商回报的实测值。",
+        "Declare the maximum number of output tokens (e.g. 8192).\nLeave empty to use the provider's default.":
+            "声明最大输出 token 数（如 8192）。\n留空则使用服务商默认值。",
+        "Ask the provider's /models metadata for a context window. OpenAI official endpoints usually do not expose it.":
+            "向服务商的 /models 元数据询问上下文窗口。OpenAI 官方端点通常不暴露该信息。",
+        "Download LiteLLM's official model_prices_and_context_window.json so new models (GPT-6, DeepSeek V4, Qwen3-Max, ...) resolve correctly.":
+            "下载 LiteLLM 官方的 model_prices_and_context_window.json，让新模型（GPT-6、DeepSeek V4、Qwen3-Max 等）能被正确识别。",
         "Model Name:": "模型名称：",
         "Params Strategy:": "参数策略：",
         "Inherit (Provider)": "继承（Provider）",
@@ -780,7 +791,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Conversation Evidence": "本对话证据",
         " Evidence": " 证据",
         "Show literature evidence attached to this conversation": "查看本对话已入库的文献证据",
-        "Title": "标题", "Year": "年份", "Journal": "期刊",
+        "Title": "标题", "Type": "类型", "Year": "年份", "Journal": "期刊",
+        "Journal article": "期刊论文", "Review": "综述",
+        "Book": "书籍", "Book chapter": "书籍章节", "Monograph": "专著",
+        "Conference paper": "会议论文", "Preprint": "预印本",
+        "Dataset": "数据集", "Thesis": "学位论文", "Report": "报告",
+        "Patent": "专利", "Web page": "网页",
         "Source": "来源", "Status": "状态",
         "Full text": "全文", "Abstract": "摘要",
         "Refresh": "刷新", "Get full text": "获取全文",
@@ -795,6 +811,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Loading evidence...": "正在读取证据…",
         "Private evidence deleted.": "私有证据已删除。",
         "Delete failed.": "删除失败。",
+        # ---- AI 主动请求登录获取付费墙全文 ----
+        "Waiting for sign-in: {t}. The conversation resumes after the PDF is saved.":
+            "等待登录：{t}。PDF 入库后对话会自动继续。",
+        "Sign in to fetch the full text": "登录以获取全文",
+        "{t} — the conversation resumes automatically once the PDF is added.":
+            "{t} —— 全文加入证据后，对话会自动继续。",
+        "Full text saved": "全文已入库",
+        "Resuming the conversation: {t}": "正在继续对话：{t}",
+        "Full text saved. Resuming the conversation...": "全文已入库，正在继续对话…",
+        "Full text obtained: {t}": "已获取全文：{t}",
+        "Sign-in cancelled. You can keep typing.": "已取消登录，可以继续输入。",
+        "This answer relies on an abstract only. Sign in to fetch the full text of {t}.":
+            "本次回答依据的是摘要。登录后可获取《{t}》全文。",
+        "Full text needed": "需要获取全文",
+        "{t} — only the abstract was used; sign in to fetch the full text.":
+            "{t} —— 本轮只用到摘要，登录后可获取全文。",
         "Context:": "上下文：", "Max Output:": "最大输出：",
         "Detect": "探测", "Detecting...": "探测中…",
         "Refresh models": "刷新模型表", "Refreshing...": "刷新中…",

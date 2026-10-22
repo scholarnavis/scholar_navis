@@ -123,15 +123,20 @@ def _file_digest(path: str, stat: os.stat_result) -> Optional[str]:
     cached = _hash_cache.get(key)
     if cached:
         return cached
-    digest = hashlib.sha256()
     try:
         with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(_CHUNK), b""):
-                digest.update(chunk)
+            # hashlib.file_digest 在 C 层完成读盘+摘要（3.11+），比 Python 循环快得多；
+            # 归档/快照每次导出都要哈希一遍图片与附件，这里省下的是成倍的时间。
+            try:
+                value = hashlib.file_digest(f, "sha256").hexdigest()
+            except AttributeError:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: f.read(4 << 20), b""):
+                    digest.update(chunk)
+                value = digest.hexdigest()
     except OSError as e:
         logger.warning("Cannot hash asset '%s': %s", path, e)
         return None
-    value = digest.hexdigest()
     if len(_hash_cache) >= _HASH_CACHE_MAX:
         # dict 保持插入顺序：丢掉最早的一条即可（不做 LRU，够用且更简单）
         _hash_cache.pop(next(iter(_hash_cache)))

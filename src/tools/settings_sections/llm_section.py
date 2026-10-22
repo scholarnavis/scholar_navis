@@ -16,7 +16,7 @@ from src.core.theme_manager import ThemeManager
 from src.ui.components.HoverRevealLineEdit import HoverRevealLineEdit
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.dialog import StandardDialog
-from src.ui.components.param_editor import ParamEditorWidget
+
 from src.ui.components.toast import ToastManager
 
 
@@ -120,14 +120,6 @@ class LlmSectionMixin:
         capacity_layout.addWidget(QLabel(tr("Max Output:")))
         capacity_layout.addWidget(self.input_llm_max_output, stretch=1)
 
-        self.editor_provider_params = ParamEditorWidget()
-        self.btn_add_provider_param = QPushButton(tr(" Add Provider Parameter"))
-        self.btn_add_provider_param.clicked.connect(lambda: self.editor_provider_params.add_param_row())
-
-        provider_param_layout = QVBoxLayout()
-        provider_param_layout.addWidget(self.editor_provider_params)
-        provider_param_layout.addWidget(self.btn_add_provider_param)
-
         model_layout = QHBoxLayout()
         self.combo_llm_model = BaseComboBox()
 
@@ -149,45 +141,13 @@ class LlmSectionMixin:
         model_layout.addWidget(self.btn_fetch_models)
         model_layout.addWidget(self.btn_test_api)
 
-        # 策略按**索引**取值（strategy_map: 0=inherit / 1=custom / 2=closed），
-        # 与显示文本无关，故可安全本地化选项文本。
-        self.combo_model_param_strategy = BaseComboBox()
-        self.combo_model_param_strategy.addItems([
-            tr("Inherit (Provider)"), tr("Custom (Model Only)"), tr("Closed (No Params)")])
-
-        self.editor_model_params = ParamEditorWidget()
-
-        model_param_btn_layout = QHBoxLayout()
-        self.btn_add_model_param = QPushButton(tr(" Add Model Parameter"))
-        self.btn_add_model_param.clicked.connect(lambda: self.editor_model_params.add_param_row())
-
-        self.btn_copy_params = QPushButton(tr(" Copy from Provider"))
-        self.btn_copy_params.setToolTip(tr("Copies global provider parameters to the current model."))
-        self.btn_copy_params.clicked.connect(self._on_copy_params_clicked)
-
-        model_param_btn_layout.addWidget(self.btn_add_model_param)
-        model_param_btn_layout.addWidget(self.btn_copy_params)
-
-        self.model_param_container = QWidget()
-        mp_layout = QVBoxLayout(self.model_param_container)
-        mp_layout.setContentsMargins(0, 0, 0, 0)
-        mp_layout.addWidget(self.editor_model_params)
-        mp_layout.addLayout(model_param_btn_layout)
-
-        self.combo_model_param_strategy.currentIndexChanged.connect(
-            lambda idx: self.model_param_container.setVisible(idx == 1)
-        )
-
         layout.addRow(tr("Service Provider:"), header_layout)
         layout.addRow(tr("Provider Name:"), self.input_llm_name)
         layout.addRow(tr("API Base URL:"), self.input_llm_url)
         layout.addRow(tr("API Key:"), self.input_llm_key)
         layout.addRow(tr("Model Capacity:"), capacity_layout)
-        layout.addRow(tr("Provider Params:"), provider_param_layout)
         layout.addRow(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
         layout.addRow(tr("Model Name:"), model_layout)
-        layout.addRow(tr("Params Strategy:"), self.combo_model_param_strategy)
-        layout.addRow("", self.model_param_container)
 
         self.layout.addWidget(group)
 
@@ -197,9 +157,6 @@ class LlmSectionMixin:
         self.input_llm_key.textChanged.connect(self._sync_llm_data_debounced)
         self.input_llm_context_window.textChanged.connect(self._sync_llm_data_debounced)
         self.input_llm_max_output.textChanged.connect(self._sync_llm_data_debounced)
-        self.combo_model_param_strategy.currentIndexChanged.connect(self._sync_llm_data_debounced)
-        self.editor_provider_params.sig_data_changed.connect(self._sync_llm_data_debounced)
-        self.editor_model_params.sig_data_changed.connect(self._sync_llm_data_debounced)
 
         active_id = self.config.user_settings.get("active_llm_id", "openai")
         idx_to_select = next((i for i, c in enumerate(self.llm_configs) if c.get("id") == active_id), 0)
@@ -216,7 +173,6 @@ class LlmSectionMixin:
         self.input_llm_key.blockSignals(True)
         self.input_llm_context_window.blockSignals(True)
         self.input_llm_max_output.blockSignals(True)
-        self.combo_model_param_strategy.blockSignals(True)
 
         self.input_llm_name.setText(conf.get("name", ""))
         self.input_llm_url.setText(conf.get("base_url", ""))
@@ -224,21 +180,11 @@ class LlmSectionMixin:
         self.input_llm_context_window.setText(str(conf.get("context_window") or ""))
         self.input_llm_max_output.setText(str(conf.get("max_output_tokens") or ""))
 
-        mode = conf.get("model_params_mode", "inherit")
-        reverse_map = {"inherit": 0, "custom": 1, "closed": 2}
-        self.combo_model_param_strategy.setCurrentIndex(reverse_map.get(mode, 0))
-        self.model_param_container.setVisible(mode == "custom")
-
-        self.editor_provider_params.blockSignals(True)
-        self.editor_provider_params.load_data(conf.get("provider_params", []))
-        self.editor_provider_params.blockSignals(False)
-
         self.input_llm_name.blockSignals(False)
         self.input_llm_url.blockSignals(False)
         self.input_llm_key.blockSignals(False)
         self.input_llm_context_window.blockSignals(False)
         self.input_llm_max_output.blockSignals(False)
-        self.combo_model_param_strategy.blockSignals(False)
 
         default_ids = ["openai", "deepseek", "gemini", "anthropic", "nvidia", "qwen", "zhipu", "siliconflow","mimo",
                        "lmstudio", "ollma", "minimax"]
@@ -382,14 +328,12 @@ class LlmSectionMixin:
         if "models_config" not in conf:
             conf["models_config"] = {}
 
-        strategy_map = {0: "inherit", 1: "custom", 2: "closed"}
-        mode = strategy_map.get(self.combo_model_param_strategy.currentIndex(), "inherit")
-
-        conf["models_config"][curr_real] = {
-            "mode": mode,
-            "params": self.editor_model_params.extract_data()
-        }
-        conf["provider_params"] = self.editor_provider_params.extract_data()
+        # 自定义参数编辑器已移除：不再写 models_config / provider_params。
+        # 既有配置保持原样（不删除、不覆盖），避免"删了界面顺带清掉用户数据"。
+        mode = "inherit"
+        existing_model_conf = (conf.get("models_config") or {}).get(curr_real)
+        if isinstance(existing_model_conf, dict):
+            mode = str(existing_model_conf.get("mode") or "inherit")
 
         # 容量声明：留空即删除该键（配置里不留 "" / 0 这类含混值，自动推断看键是否存在）
         context_window = parse_optional_positive_int(self.input_llm_context_window.text())

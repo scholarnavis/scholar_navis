@@ -16,8 +16,8 @@ and unsaved-changes tracking.
 
 import logging
 
-from PySide6.QtCore import QEvent, QObject, QTimer
-from PySide6.QtWidgets import (QHBoxLayout, QPushButton, QScrollArea,
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QScrollArea,
                                QTableWidget, QVBoxLayout, QWidget)
 
 from src.core.config_manager import ConfigManager
@@ -102,6 +102,10 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         ThemeManager().theme_changed.connect(self._apply_theme)
 
     def get_ui_widget(self):
+        if getattr(self, "_ui_ready", False):
+            return self.widget
+        self._ui_ready = True
+        self._sections_built = False
         self.widget = QWidget()
         main_layout = QVBoxLayout(self.widget)
 
@@ -110,23 +114,20 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         scroll.setStyleSheet(
             "QScrollArea { border: none; background-color: transparent; } QWidget#scroll_content { background-color: transparent; }")
         scroll_content = QWidget()
+        self._scroll = scroll
+        self._scroll_content = scroll_content
 
         self.layout = QVBoxLayout(scroll_content)
         self.layout.setSpacing(20)
         self.layout.setContentsMargins(15, 0, 15, 40)
 
-        self.init_hardware_section()
-        self.init_r_environment_section()
-        self.init_system_section()
-        self.init_network_section()
-        self.init_llm_section()
-        self.init_model_section()
-        self.init_api_keys_section()
-        self.init_agent_tool_section()
+        # 九个区块的构建要读配置、建几十个控件并做一次主题着色，同步跑会卡住
+        # "点设置 → 界面出现"这一段。先把骨架铺出来（滚动区 + 底部按钮 + 一行
+        # 加载提示），下一轮事件循环再建内容，界面立刻可见。
+        self._loading_row = QLabel(tr("Loading settings..."))
+        self._loading_row.setAlignment(Qt.AlignCenter)
+        self.layout.addWidget(self._loading_row)
 
-        self.init_api_server_section()
-
-        self.layout.addStretch()
         scroll.setWidget(scroll_content)
         main_layout.addWidget(scroll)
 
@@ -152,6 +153,36 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         btn_layout.addWidget(self.btn_save)
         main_layout.addLayout(btn_layout)
 
+        # 放到事件循环里构建：先让窗口上屏，再干活（见 _build_sections）。
+        # 延迟 50ms 是为了确保"骨架 + Loading 文案"真的画出来一帧，否则用户看到的
+        # 仍是"点了没反应"。
+        QTimer.singleShot(50, self._build_sections)
+        return self.widget
+
+    def _build_sections(self):
+        """构建设置页的九个区块（延迟到窗口上屏之后执行，只做一次）。"""
+        if getattr(self, "_sections_built", False) or not getattr(self, "_ui_ready", False):
+            return
+        self._sections_built = True
+        try:
+            self.init_hardware_section()
+            self.init_r_environment_section()
+            self.init_system_section()
+            self.init_network_section()
+            self.init_llm_section()
+            self.init_model_section()
+            self.init_api_keys_section()
+            self.init_agent_tool_section()
+            self.init_api_server_section()
+        except Exception as e:
+            logger.exception("Failed to build settings sections: %s", e)
+        finally:
+            try:
+                self._loading_row.deleteLater()
+            except Exception:
+                pass
+        self.layout.addStretch()
+
         self._setup_change_listeners()
         self._load_current_settings()
         self._apply_theme()
@@ -165,8 +196,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.hw_task_mgr = TaskManager()
         self.hw_task_mgr.sig_result.connect(self._on_hw_detected_result)
         self.hw_task_mgr.start_task(HWDetectTask, "hw_detect", mode=TaskMode.THREAD)
-
-        return self.widget
 
     def _setup_change_listeners(self):
         """Attach change listeners on every input widget to track dirty state."""
@@ -198,9 +227,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.input_llm_key.textChanged.connect(self._mark_unsaved)
         self.combo_llm_preset.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_llm_model.currentIndexChanged.connect(self._mark_unsaved)
-        self.combo_model_param_strategy.currentIndexChanged.connect(self._mark_unsaved)
-        self.editor_provider_params.sig_data_changed.connect(self._mark_unsaved)
-        self.editor_model_params.sig_data_changed.connect(self._mark_unsaved)
 
     def _get_input_style(self):
         tm = ThemeManager()
@@ -281,8 +307,10 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
                    QHeaderView::section {{ background-color: {tm.color('bg_input')}; color: {tm.color('text_muted')}; border: 1px solid {tm.color('border')}; padding: 4px; }}
                """)
 
-        self._update_all_styles()
-        self._update_all_icons()
+        # 区块还没建好时只给壳子着色：此时 _update_all_* 会读到尚不存在的控件。
+        if getattr(self, "_sections_built", False):
+            self._update_all_styles()
+            self._update_all_icons()
 
         if hasattr(self, '_update_hardware_html'): self._update_hardware_html()
         if hasattr(self, '_update_api_keys_html'): self._update_api_keys_html()
@@ -389,7 +417,16 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
             if hasattr(self, '_refresh_mcp_status'):
                 self._refresh_mcp_status()
 
+    def _ensure_sections_built(self) -> bool:
+        """交互前确保区块已建好（延迟构建期间用户直接点保存的兜底）。"""
+        if getattr(self, "_sections_built", False):
+            return True
+        self._build_sections()
+        return getattr(self, "_sections_built", False)
+
     def on_undo_clicked(self):
+        if not self._ensure_sections_built():
+            return
         self._load_current_settings(is_undo=True)
 
     def _get_btn_style(self, btn_type="default"):
