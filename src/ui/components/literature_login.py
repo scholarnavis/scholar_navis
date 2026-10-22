@@ -30,11 +30,12 @@ from PySide6.QtCore import QSize, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtNetwork import QNetworkProxy, QNetworkProxyFactory
 from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel,
-                               QLineEdit, QMessageBox, QPushButton,
+                               QLineEdit, QMessageBox, QProgressBar, QPushButton,
                                QVBoxLayout, QWidget)
 
 from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager, strong_weight_css
 
 logger = logging.getLogger("UI.LiteratureLogin")
@@ -319,6 +320,9 @@ class LiteratureLoginPanel(QDialog):
         self._known: dict = {}
         self._view = None
         self._profile = None
+        #: 共享 profile 上的下载信号只允许**当前可见**的面板订阅。历史面板若一直挂着，
+        #: 会抢在可见面板之前 accept 下载并把文件登记进早已失效的对话。
+        self._downloads_bound = False
         self._download_dir = os.path.join(tempfile.gettempdir(), "navis_literature_downloads")
         os.makedirs(self._download_dir, exist_ok=True)
         self._building = False
@@ -336,6 +340,16 @@ class LiteratureLoginPanel(QDialog):
         self._watch_seen: dict[str, int] = {}
         self._watch_started = 0.0
         self._watch_deadline = 0.0
+        #: 下载进度：定时器 + 速度平滑（瞬时速度抖动很大，显示用滑动平均）。
+        self._dl_timer = None
+        self._download = None
+        self._dl_started = 0.0
+        self._dl_last_bytes = 0
+        self._dl_last_ts = 0.0
+        self._dl_speed = 0.0
+        #: 是否有一次下载正在进行/刚结束（用它判断"要不要更新进度文案"，
+        #: 不能用 isVisible：面板未显示时子控件的 isVisible 恒为 False）。
+        self._dl_active = False
         self._build_ui()
         self._apply_theme()
         ThemeManager().theme_changed.connect(self._apply_theme)
@@ -434,6 +448,24 @@ class LiteratureLoginPanel(QDialog):
         self.browser_layout.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self.browser_host, 1)
 
+        # 下载进度条：只在真正开始下载时出现（不占常态空间）。
+        self.download_box = QWidget()
+        dl_layout = QVBoxLayout(self.download_box)
+        dl_layout.setContentsMargins(0, 0, 0, 0)
+        dl_layout.setSpacing(3)
+        self.lbl_download = QLabel("")
+        self.lbl_download.setWordWrap(True)
+        self.lbl_download.setTextFormat(Qt.PlainText)
+        self.progress_download = QProgressBar()
+        self.progress_download.setRange(0, 100)
+        self.progress_download.setValue(0)
+        self.progress_download.setTextVisible(False)
+        self.progress_download.setFixedHeight(6)
+        dl_layout.addWidget(self.lbl_download)
+        dl_layout.addWidget(self.progress_download)
+        self.download_box.setVisible(False)
+        outer.addWidget(self.download_box)
+
         row = QHBoxLayout()
         self.lbl_status = QLabel("")
         self.lbl_status.setWordWrap(True)
@@ -468,7 +500,6 @@ class LiteratureLoginPanel(QDialog):
             return
 
         self._profile = profile
-        self._profile.downloadRequested.connect(self._on_download)
 
         self._view = QWebEngineView(self)
         page_cls = _LiteraturePage or QWebEnginePage
@@ -904,14 +935,58 @@ class LiteratureLoginPanel(QDialog):
         except RuntimeError:
             pass    # 面板已销毁（标签页关闭）：忽略即可
 
+    def _bind_profile_downloads(self):
+        """订阅共享 profile 的下载请求（仅在面板可见时）。"""
+        if self._profile is None or self._downloads_bound:
+            return
+        try:
+            self._profile.downloadRequested.connect(self._on_download)
+            self._downloads_bound = True
+        except Exception as e:
+            logger.debug("Cannot bind downloadRequested: %s", e)
+
+    def _unbind_profile_downloads(self):
+        if self._profile is None or not self._downloads_bound:
+            return
+        try:
+            self._profile.downloadRequested.disconnect(self._on_download)
+        except Exception as e:
+            logger.debug("Cannot unbind downloadRequested: %s", e)
+        self._downloads_bound = False
+
+    def _bind_download_signals(self, download):
+        """把"下载结束"的两条通路都接上。
+
+        真实故障：只连 stateChanged，而 WebEngine 在某些版本/场景下不会为
+        结束态补发这个信号，于是进度条永远停在"下载中"、导入也不再触发。
+        isFinishedChanged（Qt ≥ 6.7）可用时一并接上，另外 _update_download_ui
+        的轮询里还有一道兜底判断。
+        """
+        try:
+            download.stateChanged.connect(
+                lambda _state, d=download: self._on_download_state(d))
+        except Exception as e:
+            logger.debug("stateChanged unavailable: %s", e)
+        try:
+            download.isFinishedChanged.connect(
+                lambda d=download: self._on_download_state(d))
+        except Exception as e:
+            logger.debug("isFinishedChanged unavailable: %s", e)
+
     def _on_download(self, download):
-        # 共享 profile 上可能挂着多个历史面板：不可见时也要**接收**，否则浏览器
-        # 端会静默丢弃这次下载（用户看到的就是"点了没反应"）。文件落到本面板的
-        # 临时目录，可见时才继续登记入库。
+        # 只有可见面板会订阅该信号（见 _bind_profile_downloads），所以这里基本
+        # 就是"用户正在浏览的那个面板"。仍然保留 visible 判断以防误订阅。
         visible = self.isVisible()
         try:
             name = download.downloadFileName() or "paper.pdf"
             logger.info("Download requested: %s (panel visible=%s)", name, visible)
+            # 先握住句柄再 accept()：downloadRequested 的参数所有权在 PySide6 里
+            # 交给接收方，没有 Python 引用时对象会被回收、下载随即中断——表现正是
+            # 进度条卡在"下载中"。句柄同时用于轮询完成态。
+            self._download = download
+            if not visible:
+                download.accept()
+                return
             if not name.lower().endswith(".pdf"):
                 # 用户可能点了补充材料；仍然接收，但明确提示不是论文正文
                 self.sig_status.emit(f"Downloading {name} (not a PDF paper)...")
@@ -919,31 +994,166 @@ class LiteratureLoginPanel(QDialog):
             download.setDownloadDirectory(self._download_dir)
             download.setDownloadFileName(name)
             download.accept()
-            download.stateChanged.connect(
-                lambda state, d=download: self._on_download_state(d, state))
-            if not visible:
-                self.lbl_status.setText(
-                    f"Downloading {name}… (open the panel to finish importing)")
-                return
+            self._bind_download_signals(download)
             self.lbl_status.setText(f"Downloading {name}…")
-            # 命中缓存等情况下下载可能已经结束，stateChanged 不会再来一次。
+            self._begin_download_ui(download)
+            # 命中缓存等情况下下载可能已经结束，结束信号不会再来一次。
             if download.isFinished():
-                QTimer.singleShot(250, self, lambda d=download: self._on_download_state(d, None))
+                QTimer.singleShot(250, self, lambda d=download: self._on_download_state(d))
         except Exception as e:
             logger.warning("Download request handling failed: %s", e)
             self.lbl_status.setText(f"Download failed: {e}")
 
-    def _on_download_state(self, download, state):
-        # 枚举名在不同 PySide6 版本里略有差异，用 isFinished() 判断完成；
-        # 取消/中断也会 finished，但文件不存在，下面会走失败提示。
-        if not download.isFinished():
+    # ------------------------------------------------------------------ #
+    #  下载进度（大小 / 速度 / 已用 / 剩余）
+    # ------------------------------------------------------------------ #
+    #: isFinished 已置位但文件还没落盘时，最多再等几拍轮询（500ms/拍）。
+    _DL_MISSING_RETRIES = 10
+
+    @staticmethod
+    def _human_size(num) -> str:
+        try:
+            value = float(num or 0)
+        except (TypeError, ValueError):
+            return "0 B"
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024 or unit == "GB":
+                return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+            value /= 1024
+        return f"{value:.1f} GB"
+
+    @staticmethod
+    def _human_time(seconds) -> str:
+        try:
+            total = max(0, int(round(float(seconds or 0))))
+        except (TypeError, ValueError):
+            return "0s"
+        if total >= 3600:
+            return f"{total // 3600}h{(total % 3600) // 60:02d}m"
+        if total >= 60:
+            return f"{total // 60}m{total % 60:02d}s"
+        return f"{total}s"
+
+    def _begin_download_ui(self, download):
+        """开始一次下载：显示进度条并启动刷新定时器。"""
+        self._download = download
+        self._dl_active = True
+        self._dl_started = time.monotonic()
+        self._dl_last_bytes = 0
+        self._dl_last_ts = self._dl_started
+        self._dl_speed = 0.0
+        self._dl_missing_tries = 0
+        self.download_box.setVisible(True)
+        self.progress_download.setRange(0, 0)      # 总大小未知：先显示忙碌态
+        try:
+            download.receivedBytesChanged.connect(
+                lambda d=download: self._update_download_ui(d))
+            download.totalBytesChanged.connect(
+                lambda d=download: self._update_download_ui(d))
+        except Exception as e:
+            logger.debug("Download byte signals unavailable: %s", e)
+        if self._dl_timer is None:
+            self._dl_timer = QTimer(self)
+            self._dl_timer.setInterval(500)
+            self._dl_timer.timeout.connect(lambda: self._update_download_ui(self._download))
+        self._dl_timer.start()
+        self._update_download_ui(download)
+
+    def _stop_download_ui(self):
+        if self._dl_timer is not None:
+            self._dl_timer.stop()
+
+    def _update_download_ui(self, download):
+        if download is None:
             return
-        path = os.path.join(download.downloadDirectory(), download.downloadFileName())
-        if not os.path.isfile(path):
-            self.lbl_status.setText("Download finished, but the file was not found.")
+        # 轮询兜底：结束信号可能缺失，这里每 500ms 主动查一次完成态，保证
+        # 进度条/文案一定会切到"已完成 → 导入"。
+        try:
+            finished = bool(download.isFinished())
+        except Exception:
+            finished = False
+        if finished:
+            self._on_download_state(download)
+            return
+        try:
+            got = int(download.receivedBytes() or 0)
+            total = int(download.totalBytes() or 0)
+        except Exception:
+            return
+        now = time.monotonic()
+        dt = max(1e-3, now - self._dl_last_ts)
+        if got > self._dl_last_bytes:
+            instant = (got - self._dl_last_bytes) / dt
+            # 指数滑动平均：瞬时速度跳变太大，直接显示会闪
+            self._dl_speed = instant if self._dl_speed <= 0 else \
+                self._dl_speed * 0.6 + instant * 0.4
+        self._dl_last_bytes, self._dl_last_ts = got, now
+        elapsed = now - self._dl_started
+
+        if total > 0:
+            pct = max(0, min(100, int(got * 100 / total)))
+            self.progress_download.setRange(0, 100)
+            self.progress_download.setValue(pct)
+            remaining = (total - got) / self._dl_speed if self._dl_speed > 1024 else 0
+            text = (f"{tr('Downloading…')} {self._human_size(got)} / "
+                    f"{self._human_size(total)} ({pct}%) · "
+                    f"{self._human_size(self._dl_speed)}/s · "
+                    f"{tr('elapsed')} {self._human_time(elapsed)}")
+            if remaining > 0:
+                text += f" · {tr('remaining')} {self._human_time(remaining)}"
+        else:
+            self.progress_download.setRange(0, 0)
+            text = (f"{tr('Downloading…')} {self._human_size(got)} · "
+                    f"{self._human_size(self._dl_speed)}/s · "
+                    f"{tr('elapsed')} {self._human_time(elapsed)}")
+        self.lbl_download.setText(text)
+
+    def _on_download_state(self, download, state=None):
+        # 枚举名在不同 PySide6 版本里略有差异，统一用 isFinished() 判断完成；
+        # 取消/中断同样 finished，但文件不存在，下面走失败提示。信号与轮询都会
+        # 调到这里，所以整个函数必须可重入、幂等。
+        try:
+            if not download.isFinished():
+                return
+        except Exception:
+            return
+        if self._download is not None and download is not self._download:
+            return                       # 非本面板接管的下载：不重复导入
+        try:
+            path = os.path.join(download.downloadDirectory(),
+                                download.downloadFileName())
+        except Exception as e:
+            logger.debug("Cannot resolve the downloaded path: %s", e)
             return
         if path in getattr(self, "_finalized", set()):
             return
+        if not os.path.isfile(path):
+            # isFinished 会早于文件句柄落盘一点点；先让轮询再等几拍，避免把
+            # "文件还没写完"误判成"下载失败"。
+            tries = getattr(self, "_dl_missing_tries", 0) + 1
+            self._dl_missing_tries = tries
+            if tries <= self._DL_MISSING_RETRIES:
+                return
+            self._stop_download_ui()
+            self.progress_download.setRange(0, 100)
+            self.progress_download.setValue(0)
+            self.lbl_download.setText(tr("Download failed."))
+            self.lbl_status.setText("Download finished, but the file was not found.")
+            return
+        self._dl_missing_tries = 0
+        self._stop_download_ui()
+        # 下载完成：进度条填满 + 明确告知“已完成 / 用时 / 大小”，随后进入导入。
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        used = time.monotonic() - self._dl_started if self._dl_started else 0
+        self.progress_download.setRange(0, 100)
+        self.progress_download.setValue(100)
+        self.lbl_download.setText(
+            f"{tr('Download complete')} · {self._human_size(size)} · "
+            f"{tr('elapsed')} {self._human_time(used)} · {tr('Importing…')}")
+        self.lbl_status.setText(tr("Download complete. Importing into evidence…"))
         self._finalized = getattr(self, "_finalized", set())
         self._finalized.add(path)
         # 等文件句柄完全关闭一帧再解析/搬运
@@ -951,8 +1161,19 @@ class LiteratureLoginPanel(QDialog):
 
     def _finalize_download(self, path: str):
         self.lbl_status.setText("Download detected. Reading citation metadata...")
+        if self._dl_active:
+            self.lbl_download.setText(
+                f"{tr('Download complete')} · {tr('Reading metadata…')}")
+
+        done = {"flag": False}
 
         def _emit(meta):
+            # runJavaScript 的回调在页面跳转/销毁时可能永远不回来；用一次性标志
+            # 保证只登记一次，并由下面的兜底定时器补发，绝不让导入卡在
+            # "Reading metadata…"（用户看到的就是"下载完了但什么都没发生"）。
+            if done["flag"]:
+                return
+            done["flag"] = True
             merged = dict(self._known)
             if isinstance(meta, dict):
                 for key in ("doi", "title", "authors", "journal", "year", "url"):
@@ -966,13 +1187,17 @@ class LiteratureLoginPanel(QDialog):
                 "PDF ready. Registering it as full-text evidence...")
             self.sig_pdf_ready.emit(path, merged)
 
+        ran = False
         if self._view is not None:
             try:
                 self._view.page().runJavaScript(_META_JS, _emit)
-                return
+                ran = True
             except Exception as e:
                 logger.debug("Metadata JS failed: %s", e)
-        _emit({})
+        if ran:
+            QTimer.singleShot(1500, self, lambda: _emit({}))
+        else:
+            _emit({})
 
     def _open_external(self):
         # 优先用地址栏当前地址：用户在浏览器里点进出版社页面后，想用系统浏览器
@@ -999,11 +1224,19 @@ class LiteratureLoginPanel(QDialog):
         if not path:
             return
         self._submit_results[path] = (bool(ok), str(message or ""))
+        was_pending = path in self._pending_paths
         self._pending_paths.discard(path)
+        # 路径归一化差异（软链接 / realpath / 大小写）会让 discard 落空，于是
+        # "提交"永远等在那里。只剩一个待提交项时按唯一项清理，保证一定能收敛。
+        if not was_pending and len(self._pending_paths) == 1:
+            self._pending_paths.clear()
         if not ok:
             self._waiting_close = False
             self.lbl_status.setText(
                 f"Full-text submission failed: {message or 'unknown error'}")
+            if self._dl_active:
+                self.lbl_download.setText(
+                    f"{tr('Import failed')}: {message or 'unknown error'}")
             self.sig_submit_finished.emit(False, message or "Full-text submission failed")
             return
         if self._pending_paths:
@@ -1011,6 +1244,8 @@ class LiteratureLoginPanel(QDialog):
                 f"Registered. Waiting for {len(self._pending_paths)} more PDF(s)...")
             return
         self.lbl_status.setText("Full text registered successfully.")
+        if self._dl_active:
+            self.lbl_download.setText(tr("Imported into the conversation evidence."))
         self.sig_submit_finished.emit(True, "Full text registered successfully.")
         if self._waiting_close:
             self._allow_close = True
@@ -1054,6 +1289,15 @@ class LiteratureLoginPanel(QDialog):
             f"color: {tm.color('text_main')}; font-weight: {strong_weight_css()}; font-size: 15px;")
         self.lbl_hint.setStyleSheet(f"color: {tm.color('text_muted')}; font-size: 12px;")
         self.lbl_status.setStyleSheet(f"color: {tm.color('accent')}; font-size: 12px;")
+        # 下载进度：加粗 + 主题色，让它从一堆状态文案里跳出来。
+        self.lbl_download.setStyleSheet(
+            f"color: {tm.color('accent')}; font-weight: {strong_weight_css()}; "
+            f"font-size: 12px;")
+        self.progress_download.setStyleSheet(
+            f"QProgressBar {{ background-color: {tm.color('bg_input')}; "
+            f"border: 1px solid {tm.color('border')}; border-radius: 3px; }}"
+            f"QProgressBar::chunk {{ background-color: {tm.color('accent')}; "
+            f"border-radius: 2px; }}")
         # 地址栏：只读但要能一眼看出"这是一段可以复制的网址"，故保留边框与底色。
         self.url_edit.setStyleSheet(
             f"QLineEdit {{ background-color: {tm.color('btn_bg')}; "
@@ -1084,6 +1328,8 @@ class LiteratureLoginPanel(QDialog):
         global _OPEN_PANELS
         super().showEvent(event)
         _OPEN_PANELS += 1
+        # 只有可见面板订阅下载：避免历史面板抢接下载并登记进失效的对话。
+        self._bind_profile_downloads()
         if self._view is not None:
             _apply_journal_proxy()
 
@@ -1094,6 +1340,8 @@ class LiteratureLoginPanel(QDialog):
         _OPEN_PANELS = max(0, _OPEN_PANELS - 1)
         if _OPEN_PANELS == 0:
             _restore_application_proxy()
+        # 已在途的下载已单独绑定结束信号与轮询，不受退订影响。
+        self._unbind_profile_downloads()
         super().hideEvent(event)
 
     def closeEvent(self, event):
@@ -1104,6 +1352,8 @@ class LiteratureLoginPanel(QDialog):
             self.request_submit_and_close()
             return
         self._stop_download_watch()
+        self._stop_download_ui()
+        self._unbind_profile_downloads()
         super().closeEvent(event)
         submitted = any(bool(v and v[0]) for v in (self._submit_results or {}).values())
         try:

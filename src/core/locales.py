@@ -825,6 +825,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "This answer relies on an abstract only. Sign in to fetch the full text of {t}.":
             "本次回答依据的是摘要。登录后可获取《{t}》全文。",
         "Full text needed": "需要获取全文",
+        # ---- 全文下载进度 ----
+        "Downloading…": "正在下载…",
+        "elapsed": "已用",
+        "remaining": "剩余",
+        "Download complete": "下载完成",
+        "Download failed.": "下载失败。",
+        "Importing…": "正在导入…",
+        "Reading metadata…": "正在读取元数据…",
+        "Import failed": "导入失败",
+        "Imported into the conversation evidence.": "已导入本对话证据库。",
+        "Download complete. Importing into evidence…": "下载完成，正在导入证据库…",
         "{t} — only the abstract was used; sign in to fetch the full text.":
             "{t} —— 本轮只用到摘要，登录后可获取全文。",
         "Context:": "上下文：", "Max Output:": "最大输出：",

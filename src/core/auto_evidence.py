@@ -77,12 +77,18 @@ _QUERY_STOPWORDS = {
 
 
 def _query_tokens(query: str) -> List[str]:
-    """把查询拆成可用于词面比对的片段（Latin 词 / CJK 二字片段）。"""
+    """把查询拆成可用于词面比对的片段（Latin 词 / CJK 三字片段）。
+
+    CJK 用**三字**而不是二字：二字片段几乎必然命中（"应用""分析""现代"这类
+    通用词到处都有），结果是"公路养护"能匹配"植物光形态建成"——正是无关文献
+    混进来的路径。三字片段能保留"光形态""生长素""光周期"这类真正的术语。
+    """
     text = str(query or "").lower()
     tokens = [w for w in re.findall(r"[a-z][a-z0-9\-]{2,}", text)
               if w not in _QUERY_STOPWORDS]
     cjk = re.sub(r"[^\u4e00-\u9fff]", "", text)
-    tokens += [cjk[i:i + 2] for i in range(len(cjk) - 1)]
+    tokens += [cjk[i:i + 3] for i in range(len(cjk) - 2)
+               if cjk[i:i + 3] not in _QUERY_STOPWORDS]
     return list(dict.fromkeys(tokens))
 
 
@@ -102,6 +108,72 @@ def _lexically_relevant(text: str, query: str, tokens: Optional[List[str]] = Non
         if needle in body:
             return True
     return False
+
+
+def _lexically_related(text: str, query: str) -> bool:
+    """严格版词面相关：CJK 必须共享**三字**术语，Latin 必须共享一次词干。"""
+    return _lexically_relevant(text, query, _query_tokens(query))
+
+
+def _has_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+
+
+#: 非拉丁文字（西里尔 / 阿拉伯 / 假名 / 谚文）。命中即可判定不是英文文献。
+_NON_LATIN_SCRIPT_RE = re.compile(
+    r"[\u0400-\u04ff\u0590-\u05ff\u0600-\u06ff\u3040-\u30ff\uac00-\ud7af]")
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
+#: 判定英文所需的最少拉丁字母数：一个短标题（<20 字母）不足以证明是英文正文。
+_MIN_LATIN_LETTERS = 20
+
+
+def _is_english_text(text: str) -> bool:
+    """文本是否以英文（拉丁字母）为主。
+
+    自动文献只收英文：检索源对中文/其它语言的召回质量差得多（同一关键词会带回
+    大量同语言的跨领域命中），命中率低、噪声高。判据只有两条，宁可放行也不误杀
+    英文：出现 CJK 或其它非拉丁文字即否决；拉丁字母不足 20 个也否决（只够一个
+    短标题，无法证明正文是英文）。私有 PDF（用户主动下载/上传）不走这里。
+    """
+    body = str(text or "")
+    if _has_cjk(body) or _NON_LATIN_SCRIPT_RE.search(body):
+        return False
+    return len(_LATIN_LETTER_RE.findall(body)) >= _MIN_LATIN_LETTERS
+
+
+def _record_is_english(record: Dict[str, Any]) -> bool:
+    """检索记录是否属于英文文献：标题与正文合起来判定。"""
+    if not isinstance(record, dict):
+        return False
+    text = f"{record.get('title') or ''} {_record_text(record)}"
+    return _is_english_text(text)
+
+
+def _same_language_related(query: str, doc: Dict[str, Any]) -> bool:
+    """同语言候选的硬性相关检查（跨语言交给重排模型判断）。
+
+    真实故障：中文查询 + 中文标题的"预防性公路养护技术…应用分析"，与植物学
+    问题毫无关系，却能靠通用措辞（应用/分析/现代）拿到不低的相关度。这里要求
+    **同语言**时至少共享一个三字术语，否则丢弃；跨语言（中文查询 + 英文标题）
+    不做词面要求，避免误杀翻译/同义表达。
+    """
+    q = str(query or "")
+    meta = doc.get("metadata") if isinstance(doc, dict) else None
+    title = str((meta or {}).get("title") or "")
+    if not _has_cjk(q) or not _has_cjk(title):
+        return True
+    body = f"{title} {str((doc or {}).get('content') or '')[:400]}"
+    return _lexically_related(body, q)
+
+
+def _doc_is_english(doc: Dict[str, Any]) -> bool:
+    """库里检索出的文档是否属于英文文献（标题 + 片段合起来判定）。"""
+    meta = doc.get("metadata") if isinstance(doc, dict) else None
+    title = str((meta or {}).get("title") or "")
+    body = str((doc or {}).get("content") or "")
+    return _is_english_text(f"{title} {body}")
+
+
 #: 每轮最多尝试自动抓取几篇 OA 全文；失败就退回摘要。
 MAX_FULLTEXT_FETCH = 3
 FULLTEXT_MAX_BYTES = 12 * 1024 * 1024
@@ -1346,6 +1418,13 @@ def search_for_turn(query: str) -> List[Dict[str, Any]]:
     if candidates and (time.time() - started) < 10.0:
         candidates = _expand_via_citations(candidates)
         candidates = [rec for rec in candidates if not rec.get("is_retracted")]
+    # 自动文献只收英文：非英文来源的召回命中率低、同语言噪声多。放在抓 OA 全文
+    # 之前挡掉，既避免污染全局库，也省下对非英文候选抓全文的开销。
+    english_candidates = [rec for rec in candidates if _record_is_english(rec)]
+    if len(english_candidates) != len(candidates):
+        logger.info("Auto literature: dropped %d non-English candidate(s) of %d.",
+                    len(candidates) - len(english_candidates), len(candidates))
+    candidates = english_candidates
     # 优先高质量期刊，最多尝试 3 篇 OA 全文；失败就退回摘要。
     fulltext_deadline = started + 40.0
     fetched = 0
@@ -1564,6 +1643,19 @@ def _retrieve(query: str, conversation_id: str,
                 # BGE 交叉编码器输出 logits：相关为正、无关为负。
                 threshold = 0.0
             docs = [d for d in scored if float(d.get("score") or 0) >= threshold]
+            # 同语言候选再加一道术语检查（见 _same_language_related）。
+            before = len(docs)
+            docs = [d for d in docs if _same_language_related(query, d)]
+            if before != len(docs):
+                logger.info("Dropped %d same-language candidate(s) sharing no term with the "
+                            "query.", before - len(docs))
+            # 自动文献只收英文：库里可能残留历史入库的非英文条目，读侧再挡一道，
+            # 保证进入上下文与证据面板的来源全是英文（与入库侧的同一判据）。
+            before = len(docs)
+            docs = [d for d in docs if _doc_is_english(d)]
+            if before != len(docs):
+                logger.info("Dropped %d non-English candidate(s) from the auto library.",
+                            before - len(docs))
             if not docs:
                 logger.info("All %d candidate(s) scored below the relevance floor (%.2f); "
                             "no literature evidence will be attached this turn.",
@@ -1621,6 +1713,8 @@ def _retrieve(query: str, conversation_id: str,
             "kind": str(meta.get("type") or "article"),
             "page": int(meta.get("page") or 1),
             "path": str(meta.get("file_path") or ""),
+            # 重排分数随来源一起带出：只有高置信来源才值得主动弹窗要全文。
+            "score": round(float(doc.get("score") or 0.0), 3),
             "search_text": str(doc.get("content") or ""),
         }
         ref += 1

@@ -1988,6 +1988,11 @@ class ChatGenerationTask(BackgroundTask):
         for meta in (sources_map or {}).values():
             if not isinstance(meta, dict) or meta.get("has_fulltext"):
                 continue
+            # 只有高置信来源才主动弹窗：相关度不高的来源连"是否该引用"都不确定，
+            # 为它打开登录窗口只会打扰用户（曾经弹出过一篇公路养护论文）。
+            score = meta.get("score")
+            if isinstance(score, (int, float)) and float(score) < 0.6:
+                continue
             doi = str(meta.get("doi") or "").strip()
             url = str(meta.get("url") or "").strip()
             if not (doi or url):

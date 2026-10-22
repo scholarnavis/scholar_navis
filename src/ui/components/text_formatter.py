@@ -1691,8 +1691,11 @@ class TextFormatter:
         #    让用户一眼看出可点；写成带 style 的 <a>，通用链接色规则会跳过它，
         #    且后续标识符规则因 <a>...</a> 被 skip_pattern 保护而不会误伤编号。
         _cite_accent = _tm.color('accent', theme_key)
-        _cite_style = (f"color:{_cite_accent}; background-color:{_rgba(_cite_accent, 0.12)}; "
-                       f"text-decoration:underline; font-weight:{_emph_value}; {_emph_family_decl}")
+        # 行内引用：上标 + 主题色 + 下划线，但**不加底色**——浅色底块在深色主题
+        # 里像一块蓝色补丁，连续两个引用（[21][8]）会连成一片，非常抢眼。
+        _cite_style = (f"color:{_cite_accent}; text-decoration:underline; "
+                       f"vertical-align:super; font-size:0.78em; line-height:0; "
+                       f"font-weight:{_emph_value}; {_emph_family_decl}")
         # 工具回传的引用 token 可能被模型原样粘贴进正文（<a href="ref://cite?n=N">[N]</a>）。
         # 它的编号是工具的产出，外观却由模型决定（可能缺样式、被拆行）。这里先把 token
         # 还原成裸编号 [N]，下面"行内引用标记"规则再统一建链——引用锚点**只在一处生成**，
