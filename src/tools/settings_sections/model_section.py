@@ -44,11 +44,6 @@ class ModelSectionMixin:
         self.btn_open_cache.clicked.connect(self._open_hf_cache)
         layout.addRow(tr("Model Storage:"), self.btn_open_cache)
 
-        # 出版社/机构登录会话：Cookie 长期保留，这里提供显式清除入口。
-        self.btn_clear_lit_login = QPushButton(tr(" Clear Literature Login Session"))
-        self.btn_clear_lit_login.setCursor(Qt.PointingHandCursor)
-        self.btn_clear_lit_login.clicked.connect(self._clear_literature_login)
-        layout.addRow(tr("Literature Login:"), self.btn_clear_lit_login)
 
         # --- 1. Embedding 模型选择 ---
         self.combo_embed = BaseComboBox()
@@ -204,18 +199,6 @@ class ModelSectionMixin:
         os.makedirs(model_dir, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(model_dir))
 
-    def _clear_literature_login(self):
-        """清除出版社/机构登录 Cookie（文献获取面板与设置共用同一 profile）。"""
-        try:
-            from src.ui.components.literature_login import clear_literature_login
-            ok = clear_literature_login()
-        except Exception as e:
-            ok = False
-            self.logger.warning("Clear literature login failed: %s", e)
-        if ok:
-            ToastManager().show(tr("Literature login session cleared."), "success")
-        else:
-            ToastManager().show(tr("Could not clear the literature login session."), "warning")
 
     # ---------- Device test ----------
     def _selected_device_is_unavailable(self) -> bool:

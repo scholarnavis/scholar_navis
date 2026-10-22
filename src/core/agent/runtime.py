@@ -260,41 +260,6 @@ _ALWAYS_TOOLS = {
             },
         },
     },
-    "request_fulltext": {
-        "type": "function",
-        "function": {
-            "name": "request_fulltext",
-            "description": (
-                "Ask the user to log in to the publisher (or their institution) so the app can "
-                "fetch the FULL TEXT of a specific paywalled paper, then PAUSE the turn and wait. "
-                "Use it when an abstract-only source is essential to the answer and a DOI or "
-                "landing-page URL is known. The app opens a built-in browser on that page, sends "
-                "a desktop notification, and resumes your turn automatically once the PDF is "
-                "registered (you will receive a new user message saying the full text is ready). "
-                "Do NOT call this for papers you already have full text for, and do NOT call it "
-                "more than once per turn. After this tool runs you MUST STOP: call no other tool, "
-                "and tell the user in one short sentence that you are waiting for the login."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "doi": {"type": "string", "description": "DOI of the paper, if known."},
-                    "title": {"type": "string", "description": "Paper title, in the user's language."},
-                    "url": {"type": "string", "description": "Publisher/landing-page URL, if known."},
-                    "reason": {
-                        "type": "string",
-                        "description": (
-                            "One line, in the user's language, saying why the full text is needed "
-                            "(which claim depends on it)."
-                        ),
-                    },
-                },
-                # 三选一即可：模型常常只知道 DOI 或只记得标题，强制要 title 会让调用
-                # 直接校验失败，于是"该弹窗的时候不弹"。
-                "required": [],
-            },
-        },
-    },
     "suggest_follow_ups": {
         "type": "function",
         "function": {
@@ -406,8 +371,7 @@ class AgentRuntime:
 
     def __init__(self, main_llm, skill_manager, mcp_manager, planner=None, cite_collector=None, log_fn=None,
                  plot_registry: Optional[Dict[str, Dict]] = None, plot_seq: int = 0,
-                 reference_registry=None, evidence_store: Optional[EvidenceStore] = None,
-                 fulltext_waiter=None):
+                 reference_registry=None, evidence_store: Optional[EvidenceStore] = None):
         self.main_llm = main_llm
         self.skill_manager = skill_manager
         self.mcp_manager = mcp_manager
@@ -428,11 +392,6 @@ class AgentRuntime:
         self.evidence_store = evidence_store or EvidenceStore()
         # log_fn(level: str, msg: str) : optional logger hook (e.g. ChatTask.send_log)
         self.log_fn = log_fn or (lambda level, msg: None)
-        # fulltext_waiter(payload: dict) -> str : 「请用户登录拿全文」产生的**同轮
-        # 等待**。注入时工具会挂起本线程等 PDF 入库，然后带着全文内容继续这一轮
-        # （上下文/引用注册表/思考过程全部沿用，不存在"新起一轮"的断层）。未注入
-        # 时退化为"结束本轮、等用户下次说话"的旧行为（子 Agent / API 场景）。
-        self.fulltext_waiter = fulltext_waiter
         # plot_id -> {script_path, code_path, data_path, chart_title, chart_type,
         #             columns, column_types, preview, total_rows, extra_packages}
         # 记录会话内已绘制的图，供 modify_chart 工具按 plot_id 定位并重绘。
@@ -622,25 +581,6 @@ class AgentRuntime:
                     f"{_icon_tag}"
                     "<i>Paused for your input — answer the question card above "
                     "and the task will continue.</i>\n"
-                )
-                self._finalize_usage("".join(full_response_cache))
-                return _final_text()
-
-            # 请求登录获取全文：只有**没有**同轮等待通道时才机械暂停（子 Agent /
-            # API 场景）。注入 waiter 时工具已经挂起等待并把全文交回，本循环会正常
-            # 继续，不需要也不应该在这里截断。
-            if (getattr(self, "fulltext_waiter", None) is None
-                    and any((tc.get("function") or {}).get("name") == "request_fulltext"
-                            for tc in tool_calls)):
-                self.log_fn("INFO", "request_fulltext triggered; pausing run for login.")
-                _icon = _rich_text_icon_uri("pause_circle")
-                _icon_tag = (f"<img src='{_icon}' width='14' height='14' "
-                             f"style='vertical-align: middle;' /> ") if _icon else ""
-                _emit(
-                    "\n\n---\n"
-                    f"{_icon_tag}"
-                    "<i>Waiting for you to sign in — the turn resumes automatically "
-                    "once the full text is saved to this conversation.</i>\n"
                 )
                 self._finalize_usage("".join(full_response_cache))
                 return _final_text()
@@ -1224,10 +1164,6 @@ class AgentRuntime:
         # 1d. Built-in human-in-the-loop clarification (pause for user input).
         if name == "ask_user":
             return self._handle_ask_user(args, emit_token)
-
-        # 1d-2. Paywalled full text: ask the user to log in and pause the turn.
-        if name == "request_fulltext":
-            return self._handle_request_fulltext(args, emit_token)
 
         # 1e. Structured follow-up suggestions (replaces the [FOLLOW_UPS] text block +
         # regex parsing: the model passes chips through a real function call).
@@ -1945,66 +1881,6 @@ class AgentRuntime:
         item.verified = False
         return False
 
-    def _handle_request_fulltext(self, args: dict, emit_token) -> str:
-        """请用户登录出版社获取全文，并暂停本轮（对话不结束）。
-
-        与 :meth:`_handle_ask_user` 共用同一条结构化通道：payload 暂存于 runtime，
-        任务层在 run() 返回后经状态事件送达 UI；UI 用内置浏览器打开该论文页面、
-        发一条桌面通知，用户登录并下载完成后，PDF 入证据库并自动续跑本轮。
-        """
-        args = args or {}
-        title = str(args.get("title") or "").strip()
-        doi = str(args.get("doi") or "").strip().replace("https://doi.org/", "")
-        url = str(args.get("url") or "").strip()
-        if not (title or doi or url):
-            return json.dumps({
-                "status": "error",
-                "message": ("Provide at least a title, a DOI or the landing-page URL of the "
-                            "paper you need, otherwise the app cannot open it."),
-            }, ensure_ascii=False)
-
-        payload = {
-            "doi": doi,
-            "title": title,
-            "url": url,
-            "reason": str(args.get("reason") or "").strip(),
-        }
-        self.log_fn("INFO", "Agent requested full-text access: "
-                            f"{(title or doi or url)[:80]}")
-
-        # 同轮等待：挂起本线程直到 PDF 入库，然后把**全文内容**作为工具结果交回
-        # 模型。上下文、引用注册表、已检索到的来源全部沿用，不存在"新起一轮"
-        # 的信息断层——这正是"停顿不影响对话质量"的实现方式。
-        waiter = getattr(self, "fulltext_waiter", None)
-        if callable(waiter):
-            try:
-                result_text = str(waiter(payload) or "")
-            except Exception as e:
-                self.log_fn("WARNING", f"Full-text wait failed: {e}")
-                result_text = ""
-            if result_text:
-                return json.dumps({"status": "success", "message": result_text},
-                                  ensure_ascii=False)
-
-        # 退化路径（未注入等待回调：子 Agent / API）：结束本轮，等用户下一次说话。
-        import base64
-        encoded = base64.b64encode(
-            json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        ).decode("ascii")
-        self.last_fulltext_request = payload
-        if emit_token is not None:
-            emit_token(f'<fulltext_request data="{encoded}"></fulltext_request>\n')
-
-        return json.dumps({
-            "status": "success",
-            "message": (
-                "The login panel is opening for that paper and the user has been notified. "
-                "STOP NOW: do not call any tool. End your turn with ONE short sentence (in the "
-                "user's language) telling them you are waiting for the sign-in; the full text "
-                "will be added to this conversation automatically and your turn resumes from "
-                "there."
-            ),
-        }, ensure_ascii=False)
 
     def _handle_ask_user(self, args: dict, emit_token) -> str:
         """Show an ask-user clarification card and pause the task for user input.

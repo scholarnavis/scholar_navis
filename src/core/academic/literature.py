@@ -1,10 +1,13 @@
 """Literature tools: unified search, citation graph, OA PDF and preprints."""
 import json
+import os
 import re
+import tempfile
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import unescape
 from typing import Literal
 
 from Bio import Entrez
@@ -19,8 +22,22 @@ from src.task.s2_task import s2_request, is_s2_enabled
 
 __all__ = [
     "search_academic_literature", "traverse_citation_graph",
-    "fetch_open_access_pdf", "search_preprints",
+    "fetch_open_access_pdf", "search_preprints", "fetch_paper_fulltext",
+    "fulltext_text",
 ]
+
+#: OA 全文的最小可用长度：低于此值说明只拿到摘要页/封面，按"没有全文"处理。
+_MIN_FULLTEXT_CHARS = 500
+#: 单篇全文下载上限（12 MB）：更大的"PDF"基本是出版社错误页或整刊合订本。
+_FULLTEXT_MAX_BYTES = 12 * 1024 * 1024
+#: 交给模型的全文字符上限：一篇正文约 4-6 万字符，超出部分截断并显式标记。
+_FULLTEXT_CHARS = 60000
+#: 检索结果里自动附全文的条数与每条字符上限：保证"有全文就用全文"，又不至于
+#: 一次工具调用把上下文挤爆（30 条记录 × 全文 ≈ 上百万字符，必须设上限）。
+_FULLTEXT_ATTACH_LIMIT = 2
+_FULLTEXT_ATTACH_CHARS = 20000
+#: 检索时扫描的候选条数：其中可能只有少数进了 PMC，所以窗口要大于附带条数。
+_FULLTEXT_SCAN_LIMIT = 8
 
 
 def _normalize_doi(doi):
@@ -195,6 +212,25 @@ def _pubmed_abstract_text(record):
     return " ".join(parts)
 
 
+def _iter_pubmed_records(records) -> list:
+    """把 EFetch 的解析结果展平成"一条记录一个元素"的列表。
+
+    实测（Biopython，``rettype="abstract"``）：XML 根节点 ``PubmedArticleSet`` 会被解析成
+    一个字典，键是 ``PubmedArticle`` / ``PubmedBookArticle``，值为记录列表——直接按列表
+    语义迭代只会拿到这个字典本身，``MedlineCitation`` 取不到，摘要全部丢失
+    （修复前实测 0/30）。这里统一展平，并兼容单篇返回与平铺列表返回。
+    """
+    if isinstance(records, dict):
+        for key in ("PubmedArticle", "PubmedBookArticle"):
+            value = records.get(key)
+            if value is None:
+                continue
+            return list(value) if isinstance(value, list) else [value]
+        logger.debug(f"PubMed EFetch payload lacks PubmedArticle key: {list(records.keys())[:6]}")
+        return [records]
+    return list(records)
+
+
 def _fetch_pubmed_abstracts(pmids, ncbi_rps):
     """用 EFetch 批量取 PubMed 摘要原文，返回 ``{pmid: abstract}``（唯一取原文入口）。
 
@@ -224,7 +260,7 @@ def _fetch_pubmed_abstracts(pmids, ncbi_rps):
         except Exception as e:
             logger.warning(f"PubMed EFetch failed for {len(batch)} id(s): {e}")
             continue
-        for record in (records if isinstance(records, list) else [records]):
+        for record in _iter_pubmed_records(records):
             if not isinstance(record, dict):
                 continue
             text = _pubmed_abstract_text(record)
@@ -336,18 +372,90 @@ def _preprint_records(query: str, max_results: int = 10):
     return records
 
 
+def _cite_count(record) -> int:
+    """安全读取引用数：各库给的类型不一致（int / str / None）。"""
+    try:
+        return int(record.get("citation_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _thin_result_set(records, max_results: int) -> bool:
+    """命中过少：检索式太具体或太口语，值得换个说法再扫一遍。"""
+    return len(records) < max(5, max_results // 3)
+
+
+def _refine_query(text: str) -> str:
+    """把口语化 / 疑问式的检索式改写成关键词式；与原串等价时返回空串（表示无需再搜）。"""
+    cleaned = re.sub(
+        r"(?:请问|什么是|是什么|如何|为什么|有哪些|怎么样|怎么回事|"
+        r"what\s+is|what\s+are|how\s+does|why\s+does|tell\s+me\s+about|"
+        r"[？?！!。，,、；;：:])",
+        " ", str(text or ""), flags=re.IGNORECASE)
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) < 8 or cleaned.lower() == str(text or "").strip().lower():
+        return ""
+    return cleaned
+
+
+def _attach_fulltext(records, limit: int = _FULLTEXT_ATTACH_LIMIT,
+                     chars: int = _FULLTEXT_ATTACH_CHARS,
+                     scan: int = _FULLTEXT_SCAN_LIMIT) -> int:
+    """给最值得读的若干条记录补 OA 全文，返回补到全文的条数。
+
+    "有全文就用全文"要花真实网络时间，所以只给最可能被引用的记录补全文：有 DOI、
+    正式论文优先，引用数高的优先；其余记录保留摘要。拿不到全文时绝不编造内容。
+    """
+    pool = [r for r in records if isinstance(r, dict) and r.get("doi")]
+    pool.sort(key=lambda r: (-_cite_count(r),
+                             str(r.get("type") or "article") != "article"))
+    window = pool[:max(0, int(scan))]
+    # 检索阶段只走 Europe PMC（一次批量解析 PMCID + 少量 XML 请求，快且无反爬）；
+    # 高引论文多数是付费墙经典文献，没有 PMC 副本，所以扫描窗口要比附带条数大，
+    # 否则每次都白跑。PDF 下载与解析留给显式的 fetch_paper_fulltext 调用。
+    pmcids = europe_pmc_pmcids([r.get("doi") for r in window])
+    filled = 0
+    for record in window:
+        if filled >= max(0, int(limit)):
+            break
+        pmcid = pmcids.get(_normalize_doi(record.get("doi")))
+        if not pmcid:
+            continue
+        text = _europe_pmc_xml_text(pmcid)
+        if len(text) < _MIN_FULLTEXT_CHARS:
+            continue
+        record["full_text"] = text[:chars]
+        record["full_text_source"] = "Europe PMC"
+        record["full_text_truncated"] = len(text) > chars
+        filled += 1
+        logger.info(f"Full text attached for {record.get('doi')} via {pmcid} "
+                    f"({len(text)} chars)")
+    logger.info(f"Full text attached to {filled} record(s); scanned {len(window)}")
+    return filled
+
+
 @simple_retry(max_attempts=2, delay=1)
-def search_academic_literature(query: str, max_results: int = 15, offset: int = 0,
+def search_academic_literature(query: str, max_results: int = 30, offset: int = 0,
                                source: Literal["auto", "semantic_scholar", "openalex",
                                                "crossref", "pubmed", "arxiv", "preprints"] = "auto",
                                aggregate: bool = True, min_year: int | None = None,
                                include_preprints: bool = True,
+                               include_fulltext: bool = True,
                                ) -> str:
     """Unified literature search with cross-database aggregation.
 
     - ``source="auto"`` queries ALL enabled databases (OpenAlex, Crossref,
       PubMed, Semantic Scholar) in parallel and aggregates + dedupes results,
       improving coverage breadth vs. the legacy single-source short-circuit.
+      Coverage is venue-agnostic: PNAS / Nature / Science / Cell class journals
+      are indexed by OpenAlex, Crossref and PubMed alike, so do NOT narrow
+      ``source`` unless the user explicitly asks for one database.
+    - ``max_results`` defaults to 30 (breadth first). If the aggregated pool
+      comes back thin, one extra round runs with a keyword-refined rewrite of
+      the query.
+    - ``include_fulltext`` attaches open-access full text (Europe PMC XML, then
+      OA PDF) to the most citable hits so answers can quote the paper body
+      instead of the abstract. Records with no OA copy keep the abstract only.
     - ``aggregate=False`` keeps the legacy per-source behavior (first non-empty
       source wins) for backward compatibility.
     - ``min_year`` optionally filters out papers published before a given year.
@@ -625,33 +733,52 @@ def search_academic_literature(query: str, max_results: int = 15, offset: int = 
             logger.info(f"min_year={min_year}: dropped {dropped} older records")
         all_records = filtered
 
+    # 范围兜底：命中过少说明检索式太具体或太口语，用关键词式改写再扫一遍。
+    # 只补一轮，且改写与原串相同时不再重试，避免工具调用被无限放大。
+    if source == "auto" and wanted and _thin_result_set(all_records, max_results):
+        retry_query = _refine_query(query)
+        if retry_query:
+            logger.info(f"Thin result set ({len(all_records)} records); retrying with "
+                        f"refined query: '{retry_query}'")
+            try:
+                extra_raw = search_academic_literature(
+                    retry_query, max_results=max_results, source=source,
+                    aggregate=False, min_year=min_year,
+                    include_preprints=include_preprints, include_fulltext=False)
+                extra = json.loads(extra_raw).get("results") or []
+            except Exception as e:
+                logger.warning(f"Refined-query retry failed: {e}")
+                extra = []
+            if extra:
+                source_stats["refined_retry"] = len(extra)
+                all_records.extend(extra)
+
     # 聚合（auto 且 aggregate=True）或多源短路径
     if source == "auto" and aggregate:
-        merged = _merge_records(all_records)
-        if not merged:
-            return json.dumps({"status": "success", "results": [], "source_stats": source_stats,
-                               "message": "No results found from any source"})
-        return json.dumps({"status": "success", "source": "aggregated",
-                           "source_stats": source_stats, "results": merged}, ensure_ascii=False)
+        results = _merge_records(all_records)
+        source_name = "aggregated"
+    elif not aggregate:
+        # 保持旧语义：不聚合时直接给出原始记录
+        results = all_records
+        source_name = ""
+    else:
+        # 指定单库检索（source=openalex/crossref/pubmed/semantic_scholar 且 aggregate 默认 True）
+        # 此前会落到最后一行恒返回空列表：source_stats 里明明有记录，results 却是 []，
+        # 调用方只会看到 "No results found from any source"（实测 openalex 取到 1 条却丢失）。
+        # 这里按与其他分支一致的契约返回：合并去重 + 补 confidence/source_dbs。
+        results = _merge_records(all_records)
+        source_name = wanted[0] if len(wanted) == 1 else "aggregated"
 
-    # 单源 / 不聚合：返回第一个非空来源（保持旧语义），否则汇总所有非空来源
-    if not aggregate:
-        return json.dumps({"status": "success", "results": all_records, "source_stats": source_stats,
-                           "message": "No results found" if not all_records else ""}, ensure_ascii=False)
+    # 有全文就用全文：只有拿到可核验的 OA 正文才会写入 full_text 字段
+    if results and include_fulltext:
+        _attach_fulltext(results)
 
-    # 指定单库检索（source=openalex/crossref/pubmed/semantic_scholar 且 aggregate 默认 True）
-    # 此前会落到最后一行恒返回空列表：source_stats 里明明有记录，results 却是 []，
-    # 调用方只会看到 "No results found from any source"（实测 openalex 取到 1 条却丢失）。
-    # 这里按与其他分支一致的契约返回：合并去重 + 补 confidence/source_dbs。
-    merged = _merge_records(all_records)
-    if merged:
-        return json.dumps({"status": "success",
-                           "source": wanted[0] if len(wanted) == 1 else "aggregated",
-                           "source_stats": source_stats, "results": merged},
-                          ensure_ascii=False)
-
-    return json.dumps({"status": "success", "results": [], "source_stats": source_stats,
-                       "message": "No results found from any source"})
+    payload = {"status": "success", "results": results, "source_stats": source_stats}
+    if source_name:
+        payload["source"] = source_name
+    if not results:
+        payload["message"] = "No results found from any source"
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @simple_retry(max_attempts=2, delay=1)
@@ -808,6 +935,144 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
     return json.dumps({"status": "error", "message": "Unexpected error traversing citation graph."})
 
 
+
+
+def europe_pmc_pmcids(dois) -> dict:
+    """批量把 DOI 解析成 PMCID，返回 ``{归一化 DOI: PMCID}``；解析不到的 DOI 不出现。
+
+    一次请求即可解析整批 DOI（Europe PMC 支持 ``OR`` 组合查询）。这很关键：逐条
+    查询会把"顺手附全文"拖成几十次往返，检索工具就废了。
+    """
+    wanted = {}
+    for doi in dois:
+        clean = _normalize_doi(doi)
+        if clean:
+            wanted[clean.lower()] = clean
+    if not wanted:
+        return {}
+    clause = " OR ".join(f'DOI:"{d}"' for d in wanted.values())
+    try:
+        res = mcp_request(
+            "GET", "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            params={"query": clause, "format": "json", "resultType": "core",
+                    "pageSize": len(wanted)},
+            timeout=20)
+        if res.status_code != 200:
+            return {}
+        found = {}
+        for rec in ((res.json().get("resultList") or {}).get("result") or []):
+            pmcid = str(rec.get("pmcid") or "")
+            doi = _normalize_doi(str(rec.get("doi") or "")).lower()
+            if pmcid and doi in wanted:
+                found[wanted[doi]] = pmcid
+        logger.debug(f"Europe PMC resolved {len(found)}/{len(wanted)} PMCID(s)")
+        return found
+    except Exception as e:
+        logger.debug(f"Europe PMC PMCID lookup failed: {e}")
+        return {}
+
+
+def _europe_pmc_xml_text(pmcid: str) -> str:
+    """按 PMCID 取全文 XML 的纯文本；失败返回空串。"""
+    try:
+        xml_res = mcp_request(
+            "GET", f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML",
+            timeout=20)
+        if xml_res.status_code != 200 or not xml_res.text:
+            return ""
+        text = unescape(re.sub(r"<[^>]+>", " ", xml_res.text))
+        return re.sub(r"\s+", " ", text).strip()
+    except Exception as e:
+        logger.debug(f"Europe PMC XML fetch failed for {pmcid}: {e}")
+        return ""
+
+
+def europe_pmc_fulltext(doi: str) -> str:
+    """Europe PMC 的 OA 全文（XML 纯文本）。
+
+    PMC 收录的 PNAS / Nature 子刊命中率最高，且不经过出版社页面与反爬，是取全文的
+    首选路径；拿不到时返回空串（调用方退回摘要）。
+    """
+    clean = _normalize_doi(doi)
+    pmcid = europe_pmc_pmcids([clean]).get(clean) if clean else ""
+    if not pmcid:
+        return ""
+    text = _europe_pmc_xml_text(pmcid)
+    if text:
+        logger.info(f"Europe PMC full text: {clean} -> {pmcid} ({len(text)} chars)")
+    return text
+
+
+def _oa_pdf_fulltext(doi: str) -> str:
+    """DOI -> 合法 OA PDF -> 正文文本；没有 OA 副本或下载失败时返回空串。"""
+    clean = _normalize_doi(doi)
+    if not clean:
+        return ""
+    tmp = ""
+    try:
+        from src.core.pdf_text import extract_pdf
+        found = OAFetcher().fetch_best_oa_pdf(clean, ncbi_email, ncbi_api_key=ncbi_api_key)
+        if not found.get("is_oa") or not found.get("pdf_url"):
+            return ""
+        resp = mcp_request("GET", found["pdf_url"], timeout=30)
+        if resp.status_code != 200:
+            return ""
+        content = resp.content or b""
+        if len(content) > _FULLTEXT_MAX_BYTES or not content.startswith(b"%PDF"):
+            return ""
+        fd, tmp = tempfile.mkstemp(prefix="oa_pdf_", suffix=".pdf")
+        os.close(fd)
+        with open(tmp, "wb") as handle:
+            handle.write(content)
+        pages, _meta = extract_pdf(tmp)
+        return "\n\n".join(t for _page, t in pages if t.strip()).strip()
+    except Exception as e:
+        logger.debug(f"OA PDF full text failed for {clean}: {e}")
+        return ""
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def fulltext_text(doi: str):
+    """取一篇论文的合法 OA 全文，返回 ``(正文, 来源标签)``；没有 OA 副本时返回 ``("", "")``。
+
+    顺序：Europe PMC XML（最稳） -> OA PDF（Unpaywall / OpenAlex 解析出的链接）。
+    拿不到全文**不等于**工具失败：调用方应退回摘要，并如实说明"仅有摘要"。
+    """
+    text = europe_pmc_fulltext(doi)
+    if len(text) >= _MIN_FULLTEXT_CHARS:
+        return text, "Europe PMC"
+    text = _oa_pdf_fulltext(doi)
+    if len(text) >= _MIN_FULLTEXT_CHARS:
+        return text, "Open access PDF"
+    return "", ""
+
+
+@simple_retry(max_attempts=2, delay=1)
+def fetch_paper_fulltext(doi: str, max_chars: int = _FULLTEXT_CHARS) -> str:
+    """按 DOI 取一篇论文的 OA 全文；没有 OA 副本时明确告知"只有摘要可用"。"""
+    logger.info(f"Task: Fetch Paper Full Text | DOI: '{doi}'")
+    clean = _normalize_doi(doi)
+    if not clean:
+        return json.dumps({
+            "status": "error",
+            "message": "A DOI is required. Take it from a search result's 'doi' field."})
+    text, origin = fulltext_text(clean)
+    if not text:
+        return json.dumps({
+            "status": "success", "doi": clean, "full_text": "", "source": "",
+            "message": ("No open-access full text is available for this DOI. Use the "
+                        "abstract from the search result and state that only the abstract "
+                        "was available.")}, ensure_ascii=False)
+    truncated = len(text) > max_chars
+    logger.info(f"Full text fetched: {clean} via {origin} ({len(text)} chars, truncated={truncated})")
+    return json.dumps({"status": "success", "doi": clean, "source": origin,
+                       "full_text": text[:max_chars], "truncated": truncated,
+                       "chars": len(text)}, ensure_ascii=False)
 
 
 @simple_retry()

@@ -489,23 +489,6 @@ class ChatAttachmentsMixin:
             return getter(self._tab_id())
         return None
 
-    def _current_evidence_bundle(self):
-        """当前对话的证据快照（导出用）：先读快照，没有就按当前库现做。
-
-        只读快照会漏掉"本轮还没收尾"或"旧版本没写过快照"的对话——那些对话的证据
-        在 manifest / 向量库里是有的，导出时必须一起去。
-        """
-        tab_id = self._tab_id()
-        try:
-            from src.core import chat_session
-            bundle = chat_session.load_evidence_bundle(tab_id)
-            if bundle:
-                return bundle
-            from src.core.auto_evidence import export_evidence_bundle
-            return export_evidence_bundle(tab_id) or {}
-        except Exception as e:
-            logger.debug("Evidence bundle unavailable for export: %s", e)
-            return {}
 
     def _start_export(self, path, tabs=None):
         """启动后台导出任务并挂上进度弹窗（当前对话 / 全部对话共用同一条链路）。
@@ -533,8 +516,6 @@ class ChatAttachmentsMixin:
         export_tabs = tabs if tabs is not None else [{
             "name": self._current_conversation_name(),
             "messages": self.history,
-            # 当前对话的证据随归档走（全部对话的导出已在 collect_tabs_payload 里带上）
-            "evidence": self._current_evidence_bundle(),
         }]
         # 在 UI 线程先做一次 JSON 化快照：后台任务不再直接读正在被编辑/流式追加
         # 的 history 字典，避免跨线程读写同一对象。
@@ -660,20 +641,6 @@ class ChatAttachmentsMixin:
         if imported_tags:
             from src.core import chat_session
             chat_session.save_tab_tags(self._tab_id(), imported_tags)
-        # 证据随归档恢复：当前对话先前的证据属于**上一段**内容，必须先清掉，
-        # 再写入归档里的那份（否则新旧证据混在一起，面板里会出现无关文献）。
-        imported_evidence = tabs[0].get("evidence")
-        try:
-            from src.core import chat_session
-            from src.core.auto_evidence import (delete_conversation_evidence,
-                                                reindex_evidence_in_background)
-            tab_id = self._tab_id()
-            delete_conversation_evidence(tab_id)
-            if isinstance(imported_evidence, dict) and imported_evidence:
-                chat_session.save_evidence_bundle(tab_id, imported_evidence)
-                reindex_evidence_in_background(tab_id, imported_evidence)
-        except Exception as e:
-            logger.warning("Failed to restore evidence from archive: %s", e)
 
         # 重建阶段（逐条渲染气泡）比解析慢得多，且全程在 UI 线程：这里改用异步
         # 分片推进（见 _apply_imported_history），进度对话框在这期间才能继续滚动

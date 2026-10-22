@@ -1314,19 +1314,6 @@ class DeveloperDialog(BaseDialog):
         if chat_session.tabs_with_tag("植物") != [tab_id]:
             fails.append("history: tag query does not return the conversation")
 
-        # 1b) 证据快照：文献元数据 + 检索正文必须随会话库保存，且与 embedding 无关
-        evidence_bundle = {
-            "version": 1,
-            "papers": [{"paper_id": "probe1", "title": "Evidence probe",
-                        "doi": "10.9/probe", "year": "2021", "journal": "J",
-                        "url": "", "path": "", "has_fulltext": True,
-                        "visibility": "private", "origins": ["manual_upload"]}],
-            "chunks": {"probe1": ["verbatim chunk one", "verbatim chunk two"]},
-        }
-        if not chat_session.save_evidence_bundle(tab_id, evidence_bundle):
-            fails.append("history: evidence bundle was not saved")
-        if chat_session.load_evidence_bundle(tab_id) != evidence_bundle:
-            fails.append("history: evidence bundle changed in round-trip")
 
         # 2) 归档往返（含资产内嵌 / 解包）
         image_path = os.path.join(temp_root, "figure.png")
@@ -1338,8 +1325,7 @@ class DeveloperDialog(BaseDialog):
         archive_path = os.path.join(temp_root, "probe.schat")
         chat_archive.write_archive(archive_path, [{
             "name": "Storage probe", "tags": ["植物"],
-            "messages": [archived_message],
-            "evidence": evidence_bundle}])
+            "messages": [archived_message]}])
         if not chat_store.is_sqlite_file(archive_path):
             fails.append("archive: container is not SQLite")
         payload, meta = chat_archive.read_archive(archive_path)
@@ -1365,8 +1351,6 @@ class DeveloperDialog(BaseDialog):
                 fails.append(f"archive: token usage lost -> {msg.get('usage')}")
             if msg.get("content") != message["content"]:
                 fails.append("archive: content changed in round-trip")
-            if tab.get("evidence") != evidence_bundle:
-                fails.append("archive: evidence bundle lost in round-trip")
         os.remove(image_path)
         attachment_map = meta.get("attachment_map") or {}
         if not attachment_map:
@@ -1410,10 +1394,8 @@ class DeveloperDialog(BaseDialog):
         if not chat_archive.extract_tabs(payload)[0]["messages"][0].get("references"):
             fails.append("legacy: references lost from a ZIP archive")
 
-        # 5) "清除对话"必须连证据一起清：只删消息不删快照，面板会继续列出旧文献。
+        # 5) "清除对话"必须真的清掉落盘内容：只删内存不删快照，重启后会复活。
         chat_session.clear_tab(tab_id)
-        if chat_session.load_evidence_bundle(tab_id):
-            fails.append("history: evidence bundle survived clear_tab")
         if chat_session.load_tab(tab_id):
             fails.append("history: messages survived clear_tab")
         return fails

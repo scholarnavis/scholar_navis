@@ -551,63 +551,10 @@ def tabs_with_tag(tag: str) -> List[str]:
         conn.close()
 
 
-# --------------------------------------------------------------------------- #
-#  标签页附属负载（证据快照）
-# --------------------------------------------------------------------------- #
-def save_evidence_bundle(tab_id: str, bundle: Dict[str, Any]) -> bool:
-    """把该对话的证据快照写进会话库（随历史 / 导出 / 导入一起走）。
-
-    证据的**权威副本**放在这里，向量库只是可重建的索引：换 embedding 模型时
-    索引可以重做，这份"文献元数据 + 检索正文"不能丢。
-    """
-    if not is_valid_tab_id(tab_id) or not isinstance(bundle, dict) or not bundle:
-        return False
-    conn = _open()
-    if conn is None:
-        return False
-    try:
-        chat_store.ensure_tab(conn, tab_id)
-        chat_store.put_tab_payload(conn, tab_id, chat_store.PAYLOAD_EVIDENCE, bundle)
-        return True
-    except Exception as e:
-        logger.warning("Failed to save evidence bundle of %s: %s", tab_id, e)
-        return False
-    finally:
-        conn.close()
 
 
-def load_evidence_bundle(tab_id: str) -> Dict[str, Any]:
-    """读取该对话的证据快照；没有时返回空 dict。"""
-    if not is_valid_tab_id(tab_id):
-        return {}
-    conn = _open_existing()
-    if conn is None:
-        return {}
-    try:
-        return chat_store.read_tab_payload(conn, tab_id,
-                                           chat_store.PAYLOAD_EVIDENCE) or {}
-    except Exception as e:
-        logger.warning("Failed to read evidence bundle of %s: %s", tab_id, e)
-        return {}
-    finally:
-        conn.close()
 
 
-def clear_evidence_bundle(tab_id: str) -> bool:
-    """删除某对话的证据快照（清除对话 / 关闭标签页时调用）。"""
-    if not is_valid_tab_id(tab_id) or not os.path.isfile(db_path()):
-        return False
-    conn = _open()
-    if conn is None:
-        return False
-    try:
-        chat_store.delete_tab_payload(conn, tab_id, chat_store.PAYLOAD_EVIDENCE)
-        return True
-    except Exception as e:
-        logger.warning("Failed to clear evidence bundle of %s: %s", tab_id, e)
-        return False
-    finally:
-        conn.close()
 
 
 # --------------------------------------------------------------------------- #

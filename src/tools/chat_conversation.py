@@ -62,7 +62,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
                        ChatBookmarksMixin, ChatBubblesMixin, ChatAttachmentsMixin,
                        ChatSessionMixin, BaseTool):
     #: 付费墙/手动 PDF 入库完成：(ok, message, path)。由后台线程发出，UI 线程接收。
-    sig_private_pdf_ready = Signal(bool, str, str)
 
     # 由 get_ui_widget 与信号槽流程创建，仅作静态检查声明
     top_bar_wrapper: QWidget
@@ -86,7 +85,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
     follow_up_shelf_layout: QVBoxLayout
     input_container: ChatInputContainer
     btn_toggle_search: QPushButton
-    btn_evidence: QPushButton
     search_bar: SearchBar  # 见 src/ui/components/search.py（共享搜索条）
     _render_timer: QTimer
     _is_rendering_dirty: bool
@@ -135,9 +133,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self.current_ai_text = ""
         self.current_ai_bubble = None
         self.pdf_viewer = None
-        self._literature_panel = None
-        self._evidence_panel = None
-        self.sig_private_pdf_ready.connect(self._on_private_pdf_ready)
         # 滚动范围变化在流式期间非常频繁：合并成 90ms 一次，避免每个 rangeChanged
         # 都全量扫描气泡布局来确定"回顶/到底"按钮。
         self._scroll_check_timer = QTimer(self)
@@ -235,7 +230,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self.setup_chat_search(row2_layout, top_bar)
         # 书签集入口：插在搜索按钮之前（同一行的状态按钮组）
         self.setup_bookmark_button(row2_layout)
-        self.setup_evidence_button(row2_layout)
 
         main_layout.addWidget(self.top_bar_wrapper)
 
@@ -386,226 +380,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
 
         return self.widget
 
-    # ------------------------------------------------------------------ #
-    #  会话证据面板
-    # ------------------------------------------------------------------ #
-    def setup_evidence_button(self, row2_layout):
-        tm = ThemeManager()
-        self.btn_evidence = QPushButton(tr(" Evidence"))
-        self.btn_evidence.setToolTip(tr("Show literature evidence attached to this conversation"))
-        self.btn_evidence.setCursor(Qt.PointingHandCursor)
-        self.btn_evidence.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.btn_evidence.clicked.connect(lambda: self.open_evidence_panel())
-        row2_layout.insertWidget(row2_layout.count() - 1, self.btn_evidence)
-        self._apply_evidence_button_theme()
-        tm.theme_changed.connect(self._apply_evidence_button_theme)
-
-    def _apply_evidence_button_theme(self):
-        btn = getattr(self, "btn_evidence", None)
-        if btn is None:
-            return
-        tm = ThemeManager()
-        btn.setIcon(tm.icon("folder", "text_main"))
-        btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {tm.color('btn_bg')}; color: {tm.color('text_main')};
-                           border: 1px solid {tm.color('border')}; padding: 4px 10px;
-                           border-radius: 4px; font-weight: {strong_weight_css()}; }}
-            QPushButton:hover {{ background-color: {tm.color('btn_hover')}; }}
-        """)
-
-    def open_evidence_panel(self):
-        from src.ui.components.evidence_panel import EvidencePanel
-        # 空对话不该有任何证据：内存里的 history 就是"这个标签页有没有内容"的
-        # 真相（磁盘上的消息可能还没落盘）。此时直接清掉该对话的证据再打开，
-        # 否则会出现"对话是空的、证据里却列着一堆文献"。
-        if not getattr(self, "history", None):
-            try:
-                from src.core.auto_evidence import delete_conversation_evidence
-                delete_conversation_evidence(self._tab_id())
-            except Exception as e:
-                logger.debug("Evidence cleanup for empty conversation skipped: %s", e)
-        panel = getattr(self, "_evidence_panel", None)
-        if panel is None:
-            panel = EvidencePanel(self.widget)
-            panel.sig_get_fulltext.connect(self.open_fulltext_panel)
-            panel.sig_get_missing_fulltext.connect(
-                self._open_next_missing_fulltext)
-            self._evidence_panel = panel
-        panel.refresh(self._tab_id())
-        panel.show()
-        panel.raise_()
-        panel.activateWindow()
-
-    # ------------------------------------------------------------------ #
-    #  付费墙全文获取
-    # ------------------------------------------------------------------ #
-    def _open_next_missing_fulltext(self):
-        """从证据面板挑下一篇仅摘要的论文，打开登录/下载流程。"""
-        # 空对话没有"下一篇文献"可获取；不拦就会弹出登录窗口去拿一篇与本对话
-        # 无关的论文（截图里那种：对话空空如也，却能点开 Get Full Text）。
-        if not getattr(self, "history", None):
-            ToastManager().show(
-                tr("This conversation has no evidence yet. Ask a question first."), "info")
-            return
-        from src.core.auto_evidence import list_conversation_evidence
-        items = list_conversation_evidence(self._tab_id())
-        target = next((it for it in items
-                       if not it.get("has_fulltext")
-                       and (it.get("doi") or it.get("url"))), None)
-        if target is None:
-            ToastManager().show(
-                tr("No abstract-only papers with DOI/URL remain."), "info")
-            return
-        self.open_fulltext_panel(
-            str(target.get("doi") or ""), str(target.get("title") or ""),
-            str(target.get("url") or ""))
-
-    def _resolve_paper_title(self, doi: str, url: str, fallback: str) -> str:
-        """把"模型给的标题"换成**这篇文献的标题**。
-
-        模型有时会把整段正文（带 ``[24]`` 之类引用号）当 title 传进来，直接显示就是
-        一堵字墙。优先用证据目录里按 DOI/URL 登记过的著录；目录里也没有、而传入的
-        文本明显不像标题时，退回 DOI。
-        """
-        doi_key = str(doi or "").strip().lower().replace("https://doi.org/", "")
-        url_key = str(url or "").strip().lower()
-        try:
-            from src.core.auto_evidence import list_conversation_evidence
-            for item in list_conversation_evidence(self._tab_id()):
-                item_doi = str(item.get("doi") or "").strip().lower()
-                item_url = str(item.get("url") or "").strip().lower()
-                if (doi_key and item_doi == doi_key) or (url_key and item_url == url_key):
-                    if item.get("title"):
-                        return str(item["title"])
-        except Exception as e:
-            logger.debug("Paper title lookup skipped: %s", e)
-        clean = " ".join(str(fallback or "").split())
-        if len(clean) > 200 or re.search(r"\[\d{1,3}\]", clean):
-            return f"DOI: {doi_key}" if doi_key else clean[:120]
-        return clean
-
-    def open_fulltext_panel(self, doi: str, title: str, url: str):
-        """从引用卡 / AI 请求打开非模态登录面板；不触碰当前对话历史/生成任务。"""
-        # 引号卡控制器是进程级单例：所有标签页都会收到同一信号，
-        # 只让当前可见的对话页响应，避免一次点击弹出多个登录窗口。
-        if self.widget is None or not self.widget.isVisible():
-            return
-        title = self._resolve_paper_title(doi, url, title)
-        from src.ui.components.literature_login import LiteratureLoginPanel
-        panel = getattr(self, "_literature_panel", None)
-        if panel is None:
-            panel = LiteratureLoginPanel(self.widget)
-            panel.sig_pdf_ready.connect(self._on_literature_pdf_downloaded)
-            panel.sig_closed.connect(self._on_fulltext_panel_closed)
-            self._literature_panel = panel
-        panel.open_paper(doi=doi, title=title, url=url)
-        logger.info("Literature login panel opened for DOI=%s", doi or url)
-
-    def _on_literature_pdf_downloaded(self, path, meta):
-        """PDF 下载完成：后台解析入库，当前对话与正在生成的回答都不动。"""
-        ToastManager().show(
-            tr("PDF detected. Adding it to this conversation's evidence..."), "info")
-        tab_id = self._tab_id()
-
-        def worker():
-            from src.core.auto_evidence import run_private_pdf_ingest
-            try:
-                ok, message = run_private_pdf_ingest(
-                    path, tab_id, meta, origin="login_pdf")
-            except Exception as e:
-                ok, message = False, f"PDF ingest failed: {e}"
-            try:
-                self.sig_private_pdf_ready.emit(ok, message, path)
-            except RuntimeError:
-                pass  # 标签页已关闭
-
-        threading.Thread(target=worker, daemon=True,
-                         name="private-pdf-ingest").start()
-
-    def _resume_after_fulltext(self, path: str = ""):
-        """全文入库成功：若本轮是"AI 请求登录"暂停的，自动续跑对话。
-
-        续跑走正常发送管线（新的一轮）：历史里保留着上一轮的工具调用与暂停说明，
-        模型据此知道全文已经进了证据库，直接继续作答，不必重新检索。
-        """
-        request = getattr(self, "_awaiting_fulltext", None)
-        if not request:
-            return
-        self._awaiting_fulltext = None
-        self._awaiting_user_input = False
-        if getattr(self, "input_container", None) is not None:
-            self.input_container.set_send_locked(False)
-        label = str(request.get("title") or request.get("doi") or "") or tr("the requested paper")
-        try:
-            from src.core.notifications import notify
-            notify(tr("Full text saved"),
-                   tr("Resuming the conversation: {t}").format(t=label))
-        except Exception as e:
-            logger.debug("Desktop notification skipped: %s", e)
-        ToastManager().show(tr("Full text saved. Resuming the conversation..."), "success")
-        self.process_send(f"[FULLTEXT_READY] {label}\n{path}",
-                          display_text=tr("Full text obtained: {t}").format(t=label))
-
-    def _on_fulltext_panel_closed(self, submitted: bool):
-        """登录面板关闭：若用户没拿到 PDF，就把暂停的对话解锁。
-
-        成功入库时 ``_on_private_pdf_ready`` 已经清掉等待标记并续跑，这里只处理
-        "用户放弃登录"的路径——否则输入框会一直锁着，看起来像卡死。
-        """
-        if not getattr(self, "_awaiting_fulltext", None) or submitted:
-            return
-        self._awaiting_fulltext = None
-        # 让挂起等待的那一轮立刻收尾（否则要等满超时）：模型会收到"用户没完成
-        # 登录"，用现有证据作答并说明限制，而不是继续空等。
-        try:
-            from src.core import fulltext_bridge
-            fulltext_bridge.signal(self._tab_id(), False, "",
-                                   "the user closed the sign-in panel")
-        except Exception as e:
-            logger.debug("Full-text cancel handover skipped: %s", e)
-        # 只有"已结束本轮等待作答"（mode=pause）才需要解锁输入；mode=wait 时本轮
-        # 仍在运行，提前解锁会让用户在生成中再发一条，插出并行的两轮。
-        if getattr(self, "_awaiting_fulltext_mode", "pause") != "wait":
-            self._awaiting_user_input = False
-            if getattr(self, "input_container", None) is not None:
-                self.input_container.set_send_locked(False)
-        ToastManager().show(
-            tr("Sign-in cancelled. You can keep typing."), "info")
-
-    def _on_private_pdf_ready(self, ok: bool, message: str, path: str = ""):
-        login_panel = getattr(self, "_literature_panel", None)
-        if login_panel is not None:
-            try:
-                login_panel.set_submission_result(path, ok, message)
-            except RuntimeError:
-                pass
-        if ok:
-            # 优先把结果交给**正在挂起等待的那一轮**（同轮续跑，上下文不丢）；
-            # 没有等待点时（旧暂停路径 / 手动上传）再退回"新起一轮"。
-            try:
-                from src.core import fulltext_bridge
-                handed_over = fulltext_bridge.signal(
-                    self._tab_id(), True, path, message or "")
-            except Exception as e:
-                logger.debug("Full-text handover skipped: %s", e)
-                handed_over = False
-            if handed_over:
-                # 交回给挂起的那一轮后，本轮的"等待标记"就该消失：面板稍后关闭
-                # 时不能再去发一条"已取消登录"。
-                self._awaiting_fulltext = None
-            else:
-                self._resume_after_fulltext(path)
-            panel = getattr(self, "_evidence_panel", None)
-            if panel is not None and panel.isVisible():
-                panel.refresh(self._tab_id())
-            ToastManager().show(
-                message or tr("Full text added to this conversation's evidence."),
-                "success")
-        else:
-            ToastManager().show(
-                message or tr("Failed to add the downloaded PDF to the evidence store."),
-                "warning")
-
     def shutdown(self):
         """关闭本标签页：注销退出钩子、断开全局信号、终止生成、释放画面。
 
@@ -630,15 +404,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
             timer = getattr(self, name, None)
             if timer is not None:
                 timer.stop()
-
-        for name in ("_literature_panel", "_evidence_panel"):
-            panel = getattr(self, name, None)
-            if panel is not None:
-                try:
-                    panel.close()
-                except RuntimeError:
-                    pass
-                setattr(self, name, None)
 
         layout = getattr(self, 'chat_layout', None)
         if layout is not None:
@@ -673,13 +438,11 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
             ThemeManager().theme_changed.disconnect(self._apply_ribbon_button_style)
         except (RuntimeError, TypeError):
             pass
-        for slot in (self._apply_bookmark_button_theme,
-                     self._apply_evidence_button_theme):
+        for slot in (self._apply_bookmark_button_theme,):
             try:
                 ThemeManager().theme_changed.disconnect(slot)
             except (RuntimeError, TypeError):
                 pass
-
 
     def _apply_ribbon_button_style(self):
         """按当前主题刷新顶栏 ribbon 状态按钮（Pinned / Hover / Collapsed）。"""

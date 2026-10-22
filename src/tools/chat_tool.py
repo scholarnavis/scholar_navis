@@ -171,7 +171,7 @@ class ChatTool(BaseTool):
     #  标签页操作
     # ------------------------------------------------------------------ #
     def add_tab(self, name=None, messages=None, activate: bool = True,
-                tab_id: Optional[str] = None, tags=None, evidence=None) -> str:
+                tab_id: Optional[str] = None, tags=None) -> str:
         """新建标签页并（默认）激活；返回标签页 id。
 
         :param messages: 非空时表示该标签页自带历史（导入 / 恢复场景），
@@ -180,8 +180,6 @@ class ChatTool(BaseTool):
             （见 :meth:`_unique_tab_name`），因此新建 / 导入都拿不到重名标签。
         :param tags: 对话标签（导入的归档可能自带）。一个标签下可以放多个对话，
             一段对话也可以挂多个标签；存储由 :mod:`src.core.chat_session` 负责。
-        :param evidence: 归档里带的证据快照。新标签页 id 与旧 id 不同，向量库里
-            的关联会断，因此快照随新 id 重新落盘，并在后台按当前模型重建索引。
         """
         tab_id = tab_id or chat_session.new_tab_id()
         display = self._unique_tab_name(name)
@@ -200,10 +198,6 @@ class ChatTool(BaseTool):
             # 自带历史的标签页（导入）立刻落盘：用户完全可能不激活它就直接退出，
             # 只留在内存里等于白丢一份刚导入的对话。
             chat_session.save_tab(tab_id, tab["messages"], tags=tab["tags"])
-        if isinstance(evidence, dict) and evidence:
-            if chat_session.save_evidence_bundle(tab_id, evidence):
-                from src.core.auto_evidence import reindex_evidence_in_background
-                reindex_evidence_in_background(tab_id, evidence)
         if activate:
             self.activate_tab(tab_id)
         else:
@@ -253,12 +247,6 @@ class ChatTool(BaseTool):
                 widget.setParent(None)
                 widget.deleteLater()
 
-        # 关闭 = 丢弃该标签页的对话：私有证据与磁盘快照同步删除。
-        try:
-            from src.core.auto_evidence import delete_conversation_evidence
-            delete_conversation_evidence(tab_id)
-        except Exception as e:
-            logger.warning("Failed to delete private evidence for tab %s: %s", tab_id, e)
         chat_session.clear_tab(tab_id)
         if self._tab_bar is not None:
             self._tab_bar.remove_tab_item(tab_id)
@@ -335,33 +323,12 @@ class ChatTool(BaseTool):
         return chat_session.load_tab(tab["id"])
 
     def collect_tabs_payload(self) -> List[Dict[str, Any]]:
-        """汇总所有标签页的消息、标签与证据快照，供"导出全部标签页"写出无损归档。
-
-        证据（文献元数据 + 检索正文）必须一起导出：否则导入到另一台机器后，正文里
-        的 [n] 与引用卡还在，证据面板却是空的，而且这些文献再也无法被复原。
-        """
+        """汇总所有标签页的消息与标签，供"导出全部标签页"写出无损归档。"""
         return [{"name": tab["name"],
                  "tags": tab.get("tags") or chat_session.load_tab_tags(tab["id"]),
-                 "messages": self._tab_messages(tab),
-                 "evidence": self._evidence_bundle_for(tab["id"])}
+                 "messages": self._tab_messages(tab)}
                 for tab in self._tabs]
 
-    @staticmethod
-    def _evidence_bundle_for(tab_id: str) -> Dict[str, Any]:
-        """导出用的证据快照：优先用已存快照，没有就**按当前库现做一份**。
-
-        快照只在本轮收尾时写入；历史对话（或上次异常退出）可能没有快照，但 manifest
-        与向量库里的证据仍在。导出时按需合成，保证"有证据就一定带走"。
-        """
-        bundle = chat_session.load_evidence_bundle(tab_id)
-        if bundle:
-            return bundle
-        try:
-            from src.core.auto_evidence import export_evidence_bundle
-            return export_evidence_bundle(tab_id) or {}
-        except Exception as e:
-            logger.debug("Evidence bundle synthesis skipped for %s: %s", tab_id, e)
-            return {}
 
     def import_tabs(self, tabs) -> int:
         """把导入的多个标签页各建成一个新标签页，返回实际创建的数量。
@@ -379,8 +346,7 @@ class ChatTool(BaseTool):
             if not messages:
                 continue
             tab_id = self.add_tab(name=raw.get("name"), messages=messages,
-                                  activate=False, tags=raw.get("tags"),
-                                  evidence=raw.get("evidence"))
+                                  activate=False, tags=raw.get("tags"))
             if first is None:
                 first = tab_id
             created += 1

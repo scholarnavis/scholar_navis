@@ -25,15 +25,6 @@ logger = logging.getLogger(__name__)
 class ChatSendFlowMixin:
     """发送链路：process_send -> start_ai_response -> (task events handled elsewhere)。"""
 
-    @staticmethod
-    def _warm_literature_browser():
-        """在后台预热 QtWebEngine（失败静默：只是回到原来的首次加载成本）。"""
-        try:
-            from src.ui.components.literature_login import warm_up_literature_browser
-            warm_up_literature_browser()
-        except Exception as e:      # 预热属于优化路径，绝不能影响发送
-            logger.debug("Literature browser warm-up skipped: %s", e)
-
     def process_send(self, text, display_text=None):
         """发送用户消息 → 现代异步管线（线程执行，UI 不冻结）。
 
@@ -219,7 +210,6 @@ class ChatSendFlowMixin:
         # 用户开始等待回答的这一刻，顺手把文献浏览器所需的 QtWebEngine 渲染进程
         # 预热起来：首次点 "Full text" 就不会再干等 3–6 秒初始化（与网速无关）。
         # 预热是幂等的，且不占启动内存；耗时放在用户本来就在等的时间段里。
-        QTimer.singleShot(800, self, self._warm_literature_browser)
         self.current_ai_bubble = self.add_bubble("", is_user=False)
         self.current_ai_bubble.set_loading(True)
 
@@ -278,7 +268,6 @@ class ChatSendFlowMixin:
                 messages=list(self.history),
                 kb_id=kb_id,
                 conversation_id=self._tab_id(),
-                auto_evidence=True,
                 requires_translation=requires_translation,
                 external_files=current_external_files,
                 use_academic_agent=use_academic_agent,
@@ -542,9 +531,6 @@ class ChatSendFlowMixin:
         # 此处仅解除等待锁定并恢复常规对话状态，不弹取消确认框。
         if getattr(self, '_awaiting_user_input', False):
             self._awaiting_user_input = False
-            # 等待登录同样算"本轮被终止"：清掉标记，之后即使用户从登录面板下载了
-            # PDF，也不会突然又续跑一轮。
-            self._awaiting_fulltext = None
             self.input_container.set_send_locked(False)
             self.input_container.btn_stop.setVisible(False)
             self.input_container.btn_send.setVisible(True)

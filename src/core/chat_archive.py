@@ -104,14 +104,10 @@ def normalize_tabs(tabs: Iterable[Dict]) -> List[Dict[str, Any]]:
         messages = tab.get("messages")
         msgs = [sanitize(m) for m in messages if isinstance(m, dict)] \
             if isinstance(messages, list) else []
-        evidence = tab.get("evidence")
         normalized.append({
             "name": clean_tab_name(tab.get("name")) or DEFAULT_TAB_NAME,
             "messages": msgs,
             "tags": chat_store.normalize_tag_names(tab.get("tags") or []),
-            # 证据快照（文献元数据 + 检索正文）随对话一起归档：导入后证据面板与
-            # 引用卡仍能对上，且换 embedding 模型时可据此重建索引。
-            "evidence": evidence if isinstance(evidence, dict) else {},
         })
     return normalized
 
@@ -127,12 +123,10 @@ def extract_tabs(payload) -> List[Dict[str, Any]]:
     这样"归档长什么样"与"消息怎么规范化"各自只有一处定义。
     """
     def _tab(raw: Dict[str, Any]) -> Dict[str, Any]:
-        evidence = raw.get("evidence")
         return {
             "name": clean_tab_name(raw.get("name")) or None,
             "messages": [m for m in (raw.get("messages") or []) if isinstance(m, dict)],
             "tags": chat_store.normalize_tag_names(raw.get("tags") or []),
-            "evidence": evidence if isinstance(evidence, dict) else {},
         }
 
     if isinstance(payload, dict):
@@ -198,10 +192,6 @@ def write_archive(path: str, tabs: Iterable[Dict]) -> Dict[str, Any]:
             tab_id = f"{index:032x}"
             chat_store.put_tab(conn, tab_id, tab["messages"], name=tab["name"],
                                tags=tab.get("tags") or [])
-            evidence = tab.get("evidence")
-            if isinstance(evidence, dict) and evidence:
-                chat_store.put_tab_payload(conn, tab_id,
-                                           chat_store.PAYLOAD_EVIDENCE, evidence)
         chat_store.put_placeholders(conn, chat_store.ARCHIVE_SCOPE, placeholders)
         chat_store.set_meta(conn, "version", VERSION)
         chat_store.set_meta(conn, "archive_version", ARCHIVE_VERSION)
@@ -337,8 +327,6 @@ def _read_sqlite(path: str, extract_root: Optional[str]) -> Tuple[Dict[str, Any]
                 "name": str(row["name"] or ""),
                 "messages": messages,
                 "tags": chat_store.tab_tags(conn, tab_id),
-                "evidence": chat_store.read_tab_payload(
-                    conn, tab_id, chat_store.PAYLOAD_EVIDENCE) or {},
             })
         generated = chat_store.get_meta(conn, "generated", "")
         try:

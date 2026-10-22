@@ -69,8 +69,6 @@ KIND_ARCHIVE = "archive"
 #: 归档内所有资产共用一个 scope；会话里 scope 就是标签页 id。
 ARCHIVE_SCOPE = "archive"
 
-#: ``tab_payloads.kind``：证据快照（文献元数据 + 检索正文），随会话库与归档一起走。
-PAYLOAD_EVIDENCE = "evidence"
 
 #: 由独立表承载的消息字段：**不**再抄进 payload，避免同一份数据两处副本。
 _STRUCTURED_KEYS = ("references", "bookmarks")
@@ -595,42 +593,6 @@ def delete_tab(conn: sqlite3.Connection, tab_id: str) -> None:
         conn.execute("DELETE FROM tabs WHERE id = ?", (tab_id,))
 
 
-# --------------------------------------------------------------------------- #
-#  标签页附属负载（证据快照等）
-# --------------------------------------------------------------------------- #
-def put_tab_payload(conn: sqlite3.Connection, tab_id: str, kind: str,
-                    data: Dict[str, Any]) -> None:
-    """覆盖写入某标签页的附属负载（超长时压缩）。``kind`` 见 ``PAYLOAD_EVIDENCE``。"""
-    tid = str(tab_id or "")
-    if not is_valid_id(tid) or not isinstance(data, dict):
-        return
-    body, compressed = _encode_payload(data)
-    with conn:
-        conn.execute(
-            "INSERT INTO tab_payloads(tab_id, kind, body, body_z, updated_at) "
-            "VALUES(?, ?, ?, ?, ?) ON CONFLICT(tab_id, kind) DO UPDATE SET "
-            "body = excluded.body, body_z = excluded.body_z, updated_at = excluded.updated_at",
-            (tid, str(kind or ""), body, int(compressed), time.time()))
-
-
-def read_tab_payload(conn: sqlite3.Connection, tab_id: str,
-                     kind: str) -> Optional[Dict[str, Any]]:
-    """读取附属负载；没有或损坏时返回 ``None``。"""
-    row = conn.execute(
-        "SELECT body, body_z FROM tab_payloads WHERE tab_id = ? AND kind = ?",
-        (str(tab_id or ""), str(kind or ""))).fetchone()
-    if row is None:
-        return None
-    data = _decode_payload(row["body"], int(row["body_z"] or 0))
-    return data or None
-
-
-def delete_tab_payload(conn: sqlite3.Connection, tab_id: str, kind: str) -> None:
-    with conn:
-        conn.execute("DELETE FROM tab_payloads WHERE tab_id = ? AND kind = ?",
-                     (str(tab_id or ""), str(kind or "")))
-
-
 def list_tabs(conn: sqlite3.Connection) -> List[str]:
     """全部标签页 id（含清单外的游离标签页），供迁移与排障使用。"""
     return [str(row["id"]) for row in conn.execute("SELECT id FROM tabs ORDER BY position")]
@@ -791,12 +753,10 @@ def tabs_with_tag(conn: sqlite3.Connection, name: str) -> List[str]:
 __all__ = [
     "SQLITE_MAGIC", "SCHEMA_VERSION", "FORMAT_CHAT_TABS", "FORMAT_CHAT_HISTORY",
     "KIND_SESSION", "KIND_ARCHIVE", "ARCHIVE_SCOPE", "DETACHED_POSITION",
-    "PAYLOAD_EVIDENCE",
     "sanitize", "is_sqlite_file", "connect", "create_database", "init_schema",
     "get_meta", "set_meta", "is_valid_id",
     "put_manifest", "read_manifest", "ensure_tab", "put_tab", "read_tab",
     "delete_tab", "list_tabs",
-    "put_tab_payload", "read_tab_payload", "delete_tab_payload",
     "put_inflight", "read_inflight", "delete_inflight",
     "put_assets", "read_assets", "put_placeholders", "read_placeholders",
     "normalize_tag_names", "set_tab_tags", "tab_tags", "all_tags", "tabs_with_tag",

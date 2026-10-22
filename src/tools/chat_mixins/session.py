@@ -65,20 +65,10 @@ class ChatSessionMixin:
         chat_session.save_inflight(self._tab_id(), text)
 
     def _forget_autosaved_session(self):
-        """用户清空本标签页对话：快照与证据一并删除，下次启动不再恢复。
-
-        只清快照不清证据，会让证据面板继续列出这份对话用过的文献（点开还能下载），
-        相当于"清除"没清干净。证据由 auto_evidence 统一删除：manifest、私有向量与
-        会话库里的证据快照三处一起走。
-        """
+        """用户清空本标签页对话：落盘快照一并删除，下次启动不再恢复。"""
         from src.core import chat_session
         tab_id = self._tab_id()
         chat_session.clear_tab(tab_id)
-        try:
-            from src.core.auto_evidence import delete_conversation_evidence
-            delete_conversation_evidence(tab_id)
-        except Exception as e:
-            logger.warning("Failed to clear evidence for tab %s: %s", tab_id, e)
 
     def _on_bubble_cards_changed(self, bubble):
         """组件交互落定：把该气泡的组件状态回写所属历史条目并立即落盘。

@@ -6,7 +6,7 @@ from src.core.academic.base import (
 )
 from src.core.academic.literature import (
     search_academic_literature, traverse_citation_graph,
-    fetch_open_access_pdf, search_preprints,
+    fetch_open_access_pdf, search_preprints, fetch_paper_fulltext,
 )
 from src.core.academic.ncbi import (
     search_omics_datasets, fetch_sequence_fasta,
@@ -30,7 +30,7 @@ __all__ = [
     "is_ncbi_email_valid", "is_ncbi_enabled", "WORKSPACE_DIR",
     "mcp_request", "simple_retry",
     "search_academic_literature", "traverse_citation_graph",
-    "fetch_open_access_pdf", "search_preprints",
+    "fetch_open_access_pdf", "search_preprints", "fetch_paper_fulltext",
     "search_omics_datasets", "fetch_sequence_fasta",
     "fetch_taxonomy_info", "universal_ncbi_summary",
     "search_gbif_occurrences", "query_kegg_database", "fetch_go_annotations",

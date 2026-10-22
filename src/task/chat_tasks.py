@@ -26,7 +26,6 @@ from src.core.think_tags import strip as strip_think_blocks
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       resolve_context_window, derive_context_budgets)
 
-
 logger = logging.getLogger(__name__)
 
 # KB 检索注入治理：单 chunk 字符上限与总 token 预算**都**按主模型上下文窗口
@@ -43,7 +42,6 @@ _DEEP_PLAN_CONFIRMED_TAG = "[DEEP_PLAN_CONFIRMED]"
 _DEEP_PLAN_SKIPPED_TAG = "[DEEP_PLAN_SKIPPED]"
 #: 全文入库后自动续跑本轮的哨兵：PDF 已经作为私有证据入库，这一轮不再重复做
 #: 自动文献检索（否则会拿"已获取全文：X"这种界面文案去搜文献）。
-_FULLTEXT_READY_TAG = "[FULLTEXT_READY]"
 
 
 _EVIDENCE_CITE_RE = re.compile(r"\[\d+(?:\s*[,–\-]\s*\d+)*\]")
@@ -69,7 +67,6 @@ def _looks_research_query(query: str) -> bool:
     low = str(query or "").lower()
     return any(hint in low for hint in _RESEARCH_CONTEXT_HINTS)
 
-
 _NON_GENE_ACRONYMS = {
     "DNA", "RNA", "ATP", "GTP", "PCR", "ROS", "ABA", "IAA", "GA", "JA",
     "SA", "ET", "WT", "SD", "SE", "CI", "ANOVA", "UV", "IR", "MS", "NMR",
@@ -81,7 +78,6 @@ _SIGNAL_TOKEN_RE = re.compile(
     r"|\b[A-Z]{2,}\b"
     r"|\b(?:19|20)\d{2}\b"
     r"|\b\d+(?:\.\d+)?\s*(?:%|mg|g|mM|μM|nM|nm|kDa|bp|kb)\b")
-
 
 def _verify_citation_support(text: str, ordered) -> str:
     """检查句子里的基因名/年份/数值是否真的出现在对应引用片段中。
@@ -151,7 +147,6 @@ def _verify_citation_support(text: str, ordered) -> str:
                  "关键基因名/年份/数值未出现在对应来源原文里。")
     return body
 
-
 #: 证据行：模型在这些行里给出某条结论的出处（"依据：…[3]"、"Source: …"）。
 #: 它本身不是待判定的论断，而是**前面那组陈述**的来源说明。
 _EVIDENCE_TAIL_RE = re.compile(
@@ -169,7 +164,6 @@ def _split_blocks(body: str):
     """
     parts = re.split(r"(\n[ \t]*\n)", body)
     return [("sep" if index % 2 else "block", part) for index, part in enumerate(parts)]
-
 
 def _apply_evidence_gate(text: str, has_sources: bool,
                          research_context: bool = True) -> str:
@@ -276,7 +270,6 @@ def _apply_evidence_gate(text: str, has_sources: bool,
         logger.info("Evidence gate flagged %d uncited paragraph group(s).", flagged)
     return body
 
-
 def _source_dedupe_key(meta):
     """引用来源归一键：URL/DOI 优先，其次 标题|年份，用于引用去重合并。
 
@@ -301,7 +294,6 @@ def _source_dedupe_key(meta):
         return f"{title}|{year}"
     return None
 
-
 def _has_visible_answer(text: str) -> bool:
     """正文里是否真有"回答"（去掉思考块、过程块、控制标记与纯 HTML 后仍非空）。
 
@@ -312,16 +304,6 @@ def _has_visible_answer(text: str) -> bool:
     body = re.sub(r"\[(?:CLEAR_SEARCH|START_LLM_NETWORK)\]", "", body)
     body = re.sub(r"<[^>]+>", "", body)
     return bool(body.strip())
-
-
-#: 已经主动提示过"去取全文"的 ``(conversation_id, paper_id)``。
-#: 同一篇只提示一次：否则每轮回答都会再弹一次窗，比不提示更烦。
-_FULLTEXT_SUGGESTED: set = set()
-#: 每个对话每次运行最多主动弹几次全文窗口。检索结果里"仅摘要"的条目可能很多，
-#: 不加预算就会变成连环弹窗。
-_FULLTEXT_SUGGEST_BUDGET = 3
-_FULLTEXT_SUGGEST_COUNT: dict = {}
-
 
 def _absorb_usage(target, usage) -> None:
     """把一份 ``{"prompt_tokens", "completion_tokens", "estimated"}`` 累加进 ``target``。
@@ -337,7 +319,6 @@ def _absorb_usage(target, usage) -> None:
                                    + int(usage.get("completion_tokens", 0) or 0))
     if usage.get("estimated"):
         target["estimated"] = True
-
 
 def _registry_item_from_source(index, meta):
     """把 sources_map 的来源元数据规整为参考文献条目（单一映射定义）。
@@ -387,7 +368,6 @@ def _registry_item_from_source(index, meta):
                          title=name or os.path.basename(path) or "Local document",
                          snippet=snippet, kind="local_document", verified=verified)
 
-
 def _seed_registry_from_sources(registry, sources_map, evidence_store=None):
     """把 sources_map 中尚未登记的来源补录进注册表（幂等）。
 
@@ -411,7 +391,6 @@ def _seed_registry_from_sources(registry, sources_map, evidence_store=None):
         if not isinstance(rid, int) or rid in registry:
             continue
         registry.seed(rid, _registry_item_from_source(rid, meta))
-
 
 def _seed_registry_from_history(registry, messages):
     """把历史回答里已登记过的引用补录进本轮注册表（跨轮连续性）。
@@ -453,7 +432,6 @@ def _seed_registry_from_history(registry, messages):
             seeded += 1
     return seeded
 
-
 _FOLLOWUP_ONLY_PATTERNS = (
     r"^(?:请|麻烦)?(?:用)?中文(?:回答|回复|说|解释|输出|重写|翻译)?(?:我|一下|一遍)?(?:啊|呀|吧|谢谢)?$",
     r"^(?:请|麻烦)?(?:用)?英文(?:回答|回复|说|解释|输出|重写|翻译)?(?:我|一下|一遍)?(?:啊|呀|吧|谢谢)?$",
@@ -475,7 +453,6 @@ def _is_followup_only_query(text: str) -> bool:
         return True
     return any(re.fullmatch(p, compact, flags=re.IGNORECASE)
                for p in _FOLLOWUP_ONLY_PATTERNS)
-
 
 def _trim_history_for_budget(history, token_budget):
     """按轮次边界裁剪历史消息至 token 预算内（从最新往回保留）。
@@ -526,7 +503,6 @@ def _trim_history_for_budget(history, token_budget):
         f"History trimmed for context budget: {len(history)} -> {len(flat)} "
         f"messages (~{total} -> ~{used} tokens).")
     return flat
-
 
 def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="",
                        main_base_url="", declared_window=None):
@@ -627,7 +603,6 @@ def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="",
         current_ref_id += 1
     return context_str, sources_map, domain
 
-
 def _kb_retrieval_worker(kb_id, search_query, main_model_name, out_path, history_context="",
                          main_base_url="", declared_window=None):
     """独立子进程入口：隔离本地 ONNX 推理。执行权威检索逻辑并把结果写 out_path。
@@ -657,7 +632,6 @@ def _kb_retrieval_worker(kb_id, search_query, main_model_name, out_path, history
             json.dump(payload, f, ensure_ascii=False)
     except Exception:
         pass
-
 
 #: detect_primary_language 返回的语言码 -> prompt 中可读的语言名。
 #: 用于告诉主模型"用户原始语言是 X，请用 X 回复"（翻译仅用于英文检索）。
@@ -796,10 +770,8 @@ class ChatGenerationTask(BackgroundTask):
         self.trans_config = self.kwargs.get('trans_config')
         self.messages = self.kwargs.get('messages', [])
         self.kb_id = self.kwargs.get('kb_id')
-        # 所属对话 id / 是否启用自动文献证据。自动库按 conversation_id 隔离私有
-        # PDF；公开文献则全局复用。
+        # 所属对话 id：会话级私有文档（用户上传的 PDF）按它隔离。
         self.conversation_id = str(self.kwargs.get('conversation_id') or "")
-        self.auto_evidence = bool(self.kwargs.get('auto_evidence', True))
         # 语言检测（下方 ~371 行）之前就需 config 与翻译开关：独立翻译往返默认关闭，
         # 非英文输入交由主模型首轮内化；此处提前初始化以决定回复语言约束是否生效。
         self.config = ConfigManager()
@@ -967,7 +939,6 @@ class ChatGenerationTask(BackgroundTask):
         self.use_academic_agent = self.kwargs.get('use_academic_agent', True)
         self.academic_tags = self.kwargs.get('academic_tags', [])
 
-
         self.use_external_tools = self.kwargs.get('use_external_tools', False)
         self.external_tool_names = self.kwargs.get('external_tool_names',
                                                    [])
@@ -1016,21 +987,7 @@ class ChatGenerationTask(BackgroundTask):
                     self.logger.warning(f"Failed to reset LLM cancel state: {e}")
 
         original_user_query = self.messages[-1].get('display_text', self.messages[-1].get('content', ''))
-        # 续跑轮：全文刚入库（content 带哨兵，display_text 是给人看的文案）。
-        # 检索仍要跑——**新入库的 PDF 只有经过检索才会进入上下文**；跳过的代价是
-        # 模型拿到"全文已就绪"却看不到全文。查询词改用论文标题（哨兵的第一行），
-        # 既不拿界面文案去搜，也能把刚入库的私有分片召回。
-        fulltext_resume = str(self.messages[-1].get('content') or '').startswith(_FULLTEXT_READY_TAG)
-        pending_paper = ""
-        if fulltext_resume:
-            rest = str(self.messages[-1].get('content') or '')[len(_FULLTEXT_READY_TAG):].strip()
-            pending_paper = rest.splitlines()[0].strip() if rest else ""
-            self.send_log(
-                "INFO",
-                "Resuming after full-text ingestion; retrieval query = the paper title.")
-        # 检索用查询词与"送给模型的用户问题"是两件事：续跑时前者取论文标题（才能
-        # 召回刚入库的私有分片），后者仍是这段内容的自然描述。
-        retrieval_query = pending_paper or original_user_query
+        retrieval_query = original_user_query
         search_query = original_user_query
         domain = "General Academic"
         context_str = ""
@@ -1123,57 +1080,11 @@ class ChatGenerationTask(BackgroundTask):
         )
         if followup_only:
             self.logger.info(
-                "Follow-up-only query detected; reusing conversation evidence "
+                "Follow-up-only query detected; relying on conversation history "
                 "instead of running a new literature search.")
-        auto_handled = False
-        if followup_only and self.auto_evidence:
-            # 不只“跳过检索”，而是把上一轮真正进入上下文的证据原样带回来；
-            # 否则“详细一点”只能看到上一轮答案，看不到支撑原文。
-            try:
-                from src.core.auto_evidence import load_conversation_context
-                cached_context, cached_sources = load_conversation_context(
-                    self.conversation_id)
-            except Exception as e:
-                self.logger.debug("Load conversation context failed: %s", e)
-                cached_context, cached_sources = "", {}
-            if cached_context.strip():
-                context_str = cached_context
-                sources_map = cached_sources
-                auto_handled = True
-                _seed_registry_from_sources(
-                    reference_registry, sources_map, evidence_store)
-                self.logger.info(
-                    "Follow-up reused cached evidence: %d source(s), %d chars.",
-                    len(sources_map), len(context_str))
-            else:
-                self.logger.info(
-                    "Follow-up cache empty; relying on conversation history.")
-        if self.auto_evidence and not followup_only:
-            self.send_log("INFO", "Initiating automatic literature evidence retrieval...")
-            self._emit_token("[CLEAR_SEARCH]")
-            self._emit_token(
-                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Searching for relevant papers and reading the most relevant sources...</div>\n\n")
-            time.sleep(0.05)
-            auto_context, auto_sources = self._run_auto_evidence(retrieval_query)
-            if auto_context.strip():
-                context_str = auto_context
-                sources_map = auto_sources
-                auto_handled = True
-                _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
-                try:
-                    from src.core.auto_evidence import save_conversation_context
-                    save_conversation_context(
-                        self.conversation_id, search_query,
-                        auto_context, auto_sources)
-                except Exception as e:
-                    self.logger.debug("Save conversation context failed: %s", e)
-                self.logger.info("Auto evidence: %d citation(s) prepared.", len(sources_map))
-            else:
-                self.logger.info("Auto evidence returned no usable documents for this turn.")
-
-        # 兼容旧的手动 KB：只有自动证据为空、且用户仍显式挂了一个库时才走。
-        # 本地 embedding/rerank 属重量级 ONNX/torch 推理，统一交给子进程隔离。
-        if self.kb_id and not auto_handled and not followup_only:
+        # 本地 KB：只有用户显式挂了一个库时才走。本地 embedding/rerank 属重量级
+        # ONNX/torch 推理，统一交给子进程隔离。
+        if self.kb_id and not followup_only:
             self.send_log("INFO", "Initiating local Vector RAG retrieval...")
             self._emit_token("[CLEAR_SEARCH]")
             self._emit_token(
@@ -1199,25 +1110,7 @@ class ChatGenerationTask(BackgroundTask):
             IMAGE_EXTENSIONS)]
         docs = [c for c in external_chunks if c not in images]
 
-        # 附件页文本在本轮结束后仍需可检索：后台写入当前会话的私有证据库。
-        # 不阻塞本轮生成（当前轮已经通过 external_context 直接使用附件内容）。
-        if self.auto_evidence and docs and self.conversation_id:
-            try:
-                import threading
-                from src.core.auto_evidence import run_private_docs_ingest
-
-                def _persist(docs_snapshot=docs, cid=self.conversation_id):
-                    ok, message = run_private_docs_ingest(
-                        docs_snapshot, cid, origin="manual_upload")
-                    self.logger.info("Attachment evidence ingest: ok=%s msg=%s",
-                                     ok, (message or "")[:160])
-
-                threading.Thread(target=_persist, daemon=True,
-                                 name="attachment-evidence-ingest").start()
-            except Exception as e:
-                self.logger.debug("Attachment evidence ingest skipped: %s", e)
-
-        # 附件文档正文同样进入逐字证据库：模型引用用户上传文件内容时可校验。
+        # 附件文档正文进入逐字证据库：模型引用用户上传文件内容时可校验。
         for d in docs:
             content = str(d.get("content") or "")
             if content.strip():
@@ -1388,10 +1281,6 @@ class ChatGenerationTask(BackgroundTask):
         # 通用 human-in-the-loop 澄清工具：歧义影响科学正确性或高成本操作前，
         # 由模型主动提问并等待用户作答（下一轮以用户消息回灌）。
         combined_tools.append(dict(_ALWAYS_TOOLS)["ask_user"])
-        # 付费墙全文：由模型主动请求登录（弹窗 + 桌面通知），登录/下载期间本轮暂停、
-        # 拿到 PDF 后自动续跑。仅在启用自动文献时提供，避免关掉证据链路后还弹窗。
-        if getattr(self, "auto_evidence", True):
-            combined_tools.append(dict(_ALWAYS_TOOLS)["request_fulltext"])
         # 追问建议改为结构化产出（工具调用），不再依赖模型输出固定文本 + 正则解析
         combined_tools.append(dict(_ALWAYS_TOOLS)["suggest_follow_ups"])
         # 参考文献改为结构化产出：模型只提交条目，编号与文献列表由程序生成
@@ -1457,7 +1346,7 @@ class ChatGenerationTask(BackgroundTask):
             f"{self._reply_lang_instruction()}\n"
             f"{dynamic_tool_prompt}\n\n"
             "### TOOL USE PROTOCOL (STRICT):\n"
-            "1. CRITICAL FOR CITATIONS: If the user's prompt asks for literature, references, citations, or a review, you MUST explicitly invoke academic search tools (like search_academic_literature) BEFORE generating your response. NEVER rely on your internal training data to generate citations, DOIs, or author lists.\n"
+            "1. LITERATURE RETRIEVAL (CRITICAL): Whenever the question needs published evidence, you MUST invoke search_academic_literature BEFORE answering — never answer from memory and NEVER fabricate citations, DOIs or author lists. Search BROADLY: run SEVERAL differently-worded English queries (synonyms, field jargon, method or author names) instead of one, keep source='auto' so OpenAlex / Crossref / PubMed / Semantic Scholar are all covered (PNAS, Nature, Science, Cell class journals are indexed there — do NOT narrow 'source' unless the user asks for one database), and raise max_results when the topic is wide. Then follow the trail with traverse_citation_graph on the key paper to catch landmark work that keyword search misses.\n"
             "2. If the provided Context is insufficient, invoke tools IMMEDIATELY.\n"
             "3. SILENT EXECUTION: Never output your reasoning process for choosing a tool. YOU MUST USE THE NATIVE TOOL CALLING API FORMAT.\n"
             "4. FALLBACK TOOL CALLING (CRITICAL FOR REASONING MODELS): If your native function calling API is disabled (e.g., DeepSeek-R1), you MUST invoke tools manually by outputting exactly this JSON block in your response text: ```json {\"name\": \"tool_name\", \"arguments\": {\"arg\": \"value\"}} ```\n"
@@ -1474,14 +1363,14 @@ class ChatGenerationTask(BackgroundTask):
             "work around the ambiguity.\n"
             "Also ask before any costly or hard-to-reverse operation. After calling ask_user the runtime pauses "
             "the run automatically; the user's answer arrives as the next user message.\n"
-            "### PAYWALLED FULL TEXT (request_fulltext TOOL):\n"
-            "When an essential source exists only as an abstract and you DO have its DOI or landing-page URL, call "
-            "request_fulltext ONCE (title + doi/url + one-line reason). The app opens a sign-in browser, sends a "
-            "desktop notification, pauses this turn, and resumes it automatically after the PDF is saved to this "
-            "conversation's evidence — you will then receive a user message starting with [FULLTEXT_READY]. Do NOT "
-            "call it for papers whose full text is already in the evidence, and do NOT call it more than once per "
-            "turn. PREFER full text over the abstract whenever the user asks for methods, sample sizes, statistics, "
-            "figure-level details or exact wording that an abstract cannot answer.\n\n"
+            "### FULL TEXT PREFERENCE (fetch_paper_fulltext TOOL):\n"
+            "An abstract is a fallback, not the goal. Search results already carry 'full_text' (+ "
+            "'full_text_source') for the most citable hits when an open-access body exists — USE that body text "
+            "whenever the claim depends on methods, sample sizes, statistics, thresholds, figure-level wording "
+            "or verbatim statements. For any other paper you intend to rely on, call fetch_paper_fulltext with "
+            "its DOI first, and copy the supporting snippet from the body verbatim. If no open-access copy "
+            "exists the tool says so explicitly: fall back to the abstract and state plainly that only the "
+            "abstract was available. NEVER invent body content.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
             f"1. IN-TEXT CITATIONS (STRICT): {CITATION_TOKEN_RULE} Attach the token inline IMMEDIATELY after the claim it supports, and NEVER claim a fact without an inline citation.\n"
             f"2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): For every source you cite that carries no 'citation_token' and no pre-assigned number, you MUST register it by calling cite_references ONCE, passing its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'); the tool returns a 'citation_token' for each entry — paste that token at the claim it supports. Sources that already carry a token or a number (knowledge-base '--- [Document n] ---' entries, tool results with '{AgentRuntime.TOOL_CITE_TOKEN_FIELD}') are already registered by the app — reuse THAT token/number and do NOT register them again. The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. Every number is assigned by the app: do NOT invent, shift or renumber one, and never fall back to an ASCII alias such as [lariguet2004].\n"
@@ -1505,21 +1394,6 @@ class ChatGenerationTask(BackgroundTask):
             f"### CONTEXT:\n{context_str}"
         )
 
-        # 续跑轮：上一轮是"等用户登录拿全文"停下的，历史里只有过程与暂停说明
-        # （思考块与工具过程在发给 provider 前会被剥离）。这里补一句**可见的**
-        # 续跑说明，模型才知道该接着刚才那条线作答，而不是从头再问一遍。
-        if fulltext_resume:
-            paper = pending_paper or "the requested paper"
-            system_prompt += (
-                "\n\n### RESUMED TURN (full text just added)\n"
-                f"Your previous turn was paused to obtain the full text of **{paper}**; it has "
-                "now been added to this conversation's private evidence and is available through "
-                "the retrieved context below. Continue the answer you were in the middle of: do "
-                "NOT restart from scratch, do not re-list papers you already introduced, and do "
-                "not ask the user to repeat the question. If your interrupted turn had not "
-                "produced conclusions yet, answer the user's last question directly, using the "
-                "full text where it matters and citing it."
-            )
 
         clean_history = []
         for m in self.messages[:-1]:
@@ -1576,97 +1450,6 @@ class ChatGenerationTask(BackgroundTask):
             sources_map[ref_id] = source_meta
             return ref_id
 
-        def _fulltext_waiter(payload) -> str:
-            """请求登录拿全文时**就地挂起本线程**，拿到 PDF 后继续同一轮。
-
-            与"结束本轮、用户下次说话时再续"相比，这条路径保住了这一轮的全部工作
-            记忆：messages、引用注册表、已检索到的来源、已写下的结论都还在；工具
-            结果直接把全文正文交回模型，它接着写就行，不需要重述、重搜、重排文献。
-            """
-            import html as _html
-
-            from src.core import fulltext_bridge
-            from src.core.auto_evidence import fulltext_excerpt
-
-            data = dict(payload or {})
-            label = str(data.get("title") or data.get("doi") or "the paper")
-            # 0) 命中缓存就不打扰用户：这篇论文的全文（不论在当前对话还是别处获取
-            #    过）已经在库里，直接交给模型继续作答。
-            _cached_pid, cached = fulltext_excerpt(
-                self.conversation_id,
-                doi=str(data.get("doi") or ""),
-                title=str(data.get("title") or ""))
-            if cached:
-                self.send_log("INFO", f"Full text already cached for {label[:60]}; "
-                                      "skipping the sign-in flow.")
-                try:
-                    evidence_store.add_source(cached, doi=str(data.get("doi") or ""),
-                                              title=str(data.get("title") or ""))
-                except Exception:
-                    pass
-                return (f"The full text of **{label}** is already in the evidence store "
-                        "(no new download was needed). Continue this turn using the text "
-                        "below and cite it.\n\n--- FULL TEXT (excerpt) ---\n" + cached)
-
-            # 1) 先让 UI 打开面板并提醒用户（此时本线程仍在工具调用里挂着）
-            # mode="wait"：本轮仍在跑，只是挂起等 PDF；UI 据此**不**锁输入、
-            # 也不走"新起一轮"的续跑路径（那是 mode="pause" 才需要的）。
-            self._emit_state(TaskState.PROCESSING, -1, "", payload={
-                "event": "fulltext_request", "data": data, "mode": "wait"})
-            self._emit_token(
-                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>"
-                f"Waiting for sign-in: {_html.escape(label)} — 本轮会自动继续，"
-                "不需要你重新提问。</div>\n\n")
-            self.send_log("INFO", f"Waiting for full-text sign-in: {label[:80]}")
-
-            # 2) 挂起等待（可被"停止"打断；超时也会退出）。
-            #    全程兜底：等待链自己出问题时要给出明确的工具结果并退出等待点，
-            #    绝不能让异常落回"暂停"——那会同时留下一个没人领取的等待点。
-            try:
-                handle = fulltext_bridge.begin(self.conversation_id)
-                ok, path, message = fulltext_bridge.wait(
-                    self.conversation_id, handle,
-                    timeout=fulltext_bridge.DEFAULT_TIMEOUT,
-                    cancel_check=self.is_cancelled)
-            except Exception as e:
-                self.logger.warning(f"Full-text wait crashed: {e}")
-                try:
-                    fulltext_bridge.release(self.conversation_id)
-                except Exception:
-                    pass
-                ok, path, message = False, "", f"wait failed: {e}"
-            if not ok:
-                self.send_log("WARNING", f"Full-text wait ended without a PDF: {message}")
-                return ("No full text was registered (" + message + "). Answer with the "
-                        "evidence you already have and state the limitation explicitly "
-                        "instead of asking the user again.")
-
-            # 3) 全文正文直接作为工具结果交回：上下文里本来没有它，必须在这里补上
-            _pid, excerpt = fulltext_excerpt(
-                self.conversation_id,
-                doi=str(data.get("doi") or ""),
-                title=str(data.get("title") or ""))
-            if excerpt:
-                # 同时进逐字证据库：cite_references 的 snippet 校验要能在全文里找到
-                try:
-                    evidence_store.add_source(excerpt, doi=str(data.get("doi") or ""),
-                                              title=str(data.get("title") or ""))
-                except Exception as e:
-                    self.logger.debug("Evidence store update skipped: %s", e)
-            self.send_log(
-                "INFO",
-                f"Full text registered for {label[:60]}: {len(excerpt)} char(s) handed to the model.")
-
-            head = (f"The full text of **{label}** is now in this conversation's private "
-                    f"evidence ({path}). Continue THIS turn: use the text below, cite it "
-                    "where it supports your claims, and do not restart or repeat what you "
-                    "already covered.")
-            if not excerpt:
-                return head + ("\n\n(No extractable text was indexed for this file; rely on "
-                               "the retrieved evidence and say so if a claim cannot be "
-                               "supported.)")
-            return head + "\n\n--- FULL TEXT (excerpt) ---\n" + excerpt
-
         try:
             # 会话级 plot registry 缓存：AgentRuntime 每轮重建，但已画过的图
             # 注册在磁盘（plot_registry.json），这里传入内存缓存并回写，减少
@@ -1679,7 +1462,6 @@ class ChatGenerationTask(BackgroundTask):
                 plot_seq=getattr(self, "_plot_seq_cache", 0),
                 reference_registry=reference_registry,
                 evidence_store=evidence_store,
-                fulltext_waiter=_fulltext_waiter,
             )
             if self.deep_mode or deep_plan_confirmed is not None:
                 # 深度研究：分解为并行子任务 -> 用户确认计划 -> 独立 Agent 执行
@@ -1723,21 +1505,6 @@ class ChatGenerationTask(BackgroundTask):
                 self._emit_state(TaskState.PROCESSING, -1, "", payload={
                     "event": "ask_user",
                     "data": ask_payload,
-                })
-
-            # 付费墙全文：模型请求登录。runtime 已暂停本轮；这里把请求直达 UI
-            #（打开内置浏览器 + 桌面通知），PDF 入库后由 UI 自动续跑。
-            fulltext_payload = getattr(agent, "last_fulltext_request", None)
-            if fulltext_payload:
-                agent.last_fulltext_request = None
-                self.send_log("INFO", "Full-text request dispatched: "
-                                      f"{str(fulltext_payload.get('title') or fulltext_payload.get('doi'))[:80]}")
-                # mode="pause"：这一轮已经结束（没有同轮等待通道），UI 需要锁定
-                # 输入，并在 PDF 入库后以一条新消息续跑。
-                self._emit_state(TaskState.PROCESSING, -1, "", payload={
-                    "event": "fulltext_request",
-                    "data": fulltext_payload,
-                    "mode": "pause",
                 })
 
             follow_ups = getattr(agent, "last_follow_ups", None)
@@ -1863,21 +1630,6 @@ class ChatGenerationTask(BackgroundTask):
             "references": [it.to_dict() for it in cited],
         })
 
-        # 本轮用到的来源里如果有"只有摘要、但有 DOI/URL"的论文，主动提示获取全文。
-        # 不能只靠模型自觉调用 request_fulltext：绝大多数模型会直接拿摘要作答，
-        # 结果是证据面板里堆着一堆"仅摘要"却永远没人去取全文。
-        # 只看**本轮真正被引用**的来源：仅仅检索到、但回答没用的论文不该弹窗，
-        # 否则每轮都会因为一堆无关检索结果而反复打扰。
-        cited_ids = {getattr(it, "index", None) for it in cited}
-        cited_sources = {rid: meta for rid, meta in (sources_map or {}).items()
-                         if rid in cited_ids}
-        suggestion = self._pick_fulltext_suggestion(cited_sources)
-        if suggestion:
-            self._emit_state(TaskState.PROCESSING, -1, "", payload={
-                "event": "fulltext_suggest",
-                "data": suggestion,
-            })
-
         # Phase 7: Persist Provenance evidence chain + show summary to user
         self._emit_provenance()
 
@@ -1963,49 +1715,6 @@ class ChatGenerationTask(BackgroundTask):
         由错误面板折叠栏展示并写入日志。
         """
         return json.dumps(friendly_payload(title, body, details), ensure_ascii=False)
-
-    def _pick_fulltext_suggestion(self, sources_map):
-        """挑一篇"本轮用到、只有摘要、有 DOI/URL、还没提示过"的论文。
-
-        为什么要程序来挑：把这件事完全交给模型自觉，实测几乎不会触发——它拿着
-        摘要就能写出像样的回答，没有动机再去要全文。判据保持保守：只在本轮真正
-        进入过上下文的来源里找，同一篇只提示一次。
-        """
-        if not getattr(self, "auto_evidence", False) or not sources_map:
-            return None
-        # 允许关闭（配置项 fulltext_auto_prompt=false）：自动开窗属于"主动打扰"，
-        # 有用户就是不想要。
-        try:
-            if not self.config.user_settings.get("fulltext_auto_prompt", True):
-                return None
-        except Exception:
-            pass
-        cid = str(getattr(self, "conversation_id", "") or "")
-        if not cid:
-            return None
-        if _FULLTEXT_SUGGEST_COUNT.get(cid, 0) >= _FULLTEXT_SUGGEST_BUDGET:
-            return None
-        for meta in (sources_map or {}).values():
-            if not isinstance(meta, dict) or meta.get("has_fulltext"):
-                continue
-            # 只有高置信来源才主动弹窗：相关度不高的来源连"是否该引用"都不确定，
-            # 为它打开登录窗口只会打扰用户（曾经弹出过一篇公路养护论文）。
-            score = meta.get("score")
-            if isinstance(score, (int, float)) and float(score) < 0.6:
-                continue
-            doi = str(meta.get("doi") or "").strip()
-            url = str(meta.get("url") or "").strip()
-            if not (doi or url):
-                continue
-            pid = str(meta.get("paper_id") or "")
-            if not pid or (cid, pid) in _FULLTEXT_SUGGESTED:
-                continue
-            _FULLTEXT_SUGGESTED.add((cid, pid))
-            _FULLTEXT_SUGGEST_COUNT[cid] = _FULLTEXT_SUGGEST_COUNT.get(cid, 0) + 1
-            return {"doi": doi, "url": url,
-                    "title": str(meta.get("title") or ""),
-                    "reason": "only the abstract was available"}
-        return None
 
     def _emit_provenance(self):
         """Persist the current conversation's evidence chain as JSONL and show
@@ -2143,15 +1852,14 @@ class ChatGenerationTask(BackgroundTask):
 
         # ---- 并行执行各子任务 ----
         # 子 Agent 无法触达用户：从其工具池剔除 ask_user，避免子任务发起
-        # 无人应答的暂停式提问。request_fulltext 同理——子 Agent 没有等待通道，
-        # 调了只会把请求记在自己身上，用户既看不到弹窗、也不会有人去登录。
+        # 无人应答的暂停式提问。
         # 同时剔除 cite_references：子任务的编号需要在合并阶段重映射到全局编号，
         # 而重映射只覆盖工具来源（sources_map）；子任务自行登记的文献编号会与全局
         # 冲突，故统一由主流程/合成阶段负责文献登记。
         sub_candidate_tools = [
             t for t in (candidate_tools or [])
             if (t or {}).get("function", {}).get("name")
-            not in ("ask_user", "cite_references", "request_fulltext")
+            not in ("ask_user", "cite_references")
         ]
         results = [None] * len(sub_tasks)
 
@@ -2466,18 +2174,6 @@ class ChatGenerationTask(BackgroundTask):
         except Exception as e:
             self.logger.warning(f"Reranker preload failed: {e}")
 
-    def _run_auto_evidence(self, search_query):
-        """自动文献证据：搜索 -> 摘要/全文入库 -> 按会话检索。
-
-        整个链路在短命子进程里跑（搜索的 HTTP、embedding、rerank 都不占 GUI
-        进程），父线程只等 JSON 结果；超时/模型缺失时返回空证据。
-        """
-        from src.core.auto_evidence import run_auto_evidence
-        model_name, base_url, declared_window = self._main_model_facts()
-        return run_auto_evidence(search_query, self.conversation_id,
-                                 model_name, base_url, declared_window,
-                                 cancel_check=self.is_cancelled)
-
     def _run_kb_retrieval(self, search_query, domain):
         """在 GUI 进程内执行 Phase 2 的本地 KB 检索与重排。
 
@@ -2594,8 +2290,6 @@ class ChatGenerationTask(BackgroundTask):
             # 降级方案：返回未重新排序的前 top_k 个文档
             return docs[:top_k]
 
-
-
 class ExportChatTask(BackgroundTask):
     """后台任务：把一段或全部对话写入 ``.schat`` 归档。
 
@@ -2621,7 +2315,6 @@ class ExportChatTask(BackgroundTask):
         except Exception as e:
             self.send_log("ERROR", f"Export task failed: {str(e)}")
             return {"success": False, "msg": str(e)}
-
 
 class ImportChatHistoryTask(BackgroundTask):
     """后台任务：解析并导入对话归档（``.schat`` / ``.sqlite3`` / ``.db`` / ``.json``）。
@@ -2721,7 +2414,6 @@ class ImportChatHistoryTask(BackgroundTask):
                          "evidence": entry.get("evidence") or {}})
         return tabs, annotated
 
-
 class DownloadImageTask(BackgroundTask):
     """
     异步图片下载任务。
@@ -2762,7 +2454,6 @@ class DownloadImageTask(BackgroundTask):
             self.send_log("ERROR", f"Image download failed for {url}: {str(e)}")
             return {"success": False, "url": url, "path": save_path, "msg": str(e)}
 
-
 class FetchHardwareStatusTask(BackgroundTask):
     """
     异步获取硬件状态，避免阻塞主 UI 线程
@@ -2785,4 +2476,3 @@ class FetchHardwareStatusTask(BackgroundTask):
                 break
 
         return {"dev_name": dev_name}
-

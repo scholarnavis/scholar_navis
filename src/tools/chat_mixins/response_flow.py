@@ -228,69 +228,6 @@ class ChatResponseFlowMixin:
                 bubble.set_token_stats(
                     stats["prompt_tokens"], stats["completion_tokens"],
                     estimated=stats["estimated"], elapsed_ms=stats["elapsed_ms"])
-        elif isinstance(payload, dict) and payload.get("event") == "fulltext_request":
-            # AI 主动请求登录获取付费墙全文：打开内置浏览器 + 发桌面通知。
-            # 注意**不要**置 _awaiting_user_input：这一轮并没有结束——任务线程正
-            # 挂起在工具调用里等 PDF，拿到后会继续跑完，输入框由生成状态本身锁定。
-            data = payload.get("data") or {}
-            self._awaiting_fulltext = dict(data)
-            # mode="wait"：任务线程正挂起等 PDF，本轮尚未结束（输入已由生成态锁住）；
-            # mode="pause"：本轮已结束，必须锁定输入并等新消息续跑。
-            self._awaiting_fulltext_mode = payload.get("mode") or "pause"
-            if self._awaiting_fulltext_mode != "wait":
-                self._awaiting_user_input = True
-            bubble = getattr(self, "current_ai_bubble", None)
-            if bubble is not None:
-                try:
-                    bubble.set_loading(True)
-                except Exception:
-                    pass
-            # 提示语里的标题同样要收口：模型有时把整段正文当 title 传进来，Toast
-            # 和系统通知都不该出现一堵字墙。
-            label = " ".join(str(data.get("title") or data.get("doi")
-                                 or data.get("url") or "paper").split())[:90]
-            self.logger.info("Full-text login requested by the agent: %s", label[:120])
-            try:
-                self.open_fulltext_panel(str(data.get("doi") or ""),
-                                         str(data.get("title") or ""),
-                                         str(data.get("url") or ""))
-            except Exception as e:
-                self.logger.warning("Cannot open the full-text panel: %s", e)
-            ToastManager().show(
-                tr("Waiting for sign-in: {t}. The conversation resumes after the PDF is saved.")
-                .format(t=label), "info")
-            try:
-                from src.core.notifications import notify
-                notify(tr("Sign in to fetch the full text"),
-                       tr("{t} — the conversation resumes automatically once the PDF "
-                          "is added.").format(t=label))
-            except Exception as e:
-                self.logger.debug("Desktop notification skipped: %s", e)
-        elif isinstance(payload, dict) and payload.get("event") == "fulltext_suggest":
-            # 本轮用的是"只有摘要"的来源：主动把登录窗口打开（本轮已结束，
-            # 不涉及暂停/续跑）。同一篇只提示一次，由任务层去重。
-            data = payload.get("data") or {}
-            if getattr(self, "_awaiting_fulltext", None):
-                return              # 刚刚已经为某篇开过窗：不要连开两个
-            label = " ".join(str(data.get("title") or data.get("doi")
-                                 or data.get("url") or "paper").split())[:90]
-            try:
-                self.open_fulltext_panel(str(data.get("doi") or ""),
-                                         str(data.get("title") or ""),
-                                         str(data.get("url") or ""))
-            except Exception as e:
-                self.logger.warning("Cannot open the full-text panel: %s", e)
-                return
-            ToastManager().show(
-                tr("This answer relies on an abstract only. Sign in to fetch the full "
-                   "text of {t}.").format(t=label), "info")
-            try:
-                from src.core.notifications import notify
-                notify(tr("Full text needed"),
-                       tr("{t} — only the abstract was used; sign in to fetch the full "
-                          "text.").format(t=label))
-            except Exception as e:
-                self.logger.debug("Desktop notification skipped: %s", e)
         elif isinstance(payload, dict) and payload.get("event") == "follow_ups":
             # 结构化追问建议（suggest_follow_ups 工具产出）：缓存到收尾时统一渲染，
             # 优先于 on_chat_finished 里的文本解析兜底。

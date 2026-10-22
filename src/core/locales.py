@@ -782,8 +782,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "全文已加入本对话的证据库。",
         "Failed to add the downloaded PDF to the evidence store.":
             "下载的 PDF 未能加入证据库。",
-        " Clear Literature Login Session": " 清除文献登录会话",
-        "Literature Login:": "文献登录：",
         "Use global proxy for journal browser": "期刊浏览器使用全局代理",
         "Off by default. Some journals and institutional services auto-login by recognizing your institution's IP; using a proxy can break that.":
             "默认关闭。部分期刊/机构服务会通过机构 IP 自动登录，使用代理可能反而失效。",
