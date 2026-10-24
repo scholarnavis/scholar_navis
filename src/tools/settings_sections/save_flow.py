@@ -224,6 +224,9 @@ class SaveFlowMixin:
             "api_server_host": self.input_api_host.text().strip(),
             "api_server_port": api_port,
             "api_server_key": self.input_api_key.text().strip(),
+            # 取全文窗口的额外监听目录：规范化/去重/上限由 fulltext_dirs 负责，
+            # 这里只交用户当前列表。
+            "fulltext_watch_dirs": self._fulltext_dirs_from_ui(),
         })
 
         for old_key in ["external_mcp_enabled", "network_mcps", "network_mcp_enabled", "custom_network_models"]:

@@ -80,6 +80,12 @@ class OAFetcher:
 
         self.logger.info(f"Starting OA search for DOI: {clean_doi} | Forced Source: {source}")
 
+        # 来源结论分两栏记录：拿到 200 响应的 host 进 checked（明确回答过），请求失败、
+        # 非 200 或被熔断跳过的进 failures。调用方据此区分"确实没有 OA 副本"与"这次
+        # 没查到"，避免把网络故障或 key 失效说成"该论文没有开放获取版本"。
+        checked: list = []
+        failures: list = []
+
         session = None
         if request_func is None:
             session = create_robust_session()
@@ -88,7 +94,9 @@ class OAFetcher:
                 # 鉴权熔断：本轮内该 host 已累计 2 次 401/403 时零开销跳过
                 # （OpenAlex/Unpaywall/NCBI idconv/PMC 各 host 独立计数；
                 # NCBI 的 www host 与 Entrez 在熔断器内归一为同一服务键）。
+                host = urllib.parse.urlsplit(url).netloc
                 if is_auth_blocked(url):
+                    failures.append(f"{host} (auth-rejected earlier this round; skipped)")
                     raise RuntimeError(
                         f"Request skipped: '{url}' blocked by the "
                         f"auth-rejection breaker for the current chat round.")
@@ -102,6 +110,11 @@ class OAFetcher:
                 if res.status_code in (401, 403):
                     record_auth_rejection(
                         url, context=f"HTTP {res.status_code} via OAFetcher.")
+                if res.status_code == 200:
+                    if host not in checked:
+                        checked.append(host)
+                else:
+                    failures.append(f"{host} (HTTP {res.status_code})")
                 return res
 
             request_func = default_request
@@ -228,6 +241,8 @@ class OAFetcher:
                         raise ValueError("S2 request failed - response is None")
 
                     res.raise_for_status()
+                    if "api.semanticscholar.org" not in checked:
+                        checked.append("api.semanticscholar.org")
 
                     response_text = res.text
                     if not response_text or len(response_text.strip()) == 0:
@@ -252,11 +267,14 @@ class OAFetcher:
                     self.logger.debug("S2 OA skipped: S2 not enabled")
 
             except Exception as e:
+                failures.append(f"api.semanticscholar.org ({e})")
                 self.logger.warning(f"Semantic Scholar check/query failed: {repr(e)}")
             else:
                 self.logger.debug("S2 OA skipped: S2 not enabled")
-        self.logger.info(f"No Open Access PDF found (Tested source: {source}).")
-        return {"is_oa": False, "landing_page_url": landing_url, "source": source}
+        self.logger.info(f"No Open Access PDF found (Tested source: {source}); "
+                         f"checked={checked} failures={failures}")
+        return {"is_oa": False, "landing_page_url": landing_url, "source": source,
+                "checked": checked, "failures": failures}
 
 
 if __name__ == "__main__":

@@ -253,7 +253,10 @@ class LlmSectionMixin:
     def _detect_context_window(self):
         """异步探测 provider 元数据里的上下文窗口，不阻塞设置页。"""
         url = self.input_llm_url.text().strip()
-        name = self.input_llm_name.text().strip()
+        # 查窗口要用**模型名**：provider 的 /models 与 LiteLLM 元数据都按模型名索引。
+        # 原先取的是 Provider Name（配置备注名），两个来源必然都查不到，于是"备注名
+        # ≠ 模型名"的条目永远弹"未暴露"，litellm 还会抱怨模型名未知。
+        name = self._current_real_model_name()
         key = self.input_llm_key.text().strip()
         if not url or not name:
             ToastManager().show(
@@ -289,9 +292,9 @@ class LlmSectionMixin:
                 return
             self.btn_detect_context.setEnabled(True)
             self.btn_detect_context.setText(tr("Detect"))
-            # 探测期间用户可能换了 provider：只在字段未变时回填。
+            # 探测期间用户可能换了 provider 或模型：只在字段未变时回填。
             if (self.input_llm_url.text().strip() != url
-                    or self.input_llm_name.text().strip() != name):
+                    or self._current_real_model_name() != name):
                 return
             value = int(result.get("value") or 0)
             if value > 0:
@@ -393,6 +396,14 @@ class LlmSectionMixin:
             if display_text.endswith(suffix):
                 return display_text[:-len(suffix)]
         return display_text
+
+    def _current_real_model_name(self):
+        """当前选中的**真实模型名**（剥掉下拉框里的 ``[Custom]`` / ``[Closed]`` 标记）。
+
+        探测上下文窗口、写回 ``model_name`` 都必须用它，因为 provider 的 ``/models``
+        与 LiteLLM 元数据都按模型名索引；``Provider Name`` 只是这条配置的备注名。
+        """
+        return self._extract_real_model_name(self.combo_llm_model.currentText().strip())
 
     def _update_current_model_marker(self, real_name, mode):
         self.combo_llm_model.blockSignals(True)

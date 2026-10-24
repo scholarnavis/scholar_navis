@@ -13,10 +13,10 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QListWidget, QSplitter, QListWidgetItem, QLineEdit, QCheckBox, QScrollArea,
                                QFrame, QAbstractItemView, QMenu, QApplication)
 
-from src.core import BASE_DIR
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskState, TaskMode
 from src.core.i18n import tr
+from src.core.rss_paths import CONFIG_DIR, RSS_CACHE_FILE, RSS_DIR, RSS_FEEDS_FILE
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.rss_tasks import FetchRSSTask, SearchArticlesTask, ImportRssTask, ExportRssTask
@@ -425,14 +425,13 @@ class RSSTool(BaseTool):
     def __init__(self):
         super().__init__("Literature Tracker")
 
-        self.workspace_dir = os.path.join(BASE_DIR, "RSS")
+        # 路径来自 src.core.rss_paths（唯一定义处）：取全文自检也要读同一份文章缓存。
+        self.workspace_dir = RSS_DIR
         os.makedirs(self.workspace_dir, exist_ok=True)
+        os.makedirs(CONFIG_DIR, exist_ok=True)
 
-        config_dir = os.path.join(BASE_DIR, "config")
-        os.makedirs(config_dir, exist_ok=True)
-
-        self.feeds_file = os.path.join(config_dir, "rss_feed.json")
-        self.cache_file = os.path.join(self.workspace_dir, "rss_cache.json")
+        self.feeds_file = RSS_FEEDS_FILE
+        self.cache_file = RSS_CACHE_FILE
 
         self.feeds = []
         self.article_cache = {}

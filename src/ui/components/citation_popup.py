@@ -483,8 +483,11 @@ class CitationPopup(QWidget):
         # 只有尚未拿到本地全文、但有 DOI/URL 的论文才显示"获取全文"。
         full = (mode == self.MODE_FULL)
         self._btn_close.setVisible(full)
-        self._snippet_header.setVisible(full)
-        self._snippet.setVisible(full)
+        snippet = (normalize_bibliographic_text(str(self._data.get("snippet") or "").strip())
+                   if full else "")
+        # 没有登记片段就整块隐去：留一句"未记录"既占位置又没有任何信息。
+        self._snippet_header.setVisible(bool(snippet))
+        self._snippet.setVisible(bool(snippet))
         # 逐字标识：verified 由程序侧逐字校验写入（见 src/core/evidence.py），
         # 只有经校验的原文才带该标注，与模型的复述文字明确区分。
         self._snippet_title.setText(
@@ -493,15 +496,8 @@ class CitationPopup(QWidget):
         self._lbl_note.setVisible(full and bool(note))
         self._lbl_note.setText(f"Why cited: {note}" if note else "")
 
-        if full:
-            snippet = normalize_bibliographic_text(
-                str(self._data.get("snippet") or "").strip())
-            if snippet:
-                self._snippet.setHtml(self._snippet_html(snippet))
-            else:
-                self._snippet.setHtml(
-                    "<span style='opacity:0.7;'>No cited passage was recorded "
-                    "for this entry.</span>")
+        if snippet:
+            self._snippet.setHtml(self._snippet_html(snippet))
 
         self._relayout()
 

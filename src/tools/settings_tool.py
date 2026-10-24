@@ -29,9 +29,9 @@ from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.settings_tasks import HWDetectTask
 from src.tools.base_tool import BaseTool
 from src.tools.settings_sections import (ConfigTransferMixin, EnvSectionMixin,
-                                         LlmModelOpsMixin, LlmSectionMixin,
-                                         McpSectionMixin, ModelSectionMixin,
-                                         SaveFlowMixin)
+                                         FulltextSectionMixin, LlmModelOpsMixin,
+                                         LlmSectionMixin, McpSectionMixin,
+                                         ModelSectionMixin, SaveFlowMixin)
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class FloatingOverlayFilter(QObject):
 
 class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
                    LlmModelOpsMixin, ModelSectionMixin, ConfigTransferMixin,
-                   SaveFlowMixin, BaseTool):
+                   FulltextSectionMixin, SaveFlowMixin, BaseTool):
     # 由 UI 构建与硬件探测流程创建，仅作静态检查声明
     layout: QVBoxLayout
     btn_undo: QPushButton
@@ -121,7 +121,7 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.layout.setSpacing(20)
         self.layout.setContentsMargins(15, 0, 15, 40)
 
-        # 九个区块的构建要读配置、建几十个控件并做一次主题着色，同步跑会卡住
+        # 十个区块的构建要读配置、建几十个控件并做一次主题着色，同步跑会卡住
         # "点设置 → 界面出现"这一段。先把骨架铺出来（滚动区 + 底部按钮 + 一行
         # 加载提示），下一轮事件循环再建内容，界面立刻可见。
         self._loading_row = QLabel(tr("Loading settings..."))
@@ -160,13 +160,14 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         return self.widget
 
     def _build_sections(self):
-        """构建设置页的九个区块（延迟到窗口上屏之后执行，只做一次）。"""
+        """构建设置页的十个区块（延迟到窗口上屏之后执行，只做一次）。"""
         if getattr(self, "_sections_built", False) or not getattr(self, "_ui_ready", False):
             return
         self._sections_built = True
         try:
             self.init_hardware_section()
             self.init_r_environment_section()
+            self.init_fulltext_section()
             self.init_system_section()
             self.init_network_section()
             self.init_llm_section()
@@ -283,6 +284,29 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
                     if chk:
                         chk.setStyleSheet(
                             f"color: {tm.color('text_main')}; background: transparent; margin-left: 10px;")
+
+        # Full-text watch dirs
+        if hasattr(self, 'btn_add_fulltext_dir'):
+            self.btn_add_fulltext_dir.setStyleSheet(self._get_btn_style(btn_type="success"))
+        if hasattr(self, 'btn_del_fulltext_dir'):
+            self.btn_del_fulltext_dir.setStyleSheet(self._get_btn_style(btn_type="danger"))
+        if hasattr(self, 'list_fulltext_dirs'):
+            self.list_fulltext_dirs.setStyleSheet(
+                f"QListWidget {{ color: {tm.color('text_main')};"
+                f" background: {tm.color('bg_main')};"
+                f" border: 1px solid {tm.color('border')};"
+                f" border-radius: 4px; padding: 4px; }}"
+                f"QListWidget::item {{ padding: 3px 4px; }}")
+        for lbl_name in ('lbl_fulltext_hint', 'lbl_fulltext_inbox', 'lbl_fulltext_perf',
+                         'lbl_fulltext_count'):
+            if not hasattr(self, lbl_name):
+                continue
+            style = f"color: {tm.color('text_muted')}; font-size: 11px;"
+            if lbl_name == 'lbl_fulltext_inbox':
+                # 内置收件目录的路径是可点的链接；QLabel 的 color 管不到富文本链接，
+                # 链接色单独给（默认的纯蓝在深色主题上不协调）。
+                style += f" a {{ color: {tm.color('accent')}; }}"
+            getattr(self, lbl_name).setStyleSheet(style)
 
     def _mark_unsaved(self, *args, **kwargs):
         if getattr(self, '_is_loading', False): return
@@ -408,6 +432,8 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
 
         if hasattr(self, '_load_mcp_servers_to_ui'):
             self._load_mcp_servers_to_ui()
+
+        self._set_fulltext_dirs(self.config.get_fulltext_watch_dirs())
 
         self._clear_unsaved()
         self._is_loading = False

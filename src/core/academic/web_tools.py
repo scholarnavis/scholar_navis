@@ -16,9 +16,15 @@ __all__ = [
 ]
 
 
+#: 网页正文交给模型的字符上限：脱离运行时直接调用时的兜底。运行时会把窗口预算
+#: 注入 ``max_chars``（见 AgentRuntime._fit_result_budget），届时以注入值为准。
+_WEB_CONTENT_CHARS = 30000
+
+
 @simple_retry(max_attempts=2, delay=1)
-def fetch_webpage_content(url: str, timeout: int = 15) -> str:
-    logger.info(f"Task: Fetch Webpage | URL: '{url}'")
+def fetch_webpage_content(url: str, timeout: int = 15,
+                          max_chars: int = _WEB_CONTENT_CHARS) -> str:
+    logger.info(f"Task: Fetch Webpage | URL: '{url}' | max_chars: {max_chars}")
     if not url.startswith(("http://", "https://")): return json.dumps(
         {"status": "error", "message": "Security Error: Only HTTP(S) allowed."})
     parsed_url = urllib.parse.urlparse(url)
@@ -43,10 +49,14 @@ def fetch_webpage_content(url: str, timeout: int = 15) -> str:
             script_or_style.decompose()
 
         text_content = soup.get_text(separator=' ', strip=True)
-        if len(text_content) > 30000:
-            text_content = text_content[:30000] + "\n...[Content truncated]"
+        raw_chars = len(text_content)
+        truncated = raw_chars > max_chars
+        if truncated:
+            text_content = text_content[:max_chars] + "\n...[Content truncated]"
+            logger.info(f"Webpage text truncated: {raw_chars} -> {max_chars} chars | URL: '{url}'")
 
-        return json.dumps({"status": "success", "url": url, "content": text_content}, ensure_ascii=False)
+        return json.dumps({"status": "success", "url": url, "content": text_content,
+                           "truncated": truncated, "chars": raw_chars}, ensure_ascii=False)
 
     except Exception as e:
         err_str = str(e)

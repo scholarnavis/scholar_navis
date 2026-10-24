@@ -455,6 +455,14 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
 
     # --add-data 的分隔符是平台相关的：Windows 为 ';'，POSIX 为 ':'。
     cmd.append(f"--add-data=Assets{os.pathsep}Assets")
+    # 开发者模式"获取全文"自检的内置付费墙样例（src/core/data，纯数据目录、不含代码）。
+    # 冻结产物不经过源码树，必须显式带上，否则分发后没有 RSS 订阅就测不了取全文。
+    fulltext_data_dir = os.path.join("src", "core", "data")
+    if os.path.isdir(fulltext_data_dir):
+        cmd.append(f"--add-data={fulltext_data_dir}{os.pathsep}{fulltext_data_dir}")
+    else:
+        print(f"[!] {fulltext_data_dir} is missing; the full-text dev test will have no "
+              f"bundled sample.")
 
     # 打包时抓一次 LiteLLM 官方 model map 作为随包种子：即使首次启动完全离线，
     # GPT-6 / DeepSeek V4 等新模型也有上下文数据。抓取失败则复用上次种子。

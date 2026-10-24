@@ -937,11 +937,14 @@ def traverse_citation_graph(doi: str, direction: Literal["references", "citation
 
 
 
-def europe_pmc_pmcids(dois) -> dict:
+def europe_pmc_pmcids(dois, report: dict | None = None) -> dict:
     """批量把 DOI 解析成 PMCID，返回 ``{归一化 DOI: PMCID}``；解析不到的 DOI 不出现。
 
     一次请求即可解析整批 DOI（Europe PMC 支持 ``OR`` 组合查询）。这很关键：逐条
     查询会把"顺手附全文"拖成几十次往返，检索工具就废了。
+
+    ``report`` 给出时记录请求失败：查不到的 DOI 既可能真没进 PMC，也可能这次查询
+    失败，调用方需要能区分（见 :func:`fetch_paper_fulltext`）。
     """
     wanted = {}
     for doi in dois:
@@ -958,6 +961,8 @@ def europe_pmc_pmcids(dois) -> dict:
                     "pageSize": len(wanted)},
             timeout=20)
         if res.status_code != 200:
+            if report is not None:
+                report["failures"].append(f"Europe PMC search (HTTP {res.status_code})")
             return {}
         found = {}
         for rec in ((res.json().get("resultList") or {}).get("result") or []):
@@ -968,6 +973,8 @@ def europe_pmc_pmcids(dois) -> dict:
         logger.debug(f"Europe PMC resolved {len(found)}/{len(wanted)} PMCID(s)")
         return found
     except Exception as e:
+        if report is not None:
+            report["failures"].append(f"Europe PMC search ({e})")
         logger.debug(f"Europe PMC PMCID lookup failed: {e}")
         return {}
 
@@ -987,47 +994,58 @@ def _europe_pmc_xml_text(pmcid: str) -> str:
         return ""
 
 
-def europe_pmc_fulltext(doi: str) -> str:
+def europe_pmc_fulltext(doi: str, report: dict | None = None) -> str:
     """Europe PMC 的 OA 全文（XML 纯文本）。
 
     PMC 收录的 PNAS / Nature 子刊命中率最高，且不经过出版社页面与反爬，是取全文的
     首选路径；拿不到时返回空串（调用方退回摘要）。
+
+    ``report`` 给出时把两种"空"分开记：查不到 PMCID 是"该文未进 PMC"的确定结论，
+    PMCID 有了却取不回 XML 属故障——后者不能用来断言该文没有全文。
     """
     clean = _normalize_doi(doi)
-    pmcid = europe_pmc_pmcids([clean]).get(clean) if clean else ""
+    pmcid = europe_pmc_pmcids([clean], report=report).get(clean) if clean else ""
     if not pmcid:
+        if report is not None:
+            report["checked"].append("Europe PMC (no PMCID: not in PMC)")
         return ""
     text = _europe_pmc_xml_text(pmcid)
     if text:
         logger.info(f"Europe PMC full text: {clean} -> {pmcid} ({len(text)} chars)")
+    elif report is not None:
+        report["failures"].append(f"Europe PMC full-text XML ({pmcid})")
     return text
 
 
-def _oa_pdf_fulltext(doi: str) -> str:
-    """DOI -> 合法 OA PDF -> 正文文本；没有 OA 副本或下载失败时返回空串。"""
-    clean = _normalize_doi(doi)
-    if not clean:
-        return ""
+def _pdf_url_to_text(url: str, report: dict | None = None, label: str = "OA PDF") -> str:
+    """下载一个 PDF 直链并抽出正文；下载或解析失败返回空串，原因记进 ``report``。
+
+    OA 解析器给的链接与预印本的官方直链走同一条下载/解析链路，所以只留这一份实现；
+    失败一律记 failures —— 那是故障，不能据此断言该文没有正文。
+    """
     tmp = ""
     try:
         from src.core.pdf_text import extract_pdf
-        found = OAFetcher().fetch_best_oa_pdf(clean, ncbi_email, ncbi_api_key=ncbi_api_key)
-        if not found.get("is_oa") or not found.get("pdf_url"):
-            return ""
-        resp = mcp_request("GET", found["pdf_url"], timeout=30)
+        resp = mcp_request("GET", url, timeout=30)
         if resp.status_code != 200:
+            if report is not None:
+                report["failures"].append(f"{label} download (HTTP {resp.status_code})")
             return ""
         content = resp.content or b""
         if len(content) > _FULLTEXT_MAX_BYTES or not content.startswith(b"%PDF"):
+            if report is not None:
+                report["failures"].append(f"{label} download (response is not a PDF)")
             return ""
-        fd, tmp = tempfile.mkstemp(prefix="oa_pdf_", suffix=".pdf")
+        fd, tmp = tempfile.mkstemp(prefix="fulltext_", suffix=".pdf")
         os.close(fd)
         with open(tmp, "wb") as handle:
             handle.write(content)
         pages, _meta = extract_pdf(tmp)
         return "\n\n".join(t for _page, t in pages if t.strip()).strip()
     except Exception as e:
-        logger.debug(f"OA PDF full text failed for {clean}: {e}")
+        if report is not None:
+            report["failures"].append(f"{label} pipeline ({e})")
+        logger.debug(f"{label} fetch failed for {url}: {e}")
         return ""
     finally:
         if tmp:
@@ -1037,16 +1055,87 @@ def _oa_pdf_fulltext(doi: str) -> str:
                 pass
 
 
-def fulltext_text(doi: str):
-    """取一篇论文的合法 OA 全文，返回 ``(正文, 来源标签)``；没有 OA 副本时返回 ``("", "")``。
+def _oa_pdf_fulltext(doi: str, report: dict | None = None) -> str:
+    """DOI -> 合法 OA PDF -> 正文文本；没有 OA 副本或下载失败时返回空串。
 
-    顺序：Europe PMC XML（最稳） -> OA PDF（Unpaywall / OpenAlex 解析出的链接）。
-    拿不到全文**不等于**工具失败：调用方应退回摘要，并如实说明"仅有摘要"。
+    ``report`` 给出时汇总 OAFetcher 各来源的结论（谁明确回答过、谁失败了）；下载环节
+    的失败由 :func:`_pdf_url_to_text` 一并记入。
     """
-    text = europe_pmc_fulltext(doi)
+    clean = _normalize_doi(doi)
+    if not clean:
+        return ""
+    try:
+        found = OAFetcher().fetch_best_oa_pdf(clean, ncbi_email, ncbi_api_key=ncbi_api_key)
+        if report is not None:
+            report["checked"].extend(found.get("checked") or [])
+            report["failures"].extend(found.get("failures") or [])
+        if not found.get("is_oa") or not found.get("pdf_url"):
+            return ""
+        return _pdf_url_to_text(found["pdf_url"], report=report, label="OA PDF")
+    except Exception as e:
+        if report is not None:
+            report["failures"].append(f"OA resolver ({e})")
+        logger.debug(f"OA PDF full text failed for {clean}: {e}")
+        return ""
+
+
+def _preprint_pdf_url(doi: str) -> tuple:
+    """DOI 本身就是预印本时给出官方 PDF 直链，返回 ``(url, 标签)``；否则 ``("", "")``。
+
+    预印本正文始终免费，不必等 OA 解析器判断"有没有免费版本"：期刊版本可能落在付费墙，
+    预印本本身却一直可读。bioRxiv / medRxiv 要先问 API 拿最新版本号（``...v3.full.pdf``），
+    arXiv 的 id 直接嵌在 DOI 里。
+
+    只认"DOI 即预印本"这一种情况：期刊论文"另有预印本"的反查不做——两者 DOI 不同，按
+    标题去配容易配错论文，宁可不给。
+    """
+    clean = _normalize_doi(doi).lower()
+    if clean.startswith("10.1101/"):
+        for server, host in (("biorxiv", "www.biorxiv.org"), ("medrxiv", "www.medrxiv.org")):
+            try:
+                res = mcp_request("GET",
+                                  f"https://api.biorxiv.org/details/{server}/{clean}", timeout=15)
+                if res.status_code != 200:
+                    continue
+                collection = (res.json() or {}).get("collection") or []
+                versions = [int(c.get("version") or 0) for c in collection]
+                if not versions:
+                    continue
+                latest = max(versions)
+                return (f"https://{host}/content/{clean}v{latest}.full.pdf",
+                        f"{server} preprint v{latest}")
+            except Exception as e:
+                logger.debug(f"{server} preprint lookup failed for {clean}: {e}")
+        return "", ""
+    if clean.startswith("10.48550/arxiv."):
+        arxiv_id = clean.split("arxiv.", 1)[1]
+        return f"https://arxiv.org/pdf/{arxiv_id}", f"arXiv preprint {arxiv_id}"
+    return "", ""
+
+
+def fulltext_text(doi: str, report: dict | None = None):
+    """取一篇论文的合法全文，返回 ``(正文, 来源标签)``；都拿不到时返回 ``("", "")``。
+
+    顺序：Europe PMC XML（最稳） -> 预印本官方 PDF（DOI 即预印本时） -> OA PDF
+    （Unpaywall / OpenAlex 解析出的链接）。三者都是合法来源；出版社付费墙不在其中——
+    需要付费墙正文时由 ``request_fulltext`` 请用户交回自己订阅得到的 PDF。
+
+    拿不到全文**不等于**工具失败：调用方应退回摘要，并如实说明"仅有摘要"。
+
+    ``report``（``{"checked": [...], "failures": [...]}``）给出时逐来源记录：谁明确
+    回答过"没有 OA"、谁请求失败或被熔断。调用方据此决定措辞——只有 failures 为空
+    时才可以断言该文没有开放获取版本。
+    """
+    text = europe_pmc_fulltext(doi, report=report)
     if len(text) >= _MIN_FULLTEXT_CHARS:
         return text, "Europe PMC"
-    text = _oa_pdf_fulltext(doi)
+    url, label = _preprint_pdf_url(doi)
+    if url:
+        text = _pdf_url_to_text(url, report=report, label=label)
+        if len(text) >= _MIN_FULLTEXT_CHARS:
+            logger.info(f"Preprint full text: {doi} -> {label} ({len(text)} chars)")
+            return text, f"Preprint ({label})"
+    text = _oa_pdf_fulltext(doi, report=report)
     if len(text) >= _MIN_FULLTEXT_CHARS:
         return text, "Open access PDF"
     return "", ""
@@ -1054,20 +1143,43 @@ def fulltext_text(doi: str):
 
 @simple_retry(max_attempts=2, delay=1)
 def fetch_paper_fulltext(doi: str, max_chars: int = _FULLTEXT_CHARS) -> str:
-    """按 DOI 取一篇论文的 OA 全文；没有 OA 副本时明确告知"只有摘要可用"。"""
+    """按 DOI 取一篇论文的 OA 全文；没有 OA 副本时明确告知"只有摘要可用"。
+
+    取不到时分两种说法回话，因为模型只能照工具给的话解释原因：全部来源都正常回答过，
+    才可以说"该文没有开放获取版本"；只要有来源请求失败或被熔断，"没拿到"就不等于
+    "不存在"（否则模型会把网络故障或 key 失效讲成付费墙）。
+    """
     logger.info(f"Task: Fetch Paper Full Text | DOI: '{doi}'")
     clean = _normalize_doi(doi)
     if not clean:
         return json.dumps({
             "status": "error",
             "message": "A DOI is required. Take it from a search result's 'doi' field."})
-    text, origin = fulltext_text(clean)
+    report = {"checked": [], "failures": []}
+    text, origin = fulltext_text(clean, report=report)
     if not text:
+        checked = list(dict.fromkeys(report["checked"])) or ["Europe PMC", "OA resolvers"]
+        failed = list(dict.fromkeys(report["failures"]))
+        if failed:
+            message = (
+                "No open-access full text could be RETRIEVED for this DOI, but some sources "
+                "failed or were skipped, so this search was incomplete: "
+                f"{'; '.join(failed)}. Do NOT claim the paper has no open-access "
+                "version, and do NOT guess the reason (paywall, licence and publisher policy "
+                "are all unverified here). Use the abstract, tell the user the body could not "
+                "be fetched in this run, and say the PDF may be obtainable from their own "
+                "subscription.")
+        else:
+            message = (
+                "No open-access full text is available for this DOI "
+                f"(checked: {', '.join(checked)}). Use the abstract from the search result "
+                "and state that only the abstract was available.")
         return json.dumps({
             "status": "success", "doi": clean, "full_text": "", "source": "",
-            "message": ("No open-access full text is available for this DOI. Use the "
-                        "abstract from the search result and state that only the abstract "
-                        "was available.")}, ensure_ascii=False)
+            "conclusion": ("incomplete_sources_failed" if failed
+                           else "no_open_access_copy"),
+            "sources_checked": checked, "sources_failed": failed,
+            "message": message}, ensure_ascii=False)
     truncated = len(text) > max_chars
     logger.info(f"Full text fetched: {clean} via {origin} ({len(text)} chars, truncated={truncated})")
     return json.dumps({"status": "success", "doi": clean, "source": origin,

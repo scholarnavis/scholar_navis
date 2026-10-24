@@ -18,13 +18,18 @@ Two test categories:
       wiring, bubble typography + glued-list repair, reference integrity and
       title italics, history-replay chunking). No AI involved. Checks that only
       need pure functions never create a window and never touch user data.
+      Two checks deliberately stay OUT of Run All because they need the real
+      world: the live literature-trust check (network + DOI resolution) and the
+      paywalled full-text handover (a human downloads the PDF into the picker
+      window, which the task thread waits on).
 
 Design principles:
     * High cohesion: one test = one focused method; no cross-deps.
     * Low coupling: AI tests only need a ``MainWindow`` reference exposing
       ``route_dev_test``; functional tests only touch core modules.
     * Read-only: functional tests use synthetic fixtures and never mutate
-      user data.
+      user data (the full-text check only reads the RSS cache and the PDF the
+      user hands over).
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 
 from pathlib import Path
 from urllib.parse import quote
@@ -52,6 +58,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
 )
 
+from src.core.fulltext_samples import resolve_samples
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.dialog import BaseDialog
 from src.ui.components.source_code_viewer import SourceCodeViewer
@@ -210,7 +217,45 @@ AI_TESTS = {
             "landscape. Be thorough."
         ),
     },
+    "fulltext_fetch": {
+        "note": (
+            "Developer test: exercising the <b>paywalled full-text</b> path end to end "
+            "in the real Chat panel. The prompt names a subscription article (the first "
+            "paywalled hit of the local RSS cache, otherwise a bundled sample shipped "
+            "with the app). Expected: fetch_paper_fulltext reports no open-access body "
+            "-> request_fulltext -> the picker window opens -> after you download the "
+            "PDF and hand it over, the SAME turn continues with a reading brief "
+            "(bullets + verbatim quotes + [pN] page numbers). Wanting exact quotes is "
+            "deliberate: it forces the full-text route instead of paraphrasing the "
+            "abstract."
+        ),
+        "prompt": (
+            "There's a subscription paper I have to quote precisely in my manuscript "
+            "{sample}. The abstract doesn't give me what I need, so could you get the "
+            "actual full text and pull out the specific findings it reports, quoting "
+            "the exact wording with page numbers? If you need the PDF, just ask me — "
+            "I'll download it from my library and hand it to you."
+        ),
+        #: 提示词里的 {sample} 由 _ai_test 用真实样例填（见 _fill_sample）
+        "sample": True,
+    },
 }
+
+
+def _fill_sample(template: str, sample) -> str:
+    """把样例文章填进 AI 测试提示词：``{sample}`` 换成标题 / DOI / 链接。
+
+    模型要靠这些标识才找得到那篇付费墙论文；没有样例时也不留裸占位符。
+    """
+    if not sample:
+        return template.replace("{sample}", "(I don't have the identifier handy)")
+    parts = [f"\"{sample['title']}\""] if sample.get("title") else []
+    if sample.get("doi"):
+        parts.append(f"DOI {sample['doi']}")
+    if sample.get("url"):
+        parts.append(str(sample["url"]))
+    filled = f"({', '.join(parts)})" if parts else "(I don't have the identifier handy)"
+    return template.replace("{sample}", filled)
 
 
 # --------------------------------------------------------------------------- #
@@ -464,6 +509,19 @@ PREVIEW_DEMO_TOML = (
 LITTRUST_BTN_IDLE = "Literature Trust (live)"
 LITTRUST_BTN_RUNNING = "Literature Trust (running…)"
 
+#: 取全文自检里交给抽取子代理的问题。样例文章各不相同，问法必须与具体论文无关。
+DEV_FULLTEXT_QUESTION = (
+    "What are the paper's key findings, and what evidence does it report for them?"
+)
+
+#: 取全文自检里抽取子代理的桩回复：用来证明"子代理的结论被原样回传给主模型"，
+#: 而不是走了"读不出正文"的兜底分支。
+DEV_FULLTEXT_STUB_BRIEF = "DEV-STUB BRIEF"
+
+#: 取全文自检等窗口交回 PDF 的上限（秒）。窗口关闭时一定会通知等待方，这里只防极端
+#: 情况下把自检挂死；人工下载耗时不计入（文件交回后 ``wait`` 立刻返回）。
+DEV_FULLTEXT_WAIT_TIMEOUT = 5.0
+
 
 class _DevLogStream(QObject):
     """后台线程 → UI 线程的单向输出通道。
@@ -538,6 +596,10 @@ class DeveloperDialog(BaseDialog):
         self.content_layout.addLayout(self._button_grid(
             (self.btn_ai_ask, self.btn_ai_deep, self.btn_ai_doc, self.btn_ai_refnum),
             cols=4))
+        # 第三行：付费墙取全文（真实模型 + 真实取全文窗口 + 人工下载 PDF，全链路）
+        self.btn_ai_fulltext = self._make_btn("AI: Full Text Fetch (paywall)",
+                                              lambda: self._ai_test("fulltext_fetch"))
+        self.content_layout.addLayout(self._button_grid((self.btn_ai_fulltext,), cols=4))
 
         # --- Functional tests ---
         self.content_layout.addWidget(self._section_label("Functional Tests"))
@@ -573,6 +635,10 @@ class DeveloperDialog(BaseDialog):
                                            self._test_literature_source_trust)
         self.btn_uiinter = self._make_btn("UI Copy / Drag-Scroll",
                                           self._test_ui_copy_scroll)
+        # 付费墙取全文。样例优先取本机 RSS 缓存里的付费墙文章，没有订阅时回退到随包
+        # 分发的内置样例（见 src.core.fulltext_samples），因此分发后也能测。链路要人工
+        # 去浏览器下载 PDF 并交回窗口，所以它独立成按钮、不进 Run All。
+        self.btn_fulltext = self._make_btn("Full Text Fetch", self._test_fulltext_fetch)
         self.content_layout.addLayout(self._button_grid(
             (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill,
              self.btn_syntax, self.btn_lit, self.btn_img,
@@ -580,7 +646,7 @@ class DeveloperDialog(BaseDialog):
              self.btn_filetypes, self.btn_textviewer, self.btn_scrollbar,
              self.btn_attachwire, self.btn_typography, self.btn_refnum,
              self.btn_refint, self.btn_storage, self.btn_citeclick,
-             self.btn_littrust, self.btn_uiinter),
+             self.btn_littrust, self.btn_uiinter, self.btn_fulltext),
             cols=4))
 
         # --- Output area（专属源码/日志输出控件：固定最大高度 + 独立滚动条、
@@ -730,6 +796,22 @@ class DeveloperDialog(BaseDialog):
             self._log("Cannot route to Chat panel (MainWindow route method missing).", "FAIL")
             return
 
+        # 需要点名具体论文的测试（付费墙取全文）在发车前才解析样例：本机 RSS 缓存
+        # 里的付费墙文章优先，没有订阅时用随包分发的内置样例，于是分发后也点得出题目。
+        prompt = entry["prompt"]
+        if entry.get("sample"):
+            samples, origin = resolve_samples(limit=1)
+            if samples:
+                sample = samples[0]
+                self._log(f"Full-text sample from {origin}", "INFO")
+                self._log(f"Paper: {sample.get('title') or '(untitled)'} "
+                          f"[{sample.get('doi') or sample.get('url') or 'no id'}]", "INFO")
+            else:
+                sample = None
+                self._log("No paywalled sample available (RSS cache empty and the bundled "
+                          "sample file missing) — sending the prompt without a paper.", "WARN")
+            prompt = _fill_sample(prompt, sample)
+
         # 测试附件：图片走标准库构造的 PNG，其余类型走 _make_dev_attachment
         attachment_paths = []
         if entry.get("image"):
@@ -749,18 +831,18 @@ class DeveloperDialog(BaseDialog):
                           "WARN")
 
         self._log(f"Dispatching AI test '{key}' to Chat panel...", "INFO")
-        self._log(f"Prompt: {entry['prompt'][:80]}...", "INFO")
+        self._log(f"Prompt: {prompt[:80]}...", "INFO")
         try:
             if attachment_paths:
-                route(entry["prompt"], note_text=entry["note"],
+                route(prompt, note_text=entry["note"],
                       attachment_paths=attachment_paths)
             else:
-                route(entry["prompt"], note_text=entry["note"])
+                route(prompt, note_text=entry["note"])
             self._log("Sent to Chat panel. Check the Chat Assistant for results.", "OK")
         except TypeError:
             # Fallback: older route method without note_text / attachment_paths.
             try:
-                route(entry["prompt"])
+                route(prompt)
                 self._log("Sent to Chat panel (no note/attachment support).", "OK")
             except Exception as e2:
                 self._log(f"Failed to dispatch AI test: {e2}", "FAIL")
@@ -1103,58 +1185,64 @@ class DeveloperDialog(BaseDialog):
             # 6b) 正文"未核实"门禁的判定粒度：以"陈述组 + 依据行"为单位，不是逐行。
             #     逐行判定会把"陈述一行、依据一行"的学术写法整篇标红（真实回答里
             #     14 段被标 14 处），提醒随之失效。
-            from src.task.chat_tasks import _apply_evidence_gate
+            from src.core.evidence_gate import apply_evidence_gate, unsupported_paragraphs
             gate_mark = "（未核实）"
             pairs = ("【PIN3 侧向化】→【背光侧分布】\n\n"
                      "依据：单侧蓝光诱导 PIN3 向背光侧极性化[1]。\n\n"
                      "【NPH3】→【光依赖去磷酸化后释放】\n\n"
                      "依据：蓝光依赖的磷酸化决定 NPH3 的质膜定位[2]。")
-            if gate_mark in _apply_evidence_gate(pairs, True, True):
+            if gate_mark in apply_evidence_gate(pairs, True, True):
                 fails.append("a statement followed by its 依据 line must count as supported")
             lone = "【PIN3 侧向化】在 2019 年被证实显著增强生长素的不对称分布。"
-            if _apply_evidence_gate(lone, True, True).count(gate_mark) != 1:
+            if apply_evidence_gate(lone, True, True).count(gate_mark) != 1:
                 fails.append("an uncited high-risk paragraph must be marked exactly once")
+            # 6b-2) 编号在组内**哪个位置**不影响判定：引用一段原文、紧接着据此推论，
+            #      同属一组、同判"已落来源"。旧实现遇到编号就断组，把这种写法错标成
+            #      "（未核实）"（真实回答里"原文明确：…"[11] 之后一段推论被标过一次）。
+            cited_first = ('原文明确："phot1 在黑暗中不影响向地性" [1]。\n\n'
+                           '也就是说：phot1 突变体的向地性丧失另有蓝光机制。')
+            if gate_mark in apply_evidence_gate(cited_first, True, True):
+                fails.append("a citation must cover the following paragraphs of the same group")
+            if apply_evidence_gate(f"{lone}\n\n{lone}", True, True).count(gate_mark) != 1:
+                fails.append("an uncited run must still be marked exactly once")
+            # 6b-4) 判定与标记同源：成文后"打回去补来源"那一轮拿到的段落
+            #      （unsupported_paragraphs）必须与最终被标的段落完全一致，否则会出现
+            #      "被要求补来源的段落没标、标了的段落没被要求补"这种自相矛盾。
+            if unsupported_paragraphs(lone) != [lone]:
+                fails.append("unsupported_paragraphs must hand back the exact paragraph text")
+            for label, sample in (("pairs", pairs), ("lone", lone), ("cited-first", cited_first),
+                                  ("uncited run", f"{lone}\n\n{lone}")):
+                marked_count = apply_evidence_gate(sample, True, True).count(gate_mark)
+                if len(unsupported_paragraphs(sample)) != marked_count:
+                    fails.append(f"unsupported_paragraphs and the marker disagree on {label}")
+            # 6b-5) 打回指令只点名**手里真有**的工具：深度研究的子 Agent 没有
+            #      cite_references / request_fulltext（它触达不到用户），照主路径措辞
+            #      写会让它去调一个不存在的工具，这一轮就白烧了。
+            from src.core.agent.runtime import _evidence_round_notice
+            def as_tools(*names):
+                return [{"type": "function", "function": {"name": n}} for n in names]
+            main_notice = _evidence_round_notice(
+                [lone], as_tools("cite_references", "fetch_paper_fulltext", "request_fulltext"))
+            sub_notice = _evidence_round_notice([lone], as_tools("fetch_paper_fulltext"))
+            if "cite_references" not in main_notice or "request_fulltext" not in main_notice:
+                fails.append("the sourcing round must name the tools the main path really has")
+            if "cite_references" in sub_notice or "request_fulltext" in sub_notice:
+                fails.append("the sourcing round must not name tools the sub-agent lacks")
+            if "fetch_paper_fulltext" not in sub_notice:
+                fails.append("the sourcing round must still offer full-text retrieval")
             for label, sample in (("table", "| A | B |\n|---|---|\n| PIN3 | 2019 |"),
                                   ("code", "```python\nPIN3_2019 = 1\n```"),
                                   ("think", "<think>PIN3 2019 显著 [1]</think>")):
-                if gate_mark in _apply_evidence_gate(sample, True, True):
+                if gate_mark in apply_evidence_gate(sample, True, True):
                     fails.append(f"evidence gate must not mark {label} content")
             # 多段思考块（空行分段）同样不能标：状态必须跨块延续，否则思考正文
             # 会被当成普通段落，标记直接写进 Reasoning 面板。
             multi_block_think = ("<think>\n\nThe user wants PIN3 and 2019 data.\n\n"
                                  "Let me search.\n\n</think>\n\n"
                                  "PKS1 在 2019 年被证实参与竞争[1]。")
-            marked_think = _apply_evidence_gate(multi_block_think, True, True).split("</think>")[0]
+            marked_think = apply_evidence_gate(multi_block_think, True, True).split("</think>")[0]
             if gate_mark in marked_think:
                 fails.append("evidence gate wrote a marker inside the reasoning panel")
-
-            # 6b2) 引用校验的信息面：证据库里的 OA 正文必须参与判定。只看登记片段时，
-            #      模型引用正文结论（正文写 phot1/phot2，摘要只写家族名）会被判成
-            #      "引用未直接支持"——这正是提醒最常误报的一类。
-            import types as _types
-
-            from src.core.evidence import EvidenceStore
-            from src.task.chat_tasks import _verify_citation_support
-            probe_doi = "10.1038/probe-phot"
-            probe_abstract = ("Phototropins are blue-light receptors mediating chloroplast "
-                              "relocation and photomorphogenesis in Arabidopsis thaliana.")
-            probe_body = ("Here we show that phot1 mediates the low-fluence response, whereas at "
-                          "high fluence rates phot1 and phot2 act redundantly in chloroplast "
-                          "movement. ")
-            probe_store = EvidenceStore()
-            probe_store.add_source(probe_abstract, doi=probe_doi, title="Phototropin receptors")
-            probe_store.add_source(probe_body, doi=probe_doi, title="Phototropin receptors")
-            probe_item = _types.SimpleNamespace(index=2, snippet=probe_abstract, note="",
-                                                doi=probe_doi, url="",
-                                                title="Phototropin receptors")
-            support_mark = "（引用未直接支持）"
-            if support_mark in _verify_citation_support(
-                    "感知端：低强度蓝光由 phot1 感知；高光强下 phot1 与 phot2 冗余作用[2]。",
-                    [probe_item], probe_store):
-                fails.append("captured source text must take part in the citation support check")
-            if support_mark not in _verify_citation_support(
-                    "Cys39 是燕麦 PKS1 的关键位点[2]。", [probe_item], probe_store):
-                fails.append("citation support check must still flag a mismatched passage")
 
             # 6c) 工具调用步骤的"我先检索…"属于过程：收尾要折进过程面板，不能冒充正文。
             from src.core.agent.runtime import _fold_narration
@@ -1168,6 +1256,35 @@ class DeveloperDialog(BaseDialog):
                 fails.append("a reasoning-only turn must be detected as having no answer")
             if not _has_visible_answer("<think>t</think>\n\n真实结论。"):
                 fails.append("a real answer must be recognised as visible text")
+            # 6e) 取全文"同轮会合"通道：用户交回 PDF 时等待方必须立刻拿到路径并按此续跑
+            #     本轮；没人等待 / 用户拒绝 / 用户取消时不得给出假路径（否则模型会对着
+            #     不存在的全文编结论）。
+            import threading as _threading
+
+            from src.core import fulltext_bridge as _ftb
+
+            _cid = "selfcheck-fulltext"
+            _handle = _ftb.begin(_cid)
+            _threading.Thread(
+                target=lambda: _ftb.signal(_cid, True, "/tmp/selfcheck-paper.pdf"),
+                daemon=True).start()
+            _ok, _path, _note = _ftb.wait(_cid, _handle, timeout=5.0)
+            if not (_ok and _path == "/tmp/selfcheck-paper.pdf"):
+                fails.append(f"full-text rendezvous lost the PDF: ok={_ok} path={_path!r} note={_note!r}")
+            if _ftb.pending(_cid):
+                fails.append("a consumed full-text wait must be released")
+            if _ftb.signal(_cid, True, "/tmp/nobody-waits.pdf"):
+                fails.append("signalling a full-text result without a waiter must report failure")
+            _handle = _ftb.begin(_cid)
+            _threading.Thread(
+                target=lambda: _ftb.signal(_cid, False, "", "no file"),
+                daemon=True).start()
+            if _ftb.wait(_cid, _handle, timeout=5.0)[0]:
+                fails.append("a refused full-text request must not report a delivered PDF")
+            _handle = _ftb.begin(_cid)
+            if _ftb.wait(_cid, _handle, timeout=5.0, cancel_check=lambda: True)[2] != "cancelled by the user":
+                fails.append("cancelling while waiting for the PDF must return the user-cancel reason")
+            _ftb.release(_cid)
 
             # 7) 标题斜体：**默认正体**，只有原标题自带的斜体信号才保留。整条标题斜体
             #    既不符合学术惯例（斜体只落在物种名/基因名/刊名一类局部成分上），也让
@@ -2144,6 +2261,233 @@ class DeveloperDialog(BaseDialog):
         if not summary["suspect"] and not summary["warn"]:
             self._emit_dev_log("All retrieved sources were independently confirmed "
                                "(DOI resolved + title/year matched).", "OK")
+
+    # ------------------------------------------------------------------ #
+    #  Full text fetch (paywalled paper; needs a manual PDF download)
+    # ------------------------------------------------------------------ #
+    def _test_fulltext_fetch(self, clear: bool = True):
+        """付费墙"获取全文"端到端自检（要人工下载 PDF，故不进 Run All）。
+
+        链路与生产**完全同一条**：``AgentRuntime._handle_request_fulltext`` 调用注入的
+        等待方 -> 真取全文窗口 -> 经 ``fulltext_bridge`` 同轮会合 -> PDF 解析入库 ->
+        抽取子代理回简报。样例先取本机 RSS 缓存里的付费墙文章，本机没有订阅时回退到随
+        包分发的内置样例（见 :mod:`src.core.fulltext_samples`），因此分发后照样能测。
+
+        抽取子代理的模型调用在这里用桩替换：本按钮不消耗配额、不需要联网，只核对"送进
+        子代理的提示词与库里的原文是否正确"。真实模型跑完整链路请用 AI 测试里的
+        "AI: Full Text Fetch (paywall)"。
+        """
+        if clear:
+            self._clear()
+        self._log("--- Full Text Fetch (paywalled sample) ---", "INFO")
+
+        samples, origin = resolve_samples(limit=5)
+        if not samples:
+            self._log("No paywalled sample available: the RSS cache has none and the "
+                      "bundled sample file is unreadable.", "FAIL")
+            return
+        self._log(f"Sample source: {origin}", "INFO")
+        for cand in samples:
+            self._log(f"  candidate: {cand['title'] or '(untitled)'} "
+                      f"[{cand['doi'] or cand['url'] or 'no id'}]", "INFO")
+        sample = samples[0]
+        payload = {
+            "title": sample["title"],
+            "doi": sample["doi"],
+            "url": sample["url"],
+            "reason": "开发者自检：付费墙取全文链路",
+        }
+        self._log("A picker window opens next: download the PDF in your browser, then drop "
+                  "it on that window (or click 选择 PDF). Closing it aborts the check.",
+                  "INFO")
+
+        from src.core.agent.runtime import AgentRuntime
+
+        captured: dict = {}
+        self._dev_fulltext_last = (False, "", "")
+        runtime = self._dev_runtime(self._dev_fulltext_waiter, DEV_FULLTEXT_QUESTION)
+        runtime._llm_step = self._dev_llm_stub(captured)
+        started = time.time()
+        try:
+            result = json.loads(AgentRuntime._handle_request_fulltext(runtime, payload))
+        except Exception as e:
+            self._log(f"request_fulltext handler raised: {e}", "FAIL")
+            return
+        elapsed = time.time() - started
+
+        handed_ok, path, note = self._dev_fulltext_last
+        if result.get("status") != "success":
+            self._log(f"Handler returned '{result.get('status')}': "
+                      f"{str(result.get('message') or '')[:200]}", "FAIL")
+            self._log(f"The chain stopped before the reading sub-agent "
+                      f"({note or 'no PDF handed over'}).", "WARN")
+            return
+        self._log(f"PDF handed over: {path}", "INFO")
+
+        checks = [("picker handed over the PDF",
+                   bool(handed_ok and path and os.path.isfile(path)))]
+        checks += self._fulltext_chain_checks(runtime, captured, result, path, payload)
+        checks += self._fulltext_contract_checks(payload)
+        passed = sum(1 for _name, good in checks if good)
+        for name, good in checks:
+            self._log(f"{'PASS' if good else 'FAIL'} · {name}", "OK" if good else "FAIL")
+        self._log(f"--- Full Text Fetch: {passed}/{len(checks)} checks passed "
+                  f"({elapsed:.1f}s incl. the manual download) ---",
+                  "OK" if passed == len(checks) else "FAIL")
+
+    def _dev_runtime(self, waiter, query: str):
+        """构造一个只跑取全文链路的 ``AgentRuntime``（不注入模型 / 技能管理器）。
+
+        ``_llm_step`` 由调用方按需替换：自检用桩，避免消耗配额、也不需要联网。
+        """
+        from src.core.agent.runtime import AgentRuntime
+
+        runtime = AgentRuntime(main_llm=None, skill_manager=None, mcp_manager=None,
+                               log_fn=self._runtime_log)
+        runtime.fulltext_waiter = waiter
+        runtime.current_query = query
+        return runtime
+
+    @staticmethod
+    def _dev_llm_stub(captured: dict):
+        """抽取子代理的模型调用桩：记下送进去的提示词，回一段可辨识的简报。"""
+        def _step(messages, tools=None, emit_token=None, is_cancelled=None):
+            captured["messages"] = list(messages or [])
+            return {"content": DEV_FULLTEXT_STUB_BRIEF}
+
+        return _step
+
+    def _runtime_log(self, level: str, msg: str):
+        """把运行时的链路日志转到本控制台（取全文的关键节点都经 ``log_fn`` 出来）。"""
+        noisy = str(level).upper() in ("WARNING", "ERROR")
+        self._log(f"[runtime] {msg}", "WARN" if noisy else "INFO")
+
+    def _dev_fulltext_waiter(self, payload: dict):
+        """自检用的等待方：真窗口 + 真会合，与生产 ``ChatTask._wait_for_fulltext`` 等价。
+
+        进程里只有一条 Qt 主线程，所以这里就在 UI 线程 ``exec()``：嵌套事件循环照常处理
+        点击与拖拽，用户交回 PDF 的信号唤醒 ``fulltext_bridge`` 后 ``wait`` 立刻返回。
+        """
+        from src.core import fulltext_bridge
+        from src.ui.components.fulltext_request import FullTextRequestDialog
+
+        conversation_id = f"dev-fulltext-{int(time.time())}"
+        handle = fulltext_bridge.begin(conversation_id)
+        if handle is None:
+            self._log("The rendezvous channel refused to open a wait point.", "FAIL")
+            return False, "", "no wait handle"
+
+        self._log("Picker opened — download the PDF in your browser, then drop it on the "
+                  "window (or click 选择 PDF / use the inbox folder).", "INFO")
+        dialog = FullTextRequestDialog(self, data=payload, conversation_id=conversation_id)
+        dialog.exec()
+        # 交付 / 取消 / 关窗都会通知等待方，因此这里的等待几乎是即时的。
+        result = fulltext_bridge.wait(conversation_id, handle,
+                                      timeout=DEV_FULLTEXT_WAIT_TIMEOUT)
+        self._dev_fulltext_last = result
+        if result[0]:
+            self._log(f"Handover acknowledged: {result[1]}", "OK")
+        else:
+            self._log(f"No handover: {result[2] or 'no file'}", "WARN")
+        return result
+
+    def _fulltext_chain_checks(self, runtime, captured: dict, result: dict,
+                               path: str, payload: dict):
+        """取全文成功后的断言：解析 / 入库 / 页码 / 与抽取子代理之间的口径。"""
+        from src.core.pdf_text import extract_pdf
+
+        checks = []
+        brief = str(result.get("content") or "").strip()
+        checks.append(("the reading sub-agent's brief reached the main model",
+                       brief == DEV_FULLTEXT_STUB_BRIEF))
+
+        pages_expected, _meta = extract_pdf(path)
+        result_pages = int(result.get("pages") or 0)
+        checks.append(("page blocks parsed out of the delivered PDF", result_pages >= 1))
+        checks.append((f"page count matches the PDF ({result_pages} block(s))",
+                       result_pages == len(pages_expected)))
+
+        if payload.get("doi"):
+            checks.append((f"requested DOI echoed back ({payload['doi']})",
+                           str(result.get("doi") or "") == payload["doi"]))
+        else:
+            checks.append(("no DOI invented for a sample that has none",
+                           not str(result.get("doi") or "").strip()))
+
+        store = runtime.evidence_store
+        checks.append(("body kept in the evidence store",
+                       bool(store.source_for(doi=payload.get("doi", ""),
+                                             url=payload.get("url", ""),
+                                             title=payload.get("title", "")))))
+        quote_ok, quote_note = self._fulltext_verbatim_probe(store, path, payload)
+        checks.append((f"verbatim quote from the PDF verifies ({quote_note})", quote_ok))
+
+        messages = captured.get("messages") or []
+        checks.append((f"reading sub-agent called once ({len(messages)} message(s))",
+                       len(messages) == 2))
+        if len(messages) != 2:
+            return checks
+        system = str((messages[0] or {}).get("content") or "")
+        block = str((messages[1] or {}).get("content") or "")
+        checks.append(("question carried into the reading sub-agent",
+                       DEV_FULLTEXT_QUESTION[:32] in block))
+        checks.append(("page tags kept in the analyst block",
+                       bool(re.search(r"\[p\d+\]", block))))
+        checks.append((f"page budget reported ({len(pages_expected)} page(s) total)",
+                       "Pages sent:" in block and f"of {len(pages_expected)}" in block))
+        used = re.search(r"\((\d+) chars", block)
+        checks.append(("page selection stayed inside the analyst budget",
+                       bool(used) and int(used.group(1)) <= runtime._FULLTEXT_ANALYST_CHARS))
+        checks.append(("verbatim-quote rule kept in the system prompt", "VERBATIM" in system))
+        checks.append(("NOT_FOUND escape kept in the system prompt", "NOT_FOUND" in system))
+        return checks
+
+    @staticmethod
+    def _fulltext_verbatim_probe(store, path: str, payload: dict):
+        """从交付的 PDF 里取一句原话核对证据库能否逐字命中（引用链路的判据）。
+
+        有意重新解析一次文件：这样"原文"来自文件本身，而不是入库时写进去的那一份，
+        校验才独立可信。返回 ``(是否命中, 说明)``。
+        """
+        from src.core.pdf_text import extract_pdf
+
+        pages, _meta = extract_pdf(path)
+        body = "\n".join(text for _page, text in pages)
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if 40 <= len(s) <= 400]
+        snippet = sentences[0] if sentences else body[:200].strip()
+        if not snippet:
+            return False, "the PDF yielded no text"
+        hit = store.verify_snippet(snippet, doi=payload.get("doi", ""),
+                                   url=payload.get("url", ""),
+                                   title=payload.get("title", ""))
+        detail = f"{len(snippet)}-char quote from the file"
+        return bool(hit), detail if hit else f"{detail} was NOT in the store"
+
+    def _fulltext_contract_checks(self, payload: dict):
+        """没界面 / 用户不给 / 没给标识：必须如实回报，不能让模型对着空文件编结论。"""
+        from src.core.agent.runtime import AgentRuntime
+
+        checks = []
+        result = json.loads(AgentRuntime._handle_request_fulltext(
+            self._dev_runtime(None, DEV_FULLTEXT_QUESTION), payload))
+        checks.append(("without a UI the tool reports 'unavailable'",
+                       result.get("status") == "unavailable"))
+        checks.append(("without a UI the model is told the user cannot hand over a file",
+                       "cannot hand over" in str(result.get("message") or "").lower()))
+
+        refused = self._dev_runtime(lambda _payload: (False, "", "dev: user refused"),
+                                    DEV_FULLTEXT_QUESTION)
+        result = json.loads(AgentRuntime._handle_request_fulltext(refused, payload))
+        checks.append(("a refusal reports 'unavailable' and forbids asking again",
+                       result.get("status") == "unavailable"
+                       and "do not ask again" in str(result.get("message") or "").lower()))
+
+        result = json.loads(AgentRuntime._handle_request_fulltext(
+            self._dev_runtime(lambda _payload: (True, "/nonexistent-dev.pdf", ""),
+                              DEV_FULLTEXT_QUESTION), {}))
+        checks.append(("a request with no identifier at all is rejected as an error",
+                       result.get("status") == "error"))
+        return checks
 
     def _run_all(self):
         self._clear()

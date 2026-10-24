@@ -111,6 +111,34 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "all core packages available": "核心包齐全",
         "R packages missing:": "缺少 R 包：",
 
+        # ================= 设置页：获取全文 =================
+        "Full-Text Retrieval": "获取全文",
+        "The paywalled full-text picker watches the directories below. Drop the "
+        "downloaded PDF into any of them and it is claimed automatically as long "
+        "as the file name matches the requested paper. Double-click a watched "
+        "directory to open it in the file manager.":
+            "付费墙取全文窗口会监听下面的目录：把下载好的 PDF 放进任一目录即自动认领，"
+            "前提是文件名能匹配所请求的论文。双击任一目录即可在文件管理器中打开。",
+        "Built-in inbox (always watched):": "内置收件目录（始终监听）：",
+        "Open this directory in the file manager.": "在文件管理器中打开该目录。",
+        "This directory does not exist (yet).": "该目录还不存在。",
+        "Could not open the directory with the system file manager.":
+            "无法用系统文件管理器打开该目录。",
+        "Extra watch directories": "额外监听目录",
+        "Add Directory...": "添加目录…",
+        "Remove Selected": "移除所选",
+        "Select a directory to watch": "选择要监听的目录",
+        "(missing)": "（不存在）",
+        "This directory is already in the list.": "该目录已在列表中。",
+        "Select the directories to remove first.": "请先选中要移除的目录。",
+        "Up to {n} extra directories can be watched.": "最多只能额外监听 {n} 个目录。",
+        "Each watched directory is listed on a timer while the picker is open, so "
+        "more directories cost more disk scanning; the picker backs off "
+        "automatically when a directory is large or quiet. Missing directories are "
+        "skipped.":
+            "窗口打开期间会定时列出每个监听目录，目录越多磁盘扫描开销越大；目录很大或"
+            "长期没有新文件时窗口会自动降频。不存在的目录会被跳过。",
+
         # ================= 设置页：网络代理 =================
         "Network Proxy": "网络代理",
         "Disable Proxy (Direct)": "禁用代理（直连）",
@@ -623,7 +651,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Deep research mode.\nOff (default): single-agent answer, faster.\nOn: decompose the query into parallel sub-investigations, then synthesize a section-by-section answer (broader coverage, higher cost)":
             "深度研究模式。\n关闭（默认）：单 Agent 作答，更快。\n开启：把问题分解为并行子调查，再分节汇总（覆盖更广，成本更高）",
         "Tools Filter": "工具过滤",
-        " (Tip: Selecting fewer tools improves accuracy)": "（提示：工具选得越少，准确率越高）",
+        " (Tip: tick only what you need — fewer wrong tool calls)":
+            "（提示：按需勾选，越精简越不易选错）",
         "Tools Filter: Fetching...": "工具过滤：获取中…",
         "Tools Filter: None": "工具过滤：无",
         "🏷️ Tools Filter: None": "🏷️ 工具过滤：无",

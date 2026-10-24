@@ -14,8 +14,16 @@
 #: MCPManager / SkillManager 管线不受影响，已有订阅仍会被加载。
 EXTERNAL_TOOLS_SETTINGS_SECTION_ENABLED = False
 
-#: 聊天输入区的"External Tools"开关与"Tools Filter"过滤器。
+#: 聊天输入区的"External Tools"开关。
 #:
-#: 关闭时开关不进布局且强制置 False，避免"入口隐藏但功能仍在后台
-#: 生效"的不可见状态。
+#: 关闭时该开关不进布局且强制置 False，避免"入口隐藏但功能仍在后台
+#: 生效"的不可见状态。它只管**外部工具**（MCP 服务与自定义脚本），
+#: 不决定工具过滤入口的存亡（见下一个开关）。
 EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED = False
+
+#: 聊天输入区的工具过滤多选下拉（勾选本轮要用的内置学术工具）。
+#:
+#: 与 :data:`EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED` 解耦：内置学术工具是零延迟的
+#: 原生能力，常年可用，筛选入口不该跟着外部工具一起消失。外部工具关闭时，
+#: 菜单只列 ``[ACADEMIC]`` 标签——与后端实际加载的范围保持一致。
+TOOLS_FILTER_CHAT_ENABLED = True

@@ -270,6 +270,28 @@ class ChatResponseFlowMixin:
         elif isinstance(payload, dict) and payload.get("event") == "await_user":
             # deep-plan 等待确认：同样进入等待状态锁定通用发送。
             self._awaiting_user_input = True
+        elif isinstance(payload, dict) and payload.get("event") == "fulltext_request":
+            # 取全文：任务线程正挂起等这份 PDF（本轮尚未结束），弹窗让用户下载并交回。
+            self._open_fulltext_dialog(dict(payload.get("data") or {}))
+
+    def _open_fulltext_dialog(self, data: dict):
+        """打开取全文窗口；用户交回 PDF 即唤醒挂起的本轮生成。
+
+        ``exec()`` 进入嵌套事件循环：主线程仍能响应界面（用户要切到浏览器下载），而任务
+        线程已经等在 :mod:`src.core.fulltext_bridge` 上；用户交回文件后本轮从原处继续，
+        已检索到的来源、计划与引用注册表都不丢。
+        """
+        conversation_id = str(self._tab_id() or "")
+        if not conversation_id:
+            logger.warning("fulltext_request event carries no conversation id; picker skipped.")
+            return
+        from src.ui.components.fulltext_request import FullTextRequestDialog
+
+        logger.info("Opening the full-text picker (conversation=%s).", conversation_id)
+        # 本类（ChatConversation）是 QObject（BaseTool），不能当 QDialog 的父窗口；
+        # 与其它对话内弹窗一致，父窗口取对话页面控件（事件到达时界面早已建好）。
+        FullTextRequestDialog(getattr(self, "widget", None), data=data,
+                              conversation_id=conversation_id).exec()
 
     def on_chat_finished(self, is_cancelled=False):
         if hasattr(self, '_render_timer'):

@@ -11,11 +11,12 @@ from PySide6.QtCore import Qt, Signal, QTimer, QSize
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QPlainTextEdit, QPushButton, QLabel, QFrame,
-                               QMenu, QCheckBox, QToolButton, QWidgetAction,
+                               QMenu, QCheckBox, QWidgetAction,
                                QSizePolicy, QApplication)
 
 from src.core.config_manager import ConfigManager
-from src.core.feature_flags import EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED
+from src.core.feature_flags import (EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED,
+                                    TOOLS_FILTER_CHAT_ENABLED)
 from src.core.file_types import is_attachable
 from src.core.i18n import tr
 from src.core.mcp_manager import MCPManager
@@ -398,7 +399,8 @@ class ChatInputContainer(QFrame):
         # 问题升级）。控件保留只为兼容旧代码里的 hasattr 读取。
         self.chk_deep_mode.setVisible(False)
 
-        self.btn_mcp_tags = QToolButton()
+        # 4. 工具过滤：多选菜单，决定本轮加载哪些内置学术工具
+        #    （外部工具启用时还会列出外部技能与 MCP 服务）。
         self.btn_mcp_tags = QPushButton(tr("Tools Filter"), self)
         self.btn_mcp_tags.setIcon(ThemeManager().icon("filter", "text_muted"))
         self.btn_mcp_tags.setCursor(Qt.PointingHandCursor)
@@ -406,7 +408,7 @@ class ChatInputContainer(QFrame):
         self.menu_mcp_tags = QMenu(self)
         self.btn_mcp_tags.clicked.connect(self._show_filter_menu)
 
-        self.lbl_tool_hint = QLabel(tr(" (Tip: Selecting fewer tools improves accuracy)"))
+        self.lbl_tool_hint = QLabel(tr(" (Tip: tick only what you need — fewer wrong tool calls)"))
 
         self.tag_actions = {}
         self.user_deselected_tags = set()
@@ -415,14 +417,15 @@ class ChatInputContainer(QFrame):
         self.mcp_toolbar.addWidget(self.chk_academic_agent)
         if EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED:
             self.mcp_toolbar.addWidget(self.chk_external_tools)
-        self.mcp_toolbar.addWidget(self.chk_deep_mode)
-        if EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED:
-            self.mcp_toolbar.addWidget(self.btn_mcp_tags)
-            self.mcp_toolbar.addWidget(self.lbl_tool_hint)
         else:
             # 控件仍需存在（send_flow / response_flow / _apply_theme 会读取），
             # 但不进布局且显式隐藏——带父控件者否则会悬浮在父窗口角落
             self.chk_external_tools.hide()
+        self.mcp_toolbar.addWidget(self.chk_deep_mode)
+        if TOOLS_FILTER_CHAT_ENABLED:
+            self.mcp_toolbar.addWidget(self.btn_mcp_tags)
+            self.mcp_toolbar.addWidget(self.lbl_tool_hint)
+        else:
             self.btn_mcp_tags.hide()
             self.lbl_tool_hint.hide()
         self.mcp_toolbar.addStretch()
@@ -483,7 +486,7 @@ class ChatInputContainer(QFrame):
 
         ThemeManager().theme_changed.connect(self._apply_theme)
         self._apply_theme()
-        if EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED:
+        if TOOLS_FILTER_CHAT_ENABLED:
             QTimer.singleShot(100, self.refresh_mcp)
             if self.chk_external_tools.isChecked():
                 self.refresh_mcp()
@@ -671,7 +674,7 @@ class ChatInputContainer(QFrame):
         self._update_tag_button_text()
 
     def _on_external_tools_toggled(self, checked):
-            self.refresh_mcp()
+        self.refresh_mcp()
 
     def _show_filter_menu(self):
         self.btn_mcp_tags.setText(tr("Tools Filter: Fetching..."))
@@ -686,13 +689,18 @@ class ChatInputContainer(QFrame):
         self.menu_mcp_tags.popup(pos)
 
     def get_all_available_tags(self) -> list:
-        """Fetch and aggregate tags from both MCP servers and internal/external SkillManagers."""
+        """本轮可勾选的工具标签：内置学术工具，外加（仅当外部工具启用时）外部技能与 MCP 服务。
+
+        外部工具关闭时不列 ``[External]``：发送时那一侧根本不会加载它们
+        （见 :mod:`src.tools.chat_mixins.send_flow` 对 ``use_external_tools`` 的判定），
+        列出来只会让用户勾了却没反应。
+        """
         tags = set()
         try:
             skill_mgr = SkillManager.get_instance()
             import re
 
-            # 1. Fetch Academic Skills with [ACADEMIC] prefix
+            # 1. 内置学术工具：描述里的 [Tags: ...] 即它的分组标签
             for schema in skill_mgr.academic_schemas.values():
                 desc = schema.get("function", {}).get("description", "")
                 match = re.search(r"\[Tags:\s*(.*?)\]", desc)
@@ -704,15 +712,16 @@ class ChatInputContainer(QFrame):
                             continue
                         tags.add(f"[ACADEMIC] {t.strip().title()}")
 
-            # 2. Fetch External Skills with [External] prefix
-            for schema in skill_mgr.external_schemas.values():
-                name = schema.get("function", {}).get("name", "Unknown")
-                tags.add(f"[External] {name}")
+            if EXTERNAL_TOOLS_CHAT_TOGGLE_ENABLED:
+                # 2. 外部导入的技能：按函数名勾选
+                for schema in skill_mgr.external_schemas.values():
+                    name = schema.get("function", {}).get("name", "Unknown")
+                    tags.add(f"[External] {name}")
 
-            # 3. Fetch external MCP Server tags with [External] prefix
-            mcp_mgr = MCPManager.get_instance()
-            for server in mcp_mgr.get_available_mcp():
-                tags.add(f"[External] {server}")
+                # 3. 外部 MCP 服务：按服务名勾选
+                mcp_mgr = MCPManager.get_instance()
+                for server in mcp_mgr.get_available_mcp():
+                    tags.add(f"[External] {server}")
 
         except Exception as e:
             self.logger.error(f"Failed to fetch combined tags from SkillManager and MCPManager: {e}", exc_info=True)

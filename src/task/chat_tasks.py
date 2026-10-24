@@ -18,7 +18,8 @@ from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.references import (CITE_LINK_RE, FOOTER_RULE_HTML,
                                  PROVENANCE_HEADER_HTML, ReferenceItem,
                                  ReferenceRegistry, citation_href)
-from src.core.evidence import EvidenceStore, is_usable_source_text, normalize_for_match
+from src.core.evidence import EvidenceStore, is_usable_source_text
+from src.core.evidence_gate import apply_evidence_gate, gate_finder
 from src.core.prompt_rules import (CITATION_TOKEN_RULE,
                                    LANGUAGE_AND_PUNCTUATION_RULE)
 from src.core import plot_styles
@@ -44,18 +45,6 @@ _DEEP_PLAN_SKIPPED_TAG = "[DEEP_PLAN_SKIPPED]"
 #: 自动文献检索（否则会拿"已获取全文：X"这种界面文案去搜文献）。
 
 
-_EVIDENCE_CITE_RE = re.compile(r"\[\d+(?:\s*[,–\-]\s*\d+)*\]")
-_EVIDENCE_HIGH_RISK_RE = re.compile(
-    r"(?:\b(?:19|20)\d{2}\b"
-    r"|\b[A-Z]{2,}[0-9]{1,4}\b"
-    r"|\b\d+(?:\.\d+)?\s*(?:%|mg|g|mM|μM|nM|nm|kDa|bp|kb)\b"
-    r"|研究表明|研究发现|结果显示|已被证实|显著|已知"
-    r"|studies?\s+(?:show|found|reported|demonstrated)"
-    r"|was\s+(?:shown|found|reported|demonstrated))",
-    re.IGNORECASE,
-)
-
-
 _RESEARCH_CONTEXT_HINTS = (
     "研究", "文献", "论文", "综述", "机制", "基因", "蛋白", "通路", "表达",
     "突变", "表型", "信号", "文献", "reference", "paper", "study", "literature",
@@ -67,259 +56,7 @@ def _looks_research_query(query: str) -> bool:
     low = str(query or "").lower()
     return any(hint in low for hint in _RESEARCH_CONTEXT_HINTS)
 
-_NON_GENE_ACRONYMS = {
-    "DNA", "RNA", "ATP", "GTP", "PCR", "ROS", "ABA", "IAA", "GA", "JA",
-    "SA", "ET", "WT", "SD", "SE", "CI", "ANOVA", "UV", "IR", "MS", "NMR",
-    "PBS", "BSA", "EDTA", "SDS", "PAGE", "HPLC", "LC", "GC", "FPKM", "TPM",
-}
-_CITE_NUMBER_RE = re.compile(r"\[(\d+(?:\s*[,–\-]\s*\d+)*)\]")
-_SIGNAL_TOKEN_RE = re.compile(
-    r"\b[A-Za-z]{2,}\d+\b"
-    r"|\b[A-Z]{2,}\b"
-    r"|\b(?:19|20)\d{2}\b"
-    r"|\b\d+(?:\.\d+)?\s*(?:%|mg|g|mM|μM|nM|nm|kDa|bp|kb)\b")
 
-_GENE_ALIAS_RE = re.compile(r"([a-z]{3,})(\d+)")
-
-
-def _citation_corpus(item, evidence_store) -> str:
-    """一条引用可供校验的**全部**原文（信息面从大到小）。
-
-    只看注册片段会误伤：模型引用的是正文里的结论时，登记的片段往往只是摘要中的
-    一句话，句子里的基因名逐字找不到就被判成"引用未直接支持"。证据库持有检索采集
-    到的 OA 正文与摘要，是信息面最大的那一份原文。
-    """
-    parts = [str(getattr(item, "snippet", "") or ""), str(getattr(item, "note", "") or ""),
-             str(getattr(item, "title", "") or "")]
-    if evidence_store is not None:
-        held = evidence_store.source_for(
-            doi=str(getattr(item, "doi", "") or ""),
-            url=str(getattr(item, "url", "") or ""),
-            title=str(getattr(item, "title", "") or ""))
-        if held:
-            parts.append(held)
-    return " ".join(part for part in parts if part.strip())
-
-
-def _signal_hit(sig: str, corpus: str) -> bool:
-    """高辨识度 token 是否落在原文里：先逐字，再容忍"缩写 vs 全称 + 编号"。
-
-    同一基因在摘要里写 ``phototropin 1``、在正文里写 ``phot1`` 是常态，逐字匹配会把
-    正确引用判成"未直接支持"。放宽只到"词干 + 紧随其后的同一编号"一级
-    （``phot1`` ≈ ``phototropin1``），``pif1`` 与 ``pif3`` 这类同词干不同编号仍然
-    判得出来。``corpus`` 必须是 :func:`~src.core.evidence.normalize_for_match` 的结果。
-    """
-    token = normalize_for_match(sig)
-    if not token or not corpus:
-        return False
-    if token in corpus:
-        return True
-    alias = _GENE_ALIAS_RE.fullmatch(token)
-    if not alias:
-        return False
-    stem, digits = alias.group(1), alias.group(2)
-    return re.search(rf"{re.escape(stem)}[a-z]{{0,12}}{digits}(?![0-9])", corpus) is not None
-
-
-def _verify_citation_support(text: str, ordered, evidence_store=None) -> str:
-    """检查句子里的基因名/年份/数值是否真的出现在对应引用的原文里。
-
-    这不是完整的语义蕴含，但能抓住最常见的一类错误：引用了 A 文献，句子却
-    在说 B 文献里的基因/数字（典型如 "Cys39 是燕麦编号"）。判定用的原文是该引用
-    手上全部可查文本（证据库正文 > 摘要 > 注册片段 > 引用理由），只在哪一份里都
-    找不到高辨识度 token 时才标记为“引用未直接支持”。
-    """
-    items = {getattr(it, "index", None): it for it in (ordered or [])}
-    if not items:
-        return text
-    out = []
-    flagged = 0
-    in_hidden = False
-    in_code = False
-    corpora_by_index: dict = {}   # 编号 -> 归一化原文：同一编号在整篇里只取一次
-    for line in str(text or "").splitlines():
-        stripped = line.strip()
-        # 思考 / 工具过程块与代码块不参与：它们是过程与代码，不是待校验的论断。
-        opens = stripped.count("<think>") + stripped.count("<mcp_process>")
-        closes = stripped.count("</think>") + stripped.count("</mcp_process>")
-        if in_hidden:
-            if closes >= opens:
-                in_hidden = False
-            out.append(line)
-            continue
-        if opens:
-            if opens > closes:
-                in_hidden = True
-            out.append(line)
-            continue
-        if stripped.startswith("```"):
-            in_code = not in_code
-            out.append(line)
-            continue
-        if in_code:
-            out.append(line)
-            continue
-        nums = []
-        for group in _CITE_NUMBER_RE.findall(line):
-            for part in re.split(r"[,–\-]", group):
-                part = part.strip()
-                if part.isdigit():
-                    nums.append(int(part))
-        signals = {s for s in _SIGNAL_TOKEN_RE.findall(line)
-                   if not re.fullmatch(r"(?:19|20)\d{2}", s)}
-        corpora = []
-        for n in nums:
-            item = items.get(n)
-            if item is None:
-                continue
-            corpus = corpora_by_index.get(n)
-            if corpus is None:
-                corpus = normalize_for_match(_citation_corpus(item, evidence_store))
-                corpora_by_index[n] = corpus
-            if corpus:
-                corpora.append(corpus)
-        if nums and signals and corpora:
-            genes = {s for s in signals
-                     if re.fullmatch(r"(?:[A-Za-z]{2,}\d+|[A-Z]{2,})", s)
-                     and s.upper() not in _NON_GENE_ACRONYMS}
-            # 摘要往往只提一个基因/一个年份，不能要求句子里所有 token 都出现。
-            # 只要引用的任一原文里出现了任一关键 token，就不标“未直接支持”；
-            # 全都没出现才提示——宁可少标，也不要把正常学术句误伤成红色。
-            supported = any(_signal_hit(sig, corpus)
-                            for sig in (genes or signals) for corpus in corpora)
-            if not supported:
-                out.append(line.rstrip() + "（引用未直接支持）")
-                flagged += 1
-                continue
-        out.append(line)
-    body = "\n".join(out)
-    if flagged:
-        body += ("\n\n> 引用校验 / Citation check: 标有“引用未直接支持”的句子中，"
-                 "关键基因名/年份/数值未出现在对应来源原文里。")
-    return body
-
-#: 证据行：模型在这些行里给出某条结论的出处（"依据：…[3]"、"Source: …"）。
-#: 它本身不是待判定的论断，而是**前面那组陈述**的来源说明。
-_EVIDENCE_TAIL_RE = re.compile(
-    r"^[\s\-*•]*(?:依据|证据|来源|出处|对应文献|参考文献"
-    r"|evidence|sources?|refs?|references?)\s*[:：]",
-    re.IGNORECASE,
-)
-
-
-def _split_blocks(body: str):
-    """按空行把正文切成 ``[(kind, text), …]``，``kind`` 为 ``"block"``/``"sep"``。
-
-    判定粒度必须是**段落**而不是行：学术回答常写成"陈述一行、依据一行"，
-    按行判会把每条陈述都判成"无来源"——那正是满屏"（未核实）"的来源。
-    """
-    parts = re.split(r"(\n[ \t]*\n)", body)
-    return [("sep" if index % 2 else "block", part) for index, part in enumerate(parts)]
-
-def _apply_evidence_gate(text: str, has_sources: bool,
-                         research_context: bool = True) -> str:
-    """给没有来源的高风险段落加“未核实”，不删原文。
-
-    ``research_context`` 为 False 时直接放行：代码/普通问答不应该因为出现
-    年份或数字就被扣上“未核实”。
-
-    - 有证据库来源：只标出含数字/年份/基因名/“研究表明”等高风险信号、
-      却没有任何 ``[n]`` 引用的**陈述组**；
-    - 没有来源：整段回答末尾加一条明确的证据状态说明。
-
-    判定以"陈述组"为单位：连续的陈述段落 + 紧随其后的"依据：…"行算一组，组内
-    任意一处有编号即视为已落来源；整组都没有编号时，只在**组内最后一段**标一次。
-    按行逐句标会把"陈述一行、依据一行"的写法整篇标红（实测一条 14 段的回答被
-    标了 14 处），提醒反而失效。
-
-    这是**展示层门禁**，不替换模型内容；目的是让用户一眼看到哪些段落没有
-    落到具体文献，而不是把整段答案删掉或强行改写。
-    """
-    body = str(text or "")
-    if not body.strip() or not research_context:
-        return body
-
-    flagged = 0
-    if has_sources:
-        segments = _split_blocks(body)
-        in_code = False
-        in_hidden = False
-        pending: List[int] = []          # 尚未落来源的陈述块（当前组）
-        groups: List[Tuple[List[int], bool]] = []
-
-        for index, (kind, chunk) in enumerate(segments):
-            if kind == "sep":
-                continue
-            stripped = chunk.strip()
-            if not stripped:
-                continue
-            # 代码块整段跳过；思考 / 工具过程块同样不参与判定。三者都要**跨块**
-            # 维护状态：块与块之间只隔一个空行，标签只出现在块首/块尾，若只看
-            # 当前块，思考正文会被当成普通段落——之前正是这样把"（未核实）"标进了
-            # Reasoning 面板里。
-            if "```" in stripped:
-                if stripped.count("```") % 2:
-                    in_code = not in_code
-                continue
-            if in_code:
-                continue
-            opens = stripped.count("<think>") + stripped.count("<mcp_process>")
-            closes = stripped.count("</think>") + stripped.count("</mcp_process>")
-            if in_hidden:
-                if closes >= opens:
-                    in_hidden = False
-                continue
-            if opens:
-                if opens > closes:
-                    in_hidden = True
-                continue
-
-            lines = [line for line in stripped.splitlines() if line.strip()]
-            first = lines[0].strip()
-            cited = bool(_EVIDENCE_CITE_RE.search(stripped))
-            if _EVIDENCE_TAIL_RE.match(first):
-                # 依据行：给前面那组陈述背书；有编号即整组已落来源。
-                groups.append((pending, cited))
-                pending = []
-                continue
-            if first.startswith(("#", "|", ">", "<", "!")) or first.startswith("---"):
-                groups.append((pending, False))
-                pending = []
-                continue
-            if cited:
-                groups.append((pending + [index], True))
-                pending = []
-            else:
-                pending.append(index)
-        if pending:
-            groups.append((pending, False))
-
-        for block_ids, supported in groups:
-            if supported or not block_ids:
-                continue
-            group_text = " ".join(segments[i][1].strip() for i in block_ids)
-            if not _EVIDENCE_HIGH_RISK_RE.search(group_text):
-                continue
-            target = block_ids[-1]
-            kind, chunk = segments[target]
-            if "未核实" in chunk or "引用未直接支持" in chunk:
-                continue
-            marker = ("（未核实）" if any("\u4e00" <= ch <= "\u9fff" for ch in chunk)
-                      else " [unverified]")
-            segments[target] = (kind, chunk.rstrip() + marker)
-            flagged += 1
-        body = "".join(chunk for _kind, chunk in segments)
-        if flagged:
-            body += ("\n\n> 证据状态 / Evidence: 标有未核实的段落未附具体文献来源 / "
-                     "paragraphs marked unverified have no attached source.")
-    else:
-        if len(body.strip()) >= 80 and _EVIDENCE_HIGH_RISK_RE.search(body):
-            body += ("\n\n> 证据状态 / Evidence: 本轮没有检索到可用文献 / "
-                     "no usable literature evidence was retrieved this turn; "
-                     "以上内容未核实 / the response above is unverified.")
-    if flagged:
-        logger.info("Evidence gate flagged %d uncited paragraph group(s).", flagged)
-    return body
 
 def _source_dedupe_key(meta):
     """引用来源归一键：URL/DOI 优先，其次 标题|年份，用于引用去重合并。
@@ -1336,6 +1073,9 @@ class ChatGenerationTask(BackgroundTask):
         combined_tools.append(dict(_ALWAYS_TOOLS)["suggest_follow_ups"])
         # 参考文献改为结构化产出：模型只提交条目，编号与文献列表由程序生成
         combined_tools.append(dict(_ALWAYS_TOOLS)["cite_references"])
+        # 付费墙全文：只有摘要、而结论依赖正文时，向用户要一次 PDF（同轮会合等待，
+        # 拿到后由抽取子代理给要点），比让模型凭摘要硬答可靠。
+        combined_tools.append(dict(_ALWAYS_TOOLS)["request_fulltext"])
 
         # R 可视化属于**默认能力**：不再作为可勾选的独立技能，也不受技能标签筛选
         # 影响——始终把 plot_chart 交给模型，由它自行判断本次是否需要画图。
@@ -1414,14 +1154,33 @@ class ChatGenerationTask(BackgroundTask):
             "work around the ambiguity.\n"
             "Also ask before any costly or hard-to-reverse operation. After calling ask_user the runtime pauses "
             "the run automatically; the user's answer arrives as the next user message.\n"
-            "### FULL TEXT PREFERENCE (fetch_paper_fulltext TOOL):\n"
-            "An abstract is a fallback, not the goal. Search results already carry 'full_text' (+ "
-            "'full_text_source') for the most citable hits when an open-access body exists — USE that body text "
-            "whenever the claim depends on methods, sample sizes, statistics, thresholds, figure-level wording "
-            "or verbatim statements. For any other paper you intend to rely on, call fetch_paper_fulltext with "
-            "its DOI first, and copy the supporting snippet from the body verbatim. If no open-access copy "
-            "exists the tool says so explicitly: fall back to the abstract and state plainly that only the "
-            "abstract was available. NEVER invent body content.\n\n"
+            "### FULL TEXT (fetch_paper_fulltext TOOL — CONDITIONAL MUST):\n"
+            "You MUST call fetch_paper_fulltext with the paper's DOI BEFORE writing any claim that depends "
+            "on method steps, sample sizes, statistics, thresholds, figure-level details or verbatim "
+            "wording — an abstract cannot provide those, so an abstract-only answer for such a claim counts "
+            "as a failed retrieval. Search results already carry 'full_text' (+ 'full_text_source') for the "
+            "most citable hits when an open-access body exists: use that body text directly for those papers "
+            "and skip the extra call. For papers whose claims need only their headline finding, the abstract "
+            "is acceptable. If the tool returns no body, read its 'conclusion' field: "
+            "'no_open_access_copy' means the paper genuinely has no open-access version, while "
+            "'incomplete_sources_failed' means the lookup itself was incomplete — never present the second "
+            "as the first. In either case, when a claim needs the body, do NOT stop at the abstract: go to "
+            "PAYWALLED FULL TEXT below and offer the user the manual route. Copy supporting snippets from "
+            "the body VERBATIM. NEVER invent body content.\n\n"
+            "### PAYWALLED FULL TEXT (request_fulltext TOOL — MUST OFFER):\n"
+            "Open-access lookup only covers free copies. When fetch_paper_fulltext returns NO body (either "
+            "conclusion) AND a claim you must support depends on the body (methods, sample sizes, statistics, "
+            "thresholds, figure-level wording), you MUST call request_fulltext with that paper's DOI/title "
+            "BEFORE falling back to the abstract — a paywalled paper is often readable through the user's own "
+            "subscription, and this tool is how they hand it over. A picker window opens on the user's screen: "
+            "they download the PDF and hand it over, and this call BLOCKS until then — it returns a reading "
+            "brief (key points + verbatim quotes + page numbers) that a reading sub-agent extracted from that "
+            "body. Quote those passages verbatim in your cite_references snippets. Rules: only after "
+            "fetch_paper_fulltext returned no body; at most ONCE per paper per turn; do not call any other tool "
+            "while it is pending; if it returns 'unavailable', keep the abstract-only conclusion and say "
+            "plainly that the full text could not be obtained in this run. Never explain a missing body as a "
+            "paywall unless the tool reported 'no_open_access_copy' — with 'incomplete_sources_failed' the "
+            "cause is unknown.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
             f"1. IN-TEXT CITATIONS (STRICT): {CITATION_TOKEN_RULE} Attach the token inline IMMEDIATELY after the claim it supports, and NEVER claim a fact without an inline citation.\n"
             f"2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): For every source you cite that carries no 'citation_token' and no pre-assigned number, you MUST register it by calling cite_references ONCE, passing its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'); the tool returns a 'citation_token' for each entry — paste that token at the claim it supports. Sources that already carry a token or a number (knowledge-base '--- [Document n] ---' entries, tool results with '{AgentRuntime.TOOL_CITE_TOKEN_FIELD}') are already registered by the app — reuse THAT token/number and do NOT register them again. The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. Every number is assigned by the app: do NOT invent, shift or renumber one, and never fall back to an ASCII alias such as [lariguet2004].\n"
@@ -1501,6 +1260,10 @@ class ChatGenerationTask(BackgroundTask):
             sources_map[ref_id] = source_meta
             return ref_id
 
+        # 成文后补来源那一轮的判定入口（规则与"没有来源就不空转"都在
+        # src.core.evidence_gate；深度研究里每个子任务用同一个工厂传自己的登记表）。
+        _evidence_unsupported = gate_finder(sources_map)
+
         try:
             # 会话级 plot registry 缓存：AgentRuntime 每轮重建，但已画过的图
             # 注册在磁盘（plot_registry.json），这里传入内存缓存并回写，减少
@@ -1514,6 +1277,8 @@ class ChatGenerationTask(BackgroundTask):
                 reference_registry=reference_registry,
                 evidence_store=evidence_store,
             )
+            # 付费墙全文的同轮会合通道：弹窗 -> 用户下载/选择 PDF -> 唤醒本线程。
+            agent.fulltext_waiter = self._wait_for_fulltext
             if self.deep_mode or deep_plan_confirmed is not None:
                 # 深度研究：分解为并行子任务 -> 用户确认计划 -> 独立 Agent 执行
                 # -> 分节汇总。确认轮（哨兵）直接跳过分解、执行已确认的计划。
@@ -1528,6 +1293,7 @@ class ChatGenerationTask(BackgroundTask):
                     mcp_mgr=mcp_mgr,
                     planner=planner,
                     sources_map=sources_map,
+                    evidence_store=evidence_store,
                     confirmed_plan=deep_plan_confirmed,
                 )
             else:
@@ -1538,6 +1304,8 @@ class ChatGenerationTask(BackgroundTask):
                     candidate_tools=combined_tools,
                     emit_token=self._emit_token,
                     is_cancelled=self.is_cancelled,
+                    evidence_unsupported=(
+                        _evidence_unsupported if _looks_research_query(search_query) else None),
                 )
             # 回写 registry，供同一 task 实例的下一轮直接复用。
             if getattr(agent, "_plot_registry", None):
@@ -1659,8 +1427,7 @@ class ChatGenerationTask(BackgroundTask):
                 "Inline citation number(s) with no registered source (removed from the answer): "
                 + ", ".join(f"[{n}]" for n in unmatched[:20]))
         # 证据门禁：有来源时标出无引用的高风险段落；没有来源时明确标注未核实。
-        new_text = _verify_citation_support(new_text, cited, evidence_store)
-        new_text = _apply_evidence_gate(
+        new_text = apply_evidence_gate(
             new_text, bool(sources_map or cited),
             research_context=_looks_research_query(search_query))
         self.full_response_cache = new_text
@@ -1826,14 +1593,40 @@ class ChatGenerationTask(BackgroundTask):
         except Exception as e:
             self.logger.warning(f"Provenance emission skipped: {e}")
 
+    def _wait_for_fulltext(self, request: dict):
+        """挂起本线程，等用户把 PDF 交进来；返回 ``(ok, path, note)``。
+
+        界面收到 ``fulltext_request`` 事件后弹窗（选择/拖拽为主，约定目录兜底），用户交回
+        文件即经 :mod:`src.core.fulltext_bridge` 唤醒这里。等待期间本轮**尚未结束**：计划、
+        已检索到的来源、引用注册表、思考过程全留在上下文里，不存在"新起一轮"的信息断层。
+        """
+        from src.core import fulltext_bridge
+
+        handle = fulltext_bridge.begin(self.conversation_id)
+        if handle is None:
+            return False, "", "no conversation context"
+        self._emit_state(TaskState.PROCESSING, -1, "", payload={
+            "event": "fulltext_request",
+            "mode": "wait",
+            "data": dict(request or {}),
+        })
+        self.send_log("INFO", "Waiting for the user to hand over the PDF full text...")
+        return fulltext_bridge.wait(
+            self.conversation_id, handle,
+            timeout=fulltext_bridge.DEFAULT_TIMEOUT,
+            cancel_check=self.is_cancelled)
+
     def _run_deep_agent(self, agent, search_query, rag_messages, system_prompt,
                         candidate_tools, llm_content, skill_mgr, mcp_mgr,
-                        planner, sources_map, confirmed_plan=None):
+                        planner, sources_map, evidence_store=None,
+                        confirmed_plan=None):
         """Deep research: decompose into parallel sub-investigations.
 
         Args:
             confirmed_plan: 用户确认后的 SubTask 列表（来自 deep-plan 确认卡）。
                 非空时跳过分解直接执行；为 None 时先出计划卡等待用户确认。
+            evidence_store: 会话级逐字证据库。子 Agent 的 citation 校验依赖它，必须
+                显式传入——它只存在于主流程的局部作用域，靠名字是取不到的。
         """
         """深度研究：分解 -> 并行子 Agent -> 分节汇总。
 
@@ -1864,6 +1657,7 @@ class ChatGenerationTask(BackgroundTask):
                     candidate_tools=candidate_tools,
                     emit_token=self._emit_token,
                     is_cancelled=self.is_cancelled,
+                    evidence_unsupported=gate_finder(sources_map),
                 )
         else:
             self._emit_token(
@@ -1880,6 +1674,7 @@ class ChatGenerationTask(BackgroundTask):
                     candidate_tools=candidate_tools,
                     emit_token=self._emit_token,
                     is_cancelled=self.is_cancelled,
+                    evidence_unsupported=gate_finder(sources_map),
                 )
             # Human-in-the-loop：先出计划确认卡并结束本轮，用户确认后以
             # [DEEP_PLAN_CONFIRMED] 哨兵重进管线；避免方向跑偏时白烧
@@ -1910,7 +1705,7 @@ class ChatGenerationTask(BackgroundTask):
         sub_candidate_tools = [
             t for t in (candidate_tools or [])
             if (t or {}).get("function", {}).get("name")
-            not in ("ask_user", "cite_references")
+            not in ("ask_user", "cite_references", "request_fulltext")
         ]
         results = [None] * len(sub_tasks)
 
@@ -1960,6 +1755,9 @@ class ChatGenerationTask(BackgroundTask):
                     candidate_tools=sub_candidate_tools,
                     emit_token=buffer.append,
                     is_cancelled=self.is_cancelled,
+                    # 深度研究同样要能取全文：判定表用本子任务自己的 local_sources
+                    # （各子任务各登记一份，互不串味，也不与主线程的 sources_map 竞争）。
+                    evidence_unsupported=gate_finder(local_sources),
                 )
             except Exception as e:
                 self.logger.warning(f"Sub-task '{st.query[:40]}' failed: {e}")

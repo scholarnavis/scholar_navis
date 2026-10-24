@@ -1,0 +1,60 @@
+{
+  "description": "开发者模式“获取全文”自检的内置付费墙样例：软件分发后本机没有 RSS 订阅也能跑通付费墙取全文链路。条目是开发机上 RSS 订阅实际抓到的文章（标题 / DOI / 链接原样保留），挑选口径为订阅制刊物 + 抓取时开放获取探测未找到 PDF 全文。",
+  "observed_at": "2026-04-09 17:27:32",
+  "samples": [
+    {
+      "title": "TRACERx as an Optimized Paradigm for Understanding Cancer Evolution",
+      "doi": "10.1146/annurev-cancerbio-070824-125326",
+      "url": "https://www.annualreviews.org/content/journals/10.1146/annurev-cancerbio-070824-125326?TRACK=RSS",
+      "journal": "Annual Review of Cancer Biology",
+      "publisher": "Annual Reviews",
+      "feed": "https://www.annualreviews.org/rss/content/journals/cancerbio/latestarticles?fmt=rss",
+      "note": "RSS 抓取时的开放获取探测未找到 PDF 全文（付费墙）"
+    },
+    {
+      "title": "Antibody–Drug Conjugates: The Past, Present and Future",
+      "doi": "10.1146/annurev-cancerbio-070524-032954",
+      "url": "https://www.annualreviews.org/content/journals/10.1146/annurev-cancerbio-070524-032954?TRACK=RSS",
+      "journal": "Annual Review of Cancer Biology",
+      "publisher": "Annual Reviews",
+      "feed": "https://www.annualreviews.org/rss/content/journals/cancerbio/latestarticles?fmt=rss",
+      "note": "RSS 抓取时的开放获取探测未找到 PDF 全文（付费墙）"
+    },
+    {
+      "title": "Targeting RAS for Cancer Treatment: What a Long, Strange Trip It's Been",
+      "doi": "10.1146/annurev-cancerbio-071024-082459",
+      "url": "https://www.annualreviews.org/content/journals/10.1146/annurev-cancerbio-071024-082459?TRACK=RSS",
+      "journal": "Annual Review of Cancer Biology",
+      "publisher": "Annual Reviews",
+      "feed": "https://www.annualreviews.org/rss/content/journals/cancerbio/latestarticles?fmt=rss",
+      "note": "RSS 抓取时的开放获取探测未找到 PDF 全文（付费墙）"
+    },
+    {
+      "title": "Senescence in cancer: Hallmarks, paradoxes, and therapeutic promise",
+      "doi": "",
+      "url": "https://www.cell.com/cell/fulltext/S0092-8674(26)00272-2?rss=yes",
+      "journal": "Cell",
+      "publisher": "Cell Press",
+      "feed": "https://www.cell.com/cell/inpress.rss",
+      "note": "RSS 抓取时的开放获取探测未找到 PDF 全文（付费墙）"
+    },
+    {
+      "title": "Active assembly and non-reciprocal dynamics of elastic membranes",
+      "doi": "",
+      "url": "https://www.nature.com/articles/s41567-026-03215-5",
+      "journal": "Nature Physics",
+      "publisher": "Springer Nature",
+      "feed": "https://www.nature.com/subjects/biophysics.rss",
+      "note": "RSS 抓取时的开放获取探测未找到 PDF 全文（付费墙）"
+    },
+    {
+      "title": "AlphaFold as a prior: experimental structure determination conditioned on a pretrained neural network",
+      "doi": "",
+      "url": "https://www.nature.com/articles/s41592-026-03047-4",
+      "journal": "Nature Methods",
+      "publisher": "Springer Nature",
+      "feed": "https://www.nature.com/subjects/biophysics.rss",
+      "note": "RSS 抓取时的开放获取探测未找到 PDF 全文（付费墙）"
+    }
+  ]
+}

@@ -41,12 +41,28 @@ from src.core import plot_styles
 from src.core.evidence import EvidenceStore, is_usable_source_text
 from src.core.prompt_rules import CITATION_TOKEN_RULE
 from src.core.references import citation_token
-from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG
+from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG, strip as strip_think
 from src.core.model_capabilities import resolve_window
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
                                       derive_context_budgets)
 from src.core.tool_call_leak import (ToolCallStreamFilter, iter_tool_call_objects,
                                      tool_call_fingerprint)
+
+
+#: 收尾型工具：模型把答案写完之后才调用的动作（登记来源、生成追问）。与它们
+#: 同轮的正文是**答案本体**，不是"我先查一下"的过程叙述。
+_CLOSING_TOOLS = frozenset({"cite_references", "suggest_follow_ups"})
+
+#: 可折进过程面板的叙述片段长度上限（字符）。更长的段落更可能是被工具调用打断
+#: 的半个答案，整段挪进折叠面板反而会让人以为它不存在。
+_NARRATION_MAX_CHARS = 4000
+
+
+def _only_closing_tools(tool_calls) -> bool:
+    """本轮是否只调用了收尾型工具（答案已写完，现在补引用 / 生成追问）。"""
+    names = {(tc.get("function") or {}).get("name") for tc in tool_calls or []}
+    names.discard(None)
+    return bool(names) and names <= _CLOSING_TOOLS
 
 
 def _fold_narration(text: str, segments) -> str:
@@ -56,14 +72,35 @@ def _fold_narration(text: str, segments) -> str:
     这句话是过程，不是结论；留在正文里会让整条回答看起来像一堆检索计划，
     真正的答案反而被淹没。折叠而不是删除：内容不丢，展开过程面板仍可回看。
 
-    过长的片段（> 4000 字符）不折：那更可能是被工具调用打断的半个答案，
-    整段挪进折叠面板反而会让人以为它不存在。
+    这里有两道闸门，防的是反过来把**答案**折走——实测出现过：模型写完整篇
+    2684 字的答案后在**同一轮**调用 ``suggest_follow_ups``，答案被折进过程面板，
+    正文区只剩一句总结，用户看到的就是"正文没了、跑进思考链里去了"。
+
+    1. 入口不收：只调用收尾型工具的那一轮，其正文不算叙述（见
+       :func:`_only_closing_tools` 与 ``narration`` 的收集处）；
+    2. 此处兜底：折走的字符若比折后剩下的正文还多，说明被折的才是答案，放弃折叠。
     """
     out = str(text or "")
+    matched: List[Tuple[str, str]] = []
     for segment in segments or []:
         chunk = str(segment or "").strip()
-        if not chunk or len(chunk) > 4000 or chunk not in out:
+        # 用 ``segment`` 定位而不是 ``chunk``：只有原文里能精确找到的片段才替换。
+        # 旧实现按 chunk 判定、按 segment 替换，两者不一致时会空转。
+        if not chunk or len(chunk) > _NARRATION_MAX_CHARS or segment not in out:
             continue
+        matched.append((segment, chunk))
+    if not matched:
+        return out
+
+    folded_chars = sum(len(chunk) for _segment, chunk in matched)
+    remaining = len(strip_think(out)) - folded_chars
+    if folded_chars > remaining:
+        logger.info(
+            "Narration fold skipped: %d chars would be folded, only %d chars of body would remain.",
+            folded_chars, remaining)
+        return out
+
+    for segment, chunk in matched:
         out = out.replace(segment, f"\n<mcp_process>{chunk}</mcp_process>\n")
     return out
 
@@ -99,6 +136,59 @@ logger = logging.getLogger("Agent.Runtime")
 
 # Safety limits
 MAX_ITERATIONS = 12
+#: 证据门禁的**前置一轮**上限：成文后发现"高风险信号、却没有任何编号"的段落时，先给
+#: 模型一次补来源的机会（它手上就有取全文的工具），再考虑贴"（未核实）"。只给一轮——
+#: 能用的工具都已暴露，更多轮次多半只是换个说法，延迟却翻倍。
+EVIDENCE_MAX_RETRIES = 1
+
+
+def _tool_names(tools: Optional[List[Dict]]) -> set:
+    """候选工具的名字集合（"手里有哪些工具"的唯一判定口径）。"""
+    return {str((tool or {}).get("function", {}).get("name") or "")
+            for tool in (tools or [])}
+
+
+def _evidence_round_notice(paragraphs: List[str],
+                          tools: Optional[List[Dict]] = None) -> str:
+    """成文后打回一轮的指令：把无来源的高风险段落递回去，要求补引用或取全文。
+
+    判定规则不在函数里重写，由调用方从 :mod:`src.core.evidence_gate` 传入段落文本——
+    这里只负责措辞，保证"该被标哪一段"与"该被要求补来源哪一段"始终是同一批段落。
+
+    措辞按**手里实际有的工具**生成：深度研究的子 Agent 没有 ``cite_references`` /
+    ``request_fulltext``（它触达不到用户，付费墙交接只能由主流程做），照主路径的措辞
+    写只会让它去调一个不存在的工具，这一轮就白烧了。
+    """
+    names = _tool_names(tools)
+    if "cite_references" in names:
+        first = ("(1) attach a source you already have — add its [n] and submit a VERBATIM "
+                 "snippet through cite_references;")
+    else:
+        first = ("(1) attach the [n] of a source you already retrieved through the tools — "
+                 "never a number you did not obtain;")
+    options = [first]
+    if "fetch_paper_fulltext" in names:
+        body = ("(2) when the claim depends on the body (methods, sample sizes, statistics, "
+                "thresholds, figure-level wording), call fetch_paper_fulltext")
+        if "request_fulltext" in names:
+            body += (", and if it reports that no free copy exists, call request_fulltext so "
+                     "the user can hand over their own PDF;")
+        else:
+            body += " and cite the body it returns;"
+        options.append(body)
+    options.append("(3) if the body still cannot be obtained, drop the claim or say plainly "
+                   "that only the abstract was available.")
+    listed = "\n\n".join(f"[{index}] {text.strip()[:400]}"
+                         for index, text in enumerate(paragraphs, 1))
+    return (
+        "[System Notification: These paragraphs of your answer state high-risk facts "
+        "(dated findings, gene/protein names, quantities, causal wording) but carry no "
+        "citation, so they cannot be verified as written:\n\n"
+        f"{listed}\n\n"
+        "Handle EVERY paragraph above, with one of these: " + " ".join(options) +
+        " Then output the COMPLETE corrected answer from the beginning. Never invent a "
+        "source or a citation number.]"
+    )
 # 单条工具结果字符上限与工具 token 预算不再写死：按主模型上下文窗口
 # 动态推导（见 AgentRuntime.__init__ 与 token_estimator.derive_context_budgets），
 # 使 GPT/Claude/Gemini/DeepSeek/Qwen/本地小模型等各按自身容量治理。
@@ -117,6 +207,16 @@ _MAX_PARALLEL_TOOLS = 6
 # 保持消息结构完整。
 _TOOL_RESULT_KEEP_RECENT = 3
 _TOOL_RESULT_CLEARED_TAG = "[Tool result cleared to save context]"
+# ---- 全文类工具：预算同源，避免两刀叠加 ----
+# 论文正文、网页正文这类工具自己就按 max_chars 截断并标注 truncated。若运行时再按
+# 窗口做一次 head+tail 截断，两刀会叠加：205K 窗口下 6 万字符的正文被腰斩到 2 万，
+# 砍掉的正是中段的 Methods / Results —— 模型抓了全文也拿不到要引的数值，抓全文
+# 这件动作本身变成负收益。预算只留一处来源（derive_context_budgets 的
+# tool_result_chars），由运行时注入给工具。
+_FULLTEXT_TOOLS = frozenset({"fetch_paper_fulltext", "fetch_webpage_content"})
+#: 注入全文预算时为工具返回值的 JSON 包装（status / source / chars / truncated）
+#: 留出的余量，避免包装把结果顶过 tool_result_chars 而触发二次截断。
+_RESULT_WRAPPER_RESERVE = 512
 _ALWAYS_TOOLS = {
     "generate_image": {
         "type": "function",
@@ -260,6 +360,41 @@ _ALWAYS_TOOLS = {
             },
         },
     },
+    "request_fulltext": {
+        "type": "function",
+        "function": {
+            "name": "request_fulltext",
+            "description": (
+                "Ask the user to download ONE paywalled paper as a PDF and hand it to the app, then "
+                "wait for it IN THIS SAME TURN. Use it only after fetch_paper_fulltext reported that "
+                "no open-access copy exists and a claim you must support depends on the body "
+                "(methods, statistics, thresholds, figure-level wording). Calling it opens a picker "
+                "window on the user's screen — the user downloads the PDF there and drops it in — and "
+                "this call BLOCKS until the file arrives; it then returns a reading brief (key points "
+                "+ verbatim quotes + page numbers) that a reading sub-agent extracted from that PDF. "
+                "Quote those passages verbatim in cite_references. Never call another tool while it is "
+                "pending, call it at most ONCE per paper per turn, and if it returns status "
+                "'unavailable' continue with the abstract and say plainly that the full text could not "
+                "be obtained."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doi": {"type": "string", "description": "DOI of the paper, if known."},
+                    "title": {"type": "string",
+                              "description": "Paper title, written in the user's language."},
+                    "url": {"type": "string",
+                            "description": "Publisher / landing-page URL, if known."},
+                    "reason": {"type": "string",
+                               "description": (
+                                   "Which part of the answer needs this paper, in the user's "
+                                   "language — shown in the picker window."
+                               )},
+                },
+                "required": [],
+            },
+        },
+    },
     "suggest_follow_ups": {
         "type": "function",
         "function": {
@@ -390,6 +525,12 @@ class AgentRuntime:
         # 会话级逐字证据库：收集工具结果 / KB chunk 中的原文，用于校验并强制
         # cite_references 提交的 snippet 为来源逐字内容（未注入时本地兜底）。
         self.evidence_store = evidence_store or EvidenceStore()
+        #: 取全文通道，由任务层注入：``waiter(payload) -> (ok, path, note)``。付费墙
+        #: 论文需要用户下载 PDF 时调用；任务层在此挂起本线程并弹窗，拿到文件后唤醒
+        #: （见 :mod:`src.core.fulltext_bridge`）。无界面调用（子 Agent）时为 None。
+        self.fulltext_waiter = None
+        #: 本轮的用户问题（``run()`` 每次刷新）：抽取子代理据此判断该从全文里挑什么。
+        self.current_query = ""
         # log_fn(level: str, msg: str) : optional logger hook (e.g. ChatTask.send_log)
         self.log_fn = log_fn or (lambda level, msg: None)
         # plot_id -> {script_path, code_path, data_path, chart_title, chart_type,
@@ -433,6 +574,7 @@ class AgentRuntime:
         emit_token: Callable[[str], None],
         is_cancelled: Callable[[], bool],
         max_iterations: int = MAX_ITERATIONS,
+        evidence_unsupported: Optional[Callable[[str], List[str]]] = None,
     ) -> str:
         """
         Drive the agent loop and return the final generated text.
@@ -448,8 +590,14 @@ class AgentRuntime:
             emit_token:        UI stream callback.
             is_cancelled:      cancellation probe.
             max_iterations:    hard safety cap on tool-calling rounds.
+            evidence_unsupported: 判定入口（见 src.core.evidence_gate），给定候选正文
+                               返回"高风险却没有编号"的段落。非空时**不直接收尾**，而是
+                               再给模型一轮去补引用/取全文（上限 EVIDENCE_MAX_RETRIES），
+                               本轮之后仍无来源的段落才由任务层标"（未核实）"。
         """
         self._is_cancelled = False
+        #: 本轮的用户问题：抽取子代理要按"用户到底问了什么"决定从全文里挑哪些内容。
+        self.current_query = str(query or "").strip()
         # 同一轮内重复的检索/阅读调用直接复用结果：真人不会把同一条检索
         # 原样重跑五遍；这也能避免模型陷入"搜索 -> 再搜索"的机器式循环。
         self._tool_result_cache: Dict[Tuple[str, str], str] = {}
@@ -482,6 +630,7 @@ class AgentRuntime:
 
         iterations = 0
         plot_leak_retries = 0
+        evidence_rounds = 0
         while iterations < max_iterations:
             if is_cancelled():
                 self._emit_cancel_notice(_emit)
@@ -530,6 +679,30 @@ class AgentRuntime:
                         _emit("[START_LLM_NETWORK]")
                         continue
 
+                    # 证据门禁的前置一轮：这些段落有高风险信号却没有编号，照原样交付
+                    # 就是"没法核对"。与其只在事后贴"（未核实）"，不如现在花一轮让模型
+                    # 去补来源——取全文的工具（含付费墙的 request_fulltext）仍在手边。
+                    # 只有这一轮之后仍无来源的段落，才由任务层标记。
+                    if (evidence_unsupported is not None
+                            and evidence_rounds < EVIDENCE_MAX_RETRIES):
+                        unsourced = [p for p in (evidence_unsupported(content) or []) if p.strip()]
+                        if unsourced:
+                            evidence_rounds += 1
+                            self.log_fn(
+                                "INFO",
+                                f"Evidence gate: {len(unsourced)} paragraph(s) carry no "
+                                "source; running one sourcing round before finalizing.")
+                            messages.append({"role": "assistant", "content": content})
+                            messages.append({"role": "user",
+                                             "content": _evidence_round_notice(unsourced,
+                                                                              candidate_tools)})
+                            # 草稿作废：屏幕与返回缓存一起清，否则"草稿 + 定稿"会拼成
+                            # 两段正文（UI 已收到 [CLEAR_SEARCH] 清空气泡）。
+                            full_response_cache.clear()
+                            _emit("[CLEAR_SEARCH]")
+                            _emit("[START_LLM_NETWORK]")
+                            continue
+
                     _emit("[CLEAR_SEARCH]")
                     # 真流式路径（_llm_step_stream）正文已实时上屏，跳过回放；
                     # 仅非流式回退路径（provider 不支持流式工具调用、正文整块
@@ -556,9 +729,11 @@ class AgentRuntime:
                 self._finalize_usage("".join(full_response_cache))
                 return _final_text()
 
-            # 工具调用步骤的正文只可能是"接下来我要查什么"的叙述：记下来，
-            # 收尾时折进过程面板（见 _final_text），不留在回答里。
-            if content.strip():
+            # 工具调用步骤的正文通常是"接下来我要查什么"的叙述：记下来，
+            # 收尾时折进过程面板（见 _final_text），不留在回答里。例外是只调用
+            # 收尾型工具的那一轮——模型先写完答案，再补引用或生成追问，
+            # 这轮的正文是答案本体，折起来用户就看不到答案了。
+            if content.strip() and not _only_closing_tools(tool_calls):
                 narration.append(content)
 
             # Execute requested tools, then loop back to the model.
@@ -905,10 +1080,7 @@ class AgentRuntime:
     @staticmethod
     def _has_tool(tools: List[Dict], name: str) -> bool:
         """Return True when ``name`` is present in the candidate tool list."""
-        for tool in tools or []:
-            if (tool or {}).get("function", {}).get("name") == name:
-                return True
-        return False
+        return name in _tool_names(tools)
 
     @staticmethod
     def _looks_like_plot_leak(content: str) -> bool:
@@ -1091,7 +1263,8 @@ class AgentRuntime:
                 results[idx] = "[Cancelled] Tool execution aborted by user."
                 return idx
             name = parsed[idx]["name"]
-            args = parsed[idx]["args"]
+            # 全文类工具的字符预算由运行时注入：工具自己切并标注，运行时不再二次截断。
+            args = self._fit_result_budget(name, parsed[idx]["args"])
             cacheable = name in {
                 "search_academic_literature", "search_preprints", "search_web",
                 "fetch_open_access_pdf", "fetch_pubmed_abstract",
@@ -1164,6 +1337,11 @@ class AgentRuntime:
         # 1d. Built-in human-in-the-loop clarification (pause for user input).
         if name == "ask_user":
             return self._handle_ask_user(args, emit_token)
+
+        # 1d2. Paywalled full text: the user hands over the PDF and this run waits for it
+        # in-turn (see src/core/fulltext_bridge.py).
+        if name == "request_fulltext":
+            return self._handle_request_fulltext(args)
 
         # 1e. Structured follow-up suggestions (replaces the [FOLLOW_UPS] text block +
         # regex parsing: the model passes chips through a real function call).
@@ -1932,6 +2110,168 @@ class AgentRuntime:
             ),
         }, ensure_ascii=False)
 
+    #: 全文抽取向导的输入上限（字符）：全文只在这个一次性调用里出现，主模型只拿简报。
+    _FULLTEXT_ANALYST_CHARS = 60000
+
+    def _handle_request_fulltext(self, args: dict) -> str:
+        """Ask the user for one paper's PDF, wait in-turn, return a reading brief.
+
+        The paywall escape hatch: retrieval already reports whether an open-access body
+        exists (see :mod:`src.core.academic.literature`). When it does not, this call opens
+        a picker window on the user's screen, blocks the task thread on
+        :mod:`src.core.fulltext_bridge` until the file arrives, then hands it to a one-shot
+        reading sub-agent. The model gets key points + verbatim quotes + page numbers
+        instead of a 50k-character body, so the main context and the citation registry stay
+        intact.
+        """
+        args = args or {}
+        title = " ".join(str(args.get("title") or "").split())[:200]
+        doi = str(args.get("doi") or "").strip()
+        doi = doi.split("doi.org/")[-1].strip() if "doi.org/" in doi else doi
+        url = str(args.get("url") or "").strip()[:300]
+        if not (title or doi or url):
+            return json.dumps({
+                "status": "error",
+                "message": ("Nothing identifies the paper: pass at least a DOI, a title or "
+                            "the landing-page URL, otherwise the user cannot know what to "
+                            "download."),
+            }, ensure_ascii=False)
+
+        payload = {"doi": doi, "title": title, "url": url,
+                   "reason": str(args.get("reason") or "").strip()}
+        waiter = self.fulltext_waiter
+        if not callable(waiter):
+            # 没有界面（子 Agent / 批处理）：如实报"拿不到"，让模型退回摘要作答，
+            # 而不是反复请求一个永远不会开的窗口。
+            return json.dumps({
+                "status": "unavailable",
+                "message": ("No UI is attached to this run, so the user cannot hand over the "
+                            "PDF. Answer with the evidence you already have and state "
+                            "plainly that only the abstract was available."),
+            }, ensure_ascii=False)
+
+        self.log_fn("INFO", f"Requesting the full text from the user: "
+                            f"{(title or doi or url)[:80]}")
+        try:
+            ok, path, note = waiter(payload)
+        except Exception as e:
+            self.log_fn("WARNING", f"Full-text rendezvous failed: {e}")
+            ok, path, note = False, "", str(e)
+        if not ok or not path:
+            return json.dumps({
+                "status": "unavailable",
+                "message": (f"The user did not hand over a PDF ({note or 'no file'}). Do NOT "
+                            "ask again this turn: answer with the sources you already have "
+                            "and tell the user which paper's full text is missing."),
+            }, ensure_ascii=False)
+
+        pages, meta = self._load_user_pdf(path, payload)
+        if not pages:
+            return json.dumps({
+                "status": "unavailable",
+                "message": (f"The file '{os.path.basename(path)}' could not be read as a PDF "
+                            "with extractable text. Answer with what you have and tell the "
+                            "user the file was unusable."),
+            }, ensure_ascii=False)
+        brief = self._analyse_fulltext(pages, payload)
+        self.log_fn("INFO", f"Full text ready from the user's PDF: "
+                            f"{len(pages)} page block(s)")
+        return json.dumps({
+            "status": "success",
+            "source": "user-provided PDF",
+            "pages": len(pages),
+            "doi": str(meta.get("doi") or doi or ""),
+            "content": brief,
+            "message": ("Reading brief extracted from the user-provided full text. The body "
+                        "itself is already in the app's evidence store, so snippets copied "
+                        "verbatim from the quotes above (or from that paper) pass "
+                        "verification. Cite it like any other source."),
+        }, ensure_ascii=False)
+
+    def _load_user_pdf(self, path: str, payload: dict):
+        """解析用户提供的 PDF，并把正文纳入证据库。
+
+        入库这一步有两个作用：``cite_references`` 提交的 snippet 会与"已采集原文"逐字
+        校验（见 :meth:`_enforce_verbatim_snippet`），引用弹窗也能显示被引用的原文，
+        而不是空着。
+        """
+        from src.core.pdf_text import extract_pdf
+
+        try:
+            pages, meta = extract_pdf(path)
+        except Exception as e:
+            self.log_fn("WARNING", f"Cannot read the provided PDF: {e}")
+            return [], {}
+        body = "\n".join(text for _page, text in pages)
+        if not body.strip():
+            return [], meta
+        self.evidence_store.add_source(
+            body,
+            doi=str(payload.get("doi") or meta.get("doi") or ""),
+            url=str(payload.get("url") or ""),
+            title=str(payload.get("title") or meta.get("title") or ""))
+        return pages, meta
+
+    def _select_fulltext_pages(self, pages, query: str):
+        """按与问题的词面重合度挑页：超预算时先留"相关的那几页"。
+
+        负号是为了直接用一个升序 sort 拿到"重合度高 -> 页码小"的顺序（同分时靠前的
+        页优先：引言/结果通常在前面）。
+        """
+        tokens = {t for t in re.findall(r"[A-Za-z]{3,}|\d+", str(query or "").lower())}
+        scored = [(-sum(1 for t in tokens if t in str(text or "").lower()), page, text)
+                  for page, text in pages or []]
+        scored.sort(key=lambda item: (item[0], item[1]))
+        picked, used = [], 0
+        for _neg, page, text in scored:
+            size = len(text)
+            if picked and used + size > self._FULLTEXT_ANALYST_CHARS:
+                continue
+            picked.append((page, text))
+            used += size
+            if used >= self._FULLTEXT_ANALYST_CHARS:
+                break
+        picked.sort(key=lambda item: item[0])
+        return picked, used
+
+    def _analyse_fulltext(self, pages, payload: dict) -> str:
+        """抽取子代理：读全文，只回"与当前问题相关"的要点 + 原文片段 + 页码。"""
+        question = (self.current_query or str(payload.get("reason") or "")
+                    or str(payload.get("title") or "")).strip()
+        picked, used = self._select_fulltext_pages(pages, question)
+        if not picked:
+            return ""
+        body = "\n\n".join(f"[p{page}] {text}" for page, text in picked)
+        paper = " / ".join(part for part in (str(payload.get("title") or "").strip(),
+                                             str(payload.get("doi") or "").strip()) if part)
+        prompt = (
+            "You are a reading sub-agent. A researcher asked the question below and the "
+            "paper's full text is attached page by page. Extract ONLY what is needed to "
+            "answer that question — do not summarize the paper as a whole.\n"
+            "Output, in this order:\n"
+            "1. 3-8 bullet points, each a claim the full text actually supports, written in "
+            "the user's language, ending with the page number like [p7].\n"
+            "2. Under each bullet, one VERBATIM quote from the text (exact wording, 10-40 "
+            "words, keep the paper's original language) with its page number. Never "
+            "paraphrase inside quotes; if no exact quote supports a bullet, drop that "
+            "bullet.\n"
+            "3. One short line: any limitation, contradiction or missing piece that matters "
+            "for the question.\n"
+            "If the full text does not answer the question at all, reply with exactly "
+            "NOT_FOUND plus one sentence saying what is missing."
+        )
+        block = (f"Question: {question}\nPaper: {paper or '(title unknown)'}\n"
+                 f"Pages sent: {len(picked)} of {len(pages)} "
+                 f"({used} chars, most relevant pages first)\n\nFULL TEXT:\n{body}")
+        try:
+            resp = self._llm_step([{"role": "system", "content": prompt},
+                                   {"role": "user", "content": block}], [])
+            return str((resp or {}).get("content") or "").strip()
+        except Exception as e:
+            # 兜底：抽取失败也要把链路走完——给模型正文开头，总比"没等到全文"强。
+            self.log_fn("WARNING", f"Full-text reading sub-agent failed: {e}")
+            return body[:4000]
+
     def _generate_plot_plan_text(self, request: str, data_context: str) -> str:
         """Ask the LLM to produce an English plotting proposal (natural-language text)."""
         prompt = (
@@ -2072,9 +2412,9 @@ class AgentRuntime:
     #: 可用性判据统一在 :func:`src.core.evidence.is_usable_source_text`：检索列表里的
     #: 占位串（``"No abstract"`` / ``"Fetch via ..."`` 一类）长度远不及一条摘要，
     #: 会被同一门槛挡下，无需在本处再维护一份占位串字面量清单。
-    #: 采集优先级（**信息面从大到小**）：OA 正文 > 摘要 > 片段。引用校验与逐字命中
-    #: 都要尽可能完整的原文——只拿摘要比对，正文里的基因名/数值一律对不上，正文结论
-    #: 会被误判成"引用未直接支持"。
+    #: 采集优先级（**信息面从大到小**）：OA 正文 > 摘要 > 片段。逐字校验与引用片段
+    #: 展示都要尽可能完整的原文——只拿摘要比对，正文里的原句一律对不上，只能退回
+    #: 更短的摘要片段。
     _EVIDENCE_TEXT_KEYS = ("full_text", "abstract", "abstractText", "snippet",
                            "summary", "content")
     _EVIDENCE_URL_KEYS = ("url", "pdf_url", "landing_page_url", "link")
@@ -2213,6 +2553,24 @@ class AgentRuntime:
             step = f"Working on {name.replace('_', ' ')}"
 
         emit_token(f"<mcp_process>{step}</mcp_process>\n")
+
+    def _fit_result_budget(self, name: str, args: Dict) -> Dict:
+        """给自带截断能力的全文工具注入运行时的结果预算（唯一来源）。
+
+        全文工具自己会按 ``max_chars`` 截断并标注 ``truncated``。若运行时再按窗口做
+        一次 head+tail 截断，两刀叠加：205K 窗口下 6 万字符的正文被腰斩到 2 万，砍掉
+        的正是中段的 Methods / Results —— 模型抓了全文也拿不到要引的数值，抓全文这
+        个动作本身成了负收益。这里把预算统一成 ``self._tool_result_chars``，工具切完
+        即达上限，运行时不再二次截断。
+
+        模型显式给出的 ``max_chars``（例如刻意只要一段短摘录）优先，不覆盖。
+        """
+        if name not in _FULLTEXT_TOOLS or args.get("max_chars"):
+            return args
+        budget = max(1_000, self._tool_result_chars - _RESULT_WRAPPER_RESERVE)
+        logger.debug("Full-text budget injected: %s max_chars=%d (runtime budget %d chars)",
+                     name, budget, self._tool_result_chars)
+        return {**args, "max_chars": budget}
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
