@@ -20,6 +20,35 @@ logger = logging.getLogger("Core.PdfText")
 _DOI_RE = None
 
 
+def probe_pdf(path: str, pages: int = 3) -> Tuple[str, str]:
+    """只读前几页，返回 ``(正文里出现的第一个 DOI, 这几页的纯文本)``。
+
+    给"这份 PDF 是不是这篇论文"的校验用（见 :mod:`src.core.fulltext_store`）：
+    与 :func:`extract_pdf` 共用同一套 DOI 正则与"前几页"口径，但不做 markdown
+    重建、不遍历全书，几十毫秒级——关联表每次命中都会走它，不能按整篇解析的代价来。
+    """
+    import fitz  # PyMuPDF
+
+    global _DOI_RE
+    if _DOI_RE is None:
+        _DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+")
+
+    doc = None
+    try:
+        doc = fitz.open(path)
+        head = " ".join(
+            doc[i].get_text() for i in range(min(max(1, int(pages)), doc.page_count)))
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+    match = _DOI_RE.search(head or "")
+    doi = match.group(0).rstrip(".,;).") if match else ""
+    return doi, head or ""
+
+
 def extract_pdf(path: str) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
     """返回 ``[(页码, 文本)]`` 与 PDF 内嵌元数据；解析失败抛异常。"""
     import fitz  # PyMuPDF
@@ -83,4 +112,4 @@ def extract_pdf(path: str) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
     return pages, meta
 
 
-__all__ = ["extract_pdf"]
+__all__ = ["extract_pdf", "probe_pdf"]

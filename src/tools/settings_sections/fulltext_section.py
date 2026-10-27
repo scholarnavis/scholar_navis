@@ -98,7 +98,34 @@ class FulltextSectionMixin:
         self.lbl_fulltext_perf.setWordWrap(True)
         layout.addWidget(self.lbl_fulltext_perf)
 
+        # ---- 已关联的 PDF（DOI → 文件）：交过一次就不再让用户下载 ----
+        self.lbl_fulltext_links = QLabel()
+        self.lbl_fulltext_links.setWordWrap(True)
+        layout.addWidget(self.lbl_fulltext_links)
+
+        self.list_fulltext_links = QListWidget()
+        self.list_fulltext_links.setObjectName("list_fulltext_links")
+        self.list_fulltext_links.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.list_fulltext_links.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection)
+        self.list_fulltext_links.setMinimumHeight(72)
+        self.list_fulltext_links.itemDoubleClicked.connect(
+            self._on_fulltext_link_double_clicked)
+        layout.addWidget(self.list_fulltext_links)
+
+        links_row = QHBoxLayout()
+        self.btn_del_fulltext_link = QPushButton(tr("Remove Selected Link"))
+        self.btn_del_fulltext_link.clicked.connect(self._on_remove_fulltext_link)
+        links_row.addWidget(self.btn_del_fulltext_link)
+        self.btn_clear_fulltext_links = QPushButton(tr("Clear All Links"))
+        self.btn_clear_fulltext_links.clicked.connect(self._on_clear_fulltext_links)
+        links_row.addWidget(self.btn_clear_fulltext_links)
+        links_row.addStretch()
+        layout.addLayout(links_row)
+
         self._set_fulltext_dirs([])
+        self._refresh_fulltext_links()
         self.layout.addWidget(self.group_fulltext)
 
     # ---------- 展示 ----------
@@ -136,6 +163,67 @@ class FulltextSectionMixin:
         return normalize_dirs([
             self.list_fulltext_dirs.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(self.list_fulltext_dirs.count())])
+
+    # ---------- 已关联的 PDF ----------
+
+    def _refresh_fulltext_links(self):
+        """刷新"DOI ↔ 本地 PDF"列表；失效条目由 fulltext_store 顺手清掉。"""
+        from src.core import fulltext_store
+
+        links = {}
+        try:
+            links = fulltext_store.all_links()
+        except Exception as e:      # 关联表坏了不该让设置页打不开
+            logger.warning("Cannot read the full-text link table: %s", e)
+
+        self.list_fulltext_links.clear()
+        for doi, entry in sorted(links.items()):
+            path = str((entry or {}).get("path") or "")
+            name = os.path.basename(path) or path
+            item = QListWidgetItem(f"{doi}  —  {name}")
+            item.setData(Qt.ItemDataRole.UserRole, doi)
+            item.setToolTip(path)
+            self.list_fulltext_links.addItem(item)
+
+        self.lbl_fulltext_links.setText(tr(
+            "Linked PDFs ({n}): a paper you handed over once is reused automatically, so "
+            "it is never downloaded twice. A link is dropped automatically when the file "
+            "is gone or its content no longer matches the DOI. Double-click to open the "
+            "file.").format(n=len(links)))
+        if hasattr(self, "btn_del_fulltext_link"):
+            self.btn_del_fulltext_link.setEnabled(self.list_fulltext_links.count() > 0)
+            self.btn_clear_fulltext_links.setEnabled(self.list_fulltext_links.count() > 0)
+
+    def _on_fulltext_link_double_clicked(self, item):
+        path = str(item.toolTip() or "")
+        if not path or not os.path.isfile(path):
+            ToastManager().show(tr("This PDF is no longer there."), "warning")
+            self._refresh_fulltext_links()
+            return
+        if not open_with_system(path):
+            ToastManager().show(tr("Could not open the file with the system viewer."),
+                                "warning")
+
+    def _on_remove_fulltext_link(self):
+        from src.core import fulltext_store
+
+        selected = self.list_fulltext_links.selectedItems()
+        if not selected:
+            ToastManager().show(tr("Select the links to remove first."), "info")
+            return
+        removed = sum(1 for item in selected
+                      if fulltext_store.unlink(item.data(Qt.ItemDataRole.UserRole)))
+        logger.info("Full-text links removed: %d", removed)
+        self._refresh_fulltext_links()
+        ToastManager().show(tr("{n} link(s) removed.").format(n=removed), "success")
+
+    def _on_clear_fulltext_links(self):
+        from src.core import fulltext_store
+
+        count = fulltext_store.clear()
+        logger.info("Full-text links cleared: %d", count)
+        self._refresh_fulltext_links()
+        ToastManager().show(tr("{n} link(s) removed.").format(n=count), "success")
 
     # ---------- 打开 ----------
 

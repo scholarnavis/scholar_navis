@@ -1007,6 +1007,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Markdown successfully copied to clipboard.": "Markdown 已复制到剪贴板。",
         "Show Translated Query": "显示译后问题",
         "Hide Translated Query": "隐藏译后问题",
+        "Remove Selected Link": "移除所选关联",
+        "Clear All Links": "清除全部关联",
+        "Linked PDFs ({n}): a paper you handed over once is reused automatically, so it is never downloaded twice. A link is dropped automatically when the file is gone or its content no longer matches the DOI. Double-click to open the file.":
+            "已关联 {n} 篇 PDF：交过一次的论文会被自动复用，不会再让你下载第二次；"
+            "文件丢失或内容与 DOI 对不上时，关联会被自动解除。双击可打开该文件。",
+        "This PDF is no longer there.": "这份 PDF 已经不在了。",
+        "Could not open the file with the system viewer.": "无法用系统查看器打开该文件。",
+        "Select the links to remove first.": "请先选中要移除的关联。",
+        "{n} link(s) removed.": "已移除 {n} 条关联。",
         "Search conversation...": "搜索对话…",
         "Failed to load existing skill: {err}": "加载已有技能失败：{err}",
         "Scholar Navis Conversation (*.schat *.sqlite3 *.db *.json)":

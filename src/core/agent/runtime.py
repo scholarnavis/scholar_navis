@@ -1375,7 +1375,11 @@ class AgentRuntime:
                 name in self.skill_manager.academic_skills else "[SKILL]"
             self.log_fn("INFO", f"{prefix} Executing skill: {name}")
             try:
-                result = self.skill_manager.call_skill(name, args)
+                # 取全文先看本地关联：用户交过一次的 PDF 不再联网重复获取。
+                linked = (self._linked_fulltext_result(args)
+                          if name == "fetch_paper_fulltext" else None)
+                result = (linked if linked is not None
+                          else self.skill_manager.call_skill(name, args))
                 self._record_provenance(name, "academic" if prefix == "[ACADEMIC]" else "external",
                                         args, "success", result)
                 if name == "plot_chart":
@@ -2163,6 +2167,21 @@ class AgentRuntime:
 
         payload = {"doi": doi, "title": title, "url": url,
                    "reason": str(args.get("reason") or "").strip()}
+
+        # 这个 DOI 已经有校验通过的本地 PDF：直接用，既不再联网也不再弹窗。
+        from src.core import fulltext_store
+
+        linked = fulltext_store.resolve(doi, title) if doi else ""
+        if linked:
+            ok, brief_json = self._brief_from_pdf(linked, payload, doi)
+            if ok:
+                self.log_fn("INFO", f"Full text already linked to {doi}: "
+                                    f"using {os.path.basename(linked)} (no download needed).")
+                return brief_json
+            # 关联的文件读不出正文：解除关联，老老实实回到"请用户交文件"。
+            fulltext_store.unlink(doi)
+            self.log_fn("WARNING", f"Linked PDF for {doi} is unusable; asking again.")
+
         waiter = self.fulltext_waiter
         if not callable(waiter):
             # 没有界面（子 Agent / 批处理）：如实报"拿不到"，让模型退回摘要作答，
@@ -2189,28 +2208,69 @@ class AgentRuntime:
                             "and tell the user which paper's full text is missing."),
             }, ensure_ascii=False)
 
+        ok, brief_json = self._brief_from_pdf(path, payload, doi)
+        if ok and doi:
+            # 记下"这篇 = 这份文件"：下次同一篇直接用，不必再让用户下载。
+            fulltext_store.link(doi, path, title)
+        return brief_json
+
+    def _brief_from_pdf(self, path: str, payload: dict, doi: str = "") -> tuple:
+        """把一份本地 PDF 变成"阅读简报"结果；返回 ``(是否成功, JSON 文本)``。
+
+        正文同时进入证据库（见 :meth:`_load_user_pdf`），因此引用校验能逐字命中。
+        """
         pages, meta = self._load_user_pdf(path, payload)
         if not pages:
-            return json.dumps({
+            return False, json.dumps({
                 "status": "unavailable",
                 "message": (f"The file '{os.path.basename(path)}' could not be read as a PDF "
                             "with extractable text. Answer with what you have and tell the "
                             "user the file was unusable."),
             }, ensure_ascii=False)
         brief = self._analyse_fulltext(pages, payload)
-        self.log_fn("INFO", f"Full text ready from the user's PDF: "
+        self.log_fn("INFO", f"Full text ready from {os.path.basename(path)}: "
                             f"{len(pages)} page block(s)")
-        return json.dumps({
+        return True, json.dumps({
             "status": "success",
             "source": "user-provided PDF",
             "pages": len(pages),
             "doi": str(meta.get("doi") or doi or ""),
             "content": brief,
-            "message": ("Reading brief extracted from the user-provided full text. The body "
-                        "itself is already in the app's evidence store, so snippets copied "
-                        "verbatim from the quotes above (or from that paper) pass "
-                        "verification. Cite it like any other source."),
+            "message": ("Reading brief extracted from the full text. The body itself is "
+                        "already in the app's evidence store, so snippets copied verbatim "
+                        "from the quotes above (or from that paper) pass verification. "
+                        "Cite it like any other source."),
         }, ensure_ascii=False)
+
+    def _linked_fulltext_result(self, args: dict) -> Optional[str]:
+        """``fetch_paper_fulltext`` 的本地优先：该 DOI 已关联 PDF 就直接出正文。
+
+        用户交过一次的文件不该再联网取一遍：网络既慢又可能 503，而正确答案就躺在
+        本地。返回 None 表示没有可用关联，调用方照常联网。
+        """
+        doi = str((args or {}).get("doi") or "").strip()
+        if not doi:
+            return None
+        from src.core import fulltext_store
+
+        title = str((args or {}).get("title") or "").strip()
+        path = fulltext_store.resolve(doi, title)
+        if not path:
+            return None
+        ok, brief_json = self._brief_from_pdf(path, {"doi": doi, "title": title}, doi)
+        if not ok:
+            fulltext_store.unlink(doi)
+            return None
+        try:
+            data = json.loads(brief_json)
+        except (TypeError, ValueError):
+            return None
+        data["full_text"] = str(data.pop("content", "") or "")
+        data["source"] = "linked local PDF"
+        data["conclusion"] = "user_provided_pdf"
+        self.log_fn("INFO", f"Full text served from the linked PDF for {doi} "
+                            f"({os.path.basename(path)}); network fetch skipped.")
+        return json.dumps(data, ensure_ascii=False)
 
     # ------------------------------------------------------------------ #
     #  自动取全文失败 -> 同一轮内请用户交回 PDF
