@@ -33,6 +33,8 @@ _DIR_RECHECK_SEC = 15.0
 _SCAN_SLOW_MS = 300.0
 #: 候选列表最多显示几个，避免误匹配时把窗口撑爆。
 _MAX_CANDIDATES = 3
+#: 同一个文件"看起来像但要等等"的最多复查次数：下载未完成时下一轮再看，超过就放弃。
+_SCAN_RETRY_LIMIT = 6
 
 
 def _norm(text: str) -> str:
@@ -40,21 +42,33 @@ def _norm(text: str) -> str:
     return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
 
 
-def _matches_request(filename: str, data: dict) -> bool:
-    """文件名是否指向请求的那篇：DOI 片段优先，其次标题词命中过半。
+def _match_level(filename: str, data: dict) -> int:
+    """文件名与本次请求的匹配强度：``2`` = DOI 命中，``1`` = 标题词过半，``0`` = 不像。
 
-    下载器生成的文件名千奇百怪（网页标题、DOI 后缀、加序号……），所以只做宽松命中；
-    命中不了的不会丢，进候选列表让用户点一下。
+    下载器生成的文件名千奇百怪（网页标题、DOI 后缀、加序号……），所以按强度分级：
+    DOI 片段是硬证据，标题词命中只是弱证据——**开窗之前就已经存在的文件**只按强证据
+    认领，否则用户 Downloads 里同领域的旧论文会被误认成这一篇（模型会读错论文）。
     """
     stem = _norm(os.path.splitext(os.path.basename(filename))[0])
     if not stem:
-        return False
+        return 0
     # DOI 常被切掉前缀（10.1038/）后当文件名，因此按片段匹配而非整串包含。
     parts = [p for p in re.split(r"[/:]", str(data.get("doi") or "")) if len(p) >= 6]
     if any(_norm(p) in stem for p in parts):
-        return True
+        return 2
     tokens = [t for t in re.findall(r"[A-Za-z]{4,}", str(data.get("title") or "").lower())]
-    return bool(tokens) and sum(1 for t in tokens if t in stem) * 2 >= len(tokens)
+    if tokens and sum(1 for t in tokens if t in stem) * 2 >= len(tokens):
+        return 1
+    return 0
+
+
+def _looks_like_pdf(path: str) -> bool:
+    """粗校验：PDF 魔数出现在前 1KB 内（规范允许前面有少量垃圾）。"""
+    try:
+        with open(path, "rb") as f:
+            return b"%PDF" in f.read(1024)
+    except OSError:
+        return False
 
 
 class _DropZone(QFrame):
@@ -92,15 +106,25 @@ class FullTextRequestDialog(BaseDialog):
         #: 目录 -> (上次复查时刻, 是否可用)：目录可能中途消失，但不必每轮都去看。
         self._dir_state = {}
         self._interval = _SCAN_INTERVAL_MS
-        #: 开窗时已存在的 PDF 全部忽略，只认之后新出现的文件。
+        #: 已经"看过"的文件：每个路径只判定一次，避免重复认领/重复列候选。
         self._seen = set()
+        #: 开窗那一刻就已经存在的 PDF。它们在第一次扫描里参与判定，但只按**强证据**
+        #: （DOI 命中）认领——用户往往先下载、后点开窗口，把这些文件一律当"旧的"忽略
+        #: 就是"放进指定目录没反应"的根因。
+        self._pre_existing = set()
+        #: 路径 -> 已复查次数（见 _consume：下载未完成的文件下一轮再看，超过就放弃）。
+        self._retries = {}
+        #: 上一次提示过的"认领不了"文件名：同样的话只提示一次，别每轮都闪。
+        self._last_unclaimed = ""
         self._build_ui()
-        self._prime_seen()
+        self._remember_existing()
         self.setAcceptDrops(True)
 
         self._scan_timer = QTimer(self)
         self._scan_timer.timeout.connect(self._scan_watch_dirs)
         self._scan_timer.start(self._interval)
+        # 立刻扫一遍：先下载再开窗是最常见的顺序，等 1.5 秒只会让人以为没生效。
+        QTimer.singleShot(0, self._scan_watch_dirs)
         self._apply_theme()
 
     # ------------------------------------------------------------------ 构建
@@ -234,6 +258,13 @@ class FullTextRequestDialog(BaseDialog):
         if not path.lower().endswith(".pdf") or not os.path.isfile(path):
             self._set_status(f"不是可读取的 PDF 文件：{os.path.basename(path or '(空)')}", error=True)
             return
+        # 0 字节 / 还在写入的文件先挡住：交给任务只会换来一次"PDF 无法解析"，
+        # 而那时窗口已经关了，用户连重选的入口都没有。
+        if not _looks_like_pdf(path):
+            self._set_status(
+                f"这个文件还不是完整的 PDF：{os.path.basename(path)}（下载可能尚未完成）",
+                error=True)
+            return
 
         from src.core import fulltext_bridge
 
@@ -324,8 +355,8 @@ class FullTextRequestDialog(BaseDialog):
         self._dir_state[directory] = (now, ok)
         return ok
 
-    def _new_pdfs(self, directory: str):
-        """目录里"开窗之后才出现"的 PDF；已知名字直接跳过，只对新名字多 stat 一次。"""
+    def _unseen_pdfs(self, directory: str):
+        """该轮要判定的 PDF：还没看过的路径；已知名字直接跳过。"""
         fresh = []
         for path in self._list_pdfs(directory):
             if path in self._seen:
@@ -350,42 +381,80 @@ class FullTextRequestDialog(BaseDialog):
 
         return sorted(paths, key=stamp, reverse=True)
 
-    def _prime_seen(self):
+    def _remember_existing(self):
+        """记录开窗那一刻已存在的 PDF：它们照样参与判定，只是需要更强证据才认领。
+
+        旧实现把它们一次性塞进 ``_seen``（等于永久拉黑），于是"先下载、后开窗"——
+        用户最自然的顺序——永远不会有反应。
+        """
         for directory in self._dirs:
-            self._seen.update(self._list_pdfs(directory))
-        logger.debug("Full-text picker watching %d dir(s): %s (%d pre-existing PDF(s) ignored).",
-                     len(self._dirs), self._dirs, len(self._seen))
+            self._pre_existing.update(self._list_pdfs(directory))
+        logger.debug("Full-text picker watching %d dir(s): %s (%d pre-existing PDF(s)).",
+                     len(self._dirs), self._dirs, len(self._pre_existing))
 
     def _scan_watch_dirs(self):
-        """按目录语义认领新出现的 PDF，并按本轮成本调整下次扫描间隔。
+        """按目录语义认领 PDF，并按本轮成本调整下次扫描间隔。
 
         内置收件目录表示"用户明确放进来了"，文件名对不上也列成候选；设置里的额外目录
         （下载目录、文献库等）是杂物堆，只有能确定是这一篇时才自动认领，否则安静忽略。
+        开窗时已存在的文件同样参与判定（下载往往发生在开窗之前），只是需要更强证据。
         每轮只做"列名 + 差集"，成本取决于目录条目数而非文件大小。
         """
         started = time.monotonic()
         hit = False
+        unmatched = []
         for directory in self._dirs:
             if not self._dir_usable(directory):
                 continue
-            fresh = self._new_pdfs(directory)
+            fresh = self._unseen_pdfs(directory)
             if not fresh:
                 continue
-            logger.debug("Full-text watch dir %s: %d new PDF(s).", directory, len(fresh))
-            if self._consume(directory, self._newest_first(fresh)):
+            logger.debug("Full-text watch dir %s: %d PDF(s) to check.", directory, len(fresh))
+            if self._consume(directory, self._newest_first(fresh), unmatched):
                 hit = True
                 break
+        if not hit and unmatched:
+            self._notify_unclaimed(unmatched[0])
         self._adapt_interval((time.monotonic() - started) * 1000.0, hit)
 
-    def _consume(self, directory: str, fresh) -> bool:
-        """处理一轮新文件；返回是否已交付（真=窗口已关，不用再扫）。"""
+    def _notify_unclaimed(self, path: str):
+        """看得见、但认领不了的文件要说一声：否则用户只会觉得"放进去了没反应"。"""
+        name = os.path.basename(path)
+        if name == self._last_unclaimed:
+            return
+        self._last_unclaimed = name
+        self._set_status(
+            f"看到 PDF「{name}」，但文件名里没有这篇论文的 DOI，无法自动认领；"
+            f"点「选择 PDF」手动指定即可。")
+
+    def _consume(self, directory: str, fresh, unmatched=None) -> bool:
+        """处理一轮候选文件；返回是否已交付（真=窗口已关，不用再扫）。
+
+        认领门槛按"文件是不是开窗前就在"分两档：开窗后新出现的，DOI 或标题词过半
+        都可以；开窗前就有的，只认 DOI 这种硬证据——用户 Downloads 里同一领域的旧
+        论文可能恰好与标题词撞上，认错了模型就会读错论文。
+
+        :param unmatched: 收集"像 PDF 但对不上这篇"的路径，供 :meth:`_notify_unclaimed`
+            提示用户自己点选（收件目录里的这些文件另外进候选列表）。
+        """
         in_inbox = dir_identity(directory) == self._inbox_key
         for path in fresh:
-            if _matches_request(path, self._data):
+            level = _match_level(path, self._data)
+            if level == 2 or (level == 1 and path not in self._pre_existing):
                 self._deliver(path)
-                return True
+                if self._settled:
+                    return True
+                # 文件还没写完 / 不是完整 PDF：撤掉"看过"的标记，下一轮再看一次
+                # （最多几次，避免把垃圾文件当成永远待判的对象）。
+                tries = self._retries.get(path, 0) + 1
+                self._retries[path] = tries
+                if tries <= _SCAN_RETRY_LIMIT:
+                    self._seen.discard(path)
+                continue
             if in_inbox:
                 self._add_candidate(path)
+            elif unmatched is not None:
+                unmatched.append(path)
         return False
 
     def _adapt_interval(self, cost_ms: float, hit: bool):
