@@ -314,26 +314,48 @@ class MainWindow(QMainWindow):
             self._sync_titlebar_theme(120)
 
     def clean_old_logs(self):
-        base_dir = ThemeManager.get_resource_path()
-        log_dirs =[
-            os.path.join(base_dir, "logs"),
-            os.path.join(base_dir, "logs", "mcp", "academic"),
-            os.path.join(base_dir, "logs", "mcp", "common")
+        """按数量清理日志目录。
+
+        目录必须与 :mod:`src.core.logger` 的写入位置同源。此前用
+        ``ThemeManager.get_resource_path()``，在冻结形态下（PyInstaller 的
+        ``_MEIPASS``、macOS 的 ``Contents/Resources``）指向的并不是日志实际
+        写入目录，于是 ``os.path.exists`` 恒为假，清理在发布版里静默永不生效。
+        """
+        from src.core import BASE_DIR
+
+        log_dirs = [
+            os.path.join(BASE_DIR, "logs"),
+            os.path.join(BASE_DIR, "logs", "mcp", "academic"),
+            os.path.join(BASE_DIR, "logs", "mcp", "common"),
         ]
 
         for d in log_dirs:
-            if not os.path.exists(d):
+            if not os.path.isdir(d):
                 continue
 
-            logs =[os.path.join(d, f) for f in os.listdir(d) if ".log" in f]
-            logs.sort(key=os.path.getmtime)
+            logs = []
+            for name in os.listdir(d):
+                # 轮转产物形如 xxx.log.1，不能只匹配 .log 结尾；
+                # 再用 isfile 排除同名子目录（对目录调用 os.remove 必然失败）。
+                if ".log" not in name:
+                    continue
+                full = os.path.join(d, name)
+                if not os.path.isfile(full):
+                    continue
+                try:
+                    logs.append((os.path.getmtime(full), full))
+                except OSError:
+                    continue    # 扫描与排序之间被删除或移动
 
-            if len(logs) > 30:
-                for old_log in logs[:-30]:
-                    try:
-                        os.remove(old_log)
-                    except OSError:
-                        pass
+            if len(logs) <= 30:
+                continue
+
+            logs.sort()
+            for _mtime, old_log in logs[:-30]:
+                try:
+                    os.remove(old_log)
+                except OSError:
+                    pass
 
     def perform_startup_checks(self):
         self.show_mandatory_disclaimer()

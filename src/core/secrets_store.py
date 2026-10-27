@@ -22,10 +22,14 @@ import copy
 import json
 import logging
 import os
-import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.core import safe_io
+
 logger = logging.getLogger(__name__)
+
+#: ``secrets.json`` 只允许属主读写
+_SECRETS_MODE = 0o600
 
 #: 密钥文件名（与 ``settings.json`` 同级）
 SECRETS_FILENAME = "secrets.json"
@@ -64,14 +68,19 @@ def is_secret_name(name: Any) -> bool:
 
 
 def _split_mapping(mapping: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """把映射里"名字像密钥"的**字符串**字段分流成 ``(公开, 密钥)``。"""
+    """把映射里"名字像密钥"的**字符串**字段分流成 ``(公开, 密钥)``。
+
+    空值的密钥字段两边都不保留：它既不构成有效凭据，也不应继续以明文留在
+    ``mcp_servers.json`` 里。用户清空某个 token 时，下一次保存即彻底消失。
+    """
     public: Dict[str, Any] = {}
     secret: Dict[str, Any] = {}
     for key, value in (mapping or {}).items():
-        if isinstance(value, str) and is_secret_name(key) and value.strip():
-            secret[key] = value
-        else:
-            public[key] = value
+        if isinstance(value, str) and is_secret_name(key):
+            if value.strip():
+                secret[key] = value
+            continue
+        public[key] = value
     return public, secret
 
 
@@ -91,15 +100,16 @@ def split_settings(settings: Optional[dict]) -> Tuple[dict, dict]:
 
 
 def merge_settings(settings: Optional[dict], secret: Optional[dict]) -> dict:
-    """把密钥合回 ``settings``（键位齐全，缺失即为空串，读取方行为不变）。"""
+    """把密钥合回 ``settings``（键位齐全，缺失即为空串，读取方行为不变）。
+
+    密钥文件里没有的键一律置空串，而不是保留公开侧的残留值：否则用户在界面
+    清空密钥后，旧值仍会从明文残留里被注回，表现为"删不掉、换不掉"。
+    """
     merged = dict(settings or {})
     secret = secret or {}
     for key in SECRET_SETTING_KEYS:
         value = secret.get(key)
-        if value not in (None, ""):
-            merged[key] = value
-        else:
-            merged.setdefault(key, "")
+        merged[key] = value if value not in (None, "") else ""
     return merged
 
 
@@ -128,7 +138,10 @@ def split_llm(configs: Optional[list]) -> Tuple[list, dict]:
 
 
 def merge_llm(configs: Optional[list], secret: Optional[dict]) -> list:
-    """把 ``api_key`` 合回各 provider（键位齐全，缺失即为空串）。"""
+    """把 ``api_key`` 合回各 provider（键位齐全，缺失即为空串）。
+
+    与 :func:`merge_settings` 同口径：密钥文件里没有就置空，不回退到明文残留。
+    """
     secret = secret or {}
     merged: List[dict] = []
     for raw in configs or []:
@@ -136,7 +149,7 @@ def merge_llm(configs: Optional[list], secret: Optional[dict]) -> list:
         pid = _provider_id(entry)
         for field in SECRET_LLM_FIELDS:
             value = (secret.get(pid) or {}).get(field)
-            entry[field] = value if value not in (None, "") else str(entry.get(field) or "")
+            entry[field] = value if value not in (None, "") else ""
         merged.append(entry)
     return merged
 
@@ -185,7 +198,11 @@ def merge_mcp(servers: Optional[dict], secret: Optional[dict]) -> dict:
 #  文件读写
 # --------------------------------------------------------------------------- #
 def load(config_dir: str) -> Dict[str, Dict[str, Any]]:
-    """读取 ``secrets.json``；缺失或损坏时返回空结构（绝不因它中断启动）。"""
+    """读取 ``secrets.json``；缺失或损坏时返回空结构（绝不因它中断启动）。
+
+    损坏时先把原文件移到 ``corrupt_<时间戳>_secrets.json`` 再返回空结构：
+    否则下一次保存会用空内容覆盖，用户的全部 API key 就此永久消失。
+    """
     path = secrets_path(config_dir)
     bundle = copy.deepcopy(_EMPTY_BUNDLE)
     try:
@@ -195,10 +212,14 @@ def load(config_dir: str) -> Dict[str, Dict[str, Any]]:
         return bundle
     except (OSError, ValueError) as e:
         logger.error(f"Cannot read secrets file '{path}': {e}")
+        backup = safe_io.quarantine_corrupt(path)
+        if backup:
+            logger.error(f"Secrets file preserved at '{backup}'; starting with empty bundle.")
         return bundle
 
     if not isinstance(data, dict):
         logger.error(f"Secrets file '{path}' is not an object; ignoring it.")
+        safe_io.quarantine_corrupt(path)
         return bundle
     for key in bundle:
         section = data.get(key)
@@ -208,29 +229,18 @@ def load(config_dir: str) -> Dict[str, Dict[str, Any]]:
 
 
 def save(config_dir: str, bundle: Dict[str, Any]) -> bool:
-    """原子写入 ``secrets.json``（0o600）。失败只记日志，不打断调用方主流程。
+    """原子写入 ``secrets.json``（0o600）。
+
+    返回 ``False`` 仅用于兼容既有调用方；新代码应当检查返回值并向上报错，
+    否则磁盘满或权限不足时会表现为"保存成功、重启后密钥消失"。
 
     Windows 上 ``chmod`` 基本无效（无 POSIX 权限位），按用户级目录隔离即可；
     Linux / macOS 上 0o600 是这里唯一真正的访问控制，务必保留。
     """
-    os.makedirs(config_dir, exist_ok=True)
     path = secrets_path(config_dir)
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=config_dir, prefix=".secrets_", text=False)
-        os.close(fd)
-    except OSError as e:
-        logger.error(f"Cannot create temp file for secrets in '{config_dir}': {e}")
-        return False
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(bundle or {}, f, indent=4, ensure_ascii=False)
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, path)
+        safe_io.atomic_write_json(path, bundle or {}, mode=_SECRETS_MODE)
         return True
-    except OSError as e:
+    except (OSError, TypeError, ValueError) as e:
         logger.error(f"Failed to write secrets file '{path}': {e}")
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
         return False

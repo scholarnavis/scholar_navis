@@ -45,6 +45,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import urllib.parse
 import zipfile
@@ -184,6 +185,12 @@ def write_archive(path: str, tabs: Iterable[Dict]) -> Dict[str, Any]:
     try:
         conn = chat_store.create_database(tmp_path, fmt=FORMAT,
                                           kind=chat_store.KIND_ARCHIVE)
+        # 归档先写到同目录临时文件、成功后原子替换，因此这里可以关掉提交时的
+        # fsync：中途失败整份临时文件会被删掉，不存在"半个归档被当成完整"的风险。
+        try:
+            conn.execute("PRAGMA synchronous = OFF")
+        except sqlite3.DatabaseError:
+            pass
         written_entries = _write_asset_blobs(conn, embedded, placeholders)
         # 占位信息必须在写消息**之前**定稿：写文件阶段失败的文件也要带上
         chat_assets.annotate_messages(all_msgs, placeholders, detect_missing=False)
@@ -233,8 +240,12 @@ def write_archive(path: str, tabs: Iterable[Dict]) -> Dict[str, Any]:
 
 def _write_asset_blobs(conn, embedded: Dict[str, Dict[str, Any]],
                        placeholders: Dict[str, Dict[str, Any]]) -> int:
-    """把资产本体写进归档库；单个文件读写失败降级为占位符。返回写入条目数。"""
-    written = 0
+    """把资产本体写进归档库；单个文件读写失败降级为占位符。返回写入条目数。
+
+    收集完再一次性写：旧实现每个资产调用一次 ``put_assets``，每次都是独立事务
+    与一次 fsync，带 N 张图片的归档要付 N 次提交。
+    """
+    payloads = []
     for original, meta in list(embedded.items()):
         digest = str(meta.get("sha256") or "")
         source = str(meta.get("source") or original)
@@ -254,16 +265,18 @@ def _write_asset_blobs(conn, embedded: Dict[str, Dict[str, Any]],
             placeholders[original] = {"status": chat_assets.STATUS_MISSING,
                                       "name": meta.get("name") or os.path.basename(original)}
             continue
-        chat_store.put_assets(conn, chat_store.ARCHIVE_SCOPE, [{
+        payloads.append({
             "original": original,
             "sha256": digest,
             "name": str(meta.get("name") or os.path.basename(original)),
             "size": int(meta.get("size") or len(data)),
             "entry": str(meta.get("entry") or ""),
             "blob": data,
-        }])
-        written += 1
-    return written
+        })
+
+    if payloads:
+        chat_store.put_assets(conn, chat_store.ARCHIVE_SCOPE, payloads)
+    return len(payloads)
 
 
 def _now_iso() -> str:

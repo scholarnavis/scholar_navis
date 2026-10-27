@@ -40,6 +40,7 @@ _FULLTEXT_ATTACH_CHARS = 20000
 _FULLTEXT_SCAN_LIMIT = 8
 
 
+
 def _normalize_doi(doi):
     """归一化 DOI：剥离 URL 前缀、去除空白，返回小写标准化 DOI（保留原样便于展示）。"""
     if not doi:
@@ -105,6 +106,10 @@ def _clean_abstract(raw):
     引用登记链路当成原文（历史故障：引用卡的 Cited passage 显示成了
     ``Fetch via fetch_pubmed_abstract.``）。空串的语义是"该来源没有摘要原文"，
     由 UI 明确提示"未记录支撑原文"。
+
+    摘要**不截断**：它是模型判断相关性、核对数值与结论的唯一依据，截断等于让它
+    凭猜测挑文章。上下文体积由 :func:`token_estimator.derive_context_budgets`
+    与工具结果上限统一治理，不在这一层做局部裁剪。
     """
     text = re.sub(r"<[^>]+>", " ", str(raw or ""))
     return re.sub(r"\s+", " ", text).strip()

@@ -180,8 +180,10 @@ class FetchRSSTask(BackgroundTask):
             executor.shutdown(wait=True)
 
         try:
-            with open(save_path, 'w', encoding='utf-8') as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
+            # 走统一的原子写：抓取过程中被杀或断电时，缓存文件不会变成 0 字节，
+            # 用户已抓取的全部历史得以保留。
+            from src.core.config_manager import ConfigManager
+            ConfigManager().save_json(save_path, results)
 
             if self.is_cancelled():
                 self.send_log("INFO", "Sync interrupted by user; partial data saved.")

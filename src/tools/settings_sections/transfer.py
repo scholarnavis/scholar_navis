@@ -9,6 +9,7 @@ import json
 import os
 import zlib
 
+from src.core import safe_io
 from src.core.core_task import TaskManager, TaskMode
 from src.core.i18n import tr
 from src.core.skill_store import read_skill_source
@@ -16,6 +17,26 @@ from src.task.config_task import ExportConfigTask, ImportConfigTask
 from src.ui.components.dialog import (ExportPasswordDialog, ImportPasswordDialog,
                                       ProgressDialog, StandardDialog)
 from src.ui.components.file_dialogs import open_file_name, save_file_name
+
+#: 单个技能源码解压后的字节上限。正常技能脚本远小于此值，上限只用来挡住压缩炸弹。
+_SKILL_CODE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _decompress_limited(data: bytes, max_bytes: int = _SKILL_CODE_MAX_BYTES) -> bytes:
+    """有上限的 zlib 解压。
+
+    导入的配置束是不可信输入：几 KB 的 base64 可以膨胀到 GB 级，而
+    ``zlib.decompress`` 没有长度参数，会直接把内存吃满。这里用
+    ``decompressobj`` 限定输出，并检查是否还有未消耗的输入。
+    """
+    obj = zlib.decompressobj()
+    out = obj.decompress(data, max_bytes + 1)
+    if len(out) > max_bytes or obj.unconsumed_tail:
+        raise ValueError(f"技能源码解压后超过 {max_bytes} 字节上限")
+    tail = obj.flush()
+    if len(out) + len(tail) > max_bytes:
+        raise ValueError(f"技能源码解压后超过 {max_bytes} 字节上限")
+    return out + tail
 
 
 class ConfigTransferMixin:
@@ -90,12 +111,13 @@ class ConfigTransferMixin:
 
         if result.get("success"):
             try:
-                with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, indent=4, ensure_ascii=False)
+                # 原子写：直接 open('w') 会先截断用户目标路径上的同名文件，
+                # 中途失败就只剩半截 JSON，原有备份也一并被毁。
+                safe_io.atomic_write_json(path, result)
                 pd.show_finish_state(
                     True, tr("Export Successful"),
                     tr("Configuration bundle has been securely saved to:\n{path}").format(path=path))
-            except Exception as e:
+            except (OSError, TypeError, ValueError) as e:
                 pd.show_finish_state(False, tr("Write Error"),
                                      tr("Failed to write file to disk: {err}").format(err=e))
         else:
@@ -172,7 +194,7 @@ class ConfigTransferMixin:
                 for s_name, b64_str in final_data["skill_files_zlib_b64"].items():
                     try:
                         compressed_bytes = base64.b64decode(b64_str)
-                        plain_code_str = zlib.decompress(compressed_bytes).decode('utf-8')
+                        plain_code_str = _decompress_limited(compressed_bytes).decode('utf-8')
 
                         if "mcp_servers" in final_data and "external_skills" in final_data["mcp_servers"]:
                             if s_name in final_data["mcp_servers"]["external_skills"]:

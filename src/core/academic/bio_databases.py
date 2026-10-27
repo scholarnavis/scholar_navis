@@ -16,6 +16,10 @@ __all__ = [
     "query_plant_multiomics", "search_jaspar_motifs", "query_ensembl_database",
 ]
 
+# ---- 返回值体积约束（这些工具的返回会整条进入模型上下文）----
+#: STRING 互作查询最多接受的 identifier 个数（每条各自再乘 limit 行）
+_MAX_STRING_IDENTIFIERS = 10
+
 
 @simple_retry(max_attempts=2, delay=1)
 def search_gbif_occurrences(scientific_name: str, limit: int = 5) -> str:
@@ -281,6 +285,11 @@ def query_uniprot_database(query: str, db_type: Literal[
                 sub_loc_str = ", ".join(subcellular_locations) if subcellular_locations else "Not specified"
                 function_str = " ".join(function_texts) if function_texts else "Not specified"
 
+                # TODO(sequence-tools): 完整序列内联可能上万字符（titin ≈ 34k aa），
+                # 但序列比对、结构预测这类任务应由后端的专门工具承担，而不是让模型
+                # 在上下文里读整条序列。等那批工具就位后，这里改为只回 accession 与
+                # 长度、序列本体通过工具单独取；在此之前保持完整返回，避免模型在
+                # 真正需要序列时拿不到数据。
                 sequence_str = item.get("sequence", {}).get("value", "")
 
                 results.append({
@@ -291,8 +300,8 @@ def query_uniprot_database(query: str, db_type: Literal[
                     "organism": item.get("organism", {}).get("scientificName", ""),
                     "sequence_length": item.get("sequence", {}).get("length", 0),
                     "subcellular_localization": sub_loc_str,
-                    "function_description": function_str,  # 新增
-                    "sequence": sequence_str  # 新增
+                    "function_description": function_str,
+                    "sequence": sequence_str
                 })
             return json.dumps({"status": "success", "db": "uniprotkb", "results": results}, ensure_ascii=False)
 
@@ -563,6 +572,11 @@ def analyze_systems_network(identifiers: str, action: Literal["interactions", "e
     logger.info(f"Task: Systems Network | Action: '{action}' | Identifiers: '{identifiers[:30]}'...")
     try:
         clean_identifiers = [x.strip() for x in identifiers.split(",") if x.strip()]
+        if len(clean_identifiers) > _MAX_STRING_IDENTIFIERS:
+            # 返回行数 = identifier 数 × limit，不设上限时几十个 id 就能灌上千行
+            logger.info("STRING identifiers truncated: %d -> %d",
+                        len(clean_identifiers), _MAX_STRING_IDENTIFIERS)
+            clean_identifiers = clean_identifiers[:_MAX_STRING_IDENTIFIERS]
 
         if action == "interactions":
             url = "https://string-db.org/api/json/interaction_partners"
@@ -580,6 +594,8 @@ def analyze_systems_network(identifiers: str, action: Literal["interactions", "e
                         "annotation_B": item.get("annotation_B", "")} for item in res.json()]
 
             results = sorted(results, key=lambda x: x["score"], reverse=True)
+            # 每个 identifier 各返回 limit 条，总数随输入线性增长；这里再兜一道全局上限
+            results = results[:max(1, limit) * 2]
             return json.dumps({"status": "success", "action": "interactions", "database": "STRING", "results": results},
                               ensure_ascii=False)
 
@@ -691,7 +707,7 @@ def query_plant_multiomics(gene_id: str, action: Literal["annotation", "expressi
 
 
 @simple_retry(max_attempts=2, delay=1)
-def search_jaspar_motifs(query: str, tax_group: Literal["plants", "vertebrates", "insects", "nematodes", "fungi", "urochordates"] = "plants") -> str:
+def search_jaspar_motifs(query: str, tax_group: Literal["plants", "vertebrates", "insects", "nematodes", "fungi", "urochordates"] = "plants", limit: int = 10) -> str:
     logger.info(f"Task: JASPAR Motif Search | Query: '{query}'")
     try:
         clean_query = query.strip().split()[0]
@@ -711,13 +727,14 @@ def search_jaspar_motifs(query: str, tax_group: Literal["plants", "vertebrates",
             return json.dumps({"status": "success", "message": f"No motifs found for '{clean_query}' in {tax_group}."})
 
         results = []
-        for item in data.get("results", []):
+        # 上限必须有：宽泛查询（如 "MADS"）会返回上百条 matrix，每条都带 URL 时
+        # 单次调用就能占掉可观上下文。sequence_logo_url 只有 UI 会用，不返回。
+        for item in data.get("results", [])[:max(1, limit)]:
             matrix_id = item.get("matrix_id")
             results.append({
                 "matrix_id": matrix_id,
                 "name": item.get("name"),
                 "base_url": f"https://jaspar.elixir.no/matrix/{matrix_id}/",
-                "sequence_logo_url": f"https://jaspar.elixir.no/static/logos/all/svg/{matrix_id}.svg"
             })
 
         return json.dumps({"status": "success", "source": "JASPAR", "results": results}, ensure_ascii=False)

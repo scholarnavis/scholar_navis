@@ -42,9 +42,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import time
 import zlib
@@ -56,7 +58,22 @@ logger = logging.getLogger("Core.ChatStore")
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
 #: 表结构版本（``meta.schema_version``）。新增列时要能容忍"旧库没有它"。
-SCHEMA_VERSION = 2
+#: v3：新增 ``messages.digest``，让每轮保存只需重写真正变化的消息。
+SCHEMA_VERSION = 3
+
+#: 逐版本迁移脚本：``{目标版本: (SQL, ...)}``。
+#: 新库由 :data:`_SCHEMA_SQL` 直接建出最终结构，这些语句会因"列已存在"被跳过；
+#: 旧库则只补差异列，不重建表、不动业务数据。
+_MIGRATIONS: Dict[int, Tuple[str, ...]] = {
+    3: ("ALTER TABLE messages ADD COLUMN digest TEXT NOT NULL DEFAULT ''",),
+}
+
+#: 单条消息解压后的字节上限（思维链通常几百 KB，正常远低于此值）
+_MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+
+#: ``_read_messages`` 里批量补齐引用/书签时的分块大小，避免超长对话触发
+#: SQLite 的变量数量上限（旧实现在几百条消息时就会整页读不出来）
+_IN_CHUNK = 500
 
 #: ``meta.format``：会话快照与归档各自一个标识，读取侧可据此拒绝错配文件。
 FORMAT_CHAT_TABS = "scholar_navis_chat_tabs"
@@ -100,6 +117,7 @@ CREATE TABLE IF NOT EXISTS messages (
     status    TEXT NOT NULL DEFAULT '',
     payload   TEXT NOT NULL DEFAULT '{}',
     payload_z INTEGER NOT NULL DEFAULT 0,
+    digest    TEXT NOT NULL DEFAULT '',
     UNIQUE(tab_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_tab ON messages(tab_id, seq);
@@ -255,15 +273,31 @@ def connect(path: str, *, readonly: bool = False, wal: bool = False) -> sqlite3.
 
 
 def init_schema(conn: sqlite3.Connection, *, fmt: str, kind: str) -> None:
-    """建表并写入格式标识。
+    """建表、补齐缺失列并写入格式标识。
 
     已就绪的库直接返回：这个函数在**每次**打开会话库时都会被调用（每轮对话都要
-    落盘一次），重复执行建表脚本会白白多花几毫秒。判定只看 ``schema_version``，
-    版本落后时按新脚本重建缺失的表与索引（``IF NOT EXISTS``，不动业务数据）。
+    落盘一次），重复执行建表脚本会白白多花几毫秒。
+
+    旧库升级只补差异列，不重建表、不触碰业务数据；升级前的库文件由
+    :func:`create_database` 备份为 ``<path>.bak_v<旧版本>``。
     """
     if _schema_ready(conn):
         return
+
+    previous = _schema_version(conn)
     conn.executescript(_SCHEMA_SQL)
+
+    # 新库由建表脚本直接产出最终结构，逐版本迁移语句会因"列已存在"被跳过；
+    # 旧库借此只补差异列。两者共用同一段逻辑，避免出现两套升级路径。
+    for version in range(max(previous, 0) + 1, SCHEMA_VERSION + 1):
+        for statement in _MIGRATIONS.get(version, ()):
+            try:
+                conn.execute(statement)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    logger.error("Schema migration to v%d failed: %s", version, e)
+                    raise
+
     now = time.time()
     with conn:
         # 版本号必须**无条件**推进：否则旧库永远停在旧版本，`_schema_ready` 恒为
@@ -278,21 +312,64 @@ def init_schema(conn: sqlite3.Connection, *, fmt: str, kind: str) -> None:
                 "INSERT INTO meta(key, value) VALUES(?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = CASE WHEN meta.value = '' "
                 "THEN excluded.value ELSE meta.value END", (key, value))
+    if previous and previous < SCHEMA_VERSION:
+        logger.info("Database schema upgraded: v%d -> v%d", previous, SCHEMA_VERSION)
+
+
+def _schema_version(conn: sqlite3.Connection) -> int:
+    """库内记录的表结构版本；无 ``meta`` 表（全新库）返回 0。"""
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    except sqlite3.DatabaseError:
+        return 0
+    if row is None:
+        return 0
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return 0
 
 
 def _schema_ready(conn: sqlite3.Connection) -> bool:
     """库内表结构是否已是当前版本（缺表 / 版本落后都返回 ``False``）。"""
+    return _schema_version(conn) == SCHEMA_VERSION
+
+
+def _backup_before_migration(conn: sqlite3.Connection, path: str, version: int) -> Optional[str]:
+    """升级表结构前整库备份，返回备份路径。
+
+    会话库是用户不可再生的数据，升级一旦出问题必须有办法退回去。WAL 库要先
+    checkpoint，否则复制出来的文件可能缺少最近提交的事务。
+    """
     try:
-        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    except sqlite3.DatabaseError:
-        return False
-    return row is not None and str(row["value"]) == str(SCHEMA_VERSION)
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
+    except sqlite3.DatabaseError as e:
+        logger.warning("Cannot checkpoint before migration: %s", e)
+
+    target = f"{path}.bak_v{version}"
+    if os.path.exists(target):
+        return target
+    try:
+        shutil.copy2(path, target)
+        logger.info("Database backed up before migration: %s -> %s", path, target)
+        return target
+    except OSError as e:
+        # 备份失败不阻断升级：单条 ALTER 失败会随事务回滚，且日志明确指出无备份可用
+        logger.error("Cannot back up database before migration, proceeding: %s", e)
+        return None
 
 
 def create_database(path: str, *, fmt: str, kind: str, wal: bool = False) -> sqlite3.Connection:
-    """新建（或打开）一个已建好表结构的数据库文件。"""
+    """新建（或打开）一个已建好表结构的数据库文件，必要时自动升级旧库。"""
     conn = connect(path, wal=wal)
-    init_schema(conn, fmt=fmt, kind=kind)
+    try:
+        previous = _schema_version(conn)
+        if 0 < previous < SCHEMA_VERSION and os.path.isfile(path):
+            _backup_before_migration(conn, path, previous)
+        init_schema(conn, fmt=fmt, kind=kind)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -336,16 +413,41 @@ def _encode_payload(payload: Dict[str, Any]) -> Tuple[Any, int]:
 
 
 def _decode_payload(text: Any, compressed: int) -> Dict[str, Any]:
+    """解出消息体。压缩态用有上限的解压器。
+
+    ``.schat`` 是不可信输入，一条几十 KB 的压缩数据可以膨胀到 GB 级；
+    ``zlib.decompress`` 没有长度参数，会直接把内存吃光。
+    """
     raw = text if isinstance(text, (bytes, bytearray)) else str(text or "")
     if compressed:
         try:
             blob = raw if isinstance(raw, (bytes, bytearray)) else str(raw).encode("utf-8")
-            raw = zlib.decompress(bytes(blob)).decode("utf-8")
+            obj = zlib.decompressobj()
+            chunk = obj.decompress(bytes(blob), _MAX_PAYLOAD_BYTES + 1)
+            if len(chunk) > _MAX_PAYLOAD_BYTES or obj.unconsumed_tail:
+                raise ValueError(f"消息体解压后超过 {_MAX_PAYLOAD_BYTES} 字节上限")
+            tail = obj.flush()
+            if len(chunk) + len(tail) > _MAX_PAYLOAD_BYTES:
+                raise ValueError(f"消息体解压后超过 {_MAX_PAYLOAD_BYTES} 字节上限")
+            raw = (chunk + tail).decode("utf-8")
         except (zlib.error, UnicodeDecodeError, ValueError) as e:
             logger.warning("Corrupt compressed message payload skipped: %s", e)
             return {}
     value = _loads(raw, {})
     return value if isinstance(value, dict) else {}
+
+
+def _message_digest(body: Any, compressed: int, refs: List[Dict],
+                    bookmarks: List[Dict]) -> str:
+    """消息内容指纹，用于判断某条消息是否需要重写。
+
+    引用与书签走独立表、不参与 ``payload`` 编码，因此必须一并计入；否则
+    "只加了一条书签"会被判定为未变化而跳过写入。
+    """
+    raw = body if isinstance(body, (bytes, bytearray)) else str(body).encode("utf-8")
+    extra = _dumps([refs, bookmarks]).encode("utf-8")
+    return hashlib.sha1(
+        bytes(raw) + b"|" + str(int(compressed)).encode() + b"|" + extra).hexdigest()
 
 
 def _ref_values(ref: Dict[str, Any]) -> Tuple:
@@ -379,23 +481,40 @@ def _ref_from_row(row: sqlite3.Row) -> Dict[str, Any]:
     return entry
 
 
-def _insert_message(conn: sqlite3.Connection, tab_id: str, seq: int,
-                    msg: Dict[str, Any]) -> int:
-    payload, refs, bookmarks = _split_message(sanitize(msg))
-    body, compressed = _encode_payload(payload)
-    cur = conn.execute(
-        "INSERT INTO messages(tab_id, seq, role, content, status, payload, payload_z) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?)",
-        (tab_id, int(seq), str(payload.get("role") or ""),
-         str(payload.get("content") or ""), str(payload.get("status") or ""),
-         body, compressed))
-    message_id = int(cur.lastrowid)
+def _write_message(conn: sqlite3.Connection, tab_id: str, seq: int,
+                   payload: Dict[str, Any], refs: List[Dict], bookmarks: List[Dict],
+                   body: Any, compressed: int, digest: str) -> int:
+    """按 ``(tab_id, seq)`` 写入一条消息，返回消息 id。
+
+    用 upsert 而不是"删光重插"，是为了保住主键：``message_references`` 与
+    ``message_bookmarks`` 通过 ``ON DELETE CASCADE`` 挂在消息上，主键一变，
+    这两张表的历史行就要跟着重建。
+
+    ``content`` 冗余列刻意留空：正文已经完整存在于（可压缩的）``payload`` 里，
+    再存一份明文副本等于把压缩收益抵消一半，而这一列没有任何读取方。
+    """
+    conn.execute(
+        "INSERT INTO messages(tab_id, seq, role, content, status, payload, payload_z, digest) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(tab_id, seq) DO UPDATE SET "
+        "role = excluded.role, content = excluded.content, status = excluded.status, "
+        "payload = excluded.payload, payload_z = excluded.payload_z, digest = excluded.digest",
+        (tab_id, int(seq), str(payload.get("role") or ""), "",
+         str(payload.get("status") or ""), body, int(compressed), digest))
+
+    row = conn.execute("SELECT id FROM messages WHERE tab_id = ? AND seq = ?",
+                       (tab_id, int(seq))).fetchone()
+    message_id = int(row["id"])
+
+    conn.execute("DELETE FROM message_references WHERE message_id = ?", (message_id,))
     for ordinal, ref in enumerate(refs):
         conn.execute(
             "INSERT INTO message_references(message_id, ordinal, ref_index, kind, title, "
             "authors, year, journal, doi, url, path, extra) "
             "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (message_id, ordinal) + _ref_values(ref))
+
+    conn.execute("DELETE FROM message_bookmarks WHERE message_id = ?", (message_id,))
     for ordinal, bookmark in enumerate(bookmarks):
         conn.execute(
             "INSERT INTO message_bookmarks(message_id, ordinal, bookmark_id, title, payload) "
@@ -405,24 +524,53 @@ def _insert_message(conn: sqlite3.Connection, tab_id: str, seq: int,
     return message_id
 
 
+def _write_messages(conn: sqlite3.Connection, tab_id: str, msgs: List[Dict[str, Any]]) -> None:
+    """增量写入某标签页的消息：只重写内容变化的行，并删除尾部多余行。
+
+    旧实现每轮 ``DELETE + 全量 INSERT``，第 k 轮的写入量正比于前 k-1 轮全文，
+    累计 O(n²)，表现为"对话越长，收尾越卡"。这里用 ``digest`` 列比对，
+    常规追加轮次只写新增的两条。
+    """
+    stored = {int(row["seq"]): str(row["digest"] or "") for row in conn.execute(
+        "SELECT seq, digest FROM messages WHERE tab_id = ?", (tab_id,))}
+
+    count = len(msgs)
+    if len(stored) > count:
+        conn.execute("DELETE FROM messages WHERE tab_id = ? AND seq >= ?", (tab_id, count))
+
+    for seq, msg in enumerate(msgs):
+        payload, refs, bookmarks = _split_message(sanitize(msg))
+        body, compressed = _encode_payload(payload)
+        digest = _message_digest(body, compressed, refs, bookmarks)
+        if stored.get(seq) == digest:
+            continue
+        _write_message(conn, tab_id, seq, payload, refs, bookmarks, body, compressed, digest)
+
+
 def _read_messages(conn: sqlite3.Connection, tab_id: str) -> List[Dict[str, Any]]:
-    """按 seq 顺序读回某标签页的全部消息（引用 / 书签整批补齐，避免 N+1 查询）。"""
+    """按 seq 顺序读回某标签页的全部消息（引用 / 书签整批补齐，避免 N+1 查询）。
+
+    用 JOIN 而不是 ``message_id IN (?,?,…)``：后者在消息数超过 SQLite 的变量
+    上限时会直接抛错，导致整个标签页读不出来。
+    """
     rows = conn.execute(
         "SELECT id, payload, payload_z FROM messages WHERE tab_id = ? ORDER BY seq",
         (tab_id,)).fetchall()
     if not rows:
         return []
-    ids = [int(row["id"]) for row in rows]
-    marks = ",".join("?" * len(ids))
+
     refs: Dict[int, List[Dict[str, Any]]] = {}
     for row in conn.execute(
-            f"SELECT * FROM message_references WHERE message_id IN ({marks}) "
-            "ORDER BY message_id, ordinal", ids):
+            "SELECT r.* FROM message_references r "
+            "JOIN messages m ON m.id = r.message_id "
+            "WHERE m.tab_id = ? ORDER BY r.message_id, r.ordinal", (tab_id,)):
         refs.setdefault(int(row["message_id"]), []).append(_ref_from_row(row))
+
     bookmarks: Dict[int, List[Dict[str, Any]]] = {}
     for row in conn.execute(
-            f"SELECT message_id, payload FROM message_bookmarks WHERE message_id IN ({marks}) "
-            "ORDER BY message_id, ordinal", ids):
+            "SELECT b.message_id, b.payload FROM message_bookmarks b "
+            "JOIN messages m ON m.id = b.message_id "
+            "WHERE m.tab_id = ? ORDER BY b.message_id, b.ordinal", (tab_id,)):
         entry = _loads(row["payload"], {})
         if isinstance(entry, dict):
             bookmarks.setdefault(int(row["message_id"]), []).append(entry)
@@ -539,14 +687,13 @@ def put_tab(conn: sqlite3.Connection, tab_id: str, messages: Iterable[Dict[str, 
     * ``placeholders``：``{原路径: 占位信息}``——未能内嵌的文件说明。
     * ``tags``：标签名列表（大小写不敏感去重）。
 
-    写入是"整页替换"：同一 ``tab_id`` 的旧消息先删后插，永远与内存状态一致。
+    写入是增量的：按 ``(tab_id, seq)`` upsert，只重写内容变化的行，并删除尾部
+    多余行。结果与内存状态一致，但不产生"每轮重写整段历史"的 O(n²) 写放大。
     """
     msgs = [sanitize(m) for m in (messages or []) if isinstance(m, dict)]
     ensure_tab(conn, tab_id, name)
     with conn:
-        conn.execute("DELETE FROM messages WHERE tab_id = ?", (tab_id,))
-        for seq, msg in enumerate(msgs):
-            _insert_message(conn, tab_id, seq, msg)
+        _write_messages(conn, tab_id, msgs)
         conn.execute("DELETE FROM asset_links WHERE scope = ?", (tab_id,))
         for asset in assets or []:
             _link_asset(conn, tab_id, asset)
@@ -602,11 +749,21 @@ def list_tabs(conn: sqlite3.Connection) -> List[str]:
 #  半条回答（流式中途）
 # --------------------------------------------------------------------------- #
 def put_inflight(conn: sqlite3.Connection, tab_id: str, content: str) -> None:
+    """写入流式半成品。
+
+    顺带确保 ``tabs`` 行存在：调用方此前会先单独调 :func:`ensure_tab`，那是
+    同一次逻辑写入里的第二个独立事务（两次提交），而这里只是补一行。
+    """
+    now = time.time()
     with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO tabs(id, name, position, created_at, updated_at) "
+            "VALUES(?, '', (SELECT COALESCE(MAX(position), -1) + 1 FROM tabs), ?, ?)",
+            (tab_id, now, now))
         conn.execute("INSERT INTO inflight(tab_id, content, saved_at) VALUES(?, ?, ?) "
                      "ON CONFLICT(tab_id) DO UPDATE SET content = excluded.content, "
                      "saved_at = excluded.saved_at",
-                     (tab_id, str(content or ""), time.time()))
+                     (tab_id, str(content or ""), now))
 
 
 def read_inflight(conn: sqlite3.Connection, tab_id: str) -> str:

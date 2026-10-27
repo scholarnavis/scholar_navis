@@ -52,6 +52,10 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# 应用运行期缓存（附件解析结果、图生文描述）。
+# 源码方式运行时 BASE_DIR 就是仓库根，缓存会落在 cache/ 下，不应入库。
+cache/
+
 # Translations
 *.mo
 *.pot

@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import List, Tuple
 
+from src.core import attachment_parser, safe_io
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask, TaskState
 from src.core.device_manager import DeviceManager
@@ -17,7 +18,7 @@ from src.core.mcp_manager import MCPManager
 from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.references import (CITE_LINK_RE, FOOTER_RULE_HTML,
                                  PROVENANCE_HEADER_HTML, ReferenceItem,
-                                 ReferenceRegistry, citation_href)
+                                 ReferenceRegistry, citation_href, split_footer)
 from src.core.evidence import EvidenceStore, is_usable_source_text
 from src.core.evidence_gate import apply_evidence_gate, gate_finder
 from src.core.prompt_rules import (CITATION_TOKEN_RULE,
@@ -607,10 +608,6 @@ class ChatGenerationTask(BackgroundTask):
                 f"<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>📄 Loading {len(all_external_files)} attached file(s) into memory...</div>\n\n")
             time.sleep(0.05)
 
-            import tempfile, hashlib, os
-            cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
-            os.makedirs(cache_dir, exist_ok=True)
-
             for info in all_external_files:
                 if self.is_cancelled(): break
                 path = info.get('path', '')
@@ -644,57 +641,17 @@ class ChatGenerationTask(BackgroundTask):
                     continue
 
                 if os.path.exists(path):
-                    file_stat = os.stat(path)
-                    hash_key = hashlib.md5(f"{path}_{file_stat.st_mtime}_{file_stat.st_size}".encode()).hexdigest()
-                    cache_file = os.path.join(cache_dir, f"{hash_key}.json")
-
-                    # 击中缓存，直接加载，实现秒进
-                    if os.path.exists(cache_file):
-                        try:
-                            with open(cache_file, 'r', encoding='utf-8') as cf:
-                                cached_data = json.load(cf)
-                            self.external_context.extend(cached_data)
-                            continue
-                        except (OSError, ValueError):
-                            pass
-
                     try:
-                        chunks = []
-                        if ext.endswith('.pdf'):
-                            import pymupdf4llm
-                            md_chunks = pymupdf4llm.to_markdown(path, page_chunks=True)
-                            for chunk in md_chunks:
-                                text = chunk.get("text", "").strip()
-                                if len(text) > 10:
-                                    chunks.append({
-                                        "path": path, "name": f_name, "page": chunk.get("metadata", {}).get("page", 1),
-                                        "content": text
-                                    })
-                        elif ext.endswith('.docx'):
-                            import docx
-                            doc = docx.Document(path)
-                            text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
-                            if len(text) > 10:
-                                chunks.append({"path": path, "name": f_name, "page": 1, "content": text})
-                        elif ext.endswith('.doc'):
-                            self.send_log("WARNING", f"Legacy .doc format skipped: {f_name}")
-                        else:
-                            import chardet
-                            with open(path, 'rb') as f:
-                                raw_data = f.read()
-                                detected = chardet.detect(raw_data)
-                                encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
-                                text = raw_data.decode(encoding, errors='replace').strip()
-                            if text:
-                                chunks.append({"path": path, "name": f_name, "page": 1, "content": text})
-
-                        if chunks:
-                            self.external_context.extend(chunks)
-                            with open(cache_file, 'w', encoding='utf-8') as cf:
-                                json.dump(chunks, cf, ensure_ascii=False)
-                    except Exception as e:
+                        # 体积/页数/字符上限、缓存键与失效规则统一在
+                        # src/core/attachment_parser.py，此处只负责并入上下文
+                        self.external_context.extend(
+                            attachment_parser.extract(path, f_name))
+                    except (OSError, ValueError) as e:
+                        # 明确指出失败原因：静默跳过会让人误以为"模型忽略了附件"
                         self.send_log("ERROR", f"Failed to parse {f_name}: {e}")
 
+            # 附件正文总量封顶，防止多个大文件叠加后撑爆上下文预算
+            self.external_context = attachment_parser.trim_total(self.external_context)
             self._emit_token("[CLEAR_SEARCH]")
 
         if self.kb_id:
@@ -1129,12 +1086,12 @@ class ChatGenerationTask(BackgroundTask):
                     "IMPORTANT: If the user asks to visualize/plot data but has NOT clearly specified the "
                     "chart type, the x/y columns, the title, or styling, call the propose_plot_plan tool "
                     "FIRST to show a confirmation card. Only call plot_chart after the user confirms the plan.\n"
-                    "DEFAULT FIGURE STYLE: every chart is rendered in the built-in reference style "
-                    "documented in the plot_chart tool description (journal canvas size, theme, palette and "
-                    "layout rules). That style is a BASELINE, not a constraint: whenever the user requests a "
-                    "specific chart type, palette, theme, layout or annotation, follow the user's requirement "
-                    "instead and pass it through the style / palette / theme parameters. "
-                    f"({plot_styles.STYLE_REFERENCE})\n"
+                    "DEFAULT FIGURE STYLE — this is a BASELINE, not a constraint: whenever the user "
+                    "requests a specific chart type, palette, theme, layout or annotation, follow the "
+                    "user's requirement instead and pass it through style / palette / theme.\n"
+                    # 样式细则只在系统提示里保留一份：工具描述里再抄一遍，
+                    # 等于每次请求（最多 12 步）都把同一段说明重复发送两三次。
+                    f"{plot_styles.describe_defaults()}\n"
                     "ENRICHMENT DOTPLOT REFERENCE LAYOUT (KEGG / GO / GSEA / Reactome bubble plots): "
                     "chart_type='bubble', x=Gene Ratio plotted HORIZONTALLY at the bottom, y=Pathway/Term "
                     "name on the left ordered by Gene Ratio DESCENDING (largest ratio on TOP), size=Gene "
@@ -1247,6 +1204,10 @@ class ChatGenerationTask(BackgroundTask):
                     content = strip_think_blocks(content)
                     content = re.sub(r"\[Status:\s*Executing\][^\n]*", "",
                                      content, flags=re.IGNORECASE)
+                    # 文献页脚只服务界面与导出：编号对应关系已在正文里，条目正文
+                    # （每条 up to 2000 字符）每轮随历史重发没有信息增量。
+                    if m.get("role") == "assistant":
+                        content = split_footer(content)[0]
                 msg = {"role": m["role"], "content": content}
                 if m.get("tool_calls"): msg["tool_calls"] = m["tool_calls"]
                 if m.get("tool_call_id"): msg["tool_call_id"] = m["tool_call_id"]
@@ -1480,10 +1441,15 @@ class ChatGenerationTask(BackgroundTask):
         return self.full_response_cache
 
     def _caption_cache_path(self, img_info: dict) -> str:
-        """根据图片源路径与修改时间生成图生文缓存的 JSON 路径。"""
+        """根据图片源路径与修改时间生成图生文缓存的 JSON 路径。
+
+        缓存放应用数据目录而非系统临时目录：临时目录会被随系统清理，一旦清掉，
+        每张历史图片都要重新调用视觉模型，既慢又费额度。过期清理由
+        :mod:`src.core.attachment_parser` 的缓存清扫统一负责。
+        """
         import hashlib
-        import tempfile
-        cache_dir = os.path.join(tempfile.gettempdir(), "scholar_navis_cache")
+
+        cache_dir = attachment_parser.caption_cache_dir()
         os.makedirs(cache_dir, exist_ok=True)
         src = img_info.get("image_path") or img_info.get("path", "")
         try:
@@ -1508,13 +1474,18 @@ class ChatGenerationTask(BackgroundTask):
         return None
 
     def _save_caption_cache(self, img_info: dict, desc: str):
-        """持久化图生文结果。失败静默降级（不影响主流程）。"""
+        """持久化图生文结果。失败静默降级（不影响主流程）。
+
+        用原子写：直接 ``open('w')`` 在中途被杀时留下半截 JSON，下一次读取失败
+        就会白白重新调用一次视觉模型。
+        """
         if not desc:
             return
         try:
-            with open(self._caption_cache_path(img_info), 'w', encoding='utf-8') as cf:
-                json.dump({"name": img_info.get("name", ""), "desc": desc}, cf, ensure_ascii=False)
-        except OSError as e:
+            safe_io.atomic_write_json(
+                self._caption_cache_path(img_info),
+                {"name": img_info.get("name", ""), "desc": desc})
+        except (OSError, TypeError, ValueError) as e:
             self.logger.warning(f"Caption cache write failed: {e}")
 
     @staticmethod

@@ -496,36 +496,38 @@ def litellm_context_window(model_name: str, resolve_aliases: bool = False) -> in
 def derive_context_budgets(context_window: int) -> dict:
     """按模型上下文窗口推导上下文治理预算（比例主导，上下限随窗口缩放）。
 
-    1M 级窗口已是常态，"够用但保守"的比例会把容量白白闲置——那正是"窗口 1M、
-    程序只喂一点点"的成因。因此比例按"把窗口用起来"来定：
+    这些值是**每轮都要重发的 prompt 体积**，直接决定 token 成本与首字延迟。
+    旧比例把窗口当成"必须填满的容器"（工具 26% + KB 10% + 历史 50% = 86%），
+    1M 窗口下拉满接近 90 万 token/轮：既昂贵，又必然撞上 provider 的硬限后
+    被动降级。这里改成"按需给足、不追求填满"，三项合计控制在窗口的 20% 左右，
+    余下的容量留给固定系统提示、输出长度与 provider 侧的计费差异。
 
     ===================  ==========  ==========  ==============
     预算项               占窗口比例  窗口硬上限  1M 窗口实测值
     ===================  ==========  ==========  ==============
-    tool_result_chars     10%         15%        104,858 字符
-    tool_token_budget     26%         40%        272,630 token
-    kb_token_budget       10%         18%        104,857 token
-    kb_chunk_chars       0.8%          5%          8,388 字符
-    history_token_budget  50%         65%        524,288 token
+    tool_result_chars      4%         24,000 字符   24,000 字符
+    tool_token_budget     12%         48,000 token  48,000 token
+    kb_token_budget        4%         16,000 token  16,000 token
+    kb_chunk_chars       0.8%         50,000 字符    8,000 字符
+    history_token_budget  32%        144,000 token 144,000 token
     ===================  ==========  ==========  ==============
 
-    各项都是**上界**而非预定量，实际占用取决于内容多少；"硬上限"只在窗口大到
-    离谱（>2M）时才生效，避免单项吞掉整张上下文。小窗口仍有安全下限。
+    各项都是**上界**而非预定量，实际占用取决于内容多少；小窗口仍有安全下限，
+    避免把单条工具结果切得读不出结论。三项合计在 32K 窗口约占 51%、128K 与
+    200K 约 48%、1M 约 21%——余量留给固定系统提示与输出长度。
 
-    代价要说清楚：历史/工具预算越大，Agent 每轮重发的 prompt 越大——首字延迟与
-    token 成本随之上升。1M 窗口 + 全部拉满是"用满容量"，不是"必然更快"。若要压
-    成本，改这里的比例即可（唯一处定义）。
+    ``kb_token_budget`` 已从 8% 降到 4%：Library Manager 从主界面下线后，本地
+    知识库检索实际不再产出上下文，原先属于它的份额转给历史。该预算现在只服务
+    ``### CONTEXT:`` 段里的附件正文；若将来恢复知识库入口，把这两个比例改回来
+    即可（这里是唯一处定义）。
     """
     window = max(int(context_window or 0), 1_000)
-    # 2026 年的主流窗口已是 128K–1M（DeepSeek/Qwen 128K、Claude 200K、
-    # GPT/Gemini 1M）。旧的 3%/8% 比例在 128K 上只剩几千 token，会把
-    # 工具结果和文献上下文切得过碎；适度提高，同时保留单项硬上限。
     return {
-        "tool_result_chars": _clamp(round(window * 0.10), 8_000, round(window * 0.15)),
-        "tool_token_budget": _clamp(round(window * 0.26), 6_000, round(window * 0.40)),
-        "kb_token_budget": _clamp(round(window * 0.10), 4_000, round(window * 0.18)),
+        "tool_result_chars": _clamp(round(window * 0.04), 8_000, 24_000),
+        "tool_token_budget": _clamp(round(window * 0.12), 4_000, 48_000),
+        "kb_token_budget": _clamp(round(window * 0.04), 2_000, 16_000),
         "kb_chunk_chars": _clamp(round(window * 0.008), 2_000, round(window * 0.05)),
-        "history_token_budget": _clamp(round(window * 0.50), 8_000, round(window * 0.65)),
+        "history_token_budget": _clamp(round(window * 0.32), 6_000, 144_000),
     }
 
 

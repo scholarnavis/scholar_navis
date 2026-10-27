@@ -67,6 +67,9 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     if 'global_logger' in globals():
         try:
             global_logger.error(f"Uncaught Exception:\n{tb_str}")
+            # 写盘是异步的，退出前必须排空队列，否则这条 traceback 会随进程消失
+            from src.core.logger import flush_logs
+            flush_logs()
         except Exception as e:
             # 崩溃处理器内日志失败时降级输出到 stderr
             print(f"CRITICAL: Failed to log uncaught exception: {e}", file=sys.stderr)
@@ -443,8 +446,11 @@ if __name__ == "__main__":
     # 退出顺序：先同步落盘"上一次对话"（毫秒级），再等待运行中的后台任务收尾。
     # closeEvent 已覆盖正常关闭；这里兜住其它不经过它的退出路径。
     from src.core.chat_session import flush_hooks as flush_session_hooks
+    from src.core.logger import flush_logs
     app.aboutToQuit.connect(flush_session_hooks)
     app.aboutToQuit.connect(lambda: wait_for_running_tasks(1500))
+    # 日志写盘是异步的，最后一步排空队列（atexit 是兜底，这里能更早拿到结果）
+    app.aboutToQuit.connect(flush_logs)
 
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
 

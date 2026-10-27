@@ -263,10 +263,11 @@ def _normalize_entries(tabs: List[Dict[str, str]]) -> List[Dict[str, str]]:
 # --------------------------------------------------------------------------- #
 def save_tab(tab_id: str, messages: Any, name: str = "",
              tags: Optional[List[str]] = None) -> bool:
-    """覆盖写入某标签页的完整会话，返回是否落盘成功。
+    """增量写入某标签页的完整会话，返回是否落盘成功。
 
-    只在轮次边界调用：单次成本与对话长度成正比（序列化 + 压缩 + 写库），轮内
-    高频调用请用 :func:`save_inflight`。
+    只在轮次边界调用：需要遍历全部消息做资产规划，轮内高频调用请用
+    :func:`save_inflight`。写库本身是增量的——未变化的消息由 ``digest`` 比对
+    跳过，只有新增或内容变了的行才会重写。
 
     参考文献与书签由 :func:`src.core.chat_store.put_tab` 写进各自的表：正文里
     ``[n]`` 指向的著录、支撑原文、书签锚点因此有独立位置，不会因为"消息字典少

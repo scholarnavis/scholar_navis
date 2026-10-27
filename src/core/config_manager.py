@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import sys
@@ -8,12 +9,20 @@ import threading
 import tempfile
 from cryptography.fernet import InvalidToken
 
-from src.core import BASE_DIR, secrets_store
+from src.core import BASE_DIR, safe_io, secrets_store
 from src.core.encryption_service import SystemEncryptionService
 from src.core.fulltext_dirs import default_watch_dirs
 
 # 当前配置导出版本号，用于未来兼容性检查
 CONFIG_VERSION = "1.0"
+
+
+class ConfigCorruptError(RuntimeError):
+    """配置文件存在但无法解析；原文件已被移走保留，内存侧应退回默认值。
+
+    与"文件不存在"必须区分：不存在是正常首启，可以安全地写入默认值；
+    损坏则意味着用户已有数据，绝不能就地覆盖。
+    """
 
 
 class ConfigManager:
@@ -31,9 +40,14 @@ class ConfigManager:
         return cls._instance
 
     def __init__(self):
-        if self._initialized:
-            return
+        # 首次构造可能被多个线程同时触发（GUI 线程与 API server 线程），
+        # 迁移与加载必须整体串行，否则会跑两遍并互相覆盖落盘结果。
+        with self._lock:
+            if self._initialized:
+                return
+            self._initialize()
 
+    def _initialize(self):
         self.logger = logging.getLogger("ConfigManager")
 
 
@@ -78,20 +92,22 @@ class ConfigManager:
             self._secrets_cache = cache
         return cache
 
-    def _merge_secrets(self, section: str, values: dict):
-        """把某分区的密钥写入 ``secrets.json``（空值不覆盖已有密钥）。
+    def _replace_secret_section(self, section: str, values: dict):
+        """用本次的完整密钥视图替换 ``secrets.json`` 中的对应分区。
 
-        分层合并：``settings`` 是扁平键值，``llm`` / ``mcp`` 是"标识 → 字段"两级，
-        用一层嵌套合并即可覆盖两者，避免写两套逻辑。
+        三个调用方（settings / llm / mcp）传入的都是全量快照，因此必须替换而非
+        增量合并：旧实现跳过空值做增量合并，导致被清空的 ``api_key`` 永远删不掉，
+        泄露的 token 无法吊销，界面显示为空但请求仍带着旧密钥。
+
+        写失败向上抛：静默吞掉会表现为"保存成功，重启后密钥消失"。
         """
-        bundle = self._secrets()
-        current = bundle.setdefault(section, {})
-        for key, value in (values or {}).items():
-            if isinstance(value, dict) and isinstance(current.get(key), dict):
-                current[key].update(value)
-            elif value not in (None, ""):
-                current[key] = value
-        secrets_store.save(self.CONFIG_DIR, bundle)
+        with self._lock:
+            bundle = copy.deepcopy(self._secrets())
+            bundle[section] = copy.deepcopy(values or {})
+            if not secrets_store.save(self.CONFIG_DIR, bundle):
+                raise OSError(
+                    f"无法写入密钥文件 {secrets_store.secrets_path(self.CONFIG_DIR)}")
+            self._secrets_cache = bundle
 
     # ------------------------------------------------------------------ #
     #  LEGACY-CIPHERTEXT 兼容层：读旧密文配置并迁移为明文
@@ -146,24 +162,36 @@ class ConfigManager:
 
         backup_dir = os.path.join(self.CONFIG_DIR, f"backup_{time.strftime('%Y%m%d_%H%M%S')}")
         bundle = secrets_store.load(self.CONFIG_DIR)
-        migrated = []
+        prepared = []
         for path, kind in targets:
             data = legacy[path]
             if data is None or not self._backup_file(path, backup_dir):
                 continue
             if kind == "settings":
                 public, secret = secrets_store.split_settings(data)
-                bundle["settings"].update(secret)
+                bundle["settings"] = secret
             elif kind == "llm":
                 public, secret = secrets_store.split_llm(data)
-                for pid, fields in secret.items():
-                    bundle["llm"].setdefault(pid, {}).update(fields)
+                bundle["llm"] = secret
             else:
                 public, secret = secrets_store.split_mcp(data)
-                for group, by_name in secret.items():
-                    section = bundle["mcp"].setdefault(group, {})
-                    for name, fields in by_name.items():
-                        section.setdefault(name, {}).update(fields)
+                bundle["mcp"] = secret
+            prepared.append((path, public))
+
+        if not prepared:
+            return
+
+        # 先落密钥、再落明文配置。反过来则存在一个崩溃窗口：明文里密钥已被剔除、
+        # secrets.json 却还没写，用户的 API key 会在备份之外凭空消失。
+        if not secrets_store.save(self.CONFIG_DIR, bundle):
+            self.logger.error(
+                "Cannot write secrets.json; legacy config migration aborted, "
+                "originals left untouched")
+            return
+        self._secrets_cache = bundle
+
+        migrated = []
+        for path, public in prepared:
             try:
                 self.save_json(path, public)
             except Exception as e:
@@ -172,8 +200,6 @@ class ConfigManager:
             migrated.append(os.path.basename(path))
 
         if migrated:
-            secrets_store.save(self.CONFIG_DIR, bundle)
-            self._secrets_cache = bundle
             self.logger.info(
                 f"Migrated legacy encrypted config to plaintext: {', '.join(migrated)}; "
                 f"originals backed up to '{backup_dir}'")
@@ -218,38 +244,27 @@ class ConfigManager:
 
         配置本体一律明文：托管密钥的 ``config/.secret_fallback.key`` 就在同目录、同为
         0o600，能读密文者必能读密钥，加密只带来"换机即不可读"的代价。敏感字段的隔离
-        由 :mod:`src.core.secrets_store` 负责（单独落 ``secrets.json``）。临时文件由
-        ``mkstemp`` 创建，天然是 0o600，原子替换后权限保持。
+        由 :mod:`src.core.secrets_store` 负责（单独落 ``secrets.json``）。
+
+        实现统一在 :mod:`src.core.safe_io`（临时文件 → fsync → 原子替换，
+        并对 Windows 上文件被占用做退避重试），避免各模块各自实现一套。
         """
         with self._lock:
-            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), text=False)
-            os.close(temp_fd)
             try:
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    f.write(json.dumps(data, indent=4, ensure_ascii=False))
-
-                for attempt in range(3):
-                    try:
-                        os.replace(temp_path, path)
-                        break
-                    except PermissionError:
-                        if attempt < 2:
-                            time.sleep(0.1)
-                        else:
-                            raise
-
-            except Exception as e:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception as rm_e:
-                        self.logger.error(f"Failed to remove temp file {temp_path}: {rm_e}")
+                safe_io.atomic_write_json(path, data)
+            except (OSError, TypeError, ValueError) as e:
                 self.logger.error(f"Failed to save config at {path}: {e}")
                 raise
 
-
-    def load_json(self, path):
+    def load_json(self, path, raise_on_corrupt: bool = False):
         """读取明文 JSON 配置；若是历史机器绑定密文，解密一次并就地改写为明文。
+
+        三种结果必须区分开：文件不存在返回 ``None``；正常解析返回内容；内容损坏
+        则先把原文件隔离保留，再按 ``raise_on_corrupt`` 决定抛
+        :class:`ConfigCorruptError` 还是返回 ``None``。
+
+        为什么不能一律返回 ``None``：调用方把 ``None`` 当成"首次启动"并立刻写入
+        默认配置，于是手改多一个逗号就会让整份用户设置被默认值覆盖。
 
         解密回退只服务于**读旧数据**（旧版把 ``settings.json`` 等整体加密过），
         改造后不再有任何写入侧产生密文，因此这里只读不写密文。
@@ -271,8 +286,12 @@ class ConfigManager:
                     self.logger.info(f"Migrated legacy encrypted config to plaintext: {path}")
                     return plain_data
                 except (OSError, ValueError, InvalidToken, RuntimeError) as legacy_err:
+                    backup = safe_io.quarantine_corrupt(path)
                     self.logger.error(
-                        f"Cannot read '{path}' as plain JSON or legacy ciphertext: {legacy_err}")
+                        f"Cannot read '{path}' as plain JSON or legacy ciphertext: {legacy_err}"
+                        + (f"; original preserved at '{backup}'" if backup else ""))
+                    if raise_on_corrupt:
+                        raise ConfigCorruptError(path) from legacy_err
                     return None
 
 
@@ -336,7 +355,18 @@ class ConfigManager:
         }
 
         # 明文读取；密钥单独存在 secrets.json，此处合回内存结构（读取方无需改动）
-        current_settings = self.load_json(self.SETTINGS_PATH)
+        try:
+            current_settings = self.load_json(self.SETTINGS_PATH, raise_on_corrupt=True)
+        except ConfigCorruptError:
+            # 原件已隔离保留。本次以默认值运行但绝不回写：用户主动保存时才重建文件，
+            # 这样即便默认值不对，也只是"这次没生效"，而不是把旧配置彻底抹掉。
+            self.logger.error(
+                "settings.json could not be parsed; original preserved, running with "
+                "defaults without overwriting")
+            self.user_settings = default_settings.copy()
+            self.apply_env_vars()
+            return
+
         if current_settings is not None:
             current_settings = secrets_store.merge_settings(
                 current_settings, self._secrets().get("settings"))
@@ -368,7 +398,7 @@ class ConfigManager:
     def save_settings(self):
         public, secret = secrets_store.split_settings(self.user_settings)
         self.save_json(self.SETTINGS_PATH, public)
-        self._merge_secrets("settings", secret)
+        self._replace_secret_section("settings", secret)
         self.apply_env_vars()
 
     def effective_model_name(self, provider_cfg=None, provider_id: str = "",
@@ -433,7 +463,15 @@ class ConfigManager:
         ]
 
         # 明文读取；各 provider 的 api_key 从 secrets.json 按 id 合回
-        data = self.load_json(self.LLM_CONFIG_PATH)
+        try:
+            data = self.load_json(self.LLM_CONFIG_PATH, raise_on_corrupt=True)
+        except ConfigCorruptError:
+            # 原件已隔离保留；不补默认表、不回写，避免把用户的 provider 列表抹掉
+            self.logger.error(
+                "llm_config.json could not be parsed; original preserved, using "
+                "in-memory defaults only")
+            return copy.deepcopy(default_config)
+
         if data is not None:
             data = secrets_store.merge_llm(data, self._secrets().get("llm"))
 
@@ -497,7 +535,7 @@ class ConfigManager:
     def save_llm_configs(self, configs: list):
         public, secret = secrets_store.split_llm(configs)
         self.save_json(self.LLM_CONFIG_PATH, public)
-        self._merge_secrets("llm", secret)
+        self._replace_secret_section("llm", secret)
 
 
     def apply_env_vars(self):
@@ -613,7 +651,16 @@ class ConfigManager:
         }
 
         # 明文读取；env / headers 里名字像密钥的字段从 secrets.json 合回
-        current_servers = self.load_json(self.MCP_SERVERS_PATH)
+        try:
+            current_servers = self.load_json(self.MCP_SERVERS_PATH, raise_on_corrupt=True)
+        except ConfigCorruptError:
+            # 原件已隔离保留；不补默认结构、不回写，等待用户主动保存时重建
+            self.logger.error(
+                "mcp_servers.json could not be parsed; original preserved, using "
+                "in-memory defaults only")
+            self.mcp_servers = copy.deepcopy(default_mcp_servers)
+            return
+
         if current_servers is not None:
             current_servers = secrets_store.merge_mcp(
                 current_servers, self._secrets().get("mcp"))
@@ -644,16 +691,4 @@ class ConfigManager:
     def save_mcp_servers(self):
         public, secret = secrets_store.split_mcp(self.mcp_servers)
         self.save_json(self.MCP_SERVERS_PATH, public)
-        self._merge_secrets("mcp", secret)
-
-    def toggle_mcp_tag(self, tag: str, is_checked: bool):
-        tags = self.mcp_servers.get("deselected_mcp_tags", [])
-        if is_checked and tag in tags:
-            tags.remove(tag)
-        elif not is_checked and tag not in tags:
-            tags.append(tag)
-        else:
-            return
-
-        self.mcp_servers["deselected_mcp_tags"] = tags
-        self.save_mcp_servers()
+        self._replace_secret_section("mcp", secret)

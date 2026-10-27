@@ -68,6 +68,7 @@ tests/               空目录
 | `oa.py` | 开放获取全文探测与可下载 PDF 定位 | `OAFetcher` |
 | `rss_paths.py` | RSS 订阅清单与文章缓存落盘路径 | `RSS_CACHE_FILE`、`RSS_FEEDS_FILE` |
 | `email_check.py` | 邮箱校验，满足 NCBI 邮箱要求 | `verify_email_robust` |
+| `safe_io.py` | 文件读写基础设施的唯一实现：原子写（临时文件 + fsync + 替换）、损坏文件隔离、不可信来源的安全落盘 | `atomic_write_json`、`quarantine_corrupt`、`ensure_within`、`safe_child_name` |
 
 ### 3.2 配置、密钥与开关
 
@@ -110,6 +111,7 @@ tests/               空目录
 | `fulltext_dirs.py` | 收件目录与额外监听目录定义 | `inbox_dir`、`dir_identity` |
 | `fulltext_bridge.py` | 「同轮等待」通道：Agent 请求全文后挂起，UI 入库后回填，模型带全文续跑同一轮 | `begin`、`wait`、`signal` |
 | `fulltext_samples.py` | 开发者模式取全文自检的样例来源 | `resolve_samples` |
+| `attachment_parser.py` | 聊天附件解析的唯一实现：PDF / DOCX / 文本，含体积页数上限、编码探测、内容指纹缓存与过期清扫 | `extract`、`trim_total`、`cache_root` |
 
 ### 3.5 R 引擎与绘图
 
@@ -319,6 +321,10 @@ tests/               空目录
 | 排版参数与配置键 | `chat_typography.py` | 面板、渲染、落盘同源 |
 | 图表外观 | `plot_styles.py` | LLM 描述与 R 代码共用 |
 | 依赖版本下限 | `pyproject.toml` | 验证过的安全下限，不要随手降低 |
+| 配置与索引的落盘方式 | `safe_io.py` | 不要在各模块里另写 mkstemp + replace |
+| 附件解析与缓存 | `attachment_parser.py` | 上限、编码探测、缓存键与清理都在这里 |
+| 会话库表结构版本 | `chat_store.SCHEMA_VERSION` | 改表结构必须同步 `_MIGRATIONS`，升级前自动备份为 `<库>.bak_v<旧版本>` |
+| 上下文预算 | `token_estimator.derive_context_budgets` | 工具结果、KB/附件、历史三项比例只能在这里改；合计约占窗口 21%（1M）到 51%（32K）。`kb_token_budget` 现为 4%，只服务附件正文，知识库份额已转给历史 |
 
 ---
 
@@ -344,3 +350,7 @@ tests/               空目录
 6. `tests/` 为空，`docs/` 只有图片。不要为了找测试或文档去扫描这两个目录。
 7. 主界面已下线 `ImportTool`，但代码保留；多处硬编码侧边栏索引，0 是聊天、2 是设置。
 8. 侧边栏面板是懒加载的，`main_window` 不会 import 任务层，从窗口往下找任务链路会断在 `ChatTool`。
+9. 会话库升级是自动的：`create_database` 检测到旧版本会先把文件备份为 `<库>.bak_v<版本>` 再补列。回滚即用该备份覆盖回原文件；不要让迁移脚本绕过 `_MIGRATIONS`。
+10. 日志写盘是异步的（`QueueHandler` + 后台线程），崩溃路径或优雅退出前必须调用 `logger.flush_logs()`，否则最后一段日志会丢。
+11. 工具结果进入上下文有两道闸：单条按 `tool_result_chars` 截断，同轮多条按剩余 `tool_token_budget` 二次分配并降级为占位。新增工具时不要假设"返回多少就进多少"，把结果压到模型真正需要的字段。
+12. 附件正文注入量用 `attachment_parser.MAX_TOTAL_CHARS` 固定上限；解析阶段的上限（40 万字符）只服务检索，不等于注入量。

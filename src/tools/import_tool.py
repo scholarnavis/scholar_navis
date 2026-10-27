@@ -34,6 +34,11 @@ _STATUS_LABELS = {
 }
 
 
+#: 打开文档时允许整份复制的体积上限。超过此值直接打开工作区里的原文件：
+#: 复制是为了让阅读器标题显示真实文件名，但对大文件来说这一步会冻结界面数秒。
+_INLINE_COPY_MAX_BYTES = 20 * 1024 * 1024
+
+
 class ImportTool(BaseTool):
     # 由 get_ui_widget 创建，仅作静态检查声明
     combo_kb: BaseComboBox
@@ -849,15 +854,38 @@ class ImportTool(BaseTool):
 
 
     def _get_file_hash(self, file_path):
-        """计算文件的 SHA-256 唯一指纹"""
+        """计算文件的 SHA-256 指纹，按 (路径, 大小, 纳秒修改时间) 缓存结果。
+
+        查重时同一个文件会被反复拿来比对：不缓存的话，n 个同大小候选就是
+        n² 次全文件读取，100 个 20MB 文件足以让界面假死数分钟。
+        """
+        try:
+            stat = os.stat(file_path)
+            key = (os.path.abspath(file_path), stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            return None
+
+        cache = getattr(self, "_hash_cache", None)
+        if cache is None:
+            cache = {}
+            self._hash_cache = cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
         hasher = hashlib.sha256()
         try:
             with open(file_path, 'rb') as f:
                 while chunk := f.read(1024 * 1024):  # 每次读 1MB，防内存溢出
                     hasher.update(chunk)
-            return hasher.hexdigest()
         except OSError:
             return None
+
+        digest = hasher.hexdigest()
+        if len(cache) > 4096:
+            cache.clear()       # 简单封顶，避免长会话里无限增长
+        cache[key] = digest
+        return digest
 
     def select_files(self):
         # 允许选择 PDF 和 Markdown
@@ -1153,12 +1181,16 @@ class ImportTool(BaseTool):
                 source_path = os.path.join(self.kb_manager.WORKSPACE_DIR, self.current_kb_id, "documents",
                                            obfuscated_name)
                 if os.path.exists(source_path):
-                    temp_dir = os.path.join(tempfile.gettempdir(), "ScholarNavis_View")
-                    os.makedirs(temp_dir, exist_ok=True)
-                    temp_file_path = os.path.join(temp_dir, real_name)
                     try:
-                        shutil.copy2(source_path, temp_file_path)
-                        FileService.open_file(temp_file_path)
+                        if os.path.getsize(source_path) <= _INLINE_COPY_MAX_BYTES:
+                            temp_dir = os.path.join(tempfile.gettempdir(), "ScholarNavis_View")
+                            os.makedirs(temp_dir, exist_ok=True)
+                            temp_file_path = os.path.join(temp_dir, real_name)
+                            shutil.copy2(source_path, temp_file_path)
+                            FileService.open_file(temp_file_path)
+                        else:
+                            # 大文件不复制：省掉整份拷贝，代价是标题显示工作区文件名
+                            FileService.open_file(source_path)
                     except Exception as e:
                         StandardDialog(self.widget, tr("Error"),
                                        tr("Failed to open file: {err}").format(err=e)).exec()

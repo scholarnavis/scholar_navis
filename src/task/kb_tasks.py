@@ -1,13 +1,16 @@
 import json
 import logging
 import os
+import re
 import shutil
+import tempfile
 import uuid
 import zipfile
 from typing import TYPE_CHECKING
 
 import onnxruntime as ort
 
+from src.core import safe_io
 from src.core.core_task import BackgroundTask
 from src.core.device_manager import DeviceManager
 from src.core.kb_manager import KBManager, DatabaseManager
@@ -558,34 +561,112 @@ class ExportKBTask(BackgroundTask):
         kb_mgr = KBManager()
         src_dir = os.path.join(kb_mgr.WORKSPACE_DIR, kb_id)
         if not os.path.exists(src_dir): raise FileNotFoundError("Not found")
-        self.send_log("INFO", f"📦 Packing Knowledge Base {kb_id}...")
 
-        with zipfile.ZipFile(dest_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, dirs, files in os.walk(src_dir):
-                for file in files:
+        # 先收集清单：既用于进度分母，也避免边遍历边写时目录被改动。
+        plan = []
+        for root, _dirs, files in os.walk(src_dir):
+            for file in files:
+                if file.endswith('.lock') or file.endswith('.tmp'):
+                    continue
+                file_path = os.path.join(root, file)
+                plan.append((file_path, os.path.relpath(file_path, src_dir)))
+
+        self.send_log("INFO", f"Packing Knowledge Base {kb_id} ({len(plan)} files)...")
+
+        # 写 .part 再原子替换。直接写目标路径时，中途取消会让 ZipFile.close()
+        # 补出一个结构合法但内容残缺的 zip，用户无法分辨它是否完整。
+        temp_path = f"{dest_path}.part"
+        step = max(1, len(plan) // 20)
+        try:
+            with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for index, (file_path, arcname) in enumerate(plan, 1):
                     if self.is_cancelled():
                         raise InterruptedError("Export task was safely terminated by the user.")
-                    if file.endswith('.lock') or file.endswith('.tmp'): continue
-
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, src_dir)
                     zipf.write(file_path, arcname)
+                    if index % step == 0:
+                        self.update_progress(
+                            int(index * 100 / len(plan)),
+                            f"Packing {index}/{len(plan)} files...")
+            os.replace(temp_path, dest_path)
+        except BaseException:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise
 
+        self.update_progress(100, f"Export complete: {len(plan)} files")
         self.send_log("INFO", f"Export successful: {dest_path}")
 
 class ImportExternalKBTask(BackgroundTask):
+    """导入外部知识库归档。
+
+    归档来自用户之间传递的文件，属于不可信输入：条目名可能带 ``../``，
+    条目体积可能远大于压缩包（压缩炸弹），``meta.json`` 里的 ``id`` 也可能
+    是相对路径。三者都必须在这里挡住，否则会写出工作区之外或写满磁盘。
+    """
+
+    #: 条目数量上限
+    MAX_ENTRIES = 20000
+    #: 全部条目解压后的总字节上限
+    MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+    #: 单个条目解压后的字节上限
+    MAX_ENTRY_BYTES = 4 * 1024 * 1024 * 1024
+    #: 知识库 id 允许的字符集（现行实现是 uuid4）
+    _KB_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+    def _check_archive_budget(self, infos) -> None:
+        if len(infos) > self.MAX_ENTRIES:
+            raise ValueError(
+                f"Archive contains too many entries ({len(infos)} > {self.MAX_ENTRIES}).")
+        total = 0
+        for info in infos:
+            if info.file_size > self.MAX_ENTRY_BYTES:
+                raise ValueError(f"Archive entry too large: {info.filename}")
+            total += info.file_size
+            if total > self.MAX_TOTAL_BYTES:
+                raise ValueError("Archive expands beyond the allowed total size.")
+
     def _execute(self):
         _setup_worker_env()
         from src.core.kb_manager import KBManager
         bundle_path = self.kwargs.get('bundle_path')
         kb_mgr = KBManager()
         self.send_log("INFO", "Extracting project bundle...")
-        temp_extract_dir = os.path.join(kb_mgr.WORKSPACE_DIR, "temp_import")
-        if os.path.exists(temp_extract_dir): shutil.rmtree(temp_extract_dir)
-        os.makedirs(temp_extract_dir)
+
+        # 唯一前缀便于强杀后识别残留；固定目录名会在并发导入时互相踩。
+        temp_extract_dir = tempfile.mkdtemp(prefix="kb_import_", dir=kb_mgr.WORKSPACE_DIR)
         try:
             with zipfile.ZipFile(bundle_path, 'r') as zipf:
-                zipf.extractall(temp_extract_dir)
+                infos = [i for i in zipf.infolist() if not i.is_dir()]
+                self._check_archive_budget(infos)
+                total = len(infos)
+                step = max(1, total // 20)
+                for index, info in enumerate(infos, 1):
+                    if self.is_cancelled():
+                        raise InterruptedError("Import task was safely terminated by the user.")
+
+                    target = os.path.join(temp_extract_dir, info.filename)
+                    # 逐条校验落点仍在临时目录内，替代不设防的 extractall
+                    if not safe_io.ensure_within(temp_extract_dir, target):
+                        raise ValueError(f"Archive entry escapes target directory: {info.filename}")
+                    os.makedirs(os.path.dirname(target) or temp_extract_dir, exist_ok=True)
+
+                    written = 0
+                    with zipf.open(info) as src, open(target, "wb") as dst:
+                        while True:
+                            chunk = src.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > self.MAX_ENTRY_BYTES:
+                                raise ValueError(f"Archive entry too large: {info.filename}")
+                            dst.write(chunk)
+
+                    if index % step == 0:
+                        self.update_progress(
+                            int(index * 100 / total), f"Extracting {index}/{total}...")
+
             found_root = None
             for root, dirs, files in os.walk(temp_extract_dir):
                 if "meta.json" in files:
@@ -595,21 +676,29 @@ class ImportExternalKBTask(BackgroundTask):
 
             with open(os.path.join(found_root, "meta.json"), 'r', encoding='utf-8') as f:
                 info = json.load(f)
-            kb_id = info.get('id')
-            if not kb_id: raise ValueError("Missing ID")
+
+            raw_id = str(info.get('id') or "")
+            if not raw_id: raise ValueError("Missing ID")
+            if not self._KB_ID_RE.match(raw_id):
+                raise ValueError(f"Invalid knowledge base id: {raw_id!r}")
+            kb_id = raw_id
+
             target_dir = os.path.join(kb_mgr.WORKSPACE_DIR, kb_id)
+            if not safe_io.ensure_within(kb_mgr.WORKSPACE_DIR, target_dir):
+                raise ValueError(f"Knowledge base id escapes workspace: {raw_id!r}")
+
             if os.path.exists(target_dir):
                 new_id = str(uuid.uuid4())
                 info['id'] = new_id
                 info['name'] = f"{info['name']} (Imported)"
                 kb_id = new_id
                 target_dir = os.path.join(kb_mgr.WORKSPACE_DIR, kb_id)
-                with open(os.path.join(found_root, "meta.json"), 'w', encoding='utf-8') as f: json.dump(info, f)
+                safe_io.atomic_write_json(os.path.join(found_root, "meta.json"), info)
             shutil.move(found_root, target_dir)
 
             self.send_log("INFO", f"Project imported successfully as '{info['name']}'")
         finally:
-            if os.path.exists(temp_extract_dir): shutil.rmtree(temp_extract_dir)
+            if os.path.exists(temp_extract_dir): shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
 
 class SwitchKBTask(BackgroundTask):

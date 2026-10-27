@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
+import re
+import shutil
 
+from src.core import safe_io
 from src.core.encryption_service import SystemEncryptionService
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,34 @@ logger = logging.getLogger(__name__)
 PLAIN_SUFFIX = ".py"
 #: LEGACY-CIPHERTEXT：历史技能源码后缀，机器绑定密钥的 Fernet 密文（只读兼容）
 LEGACY_SUFFIX = ".enc"
+
+#: 技能名长度上限与字符白名单
+_SKILL_NAME_MAX = 64
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_\-][A-Za-z0-9_\-.]*$")
+
+
+def validate_skill_name(name: str) -> str:
+    """校验技能名并返回去掉首尾空白后的结果；不合法时抛 ``ValueError``。
+
+    技能名来自设置页的文本输入，随后被直接拼进文件路径。不加限制时，
+    一个名为 ``../../x`` 的技能可以写到技能目录之外并覆盖任意 ``.py``。
+    """
+    text = str(name or "").strip()
+    if not text:
+        raise ValueError("技能名不能为空")
+    if len(text) > _SKILL_NAME_MAX:
+        raise ValueError(f"技能名过长（上限 {_SKILL_NAME_MAX} 字符）")
+    if not _SKILL_NAME_RE.match(text):
+        raise ValueError(f"技能名含非法字符：{text!r}")
+    return text
+
+
+def skill_path(base_dir: str, name: str) -> str:
+    """技能源码 ``<base_dir>/<name>.py`` 的路径；名字不合法时抛 ``ValueError``。"""
+    target = os.path.join(base_dir, f"{validate_skill_name(name)}{PLAIN_SUFFIX}")
+    if not safe_io.ensure_within(base_dir, target):
+        raise ValueError(f"技能路径越界：{name!r}")
+    return target
 
 
 def read_skill_source(path: str) -> str:
@@ -42,22 +72,33 @@ def read_skill_source(path: str) -> str:
 
 def write_skill_source(base_dir: str, name: str, code: str) -> str:
     """把技能源码以明文原子写入 ``<base_dir>/<name>.py``（0o600），返回实际路径。"""
+    target = skill_path(base_dir, name)
     os.makedirs(base_dir, exist_ok=True)
-    target = os.path.join(base_dir, f"{name}{PLAIN_SUFFIX}")
-    fd, tmp_path = tempfile.mkstemp(dir=base_dir, prefix=".skill_", text=False)
-    os.close(fd)
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(code or "")
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass    # Windows 无 POSIX 权限位，忽略即可
-        os.replace(tmp_path, target)
-    except OSError:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
+    safe_io.atomic_write_text(target, code or "", mode=0o600)
     return target
+
+
+def delete_skill_source(base_dir: str, name: str) -> None:
+    """删除技能源码与其工作区目录。
+
+    删除比写入更危险：配置里的 ``command`` 字段可被手工改写，直接拿它去
+    ``os.remove`` 等于提供任意文件删除能力。因此本函数只接受技能名，
+    路径由 :func:`skill_path` 重新构造并校验是否仍在技能目录内。
+    """
+    try:
+        target = skill_path(base_dir, name)
+    except ValueError as e:
+        logger.warning(f"Refusing to delete skill with invalid name {name!r}: {e}")
+        return
+
+    for candidate in (target, os.path.join(base_dir, f"{str(name).strip()}{LEGACY_SUFFIX}")):
+        try:
+            os.remove(candidate)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logger.warning(f"Cannot remove skill file '{candidate}': {e}")
+
+    workspace = os.path.join(base_dir, f"{str(name).strip()}_workspace")
+    if os.path.isdir(workspace) and safe_io.ensure_within(base_dir, workspace):
+        shutil.rmtree(workspace, ignore_errors=True)

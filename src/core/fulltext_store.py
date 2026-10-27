@@ -24,6 +24,8 @@ import threading
 import time
 from typing import Dict, Optional, Tuple
 
+from src.core import safe_io
+
 logger = logging.getLogger("Core.FulltextStore")
 
 __all__ = [
@@ -73,23 +75,30 @@ def _read_index() -> Dict[str, dict]:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError) as e:
+        # 损坏时先隔离原件：后续任何一次 link/unlink 都会以空表为基整份重写，
+        # 不保留就等于把用户之前交过的全部 PDF 关联一次性抹掉。
         logger.warning("Cannot read the full-text link table (%s): %s", path, e)
+        backup = safe_io.quarantine_corrupt(path)
+        if backup:
+            logger.error("Full-text link table preserved at %s", backup)
         return {}
     items = data.get("links") if isinstance(data, dict) else None
     if not isinstance(items, dict):
+        safe_io.quarantine_corrupt(path)
         return {}
     return {str(k): v for k, v in items.items() if isinstance(v, dict)}
 
 
 def _write_index(index: Dict[str, dict]) -> None:
+    """原子写关联表。
+
+    临时文件名由 ``safe_io`` 保证唯一（``mkstemp``），不再用固定的 ``.tmp``：
+    固定名会让 GUI 进程与任务子进程同时写时互相截断对方的半成品。
+    """
     path = links_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "links": index}, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-    except OSError as e:
+        safe_io.atomic_write_json(path, {"version": 1, "links": index}, indent=2)
+    except (OSError, TypeError, ValueError) as e:
         logger.warning("Cannot write the full-text link table (%s): %s", path, e)
 
 

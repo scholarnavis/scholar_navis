@@ -17,7 +17,7 @@ from src.core.mcp_manager import MCPManager
 from src.core.network_worker import setup_global_network_env
 from src.core.signals import GlobalSignals
 from src.core.skill_manager import SkillManager
-from src.core.skill_store import write_skill_source
+from src.core.skill_store import delete_skill_source, write_skill_source
 from src.core.theme_manager import ThemeManager
 from src.task.settings_tasks import EmailVerifyTask
 from src.task.common_task import VerifyModelsTask
@@ -150,20 +150,12 @@ class SaveFlowMixin:
                     new_mcp_servers[name] = cfg
 
             old_skills = self.config.mcp_servers.get("external_skills", {})
-            import shutil
-            for old_name, old_cfg in old_skills.items():
+            skill_dir = os.path.join(self.config.BASE_DIR, 'tools', 'skill')
+            for old_name in old_skills:
                 if old_name not in active_skill_names:
-                    old_path = old_cfg.get("command", "")
-                    if old_path and "tools" in old_path and "skill" in old_path:
-                        try:
-                            if os.path.exists(old_path):
-                                os.remove(old_path)
-                            skill_workspace = os.path.join(self.config.BASE_DIR, 'tools', 'skill',
-                                                           f"{old_name}_workspace")
-                            if os.path.exists(skill_workspace) and os.path.isdir(skill_workspace):
-                                shutil.rmtree(skill_workspace)
-                        except Exception as e:
-                            self.logger.warning(f"Failed to properly clean up deleted skill for '{old_name}': {e}")
+                    # 只按技能名重新构造路径并校验，绝不拿配置里的 command 直接删除：
+                    # 那个字段可被手工改写，会变成任意文件删除。
+                    delete_skill_source(skill_dir, old_name)
 
             self.config.mcp_servers["mcpServers"] = new_mcp_servers
             self.config.mcp_servers["external_skills"] = new_external_skills

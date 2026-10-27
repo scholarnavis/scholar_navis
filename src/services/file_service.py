@@ -1,9 +1,9 @@
 import os
 
-import chardet
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 
+from src.core import attachment_parser
 from src.core.platform_env import open_with_system, reveal_in_file_manager
 
 
@@ -50,34 +50,22 @@ class FileService:
 
     @staticmethod
     def read_file_content(path: str) -> str:
-        """
-        通用文件读取逻辑，支持 .docx 和普通文本文件。
+        """读取文件的纯文本内容，支持 .docx 与普通文本。
+
+        解析与编码探测统一委托 :mod:`src.core.attachment_parser`：同一份文件在
+        "聊天附件"和"查看器"里必须解出同一段文本，否则检索语料与界面显示会打架。
         """
         if not os.path.exists(path):
             return ""
 
-        ext = path.lower()
-
-        # 处理 DOCX
-        if ext.endswith('.docx'):
-            try:
-                import docx
-                doc = docx.Document(path)
-                return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            except Exception as e:
-                print(f"Error reading DOCX: {e}")
+        lower = path.lower()
+        try:
+            if lower.endswith('.docx'):
+                return attachment_parser.read_docx_text(path)
+            if lower.endswith('.doc'):
                 return ""
-
-        elif ext.endswith('.doc'):
+            with open(path, 'rb') as f:
+                return attachment_parser.decode_text_bytes(f.read()).strip()
+        except OSError as e:
+            print(f"Error reading file {path}: {e}")
             return ""
-
-        else:
-            try:
-                with open(path, 'rb') as f:
-                    raw_data = f.read()
-                    detected = chardet.detect(raw_data)
-                    encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
-                    return raw_data.decode(encoding, errors='replace').strip()
-            except Exception as e:
-                print(f"Error reading text file: {e}")
-                return ""

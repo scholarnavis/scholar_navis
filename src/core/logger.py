@@ -1,8 +1,12 @@
+import atexit
 import logging
+import logging.handlers
 import os
+import queue
 import signal
 import sys
 import threading
+import time
 from datetime import datetime
 from PySide6.QtCore import QObject, Signal
 
@@ -10,6 +14,17 @@ from src.core import BASE_DIR
 
 
 log_dir = os.path.join(BASE_DIR,"logs")
+
+#: 单个日志文件上限；超出后由 RotatingFileHandler 轮转为 ``*.log.1`` 等。
+#: 此前用普通 FileHandler，一次长时间运行加 DEBUG 级别就能产出 GB 级单文件，
+#: 而 ``clean_old_logs`` 只按文件个数清理，对总量毫无约束。
+LOG_MAX_BYTES = 32 * 1024 * 1024
+#: 同一次运行内保留的轮转份数
+LOG_BACKUP_COUNT = 5
+
+#: 日志写盘队列与后台写入器（进程级单例，setup_logger 重入时替换）
+_log_queue = None
+_queue_listener = None
 
 #: 保留引用：Qt 侧对传入的消息处理器只持弱引用，被 GC 后崩溃现场会静默消失。
 _qt_message_handler_ref = None
@@ -45,12 +60,59 @@ _early_formatter = logging.Formatter('%(asctime)s | %(name)s | %(levelname)s | %
 _qt_handler.setFormatter(_early_formatter)
 logging.getLogger().addHandler(_qt_handler)
 
+def _drain_log_queue(timeout: float = 1.0) -> None:
+    """等待写盘队列排空。队列空不等于最后一条已写完，故再留一个极短窗口。"""
+    pending = _log_queue
+    if pending is None:
+        return
+    deadline = time.monotonic() + timeout
+    while pending.qsize() > 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.02)
+
+
 def _flush_root_handlers():
-    """把根 logger 的所有 handler 立即刷盘（致命路径上必须先把证据落盘）。"""
-    for handler in logging.getLogger().handlers:
+    """把根 logger 的所有 handler 立即刷盘（致命路径上必须先把证据落盘）。
+
+    写盘已移到后台线程，因此这里要先把队列排空，再对真实的文件 handler 调
+    ``flush``；只对簿记用的 QueueHandler 调 flush 是空操作。
+    """
+    _drain_log_queue()
+
+    targets = list(logging.getLogger().handlers)
+    listener = _queue_listener
+    if listener is not None:
+        targets.extend(listener.handlers)
+    for handler in targets:
         try:
             handler.flush()
         except Exception:          # noqa: BLE001 - 刷盘失败不能反过来影响崩溃路径
+            pass
+
+
+def _shutdown_logging() -> None:
+    """停掉上一次安装的写盘线程并关闭其 handler。
+
+    ``handlers.clear()`` 只从列表里移除、不关闭底层文件对象：重复调用
+    ``setup_logger`` 会泄漏句柄，Windows 上旧日志文件还会一直被占用，
+    使 ``clean_old_logs`` 的删除静默失败。
+    """
+    global _log_queue, _queue_listener
+
+    if _queue_listener is not None:
+        try:
+            _queue_listener.stop()
+        except Exception:          # noqa: BLE001 - 关闭失败不影响后续初始化
+            pass
+        _queue_listener = None
+    _log_queue = None
+
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:          # noqa: BLE001
             pass
 
 
@@ -88,7 +150,10 @@ def _install_qt_message_handler():
             if context is not None and getattr(context, "file", None):
                 where = f" ({context.file}:{context.line})"
             qt_logger.log(level_map.get(mode, logging.INFO), "%s%s", message, where)
-            _flush_root_handlers()
+            # 只有 Critical / Fatal 才值得同步落盘：qFatal 之后 Qt 会直接 abort，
+            # 其余级别交给后台写线程，否则每条 Qt 消息都是一次全 handler flush。
+            if mode in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+                _flush_root_handlers()
         finally:
             state.active = False
 
@@ -131,7 +196,17 @@ def _enable_faulthandler():
 
 
 def setup_logger():
-    """Configure global logging"""
+    """Configure global logging.
+
+    文件与控制台输出经 ``QueueHandler`` 交给后台线程写：UI 线程只做一次入队，
+    不再承担 ``write + flush`` 的系统调用。日志量大时（DEBUG、MCP 输出、
+    逐行解析进度）这是界面卡顿的直接来源之一。
+
+    写入侧用 ``RotatingFileHandler``：文件名仍按启动时间生成，但单个文件超过
+    :data:`LOG_MAX_BYTES` 时轮转，避免长时间运行产出无上限的单文件。
+    """
+    global _log_queue, _queue_listener
+
     root_logger = logging.getLogger()
 
     log_level = logging.INFO
@@ -146,11 +221,11 @@ def setup_logger():
 
     root_logger.setLevel(log_level)
 
-    if root_logger.hasHandlers():
-        root_logger.handlers.clear()
+    _shutdown_logging()
 
     formatter = logging.Formatter('%(asctime)s | %(name)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
 
+    # Qt 面板信号必须发在主线程（信号接收方是 UI），因此不进队列。
     _qt_handler.setFormatter(formatter)
     root_logger.addHandler(_qt_handler)
 
@@ -158,13 +233,19 @@ def setup_logger():
     log_filename = f"scholar_navis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     log_path = os.path.join(log_dir, log_filename)
 
-    file_handler = logging.FileHandler(log_path, mode='a', encoding='utf-8')
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path, mode='a', encoding='utf-8',
+        maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT)
     file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
+
+    _log_queue = queue.Queue()
+    _queue_listener = logging.handlers.QueueListener(
+        _log_queue, file_handler, console_handler, respect_handler_level=True)
+    _queue_listener.start()
+    root_logger.addHandler(logging.handlers.QueueHandler(_log_queue))
 
 
 
@@ -182,5 +263,18 @@ def setup_logger():
     root_logger.info(f"Crash diagnostics enabled. Signal dump: {_enable_faulthandler()}")
     return root_logger
 
+def flush_logs():
+    """把待写日志立即落盘。
+
+    写盘异步化之后，进程退出前必须显式排空队列，否则最后一段（往往正是
+    崩溃 traceback）会随进程一起消失。崩溃钩子与优雅退出路径都应调用本函数。
+    """
+    _flush_root_handlers()
+
+
 def get_qt_log_handler():
     return _qt_handler
+
+
+# 正常退出时把队列里剩余的日志写完；崩溃路径由 _flush_root_handlers 主动触发。
+atexit.register(_flush_root_handlers)

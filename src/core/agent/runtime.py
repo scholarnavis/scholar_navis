@@ -300,10 +300,10 @@ _ALWAYS_TOOLS = {
                 "rationale). After this tool runs, a suggestion card is shown to the user so they can "
                 "review, edit, translate, and confirm. You MUST NOT call plot_chart until the user "
                 "has confirmed the plan.\n\n"
-                # Default look of every figure comes from the style registry
-                # (reference SCI-figure library), so the proposal the user sees
-                # already matches what plot_chart will render.
-                f"{plot_styles.describe_defaults()}\n"
+                # 默认外观的完整细则只保留在系统提示的 DATA VISUALIZATION 段；
+                # 工具描述里再抄一份会让每次请求都重复发送同一段长文本。
+                "Default look: the built-in reference style described in the system prompt's "
+                "DATA VISUALIZATION section — reuse it in the proposal instead of inventing one.\n"
                 f"{plot_styles.describe_overrides()}\n"
                 "Reference layout detail for enrichment Dotplots (GO / KEGG / GSEA / Reactome): "
                 "chart_type='bubble', x=Gene Ratio (numeric, e.g. gene_ratio / rich_factor), "
@@ -804,6 +804,21 @@ class AgentRuntime:
     # ------------------------------------------------------------------ #
     #  Step / observe helpers
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _cleared_placeholder(name: str, content: str) -> str:
+        """结果被移出上下文时的占位文本。
+
+        ``_compact_tool_history`` 与回填阶段的预算降级共用同一文案：模型看到
+        "已清理"就该重新调用工具，两处用不同措辞会让它误判数据仍然可用。
+        """
+        text = str(content or "")
+        excerpt = text[:200].replace("\n", " ")
+        return (
+            f"{_TOOL_RESULT_CLEARED_TAG} [{name}] "
+            f"original {len(text)} chars. Head excerpt: {excerpt}..."
+            "\n(Data removed from context; call the tool again if you need it.)"
+        )
+
     def _compact_tool_history(self, messages: List[Dict]) -> None:
         """多步工具循环中的旧工具结果清理（就地替换为占位摘要）。
 
@@ -830,12 +845,7 @@ class AgentRuntime:
             if id(m) in keep_ids or m["content"].startswith(_TOOL_RESULT_CLEARED_TAG):
                 continue
             content = m["content"]
-            excerpt = content[:200].replace("\n", " ")
-            placeholder = (
-                f"{_TOOL_RESULT_CLEARED_TAG} [{m.get('name', 'tool')}] "
-                f"original {len(content)} chars. Head excerpt: {excerpt}..."
-                "\n(Data removed from context; call the tool again if you need it.)"
-            )
+            placeholder = self._cleared_placeholder(m.get("name", "tool"), content)
             total -= estimate_tokens(content) - estimate_tokens(placeholder)
             m["content"] = placeholder
             cleared += 1
@@ -1316,12 +1326,25 @@ class AgentRuntime:
                     pass
 
         # 顺序回填 tool 消息，保证与 assistant.tool_calls 对齐。
+        # 同轮多个结果会累加进上下文：单条上限（窗口的 4%）乘上 6 并发仍可能
+        # 超出 tool_token_budget。因此按剩余预算二次分配，超出的当场降级为占位，
+        # 而不是等下一次发送前才发现 prompt 已经过大。
+        budget = self._tool_token_budget
+        used = 0
         for i, p in enumerate(parsed):
+            content = results[i]
+            remaining = budget - used
+            if remaining <= 0:
+                content = self._cleared_placeholder(p["name"], content)
+            else:
+                content = self._truncate(content, min(self._tool_result_chars,
+                                                      remaining * 4))
+            used += estimate_tokens(content)
             messages.append({
                 "role": "tool",
                 "tool_call_id": p["id"],
                 "name": p["name"],
-                "content": results[i],
+                "content": content,
             })
 
     def _dispatch_tool(self, name: str, args: dict, emit_token: Optional[Callable[[str], None]] = None) -> str:
