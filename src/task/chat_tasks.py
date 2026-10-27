@@ -759,6 +759,14 @@ class ChatGenerationTask(BackgroundTask):
         self.kb_manager = KBManager()
         self.full_response_cache = ""
 
+        # 新一轮开始：清空"上一轮问过哪些 DOI"。同一篇论文在新一轮里允许再问一次
+        # （用户可能这时才下载到 PDF），但同一轮内绝不重复弹窗。
+        try:
+            from src.core.agent.runtime import reset_fulltext_escalation
+            reset_fulltext_escalation()
+        except Exception as e:
+            self.logger.warning(f"Full-text escalation reset skipped: {e}")
+
         # New conversation: clear the previous round's Provenance evidence chain
         # to avoid unbounded cross-session accumulation (the collector is a
         # process-level singleton).
@@ -1766,6 +1774,10 @@ class ChatGenerationTask(BackgroundTask):
                 cite_collector=_local_cite, log_fn=self.send_log,
                 evidence_store=evidence_store,
             )
+            # 子任务同样要能请用户交全文：付费墙论文在并行子调查里一样常见，不接这
+            # 条通道，子 Agent 只能写"本次未能取回全文"——而弹窗 + 同轮等待的能力
+            # 明明就在。弹窗在 runtime 侧串行化，不会同时弹两个。
+            sub_agent.fulltext_waiter = self._wait_for_fulltext
             buffer = []
             try:
                 text = sub_agent.run(

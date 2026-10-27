@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -217,6 +218,21 @@ _FULLTEXT_TOOLS = frozenset({"fetch_paper_fulltext", "fetch_webpage_content"})
 #: 注入全文预算时为工具返回值的 JSON 包装（status / source / chars / truncated）
 #: 留出的余量，避免包装把结果顶过 tool_result_chars 而触发二次截断。
 _RESULT_WRAPPER_RESERVE = 512
+
+# ---- 自动取全文失败 -> 请用户交 PDF ----
+#: "请用户交 PDF"的弹窗在进程内**串行化**：主 Agent 与 N 路并行子 Agent 都可能撞上
+#: 付费墙，同时弹两个模态窗只会互相遮挡。跨 runtime 共享，故放在模块级。
+_FULLTEXT_DIALOG_LOCK = threading.Lock()
+#: 本轮已问过的 DOI（跨主 Agent / 子 Agent 共享）：同一篇只问一次，用户放弃后不再
+#: 反复弹窗。每轮入口由任务层调用 :func:`reset_fulltext_escalation` 清空。
+_FULLTEXT_ASKED_DOIS: "set[str]" = set()
+_FULLTEXT_ASKED_LOCK = threading.Lock()
+
+
+def reset_fulltext_escalation() -> None:
+    """清空"本轮问过哪些 DOI"（任务层每轮入口调用一次）。"""
+    with _FULLTEXT_ASKED_LOCK:
+        _FULLTEXT_ASKED_DOIS.clear()
 _ALWAYS_TOOLS = {
     "generate_image": {
         "type": "function",
@@ -366,16 +382,16 @@ _ALWAYS_TOOLS = {
             "name": "request_fulltext",
             "description": (
                 "Ask the user to download ONE paywalled paper as a PDF and hand it to the app, then "
-                "wait for it IN THIS SAME TURN. Use it only after fetch_paper_fulltext reported that "
-                "no open-access copy exists and a claim you must support depends on the body "
-                "(methods, statistics, thresholds, figure-level wording). Calling it opens a picker "
-                "window on the user's screen — the user downloads the PDF there and drops it in — and "
-                "this call BLOCKS until the file arrives; it then returns a reading brief (key points "
-                "+ verbatim quotes + page numbers) that a reading sub-agent extracted from that PDF. "
-                "Quote those passages verbatim in cite_references. Never call another tool while it is "
-                "pending, call it at most ONCE per paper per turn, and if it returns status "
-                "'unavailable' continue with the abstract and say plainly that the full text could not "
-                "be obtained."
+                "wait for it IN THIS SAME TURN. Calling it opens a picker window on the user's screen — "
+                "the user downloads the PDF there and drops it in — and this call BLOCKS until the file "
+                "arrives; it then returns a reading brief (key points + verbatim quotes + page numbers) "
+                "that a reading sub-agent extracted from that PDF. Quote those passages verbatim in "
+                "cite_references. Never call another tool while it is pending, call it at most ONCE per "
+                "paper per turn, and if it returns status 'unavailable' continue with the abstract and "
+                "say plainly that the full text could not be obtained. The app already does this "
+                "automatically when fetch_paper_fulltext comes back empty, so you only need this call "
+                "when you know the body is required BEFORE any fetch attempt — do not use it to repeat "
+                "a request the app has already made for the same paper."
             ),
             "parameters": {
                 "type": "object",
@@ -1366,6 +1382,11 @@ class AgentRuntime:
                     return self._handle_plot_result(result, emit_token)
                 if isinstance(result, (dict, list)):
                     result = json.dumps(result, ensure_ascii=False)
+                # 自动取全文失败时把球交给用户：同一轮内弹窗并等待，拿到 PDF 就换成
+                # 阅读简报。不能指望模型"记得"再调一次 request_fulltext——它只会照
+                # 工具原话写成"本次未能取回全文"，用户看到的就是一句干巴巴的失败。
+                if name == "fetch_paper_fulltext" and isinstance(result, str):
+                    result = self._escalate_fulltext(args, result)
                 # 本地技能（如 search_academic_literature）返回的文献列表同样要注入
                 # 编号与引用 token：否则模型手里只有"标题+URL"，只能自拟
                 # [pksreview2022] 这类别名，而程序并不认别名。Deep 模式的子 Agent
@@ -2190,6 +2211,105 @@ class AgentRuntime:
                         "verbatim from the quotes above (or from that paper) pass "
                         "verification. Cite it like any other source."),
         }, ensure_ascii=False)
+
+    # ------------------------------------------------------------------ #
+    #  自动取全文失败 -> 同一轮内请用户交回 PDF
+    # ------------------------------------------------------------------ #
+    def _title_for_doi(self, doi: str) -> str:
+        """按 DOI 在引用注册表里反查标题（弹窗要让用户知道"下哪一篇"）。"""
+        target = self._normalize_doi(doi)
+        if not target or self.reference_registry is None:
+            return ""
+        try:
+            for item in self.reference_registry.items():
+                if self._normalize_doi(getattr(item, "doi", "") or "") == target:
+                    return str(getattr(item, "title", "") or "")
+        except Exception as e:      # 反查失败只影响弹窗里的标题
+            logger.debug(f"DOI title lookup failed: {e}")
+        return ""
+
+    @staticmethod
+    def _normalize_doi(doi: str) -> str:
+        text = str(doi or "").strip().lower()
+        for prefix in ("https://doi.org/", "http://doi.org/",
+                       "https://dx.doi.org/", "http://dx.doi.org/", "doi:"):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+        return text.strip()
+
+    def _escalate_fulltext(self, args: dict, raw: str) -> str:
+        """自动取全文失败时，立刻把球交给用户（同一轮内等待），而不是让模型解释"取不到"。
+
+        触发条件（缺一不可）：
+
+        * 结果是"没拿到正文"——带 ``conclusion``（``incomplete_sources_failed`` /
+          ``no_open_access_copy``），参数错误之类的失败不打扰用户；
+        * 本次运行挂着 waiter（主流程有界面；子 Agent 没有，保持工具原话）；
+        * 这个 DOI 本轮还没问过（用户放弃后不再反复弹窗）。
+
+        用户交回 PDF → 返回阅读简报（逐字引用 + 页码，正文已入证据库）；用户放弃 →
+        返回原始结果并注明"已经问过用户、用户没有提供"，模型据实说明即可。
+        """
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else {}
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(data, dict) or data.get("full_text"):
+            return raw
+        if not data.get("conclusion"):
+            return raw
+        if not callable(self.fulltext_waiter):
+            return raw
+
+        doi = self._normalize_doi(data.get("doi") or (args or {}).get("doi") or "")
+        with _FULLTEXT_DIALOG_LOCK:
+            with _FULLTEXT_ASKED_LOCK:
+                if doi and doi in _FULLTEXT_ASKED_DOIS:
+                    return raw
+                if doi:
+                    _FULLTEXT_ASKED_DOIS.add(doi)
+            failed = [str(x) for x in (data.get("sources_failed") or []) if str(x).strip()]
+            self.log_fn(
+                "INFO",
+                "Open-access full text unavailable for "
+                f"{doi or 'this paper'}; asking the user to hand over the PDF.")
+            answer_raw = self._handle_request_fulltext({
+                "doi": doi,
+                "title": self._title_for_doi(doi),
+                "url": "",
+                "reason": ("; ".join(failed) if failed else "no open-access copy found"),
+            })
+
+        try:
+            answer = json.loads(answer_raw) if isinstance(answer_raw, str) else {}
+        except (TypeError, ValueError):
+            answer = {}
+        if isinstance(answer, dict) and answer.get("status") == "success":
+            merged = dict(data)
+            merged.pop("conclusion", None)
+            merged.pop("sources_failed", None)
+            merged.update({
+                "source": str(answer.get("source") or "user-provided PDF"),
+                "full_text": str(answer.get("content") or ""),
+                "pages": answer.get("pages", 0),
+                "chars": len(str(answer.get("content") or "")),
+                "doi": str(answer.get("doi") or doi),
+                "conclusion": "user_provided_pdf",
+                "message": (
+                    "The paper body is now available from the user's own PDF; the reading "
+                    "brief below carries verbatim quotes and page numbers. Use it, and do "
+                    "not claim the full text was unavailable."),
+            })
+            return json.dumps(merged, ensure_ascii=False)
+
+        # 用户放弃 / 文件不可用：把"问过了"写进结果，模型据实说明即可，别再请求一次。
+        fallback = dict(data)
+        fallback["user_asked"] = True
+        fallback["message"] = (
+            str(data.get("message") or "").strip()
+            + " The app already asked the user for their own PDF and no usable copy was "
+              "handed over; answer with what you have and name the paper.")
+        return json.dumps(fallback, ensure_ascii=False)
 
     def _load_user_pdf(self, path: str, payload: dict):
         """解析用户提供的 PDF，并把正文纳入证据库。
