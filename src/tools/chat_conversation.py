@@ -133,6 +133,16 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self.current_ai_text = ""
         self.current_ai_bubble = None
         self.pdf_viewer = None
+        #: 本标签页是否已关闭（见 :meth:`shutdown`）。
+        #:
+        #: 控件由容器 ``deleteLater`` 释放，而挂在 Python 对象（本对象）上的计时器、
+        #: 以及 ``QTimer.singleShot`` 排进事件队列的 lambda 都不受控件生命周期约束：
+        #: 它们能活到控件被销毁之后。凡是"延迟执行且会碰控件"的回调，入口都以本标志
+        #: 为准——否则关标签页后会撞上 "Internal C++ object already deleted"
+        #: （历史 bug：关标签页后 ``_check_scroll_position`` 在已删除的 QScrollArea
+        #: 上取滚动条，或取全文/追问的 50ms 迟到回调去滚一个已删除的气泡）。
+        self._closed = False
+
         # 滚动范围变化在流式期间非常频繁：合并成 90ms 一次，避免每个 rangeChanged
         # 都全量扫描气泡布局来确定"回顶/到底"按钮。
         self._scroll_check_timer = QTimer(self)
@@ -386,6 +396,9 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         由容器的 ``close_tab`` 调用；此后本对象不再被引用。快照文件的删除由容器
         统一负责（它同时要改标签页清单），这里只做内存与线程侧的收尾。
         """
+        # 先关门再收尾：控件随后被容器 deleteLater 释放，而排队的 singleShot 与挂在
+        # 本对象上的计时器都可能在那之后才执行，必须让它们一律提前返回（见 _closed）。
+        self._closed = True
         chat_session.unregister_flush_hook(self.flush_session_snapshot)
         self._disconnect_global_signals()
 
@@ -691,6 +704,10 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         return anim
 
     def _check_scroll_position(self):
+        # 计时器 / 滚动条信号都可能在控件被销毁后才到（见 _closed）：
+        # 本函数一进来就取 verticalScrollBar()，是这一族崩溃最容易撞上的一处。
+        if self._closed:
+            return
         sb = self.scroll_area.verticalScrollBar()
         self._set_overlay_visible(
             "bottom", self.btn_scroll_bottom, self.opacity_effect, self.fade_anim,
@@ -698,6 +715,9 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self._update_jump_top_button()
 
     def _on_scroll_range_changed(self, min_v, max_v):
+        # 关闭后不得再排重检：控件正在被释放，90ms 后这一枪会打在已删除的滚动条上。
+        if self._closed:
+            return
         # 布局高度变化后延迟重检：合并 90ms 内的连续 rangeChanged，避免流式期间
         # 每个 token 都全量扫描气泡布局来更新悬浮按钮。
         self._scroll_check_timer.start()

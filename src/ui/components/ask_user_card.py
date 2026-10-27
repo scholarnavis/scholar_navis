@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.core.i18n import tr
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ class AskUserCardWidget(QFrame):
         root.setSpacing(8)
         self._root_layout = root
 
-        q_label = QLabel(f"Question: {self._question}")
+        q_label = QLabel(tr("Question: {question}").format(question=self._question))
         q_label.setObjectName("askUserQuestion")
         q_label.setWordWrap(True)
         # 冻结后整卡只读，文本一律允许框选复制
@@ -111,7 +112,9 @@ class AskUserCardWidget(QFrame):
             opts_layout.addWidget(w)
             self._option_widgets.append(w)
 
-        self._own_widget = QCheckBox(_OWN_ANSWER_LABEL) if self._multi else QRadioButton(_OWN_ANSWER_LABEL)
+        own_text = tr(_OWN_ANSWER_LABEL)
+        self._own_widget = (QCheckBox(own_text) if self._multi
+                            else QRadioButton(own_text))
         self._own_widget.setObjectName("askUserOption")
         self._own_widget.toggled.connect(self._on_own_toggled)
         opts_layout.addWidget(self._own_widget)
@@ -120,7 +123,7 @@ class AskUserCardWidget(QFrame):
 
         self._edit = QPlainTextEdit()
         self._edit.setObjectName("askUserEdit")
-        self._edit.setPlaceholderText("Type your own answer...")
+        self._edit.setPlaceholderText(tr("Type your own answer..."))
         self._edit.setFixedHeight(54)
         self._edit.setEnabled(False)  # 仅选中 "My own answer" 后允许输入
         self._edit.textChanged.connect(self._update_submit_state)
@@ -129,13 +132,13 @@ class AskUserCardWidget(QFrame):
         bottom = QHBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)
 
-        self._hint_label = QLabel(_HINT_IDLE)
+        self._hint_label = QLabel(tr(_HINT_IDLE))
         self._hint_label.setObjectName("askUserHint")
         self._hint_label.setWordWrap(True)
         self._hint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         bottom.addWidget(self._hint_label, 1)
 
-        self._btn_submit = QPushButton(" Submit Answer")
+        self._btn_submit = QPushButton(" " + tr("Submit Answer"))
         self._btn_submit.setObjectName("askUserSubmit")
         self._btn_submit.setCursor(Qt.PointingHandCursor)
         self._btn_submit.setEnabled(False)  # 无有效作答前禁止提交
@@ -186,7 +189,8 @@ class AskUserCardWidget(QFrame):
         chosen = [w.text().strip() for w in self._option_widgets if w.isChecked()]
         extra = self._edit.toPlainText().strip() if own_checked else ""
         if not chosen and not extra:
-            ToastManager().show("Select an option or type your own answer first.", "warning")
+            ToastManager().show(
+                tr("Select an option or type your own answer first."), "warning")
             logger.debug("AskUserCard submit rejected: empty answer.")
             return
 
@@ -245,7 +249,7 @@ class AskUserCardWidget(QFrame):
         self._own_widget.setEnabled(False)
         self._edit.setEnabled(True)
         self._edit.setReadOnly(True)
-        self._hint_label.setText(_HINT_DONE)
+        self._hint_label.setText(tr(_HINT_DONE))
         self._show_answer_summary()
 
     def _answer_text(self) -> str:

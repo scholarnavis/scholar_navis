@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.copy_button import CopyButton
 from src.ui.components.toast import ToastManager
@@ -88,14 +89,14 @@ class PlotPlanCardWidget(QFrame):
 
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        self._title = QLabel("Proposed Plotting Plan")
+        self._title = QLabel(tr("Proposed Plotting Plan"))
         self._title.setProperty("cssClass", "plotPlanTitle")
         title_box.addWidget(self._title)
 
-        self._hint = QLabel(
+        self._hint = QLabel(tr(
             "Click the suggestion below to copy. You may edit the plan freely; "
             "if it contains non-English text it will be translated to English automatically."
-        )
+        ))
         self._hint.setProperty("cssClass", "plotPlanHint")
         self._hint.setWordWrap(True)
         title_box.addWidget(self._hint)
@@ -104,19 +105,19 @@ class PlotPlanCardWidget(QFrame):
         self._layout.addLayout(header)
 
         # --- read-only suggestion (click to copy) ---
-        self._suggestion = QLabel(self._plan_text or "(no suggestion)")
+        self._suggestion = QLabel(self._plan_text or tr("(no suggestion)"))
         self._suggestion.setProperty("cssClass", "plotPlanSuggestion")
         self._suggestion.setWordWrap(True)
         self._suggestion.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._suggestion.setCursor(Qt.PointingHandCursor)
-        self._suggestion.setToolTip("Click to copy the suggestion")
+        self._suggestion.setToolTip(tr("Click to copy the suggestion"))
         self._suggestion.installEventFilter(self)
         self._layout.addWidget(self._suggestion)
 
         # --- editable plan ---
         self._edit = QPlainTextEdit(self._plan_text or "")
         self._edit.setProperty("cssClass", "plotPlanEdit")
-        self._edit.setPlaceholderText("Edit the plotting requirements here...")
+        self._edit.setPlaceholderText(tr("Edit the plotting requirements here..."))
         self._edit.setMinimumHeight(90)
         self._edit.setMaximumHeight(200)
         self._layout.addWidget(self._edit)
@@ -135,17 +136,17 @@ class PlotPlanCardWidget(QFrame):
 
         self._btn_copy = CopyButton(" Copy Suggestion", copied_text=" Copied",
                                     provider=lambda: self._plan_text or "",
-                                    toast="Plotting plan copied to clipboard.")
+                                    toast=tr("Plotting plan copied to clipboard."))
         self._btn_copy.setProperty("cssClass", "plotPlanBtn")
         actions.addWidget(self._btn_copy)
 
-        self._btn_translate = QPushButton(" Translate to English")
+        self._btn_translate = QPushButton(" " + tr("Translate to English"))
         self._btn_translate.setProperty("cssClass", "plotPlanBtn")
         self._btn_translate.setCursor(Qt.PointingHandCursor)
         self._btn_translate.clicked.connect(self._translate_to_english)
         actions.addWidget(self._btn_translate)
 
-        self._btn_confirm = QPushButton(" Confirm & Draw")
+        self._btn_confirm = QPushButton(" " + tr("Confirm & Draw"))
         self._btn_confirm.setProperty("cssClass", "plotPlanConfirm")
         self._btn_confirm.setCursor(Qt.PointingHandCursor)
         self._btn_confirm.clicked.connect(self._on_confirm)
@@ -270,7 +271,7 @@ class PlotPlanCardWidget(QFrame):
     def _copy_suggestion(self):
         """兼容入口：交由 CopyButton 统一处理（点击建议区的复制路径也走这里）。"""
         if not self._btn_copy.copy_now():
-            ToastManager().show("Nothing to copy.", "warning")
+            ToastManager().show(tr("Nothing to copy."), "warning")
 
     def _set_translating(self, busy: bool):
         self._translating = busy
@@ -278,15 +279,16 @@ class PlotPlanCardWidget(QFrame):
         self._btn_translate.setEnabled(not busy)
         self._btn_copy.setEnabled(not busy)
         self._status.setVisible(busy)
-        self._status.setText("Translating to English...")
+        self._status.setText(tr("Translating to English..."))
 
     def _translate_to_english(self):
         text = self._edit.toPlainText().strip()
         if not text:
-            ToastManager().show("Nothing to translate.", "warning")
+            ToastManager().show(tr("Nothing to translate."), "warning")
             return
         if not self.translator_config:
-            ToastManager().show("No translator model selected. Enable one in the ribbon first.", "error")
+            ToastManager().show(
+                tr("No translator model selected. Enable one in the ribbon first."), "error")
             return
 
         self._set_translating(True)
@@ -319,33 +321,36 @@ class PlotPlanCardWidget(QFrame):
         self._set_translating(False)
         if translated:
             self._edit.setPlainText(translated)
-            self._status.setText("Translated to English. Review and confirm to draw.")
+            self._status.setText(tr("Translated to English. Review and confirm to draw."))
             self._status.setVisible(True)
-            ToastManager().show("Plan translated to English.", "success")
+            ToastManager().show(tr("Plan translated to English."), "success")
         else:
-            self._status.setText("Translation failed. Check the translator model and try again.")
+            self._status.setText(
+                tr("Translation failed. Check the translator model and try again."))
             self._status.setVisible(True)
-            ToastManager().show("Translation failed. Check the translator model.", "error")
+            ToastManager().show(tr("Translation failed. Check the translator model."), "error")
 
     def _on_confirm(self):
         text = self._edit.toPlainText().strip()
         if not text:
-            ToastManager().show("The plan is empty. Please enter or edit your requirement.", "warning")
+            ToastManager().show(
+                tr("The plan is empty. Please enter or edit your requirement."), "warning")
             return
 
         if self._translating:
-            ToastManager().show("Translation in progress. Please wait.", "warning")
+            ToastManager().show(tr("Translation in progress. Please wait."), "warning")
             return
 
         if _contains_non_english(text):
             if not self.translator_config:
                 ToastManager().show(
-                    "The plan contains non-English text but no translator is selected. "
-                    "Select a translator model and click 'Translate to English' first.",
+                    tr("The plan contains non-English text but no translator is selected. "
+                       "Select a translator model and click 'Translate to English' first."),
                     "error",
                 )
                 return
-            ToastManager().show("Plan contains non-English text. Translating before sending...", "info")
+            ToastManager().show(
+                tr("Plan contains non-English text. Translating before sending..."), "info")
             self._translate_to_english()
             return
 

@@ -1596,6 +1596,9 @@ class AgentRuntime:
             "png_path": payload.get("png_path", ""),
             "pdf_path": payload.get("pdf_path", ""),
             "script_path": payload.get("script_path", ""),
+            # 纯绘图代码（无沙箱 prelude）：复制 Markdown 时按 ```r 围栏原样带出，
+            # 因此随卡片一起下发，避免复制方再去磁盘上反推。
+            "code_path": payload.get("code_path", ""),
             "data_path": payload.get("data_path", ""),
             "columns": payload.get("columns", []),
             "preview": payload.get("preview", [])[:5],

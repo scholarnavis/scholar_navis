@@ -159,6 +159,23 @@ class EnvSectionMixin:
         path_layout.addWidget(self.btn_r_browse)
         layout.addLayout(path_layout)
 
+        # 环境维护动作：把缺的包装进私有库，或在没有可用 R 时拉一个独立运行时。
+        # 两者都以模态弹窗显示 R 的逐行输出，完成后再刷新本区块的状态。
+        action_layout = QHBoxLayout()
+        self.btn_r_recheck = QPushButton(tr("Refresh"))
+        self.btn_r_recheck.clicked.connect(self._refresh_r_status)
+        action_layout.addWidget(self.btn_r_recheck)
+
+        self.btn_r_install = QPushButton(tr("Install missing packages"))
+        self.btn_r_install.clicked.connect(self._on_r_install_packages)
+        action_layout.addWidget(self.btn_r_install)
+
+        self.btn_r_runtime = QPushButton(tr("Download private R runtime"))
+        self.btn_r_runtime.clicked.connect(self._on_r_setup_runtime)
+        action_layout.addWidget(self.btn_r_runtime)
+        action_layout.addStretch()
+        layout.addLayout(action_layout)
+
         self.layout.addWidget(self.group_r)
         self._refresh_r_status()
 
@@ -208,6 +225,7 @@ class EnvSectionMixin:
         # Fill the placeholder with the detected path (only if not user-set).
         if info.get("available") and not self.edit_r_path.text().strip():
             self.edit_r_path.setPlaceholderText(info.get("executable", ""))
+        self._update_r_actions(info)
 
     def _on_r_path_edited(self, _text):
         from src.core.r_engine import get_r_engine
@@ -216,42 +234,110 @@ class EnvSectionMixin:
         self._refresh_r_status()
 
     def _r_packages_html(self, engine) -> str:
-        """检查核心 R 绘图包并生成状态片段（缺失即给出平台相关的安装指引）。
+        """检查 R 绘图包并生成状态片段（缺失即给出平台相关的安装指引）。
 
-        可视化依赖 ggplot2 等包。Linux 发行版通常把 R 包拆成独立软件包
-        （r-cran-* 或需 install.packages），NixOS 上更是只能由 nix 提供
-        （store 只读，install.packages 无写权限）。指引统一由
-        :func:`src.core.r_engine.package_install_guidance` 按平台生成，
+        检查范围是 :data:`src.core.plot_engine.ALLOWED_R_PACKAGES`——即引擎可能
+        用到的**全部**包，而不是只查核心包：箱线图 / 小提琴图需要 ggpubr、
+        相关图需要 ggcorrplot，只查核心包会让这些缺失等到出图时才暴露。
+        指引统一由 :func:`src.core.r_engine.package_install_guidance` 生成，
         避免在 UI 里写死一条在部分平台走不通的命令。
         """
-        from src.core.plot_engine import CORE_R_PACKAGES
+        from src.core import r_env
+        from src.core.plot_engine import ALLOWED_R_PACKAGES
 
         tm = ThemeManager()
         try:
-            status = engine.check_packages(CORE_R_PACKAGES)
+            status = engine.check_packages(ALLOWED_R_PACKAGES)
         except Exception as e:
             logger.warning(f"R package check skipped: {e}")
             return ""
 
-        missing = [p for p in CORE_R_PACKAGES if not status.get(p)]
+        missing = [p for p in ALLOWED_R_PACKAGES if not status.get(p)]
+        self._r_missing = missing
+
+        private_lib = r_env.library_dir()
+        count = len(r_env.installed_packages())
+        size_mb = r_env.environment_size_bytes() / 1048576.0
+        parts = [
+            f"<br><b>{tr('Private library:')}</b> <code>{private_lib}</code>"
+            f" <span style='color:{tm.color('text_muted')};'>"
+            f"({count} {tr('packages')}, {size_mb:.1f} MB)</span>"
+        ]
+
+        try:
+            from src.core.r_runtime import private_rscript, runtime_ready
+
+            if runtime_ready():
+                parts.append(f"<b>{tr('Private runtime:')}</b> "
+                             f"<code>{private_rscript()}</code>")
+        except Exception as e:
+            logger.debug(f"Private runtime info unavailable: {e}")
+
         if not missing:
-            return (f"<br><b>{tr('R packages:')}</b> "
-                    f"<span style='color:{tm.color('success')};'>{tr('all core packages available')}</span>")
+            parts.append(f"<b>{tr('R packages:')}</b> "
+                         f"<span style='color:{tm.color('success')};'>"
+                         f"{tr('all required packages available')}</span>")
+            return "<br>".join(parts)
 
         from src.core.r_engine import package_install_guidance
 
-        # 指引是纯文本：首行说明 + 缩进行表示要在终端执行的命令，
-        # 渲染时分别保持普通文本与等宽字体。
+        # 指引是纯文本：缩进行表示要在终端执行的命令，渲染时用等宽字体。
         guidance_html = "<br>".join(
             f"<code>{line.strip()}</code>" if line.startswith("  ") else line
             for line in package_install_guidance(missing).splitlines()
             if line.strip()
         )
-        return (
-            f"<br><b>{tr('R packages missing:')}</b> "
-            f"<span style='color:{tm.color('warning')};'>{', '.join(missing)}</span><br>"
-            f"{guidance_html}"
-        )
+        parts.append(f"<b>{tr('R packages missing:')}</b> "
+                     f"<span style='color:{tm.color('warning')};'>{', '.join(missing)}</span>")
+        parts.append(guidance_html)
+        return "<br>".join(parts)
+
+    def _update_r_actions(self, info):
+        """按真实状态启停动作按钮，避免给出"点了必然失败"的按钮。"""
+        if not hasattr(self, 'btn_r_install'):
+            return
+        missing = list(getattr(self, '_r_missing', []) or [])
+        has_r = bool(info.get("available"))
+        self.btn_r_install.setEnabled(has_r and bool(missing))
+        self.btn_r_install.setToolTip(
+            tr("Install the missing packages into the private library")
+            if has_r else tr("No usable R runtime was found"))
+        self.btn_r_runtime.setToolTip(tr("Download a self-contained R runtime"))
+
+    def _on_r_install_packages(self):
+        self._open_r_env_dialog("packages")
+
+    def _on_r_setup_runtime(self):
+        self._open_r_env_dialog("runtime")
+
+    def _open_r_env_dialog(self, action: str):
+        """打开 R 环境弹窗；弹窗内跑任务，结束后刷新状态并提示结果。"""
+        from src.core.plot_engine import ALLOWED_R_PACKAGES
+        from src.ui.components.dialogs.r_env_dialogs import REnvSetupDialog
+
+        dialog = REnvSetupDialog(self.widget, action=action,
+                                 packages=list(ALLOWED_R_PACKAGES))
+        # 持有引用：模态对话框在 exec() 前不能只靠局部变量存活。
+        self._r_env_dialog = dialog
+        dialog.sig_finished.connect(self._on_r_env_finished)
+        logger.info(f"Opening R environment dialog for action={action}")
+        dialog.exec()
+        self._r_env_dialog = None
+
+    def _on_r_env_finished(self, payload: dict):
+        """任务结束后刷新状态，并把结论以提示条告知用户。"""
+        payload = payload or {}
+        summary = str(payload.get("summary") or "")
+        logger.info(f"R environment task finished: ok={payload.get('ok')} {summary}")
+        self._refresh_r_status()
+        if not summary:
+            return
+        try:
+            from src.ui.components.toast import ToastManager
+
+            ToastManager().show(summary, "success" if payload.get("ok") else "warning")
+        except Exception as e:  # 提示条不可用不应影响状态刷新
+            logger.debug(f"Could not notify R environment result: {e}")
 
     def _on_browse_r_path(self):
         from src.ui.components.file_dialogs import open_file_name

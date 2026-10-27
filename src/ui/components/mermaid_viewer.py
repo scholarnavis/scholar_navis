@@ -182,6 +182,11 @@ class MermaidViewer(QMainWindow):
     #: 源码面板 : 预览面板 的默认宽度分配（源码展开时使用）。
     _SPLIT_SIZES = (300, 900)
 
+    #: 预览固定使用的 Mermaid 主题（**唯一风格**）。内置 neutral 的低饱和米灰
+    #: 配色最接近"自然"观感；Mermaid 并没有名为 natural 的主题，因此不再提供
+    #: 主题下拉框——需要换风格时只改这一处。
+    _MERMAID_THEME = 'neutral'
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Academic Diagram Viewer - Mermaid.js")
@@ -251,9 +256,6 @@ class MermaidViewer(QMainWindow):
         combo = getattr(self, 'scale_combo', None)
         if combo is not None:
             combo.setStyleSheet(combo_style)
-        theme_combo = getattr(self, 'theme_combo', None)
-        if theme_combo is not None:
-            theme_combo.setStyleSheet(combo_style)
         chk = getattr(self, 'chk_crop', None)
         if chk is not None:
             chk.setStyleSheet(
@@ -278,13 +280,6 @@ class MermaidViewer(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(Qt.TopToolBarArea, tb)
 
-        # 主题切换
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["default", "dark", "forest", "neutral", "base"])
-        self.theme_combo.currentTextChanged.connect(self.render_diagram)
-        tb.addWidget(self.theme_combo)
-
-        tb.addSeparator()
         tm = ThemeManager()
         # 功能按钮（保存 action 引用，主题切换时刷新图标与文案样式）
         self.act_source = tb.addAction(tm.icon("edit", "text_main"), "Toggle Source")
@@ -502,24 +497,17 @@ class MermaidViewer(QMainWindow):
         """mermaid.min.js 的资源路径：预览页与页面 base_url 共用的唯一解析入口。"""
         return ThemeManager().get_resource_path("assets", "js", "mermaid.min.js")
 
-    def render_diagram(self, theme=None):
-        tm = ThemeManager()
-
-        current_combo_theme = self.theme_combo.currentText()
-        if current_combo_theme == "default":
-            mermaid_theme = 'dark' if tm.current_theme == 'dark' else 'default'
-        else:
-            mermaid_theme = current_combo_theme
-
+    def render_diagram(self):
         self.web_view.setHtml(
-            self._build_page_html(mermaid_theme),
+            self._build_page_html(),
             QUrl.fromLocalFile(os.path.dirname(self._mermaid_js_path()) + "/"))
 
-    def _build_page_html(self, mermaid_theme: str) -> str:
+    def _build_page_html(self) -> str:
         """生成预览页 HTML（**唯一事实来源**：预览与开发者模式自检读同一份）。
 
-        只依赖 ``mermaid_theme`` 与 :attr:`mermaid_code`，不碰窗口状态，所以自检可以
-        直接断言页面约束（图内文字可选中、平移不抢占选中、Copy Text 取文字）。
+        图形风格固定为 :attr:`_MERMAID_THEME`，只依赖 :attr:`mermaid_code` 与窗口
+        无关的状态，所以自检可以直接断言页面约束（图内文字可选中、平移不抢占
+        选中、Copy Text 取文字）。
         """
         tm = ThemeManager()
         safe_code = json.dumps(self.mermaid_code)
@@ -569,7 +557,7 @@ class MermaidViewer(QMainWindow):
             <script>
                 mermaid.initialize({{
                     startOnLoad: false,
-                    theme: '{mermaid_theme}',
+                    theme: '{self._MERMAID_THEME}',
                     securityLevel: 'loose',
                     useMaxWidth: false,
                     flowchart: {{ useMaxWidth: false, htmlLabels: true }},
@@ -581,6 +569,14 @@ class MermaidViewer(QMainWindow):
                     mindmap: {{ useMaxWidth: false }},
                     timeline: {{ useMaxWidth: false }}
                 }});
+                // 固定单一风格后，预览画布跟随该主题自己的底色：深色应用里沿用
+                // 暗底会让 neutral 的深色文字看不清，导出也按这个底色光栅化。
+                try {{
+                    const navisThemeVars = mermaid.mermaidAPI.getConfig().themeVariables || {{}};
+                    if (navisThemeVars.background) {{
+                        document.body.style.backgroundColor = navisThemeVars.background;
+                    }}
+                }} catch (e) {{ /* 取不到主题底色时沿用应用底色 */ }}
                 const code = {safe_code};
 
                 // ---- 缩放/平移参数，与 image_viewer 保持一致 ----

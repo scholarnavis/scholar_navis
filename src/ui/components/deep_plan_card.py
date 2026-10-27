@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.toast import ToastManager
 
@@ -84,18 +85,22 @@ class DeepPlanCardWidget(QFrame):
 
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        title = QLabel("Proposed Deep-Research Plan")
+        title = QLabel(tr("Proposed Deep-Research Plan"))
         title.setObjectName("deepPlanTitle")
         title_box.addWidget(title)
         # 预估执行成本：确认后还需 N 路并行子 Agent + 1 次综合（分解已在
         # 出卡前完成）。让用户在确认闸门上有明确的 token/时间预期。
         n_subs = len([st for st in self._sub_tasks
                       if str((st or {}).get("query", "") or "").strip()])
-        cost_hint = (f" Estimated on confirm: {n_subs} parallel agents + 1 synthesis "
-                     f"({n_subs + 1} model runs)." if n_subs else "")
+        cost_hint = ""
+        if n_subs:
+            # 另起一行拼接：中英之间是否需要空格取决于语言，用换行就绕开了这件事。
+            cost_hint = "\n" + tr(
+                "Estimated on confirm: {agents} parallel agents + 1 synthesis "
+                "({runs} model runs).").format(agents=n_subs, runs=n_subs + 1)
         hint = QLabel(
-            "Review or edit the sub-investigations below, then confirm to run them "
-            "in parallel; or answer directly without decomposition." + cost_hint
+            tr("Review or edit the sub-investigations below, then confirm to run them "
+               "in parallel; or answer directly without decomposition.") + cost_hint
         )
         hint.setObjectName("deepPlanHint")
         hint.setWordWrap(True)
@@ -105,7 +110,7 @@ class DeepPlanCardWidget(QFrame):
 
         # 原始问题（muted）
         if self._query:
-            src = QLabel(f"Query: {self._query}")
+            src = QLabel(tr("Query: {query}").format(query=self._query))
             src.setObjectName("deepPlanQuery")
             src.setWordWrap(True)
             src.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -126,24 +131,25 @@ class DeepPlanCardWidget(QFrame):
         self._edit.setPlainText(_numbered_lines(self._sub_tasks))
         self._edit.setMinimumHeight(84)
         self._edit.setMaximumHeight(200)
-        self._edit.setPlaceholderText("1. sub-investigation A\n2. sub-investigation B")
+        self._edit.setPlaceholderText(
+            tr("1. sub-investigation A\n2. sub-investigation B"))
         layout.addWidget(self._edit)
 
         # 操作区：恢复 | 跳过 | 确认执行
         actions = QHBoxLayout()
         actions.setSpacing(8)
-        self._btn_restore = QPushButton("Restore")
+        self._btn_restore = QPushButton(tr("Restore"))
         self._btn_restore.setObjectName("deepPlanRestore")
         self._btn_restore.setCursor(Qt.PointingHandCursor)
         self._btn_restore.clicked.connect(self._on_restore)
         actions.addWidget(self._btn_restore)
         actions.addStretch(1)
-        self._btn_skip = QPushButton("Answer Directly")
+        self._btn_skip = QPushButton(tr("Answer Directly"))
         self._btn_skip.setObjectName("deepPlanSkip")
         self._btn_skip.setCursor(Qt.PointingHandCursor)
         self._btn_skip.clicked.connect(self._on_skip)
         actions.addWidget(self._btn_skip)
-        self._btn_confirm = QPushButton("Confirm & Execute")
+        self._btn_confirm = QPushButton(tr("Confirm & Execute"))
         self._btn_confirm.setObjectName("deepPlanConfirm")
         self._btn_confirm.setCursor(Qt.PointingHandCursor)
         self._btn_confirm.clicked.connect(self._on_confirm)
@@ -180,12 +186,12 @@ class DeepPlanCardWidget(QFrame):
             ln.strip() for ln in self._edit.toPlainText().splitlines() if ln.strip()
         )
         if not text:
-            ToastManager().show("The plan is empty; restore or edit it first.", "warning")
+            ToastManager().show(tr("The plan is empty; restore or edit it first."), "warning")
             logger.debug("DeepPlanCard confirm rejected: empty plan")
             return
         self._resolved = True
         self._decision = "confirm"
-        self._lock_after_decision("Executing...")
+        self._lock_after_decision(tr("Executing..."))
         logger.info(f"DeepPlanCard confirmed: {len(text.splitlines())} sub-task line(s); card locked.")
         # 先冻结再发信号：上层收到时读到的一定是"已落定"的状态
         self.sig_state_changed.emit()
@@ -196,12 +202,13 @@ class DeepPlanCardWidget(QFrame):
             logger.debug("DeepPlanCard skip ignored: card already resolved.")
             return
         if not self._query:
-            ToastManager().show("Original query missing; please restate your question.", "warning")
+            ToastManager().show(
+                tr("Original query missing; please restate your question."), "warning")
             logger.debug("DeepPlanCard skip rejected: missing original query")
             return
         self._resolved = True
         self._decision = "skip"
-        self._lock_after_decision("Answering directly...")
+        self._lock_after_decision(tr("Answering directly..."))
         logger.info("DeepPlanCard skipped by user; answering directly; card locked.")
         self.sig_state_changed.emit()
         self.sig_skip.emit(self._query)
@@ -243,13 +250,13 @@ class DeepPlanCardWidget(QFrame):
         if decision:
             self._resolved = True
             self._decision = decision
-            self._lock_after_decision(str(state.get("action") or "Resolved"))
+            self._lock_after_decision(str(state.get("action") or tr("Resolved")))
         self.freeze()
 
     def freeze(self):
         """冻结为只读：按钮禁用、计划文本只读但可框选。"""
         self._resolved = True
-        self._lock_after_decision(self._btn_confirm.text() or "Resolved")
+        self._lock_after_decision(self._btn_confirm.text() or tr("Resolved"))
 
     # -------------------------------------------------------------- Theme
 

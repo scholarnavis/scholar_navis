@@ -10,8 +10,15 @@ deterministic, reproducible and free of extra licensing surface.
 
 Detection strategy (in order):
     1. A user-specified path (``set_custom_path``) — highest priority.
-    2. ``Rscript`` / ``R`` found on the system ``PATH``.
-    3. Common install locations (Windows ``R_HOME``, macOS, Linux).
+    2. The application's private runtime (``r_env/runtime``), when present: it is
+       created together with the private library, so it always matches the
+       packages we install ourselves.
+    3. ``Rscript`` / ``R`` found on the system ``PATH``.
+    4. Common install locations (Windows ``R_HOME``, macOS, Linux).
+
+Plotting packages are never installed into the system R; they live in the
+private library under ``<BASE_DIR>/r_env`` (see :mod:`src.core.r_env`), which is
+injected through ``R_LIBS_USER`` for every R subprocess.
 
 Detection is lazy and cached; call :meth:`detect` explicitly to force a
 re-scan. The class is a thread-safe singleton (mirrors ``DeviceManager``).
@@ -93,11 +100,13 @@ def r_install_hint() -> str:
 
 
 def package_install_guidance(missing: Sequence[str]) -> str:
-    """给出"缺哪些 R 包、该怎么装"的平台相关指引（可多行纯文本）。
+    """给出"缺哪些 R 包、该怎么装"的可执行指引（多行纯文本）。
 
-    不能一律建议 ``install.packages()``：NixOS 的 R 位于只读的 /nix/store
-    （``.libPaths()`` 里也没有可写的用户库），该命令必然失败。包装分发版
-    （apt/dnf/pacman）则通常另有 ``r-cran-*`` / ``R-*`` 系统包可选。
+    首选应用内安装：包装进私有库，系统 R 与只读的系统路径一概不动，删除
+    ``r_env`` 目录即完全回退。因为不同平台的可写性差异很大——NixOS 的 R 在
+    只读 /nix/store 下，手动 ``install.packages()`` 必然失败；apt/dnf/pacman 则
+    另有 ``r-cran-*`` 系统包可选——所以平台自带手段作为备选一并给出，而不是
+    笼统建议一条在部分平台上根本跑不通的命令。
 
     :param missing: 缺失的包名列表。
     :return: 纯文本指引（调用方自行决定按行渲染）。
@@ -106,26 +115,39 @@ def package_install_guidance(missing: Sequence[str]) -> str:
     if not pkgs:
         return ""
 
-    quoted = ", ".join(f'"{p}"' for p in pkgs)
-    nix_expr = " ".join(f"ps.{p}" for p in pkgs)
+    from src.core import r_env
+
     family = platform_family()
+    lines = [
+        "How to fix:",
+        "  Settings > R Environment > Install missing packages",
+        f"  Packages are installed into the private library: {r_env.library_dir()}",
+        "  Your system R stays untouched; R_LIBS_USER points at that library, so the "
+        "packages are used without changing the system environment.",
+    ]
 
     if family == "nix":
-        return (
-            "NixOS ships R as an immutable package tree: the interpreter on PATH has no "
-            "writable library, so install.packages() cannot work.\n"
-            "Provide R WITH the plotting packages instead:\n"
-            f"  nix-shell -p 'R.withPackages (ps: with ps; [ {nix_expr} ])'\n"
-            "Then start Scholar Navis from that shell, or point the R path in "
-            "Settings > R Environment at that environment's Rscript "
-            "(run: which Rscript inside the shell)."
-        )
+        nix_expr = " ".join(f"ps.{p}" for p in pkgs)
+        lines += [
+            "",
+            "The R interpreter on PATH here lives in a read-only store, so running "
+            "install.packages() by hand cannot work; the in-app install writes to the "
+            "private library instead.",
+            f"Alternative: nix-shell -p 'R.withPackages (ps: with ps; [ {nix_expr} ])'",
+        ]
+    else:
+        lines += [
+            "",
+            "Alternative: install your distribution's packaged R libraries "
+            "(apt: r-cran-*, dnf: R-*, pacman: r-*).",
+        ]
 
-    return (
-        f"In an R session run: install.packages(c({quoted}))\n"
-        "Or install your distribution's packaged R libraries "
-        "(apt: r-cran-*, dnf: R-*, pacman: r-*)."
-    )
+    lines += [
+        "",
+        "If this machine has no usable R runtime at all: Settings > R Environment > "
+        "Download private R runtime installs a prebuilt runtime that needs no compiler.",
+    ]
+    return "\n".join(lines)
 
 
 def plot_failure_missing_packages(error_text: str) -> list:
@@ -238,6 +260,17 @@ class REngine:
             self._package_cache.clear()
         logger.info(f"R engine custom path set: {self._custom_path!r}")
 
+    def refresh(self):
+        """作废探测与包检查缓存。
+
+        R 环境本身发生变化时调用：私有运行时刚装好、私有库被清空等——否则
+        ``detect()`` 会一直返回旧解释器（例如"明明装了运行时却仍在用系统 R"）。
+        """
+        with self._cache_lock:
+            self._cached = None
+            self._package_cache.clear()
+        logger.info("R engine caches invalidated.")
+
     def detect(self) -> dict:
         """Detect (or return cached) the R interpreter. See module docstring
         for the shape of the returned dict."""
@@ -273,7 +306,19 @@ class REngine:
                 return info
             logger.warning(f"Custom R path invalid: {self._custom_path!r}")
 
-        # 2) Executable on PATH.
+        # 2) 应用私有运行时（若用户装过）：与私有库配套，因此优先于系统 R。
+        from src.core.r_runtime import private_rscript
+
+        private = private_rscript()
+        if private:
+            info = self._validate(private)
+            if info:
+                logger.info(f"R engine resolved via private runtime: {private}")
+                return info
+            # 装了却跑不起来（缺兼容层等）：回落到系统 R，并把原因留在日志里。
+            logger.warning(f"Private R runtime unusable, falling back: {private}")
+
+        # 3) Executable on PATH.
         for name in ("Rscript", "R"):
             found = shutil.which(name)
             if found:
@@ -282,7 +327,7 @@ class REngine:
                     logger.info(f"R engine found on PATH: {found}")
                     return info
 
-        # 3) Common install locations.
+        # 4) Common install locations.
         for candidate in self._common_locations():
             if os.path.isfile(candidate):
                 info = self._validate(candidate)
@@ -340,24 +385,38 @@ class REngine:
 
         return candidates
 
-    def check_packages(self, packages) -> dict:
+    def invalidate_packages(self):
+        """作废包检查缓存（装包/卸载后必须调用）。"""
+        with self._cache_lock:
+            self._package_cache.clear()
+        logger.info("R package cache invalidated.")
+
+    def check_packages(self, packages, executable: str = "") -> dict:
         """批量检查 R 包是否已安装，返回 ``{包名: 是否可用}``。
 
         可视化引擎依赖 ggplot2 等 R 包；Windows 用户通常按官方引导一次装好，
-        而 Linux 发行版的 R 包往往是分离的（打包为 r-cran-* 或需自行
-        ``install.packages``），因此把"缺哪个包"提前暴露给用户，比等到出图时
-        才报错更友好。结果按（解释器 + 包集合）缓存，避免重复拉起 R 进程。
+        而 Linux 发行版的 R 包往往是分离的（打包为 r-cran-* 或需自行装包），
+        因此把"缺哪个包"提前暴露给用户，比等到出图时才报错更友好。结果按
+        （解释器 + 私有库 + 包集合）缓存，避免重复拉起 R 进程；私有库路径是
+        缓存键的一部分，否则换过私有环境后仍会拿到旧结论。
+
+        子进程带上 ``R_LIBS_USER``（见 :func:`src.core.r_env.child_env`），
+        因此这里看到的是"系统库 + 私有库"的真实可用状态。
+
+        :param executable: 指定检查用的解释器；省略时用 :meth:`detect` 解析出的
+            那个。显式指定只用于"确认某个**特定**运行时是否已备齐包"（私有运行时
+            补齐包），此时即便 :meth:`detect` 还没选它也要如实探测。
         """
         pkg_list = [str(p).strip() for p in packages if str(p).strip()]
         if not pkg_list:
             return {}
 
-        info = self.detect()
-        if not info.get("available"):
-            return {p: False for p in pkg_list}
+        from src.core import r_env
 
-        exe = info.get("executable", "")
-        cache_key = (exe, tuple(pkg_list))
+        exe = (executable or "").strip() or self.detect().get("executable", "")
+        if not exe:
+            return {p: False for p in pkg_list}
+        cache_key = (exe, r_env.library_signature(), tuple(pkg_list))
         with self._cache_lock:
             cached = self._package_cache.get(cache_key)
         if cached is not None:
@@ -376,6 +435,7 @@ class REngine:
             proc = subprocess.run(
                 [exe, "--vanilla", "-e", snippet],
                 capture_output=True, text=True, timeout=60,
+                env=r_env.child_env(),
                 creationflags=no_window_flags(),
             )
             flags = (proc.stdout or "").strip().splitlines()

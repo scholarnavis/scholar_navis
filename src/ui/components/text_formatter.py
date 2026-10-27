@@ -478,6 +478,79 @@ _MERMAID_UI_TEXT_RE = re.compile(
 _DROP_SUBTREE_RE = re.compile(
     r"<(script|style|noscript)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE)
 
+#: 渲染期下发的 Mermaid 路由链接（含哈希）：复制/导出时据此把卡片还原成源码。
+_MERMAID_HASH_RE = re.compile(r"mermaid://view\?hash=([0-9a-f]+)", re.IGNORECASE)
+
+#: Mermaid 卡片的标记属性（值为源码哈希）：渲染期由 :meth:`format_response` 注入。
+#: 复制/导出据此**整块**定位卡片并还原成源码围栏，不必靠结构猜测（卡片嵌在正文
+#: wrapper 里，按"最外层 div"猜会把整篇正文一起吃掉）。**唯一定义处**。
+MERMAID_CARD_ATTR = "data-navis-mermaid"
+
+#: R 图卡源码围栏的语言标注。plot_chart 执行的就是 R 脚本，标注必须是 ``r``。
+_PLOT_CODE_FENCE = "r"
+
+#: 复制时附带的绘图源码上限（字符）：脚本异常庞大时截断，避免剪贴板爆量。
+_PLOT_CODE_MAX_CHARS = 200_000
+
+
+def _read_plot_code(data: dict) -> str:
+    """读取 R 图卡对应的绘图源码（纯绘图代码优先，其次完整脚本）。
+
+    两个文件都由 :mod:`src.core.plot_engine` 落盘（``<job>.code.R`` / ``<job>.R``），
+    路径随卡片载荷下发。文件已被清理时返回空串，复制结果退化为只有图片引用。
+    """
+    if not isinstance(data, dict):
+        return ""
+    for key in ("code_path", "script_path"):
+        path = data.get(key)
+        if not path or not os.path.exists(str(path)):
+            continue
+        try:
+            with open(str(path), "r", encoding="utf-8", errors="replace") as f:
+                code = f.read(_PLOT_CODE_MAX_CHARS)
+        except OSError as e:
+            logger.debug("Plot source unreadable (%s): %s", path, e)
+            continue
+        code = code.strip()
+        if code:
+            return code
+    return ""
+
+
+def card_to_markdown(kind: str, data: dict) -> str:
+    """内部卡片载荷 → 可复制的 Markdown（复制与导出共用，唯一实现）。
+
+    * ``rplot_card``：图片引用 + ```r 围栏的绘图源码（源码从载荷里的文件读取，
+      图卡本身只显示图形，源码不会出现在正文，必须在这里带出）；
+    * ``plot_plan`` / ``deep_plan``：方案文本转引用块；
+    * ``ask_user``：问题与选项转引用块。
+
+    载荷不可用或类型未知时返回空串（调用方按"卡片不贡献正文"处理）。
+    """
+    if not isinstance(data, dict):
+        return ""
+    if kind == "rplot_card":
+        img = data.get("png_path") or data.get("svg_path") or ""
+        title = data.get("chart_title") or data.get("plot_label") or "chart"
+        # 方括号会截断 Markdown 的图片替代文本（如 plot_1 [volcano]），换成圆括号
+        alt = str(title).replace("[", "(").replace("]", ")")
+        parts = [f"![{alt}]({img})" if img else f"*{alt}*"]
+        code = _read_plot_code(data)
+        if code:
+            parts.append(f"```{_PLOT_CODE_FENCE}\n{code}\n```")
+        return "\n\n".join(parts)
+    if kind in ("plot_plan", "deep_plan"):
+        text = str(data.get("plan_text") or data.get("plan")
+                   or data.get("request") or "").strip()
+        return "\n".join("> " + ln for ln in text.splitlines()) if text else ""
+    if kind == "ask_user":
+        question = str(data.get("question") or "").strip()
+        if not question:
+            return ""
+        options = [str(o).strip() for o in (data.get("options") or []) if str(o).strip()]
+        return "\n".join(["> " + question] + [f"> - {o}" for o in options])
+    return ""
+
 
 class _HtmlToMarkdown(HTMLParser):
     """HTML → Markdown 提取器（导出/复制 Markdown 共用）。
@@ -508,8 +581,12 @@ class _HtmlToMarkdown(HTMLParser):
         self._skip = 0         # _DROP_SUBTREES 嵌套深度：内部一律丢弃
         self._table = None     # 表格缓冲 {"rows": [], "row": ..., "cell": ...}
         self._lists = []       # 列表栈 [(ordered, counter)]
+        self._li_open = 0      # 当前打开的 <li> 层数（判断"段落是否在列表项内"）
+        self._li_multi = []    # <li> 栈：该条目是否含多个段落（含多段的条目要保留空行）
+        self._drop_ws = False  # 刚发出块边界：紧随其后的空白一律丢弃
         self._links = []       # <a href> 栈
         self._markers = []     # 已开启的内联标记栈
+        self._span_bold = []   # <span> 栈：该 span 是否承载强调（font-weight）
 
     # ---------------- 缓冲 ----------------
     def _emit(self, text):
@@ -528,6 +605,30 @@ class _HtmlToMarkdown(HTMLParser):
                 return part[-1]
         return ""
 
+    def _break_line(self):
+        """断行（已有行尾换行时不重复追加）。
+
+        列表相关的块边界（``<ul>``/``<ol>``、条目间的源码换行）会连着触发多次，
+        逐次追加换行就会把紧凑列表撑成"每个条目之间一个空行"，嵌套列表还会多出
+        空行导致结构被解析成平级。
+        """
+        if self._tail_char() not in ("", "\n"):
+            self._emit("\n")
+
+    def _rstrip_buffer_newlines(self):
+        """去掉代码块末尾多余换行。
+
+        源 Markdown 的围栏内文本自带行尾换行，原样转回围栏会在闭合围栏前多出
+        一行空白（``summary(df)\\n\\n``` ``）。
+        """
+        buf = self._table.get("cell") if self._table else None
+        if buf is None:
+            buf = self._parts
+        while buf and not buf[-1].strip():
+            buf.pop()
+        if buf:
+            buf[-1] = buf[-1].rstrip("\n")
+
     def result(self):
         return "".join(self._parts)
 
@@ -541,11 +642,26 @@ class _HtmlToMarkdown(HTMLParser):
             self._emit(data)
             return
         if data.strip():
+            # 列表标记刚发出时，紧跟的空白（源码缩进）要一并去掉，否则 "-  内容"
+            # 会多出空格；内容一到位就恢复正常处理。
+            if self._drop_ws:
+                data = data.lstrip()
+                self._drop_ws = False
+            elif self._tail_char() == "\n":
+                # 行首缩进/换行已由上一个块标签（如 <br>）表达，数据里再带一个
+                # 换行就会把软换行写成空行（段落被拆开）。
+                data = data.lstrip("\n \t")
+                if not data:
+                    return
             self._emit(data)
+            return
+        # 列表标记/条目收尾之后的源码空白整段丢弃：留一个换行就会把编号与正文
+        # 拆成两行（条目丢失），或者把紧凑列表撑成"松散列表"。
+        if self._drop_ws:
             return
         # 纯空白：标签换行/缩进不进入正文；行内空白压缩为单个空格
         if "\n" in data:
-            self._emit("\n")
+            self._break_line()
         elif self._tail_char() not in ("", " ", "\n"):
             self._emit(" ")
 
@@ -585,14 +701,20 @@ class _HtmlToMarkdown(HTMLParser):
             self._emit(self._MARKERS[tag])
         elif tag in ("ul", "ol"):
             self._lists.append([tag == "ol", 0])
-            self._emit("\n")
+            self._break_line()
         elif tag == "li":
+            # 缩进按列表层级给：嵌套列表必须缩进，否则会被渲染成同级条目。每级 4 个
+            # 空格是 CommonMark 与 python-markdown 都认的写法（2 空格后者不认）。
             ordered, idx = self._lists[-1] if self._lists else (False, 0)
+            indent = "    " * max(0, len(self._lists) - 1)
             if ordered:
                 self._lists[-1][1] = idx + 1
-                self._emit(f"{idx + 1}. ")
+                self._emit(f"{indent}{idx + 1}. ")
             else:
-                self._emit("- ")
+                self._emit(f"{indent}- ")
+            self._li_open += 1
+            self._li_multi.append(False)
+            self._drop_ws = True
         elif tag in self._HEADINGS:
             self._emit("\n\n" + "#" * int(tag[1]) + " ")
         elif tag == "blockquote":
@@ -605,11 +727,26 @@ class _HtmlToMarkdown(HTMLParser):
         elif tag in ("td", "th"):
             if self._table:
                 self._table["cell"] = []
+        elif tag == "span":
+            # 强调被渲染成带 font-weight 的 span：还原成 Markdown 的 **。
+            bold = _carries_emphasis(data.get("style") or "")
+            self._span_bold.append(bold)
+            if bold:
+                self._emit("**")
         elif tag in self._CARDS:
             self._emit_card(tag, data)
         elif tag in self._TRANSPARENT:
             pass                                    # 纯样式容器透明化
-        elif tag in ("p", "title", "body", "html", "head"):
+        elif tag == "p":
+            if self._li_open:
+                # 列表项内的段落：第一段紧跟标记，后续段落按列表缩进续行
+                if not self._drop_ws:
+                    if self._li_multi:
+                        self._li_multi[-1] = True
+                    self._emit("\n\n" + "    " * len(self._lists))
+            else:
+                self._emit("\n\n")
+        elif tag in ("title", "body", "html", "head"):
             self._emit("\n\n")
         else:
             self._emit(f"<{tag}>")                  # 未知标签保守保留
@@ -635,6 +772,7 @@ class _HtmlToMarkdown(HTMLParser):
             return
         if tag == "pre":
             self._pre = max(0, self._pre - 1)
+            self._rstrip_buffer_newlines()
             self._emit("\n```\n\n")
             return
         if self._pre:
@@ -652,8 +790,17 @@ class _HtmlToMarkdown(HTMLParser):
             if self._lists:
                 self._lists.pop()
             self._emit("\n")
+            self._drop_ws = True    # 列表后的源码换行不能变成条目之间的空行
         elif tag == "li":
-            self._emit("\n")
+            self._li_open = max(0, self._li_open - 1)
+            multi = self._li_multi.pop() if self._li_multi else False
+            # 条目内尾随换行先收掉：否则与下面的条目换行叠成空行，紧凑列表变松散。
+            self._rstrip_buffer_newlines()
+            # 多段条目后面必须留空行：紧贴下一个条目时，很多解析器（含
+            # python-markdown 的 sane_lists）会把下一条目并进上一段正文。
+            self._emit("\n\n" if multi else "\n")
+            # 条目已收尾：紧随其后的源码空白由下一个条目的标记直接接上。
+            self._drop_ws = True
         elif tag in self._HEADINGS or tag == "blockquote":
             self._emit("\n\n")
         elif tag == "table":
@@ -664,8 +811,15 @@ class _HtmlToMarkdown(HTMLParser):
                 self._table["row"] = None
         elif tag in ("td", "th"):
             self._finish_cell()
-        elif tag in ("p", "title", "body", "html", "head"):
+        elif tag == "p":
+            if self._li_open:
+                return      # 段落边界由 </li> 与下一个 <p> 的首部负责
             self._emit("\n\n")
+        elif tag in ("title", "body", "html", "head"):
+            self._emit("\n\n")
+        elif tag == "span":
+            if self._span_bold and self._span_bold.pop():
+                self._emit("**")
         elif tag in self._CARDS or tag in self._TRANSPARENT:
             pass
         else:
@@ -723,7 +877,7 @@ class _HtmlToMarkdown(HTMLParser):
             self._emit(f"\n\n![{alt}]({src})\n\n")
 
     def _emit_card(self, tag, data):
-        """内部卡片标记 → 可读 Markdown（图形转图片链接，方案/提问转引用块）。"""
+        """内部卡片标记 → 可读 Markdown（规则见 :func:`card_to_markdown`）。"""
         payload = None
         raw = data.get("data") or ""
         if raw:
@@ -731,23 +885,9 @@ class _HtmlToMarkdown(HTMLParser):
                 payload = _json.loads(_b64decode(raw).decode("utf-8"))
             except Exception:
                 payload = None
-        if not isinstance(payload, dict):
-            return
-        if tag == "rplot_card":
-            img = payload.get("png_path") or payload.get("svg_path") or ""
-            title = payload.get("chart_title") or payload.get("plot_label") or "chart"
-            self._emit(f"\n\n![{title}]({img})\n\n" if img else f"\n\n*{title}*\n\n")
-        elif tag in ("plot_plan", "deep_plan"):
-            text = str(payload.get("plan_text") or payload.get("plan")
-                       or payload.get("request") or "").strip()
-            if text:
-                self._emit("\n\n" + "\n".join("> " + ln for ln in text.splitlines()) + "\n\n")
-        elif tag == "ask_user":
-            question = str(payload.get("question") or "").strip()
-            if question:
-                options = [str(o).strip() for o in (payload.get("options") or []) if str(o).strip()]
-                lines = ["> " + question] + [f"> - {o}" for o in options]
-                self._emit("\n\n" + "\n".join(lines) + "\n\n")
+        markdown = card_to_markdown(tag, payload)
+        if markdown:
+            self._emit("\n\n" + markdown + "\n\n")
 
 
 def _tidy_markdown(text: str) -> str:
@@ -758,6 +898,48 @@ def _tidy_markdown(text: str) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip() + "\n"
+
+
+def _carries_emphasis(style: str) -> bool:
+    """内联样式是否表示"强调"（字重 ≥ 500 或 ``bold``）。
+
+    渲染管线把 ``<b>`` / ``<strong>`` 改写成带显式 ``font-weight`` 的 ``<span>``
+    （见 :meth:`TextFormatter.apply_emphasis_weight`，目的是避开 Qt 一律用
+    Bold(700) 的过重效果）。复制/导出时若只认 ``<b>``，所有强调都会默默变成普通
+    文本——因此改为从内联字重反推。
+    """
+    match = re.search(r"font-weight\s*:\s*([0-9]{3}|bold)", style or "", re.IGNORECASE)
+    if not match:
+        return False
+    value = match.group(1).lower()
+    return True if value == "bold" else int(value) >= 500
+
+
+def _drop_empty_code_fences(text: str) -> str:
+    """删除工具输出清理后留下的**空**围栏（按行配对，逐块判定）。
+
+    不能用一条正则去配 `````lang\\s*`````：那会把"上一块的闭合围栏 + 下一块的
+    开头围栏"当成同一个空块整体删掉，相邻两个代码块就被拼成一块，后一块的
+    语言标注（如 ```r）也随之丢失。这里按行扫描，逐对围栏判定块内是否为空。
+    """
+    lines = text.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].lstrip().startswith("```"):
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].lstrip().startswith("```"):
+            j += 1
+        if j >= len(lines):                 # 未闭合：原样保留
+            out.extend(lines[i:])
+            break
+        if "".join(lines[i + 1:j]).strip():  # 有内容：整块保留（含语言行）
+            out.extend(lines[i:j + 1])
+        i = j + 1
+    return "\n".join(out)
 
 
 # 思考链/工具过程块的标签词表与规范化实现统一收敛在 src/core/think_tags.py，
@@ -830,7 +1012,9 @@ class TextFormatter:
         re.IGNORECASE)
 
     #: ``<b>`` / ``<strong>`` 开标签（属性段允许引号包裹的值，如 ``style="a: b;"``）。
-    _BOLD_OPEN_RE = re.compile(r'<(b|strong)((?:"[^"]*"|[^>"])*)>', re.IGNORECASE)
+    #: ``\b`` 卡死标签名边界：没有它 ``<br />`` 会被当成 ``<b`` + 属性 ``r /`` 改写掉，
+    #: 于是换行标签变成空 span——所有多行正文的换行会在渲染时整段消失（``<big>`` 同理）。
+    _BOLD_OPEN_RE = re.compile(r'<(b|strong)\b((?:"[^"]*"|[^>"])*)>', re.IGNORECASE)
     #: 对应的闭标签（``</b >`` 之类带空格的写法一并容忍）。
     _BOLD_CLOSE_RE = re.compile(r'</(b|strong)\s*>', re.IGNORECASE)
 
@@ -1128,8 +1312,8 @@ class TextFormatter:
             i += 1
         text = "".join(out)
 
-        # 3) JSON 被包在围栏里时，删除后留下的空围栏
-        text = re.sub(r"```[A-Za-z0-9_+-]*\s*```\s*", "", text)
+        # 3) JSON 被包在围栏里时，删除后留下的空围栏（按块配对删除，见该函数说明）
+        text = _drop_empty_code_fences(text)
         return text.strip()
 
     @staticmethod
@@ -2010,6 +2194,76 @@ class TextFormatter:
         out.append(html[pos:])
         return "".join(out)
 
+    @classmethod
+    def restore_mermaid_cards(cls, text: str, lookup) -> str:
+        """把渲染期替换掉的 Mermaid 卡片还原成 ```mermaid 源码围栏。
+
+        渲染管线（:meth:`format_response`）把 ```mermaid 围栏换成了"点击查看"
+        卡片，正文里只剩卡片 HTML；复制/导出若不做还原，用户只能拿到一句 UI
+        提示。这里按卡片上的 :data:`MERMAID_CARD_ATTR`（值为源码哈希）整块定位，
+        再用 ``lookup`` 取回源码写进围栏，**语言标注固定为 mermaid**。
+
+        :param lookup: ``(hash) -> 源码``；取不到时返回空串，此时整块卡片被
+            丢弃（保留一个指向不存在图形的链接只会是噪声）。
+        """
+        if not text or "mermaid://" not in text:
+            return text
+
+        def _fence(code_hash: str) -> str:
+            try:
+                code = (lookup(code_hash) or "").strip()
+            except Exception as e:
+                logger.debug("Mermaid source lookup failed (hash=%s): %s", code_hash, e)
+                code = ""
+            return f"\n\n```mermaid\n{code}\n```\n\n" if code else ""
+
+        # 1) 整块卡片：按标记属性定位（属性由渲染期注入），整块替换成源码围栏。
+        #    只认带属性的 div，绝不按"最外层 div"猜测——卡片嵌在正文 wrapper 内，
+        #    猜错会把整篇正文一起吃掉。
+        attr_re = re.compile(MERMAID_CARD_ATTR + r"""=['"]?([0-9a-f]+)""", re.IGNORECASE)
+        pieces = []
+        pos = 0
+        for m in _TAG_TOKEN_RE.finditer(text):
+            if m.start() < pos or m.group(1) or m.group(0).endswith('/>'):
+                continue
+            if m.group(2).lower() != "div" or MERMAID_CARD_ATTR not in m.group(0):
+                continue
+            found = attr_re.search(m.group(0))
+            if not found:
+                continue
+            end = cls._matching_close_end(text, m.end(), "div")
+            if end < 0:
+                continue
+            pieces.append(text[pos:m.start()])
+            pieces.append(_fence(found.group(1)))
+            pos = end
+        if pieces:
+            pieces.append(text[pos:])
+            text = "".join(pieces)
+
+        # 2) 兜底：早期渲染结果（无标记属性，卡片文案被打散）与残缺卡片。
+        #    先整块摘掉包着路由链接的锚点，再把残留文案与空壳元素清掉——顺序
+        #    不能反：先抹文案会让锚点变成 href 里塞着源码围栏的怪链接。
+        text = re.sub(
+            r"<a\b[^>]*href=['\"]mermaid://view\?hash=([0-9a-f]+)['\"][^>]*>.*?</a\s*>",
+            lambda m: _fence(m.group(1)), text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"\[[^\]]*\]\(mermaid://view\?hash=([0-9a-f]+)\)",
+                      lambda m: _fence(m.group(1)), text, flags=re.IGNORECASE)
+        text = re.sub(_MERMAID_HASH_RE, lambda m: _fence(m.group(1)), text)
+        text = _MERMAID_UI_HTML_RE.sub("", text)
+        text = _MERMAID_UI_TEXT_RE.sub("", text)
+        text = re.sub(r"Mermaid Diagram Generated|Click here to view\s*/\s*edit interactive diagram",
+                      "", text, flags=re.IGNORECASE)
+        # 文案被摘掉后只剩空标签的壳（如 <b></b>、<div></div>）：留着会在转换里
+        # 变成空的强调符号或多余结构，逐层收敛几次即可清完。
+        for _ in range(4):
+            stripped = re.sub(r"<(b|strong|i|em|span|div|a)\b[^>]*>\s*</\1\s*>",
+                              "", text, flags=re.IGNORECASE)
+            if stripped == text:
+                break
+            text = stripped
+        return text
+
     @staticmethod
     def html_to_markdown(html: str) -> str:
         """把 HTML 片段转成 Markdown：能转的转，转不了的保留精简 HTML。
@@ -2178,7 +2432,7 @@ class TextFormatter:
             code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()
             mermaid_cache[code_hash] = code  # 存入外部传入的字典中
             return (
-                f"<br><div style='padding:12px; margin: 8px 0; border:1px solid {tm.color('accent')}; border-radius:6px; background-color: transparent;'>"
+                f"<br><div {MERMAID_CARD_ATTR}='{code_hash}' style='padding:12px; margin: 8px 0; border:1px solid {tm.color('accent')}; border-radius:6px; background-color: transparent;'>"
                 f"<div style='margin-bottom: 5px;'><b>Mermaid Diagram Generated</b></div>"
                 f"<a href='mermaid://view?hash={code_hash}' style='color:{tm.color('accent')}; text-decoration:none; font-weight:{_strong_css()};'>"
                 f"Click here to view / edit interactive diagram</a></div><br>")

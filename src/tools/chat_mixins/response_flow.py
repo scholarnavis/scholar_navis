@@ -66,6 +66,9 @@ class ChatResponseFlowMixin:
                 self.input_container.btn_import.setEnabled(enabled)
 
     def _throttled_render(self):
+        # 渲染节拍器也挂在会话对象上：关闭标签页后不得再往已释放的气泡里写（见 _closed）。
+        if self._closed:
+            return
         if getattr(self, '_is_rendering_dirty', False) and self.current_ai_bubble:
             self._is_rendering_dirty = False
             idx = getattr(self.current_ai_bubble, 'index', -1)
@@ -82,15 +85,17 @@ class ChatResponseFlowMixin:
             # 崩溃时这一份让"正在生成的那段"也能回来，而不是只剩上一轮。
             self._autosave_inflight()
 
-            sb = self.scroll_area.verticalScrollBar()
-            if (sb.maximum() - sb.value()) <= 50:
+            # "是否还在底部"由 is_at_bottom 一处判定（默认阈值即此处原值），
+            # 不再就地重算一遍公式。
+            if self.is_at_bottom():
                 self.scroll_to_bottom()
 
     def update_ai_bubble(self, token):
         if not self.current_ai_bubble or token == "":
             return
-        sb = self.scroll_area.verticalScrollBar()
-        is_at_bottom = (sb.maximum() - sb.value()) <= 15
+        # 阈值比默认更紧（原值 15）：只判断"用户是否还贴着底"来决定要不要把视图拽下来，
+        # 公式本身仍由 is_at_bottom 定义，避免同一件事出现第二处算法。
+        is_at_bottom = self.is_at_bottom(threshold=15)
         idx = getattr(self.current_ai_bubble, 'index', -1)
 
         # 0. 任务框架的通用引导文案（"Initializing..." 等）不是模型正文：写入

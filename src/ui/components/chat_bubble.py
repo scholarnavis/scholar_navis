@@ -34,7 +34,8 @@ from src.core.theme_manager import (ThemeManager, hex_to_rgba, overlay_scrollbar
 from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import (TextFormatter, qt_font_family_css,
                                               resolve_qt_font_families,
-                                              naturalize_table_html)
+                                              naturalize_table_html,
+                                              card_to_markdown)
 from src.ui.components.toast import ToastManager
 from src.ui.components.copy_button import CopyButton
 from src.ui.components.image_viewer import open_image_viewer
@@ -178,6 +179,32 @@ _LOADING_PHRASE_TICKS = 6
 
 #: Qt 族名解析已统一由 text_formatter.resolve_qt_font_families 提供（含缓存），
 #: 本模块直接复用，保证 HTML 内联样式与文档默认字体来源一致。
+
+
+def _invalidate_typography(browser) -> None:
+    """作废"已下发逐块排版"标记（文档被 setText/setHtml 重写后调用）。
+
+    行距写在块格式里，文档一重写就全丢；任何写文档的路径都必须作废标记，
+    否则 :meth:`ChatBubbleWidget._apply_typography` 的幂等判断会认为"已经
+    应用过"，表现就是"行距滑块怎么调都没反应"。
+    """
+    if browser is not None:
+        browser._typo_applied = None
+
+
+def _write_browser_html(browser, html) -> bool:
+    """写入浏览器文档，返回是否真的重写了。
+
+    内容与上次写入相同时**不动文档**：``setText`` 会整篇重建（重新解析 + 重排 +
+    清空逐块行距），而流式渲染每个节拍都会对全部分段控件走一遍，长回答下这属于
+    纯粹的重复劳动。本函数是这些浏览器唯一的写入入口，写文档即作废排版标记。
+    """
+    if browser is None or getattr(browser, '_written_html', None) == html:
+        return False
+    browser._written_html = html
+    _invalidate_typography(browser)
+    browser.setText(html)
+    return True
 
 
 class ImageAwareTextBrowser(QTextBrowser):
@@ -589,6 +616,8 @@ class OverflowBlock(QScrollArea):
         if html != self._applied_html:
             self._applied_html = html
             self.browser.setHtml(html)
+            # 文档整篇重建，逐块行距随之清空：作废标记，下次 _apply_typography 重下发。
+            _invalidate_typography(self.browser)
 
     def _set_wrap_mode(self, wrap):
         """切换浏览器换行模式。
@@ -988,6 +1017,9 @@ class ChatBubbleWidget(QWidget):
         # 正文块渲染状态：lbl_text 承载首个文本块，后续的表格/引用/代码块/
         # 思考链由 _extra_blocks 中的独立滚动控件承载（见 _render_blocks）。
         self._extra_blocks = []
+        #: R 图卡的建卡载荷（按出现顺序）：图卡标记渲染后即从正文删除，复制
+        #: Markdown 时靠这份记录把图形与 ```r 源码一并带出。
+        self._plot_card_payloads = []
         self._lbl_last_height = -1
         self._height_sync_pending = False
         #: 最近一次悬停的行内引用锚点全局矩形：点击展开详情面板时用于定位。
@@ -1170,18 +1202,18 @@ class ChatBubbleWidget(QWidget):
         # 复制到最新一版），且复制成功会在按钮上给出可见反馈。
         self.btn_copy = CopyButton(" Copy", copied_text=" Copied",
                                    provider=self._plain_copy_text,
-                                   toast="Plain text successfully copied to clipboard.")
+                                   toast=tr("Plain text successfully copied to clipboard."))
         self.btn_copy.setIcon(tm.icon("copy", "text_muted"))
         self.btn_layout.addWidget(self.btn_copy)
 
         self.btn_copy_md = CopyButton(" Copy MD", copied_text=" Copied",
                                       provider=self._markdown_copy_text,
-                                      toast="Markdown successfully copied to clipboard.")
+                                      toast=tr("Markdown successfully copied to clipboard."))
         self.btn_copy_md.setIcon(tm.icon("markdown_copy", "text_muted"))
         self.btn_layout.addWidget(self.btn_copy_md)
 
         if self.is_user:
-            self.btn_edit = QPushButton("Edit")
+            self.btn_edit = QPushButton(tr("Edit"))
             self.btn_edit.setIcon(tm.icon("edit", "text_muted"))
             self.btn_edit.setCursor(Qt.PointingHandCursor)
             self.btn_edit.clicked.connect(self.toggle_edit)
@@ -1209,11 +1241,11 @@ class ChatBubbleWidget(QWidget):
             self.edit_btn_layout.setSpacing(6)
             self.edit_btn_layout.setAlignment(btn_alignment)
 
-            self.btn_cancel = QPushButton(" Cancel")
+            self.btn_cancel = QPushButton(" " + tr("Cancel"))
             self.btn_cancel.setIcon(tm.icon("close", "text_muted"))
             self.btn_cancel.clicked.connect(self.cancel_edit)
 
-            self.btn_confirm = QPushButton(" Confirm")
+            self.btn_confirm = QPushButton(" " + tr("Confirm"))
             self.btn_confirm.setIcon(tm.icon("check-circle", "bg_main"))
             # 配色在 _apply_theme 中按主题注入（academic_blue 为跨主题固定蓝）
             self.btn_confirm.clicked.connect(self.save_edit)
@@ -1705,15 +1737,15 @@ class ChatBubbleWidget(QWidget):
                 self.sig_bookmark_remove_requested.emit(bid))
         menu.addSeparator()
 
-        act_copy = menu.addAction(tm.icon("copy", "text_main"), "Copy Plain Text")
+        act_copy = menu.addAction(tm.icon("copy", "text_main"), tr("Copy Plain Text"))
         act_copy.triggered.connect(self.copy_plain_text)
 
-        act_copy_md = menu.addAction(tm.icon("file-text", "text_main"), "Copy Markdown")
+        act_copy_md = menu.addAction(tm.icon("file-text", "text_main"), tr("Copy Markdown"))
         act_copy_md.triggered.connect(self.copy_markdown)
 
 
         if self.is_user and self._can_edit:
-            act_edit = menu.addAction(tm.icon("edit", "text_main"), "编辑 (Edit)")
+            act_edit = menu.addAction(tm.icon("edit", "text_main"), tr("Edit"))
             act_edit.triggered.connect(self.toggle_edit)
 
         menu.exec(source.mapToGlobal(pos))
@@ -1954,7 +1986,7 @@ class ChatBubbleWidget(QWidget):
             self.btn_widget.hide()
 
             if not self.original_text.strip():
-                self.lbl_text.setText(self._loading_label())
+                _write_browser_html(self.lbl_text, self._loading_label())
                 self.loading_timer.start(500)
             else:
                 self.set_content(self.original_text)
@@ -1974,7 +2006,7 @@ class ChatBubbleWidget(QWidget):
         """
         self._loading_caption = (caption or "").strip() or None
         if self.is_loading and not self.original_text.strip():
-            self.lbl_text.setText(self._loading_label())
+            _write_browser_html(self.lbl_text, self._loading_label())
             if not self.loading_timer.isActive():
                 self.loading_timer.start(500)
 
@@ -1997,7 +2029,7 @@ class ChatBubbleWidget(QWidget):
             self._loading_ticks += 1
             if self._loading_ticks % _LOADING_PHRASE_TICKS == 0:
                 self._loading_phase = (self._loading_phase + 1) % len(_LOADING_PHRASES)
-        self.lbl_text.setText(self._loading_label())
+        _write_browser_html(self.lbl_text, self._loading_label())
 
     # --- 4.5 R 绘图卡片提取（流式标记 → 固定 QWidget） ---
     def _extract_rplot_cards(self, text: str) -> str:
@@ -2010,6 +2042,9 @@ class ChatBubbleWidget(QWidget):
         """
         def _create(data):
             from src.ui.components.r_plot_card import RPlotCardWidget
+            # 复制 Markdown 要带出绘图源码：建卡时留下载荷（去重由 card_registry
+            # 完成，同一张图只会记一次），顺序即卡片出现顺序。
+            self._plot_card_payloads.append(data)
             return RPlotCardWidget(data)
 
         return self._render_marker_cards(text, "r_plot", _create)
@@ -2350,28 +2385,46 @@ class ChatBubbleWidget(QWidget):
         行距反过来只能靠块格式下发：内联 ``line-height`` 需要给每个元素都写一遍，
         还要顾虑嵌套继承；而逐块写块格式一次覆盖正文/标题/表格/列表所有块，且
         优先级最高、不会被任何内联样式盖掉。
+
+        本方法**幂等**：逐块 ``setBlockFormat`` 的代价随文档块数线性增长，而流式
+        渲染每个节拍都会对全部分段控件走一遍（长回答下分段控件会到上百个），重复
+        应用只是白烧 CPU。文档被重写时由 :func:`_invalidate_typography` 清标记。
         """
         browser = browser if browser is not None else getattr(self, 'lbl_text', None)
         if browser is None:
             return
         try:
+            line_height = float(self._typo.get('line_height', 150.0))
+        except (TypeError, ValueError):
+            line_height = 150.0
+        if getattr(browser, '_typo_applied', None) == line_height:
+            return
+        try:
             doc = browser.document()
             if doc is None:
                 return
-
-            line_height = float(self._typo.get('line_height', 150.0))
             # heightType 形参按 **int** 校验：PySide6 6.10 起不再接受枚举对象，
             # 直接传 QTextBlockFormat.ProportionalHeight 会抛 TypeError，取枚举的
             # ``.value`` 在 IntEnum / 纯 Enum 两种形态下都成立。
             height_type = QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
 
-            block = doc.begin()
-            while block.isValid():
-                fmt = block.blockFormat()
-                fmt.setLineHeight(line_height, height_type)
-                cur = QTextCursor(block)
-                cur.setBlockFormat(fmt)
-                block = block.next()
+            # 整段包在一个编辑块里：逐块 setBlockFormat 若各自独立提交，Qt 每块都要
+            # 走一次文档变更与随之而来的重排，长文档下是 O(块数²) 量级。
+            cur = QTextCursor(doc)
+            cur.beginEditBlock()
+            try:
+                block = doc.begin()
+                while block.isValid():
+                    fmt = block.blockFormat()
+                    fmt.setLineHeight(line_height, height_type)
+                    cur.setPosition(block.position())
+                    cur.setBlockFormat(fmt)
+                    block = block.next()
+            finally:
+                cur.endEditBlock()
+
+            # 只有走到这里才算"当前文档已按此数值下发过行距"，标记必须成功后才落。
+            browser._typo_applied = line_height
 
             # QTextBrowser 会根据视口宽度自动决定换行，无需手动 setTextWidth，
             # 避免固定过宽导致横向溢出。
@@ -2406,7 +2459,7 @@ class ChatBubbleWidget(QWidget):
             if not text.strip():
                 if not self.loading_timer.isActive():
                     self.loading_dots = 0
-                    self.lbl_text.setText(self._loading_label())
+                    _write_browser_html(self.lbl_text, self._loading_label())
                     self.loading_timer.start(500)
                 return
             else:
@@ -2606,7 +2659,7 @@ class ChatBubbleWidget(QWidget):
                     self.lbl_text.setVisible(True)
                 self._set_browser_text(self.lbl_text, blocks[text_slot][1])
             else:
-                self.lbl_text.setText("")
+                _write_browser_html(self.lbl_text, "")
                 self.lbl_text.setVisible(False)
 
             # 3) 按块顺序重排并写入内容
@@ -2658,9 +2711,14 @@ class ChatBubbleWidget(QWidget):
         return widgets
 
     def _set_browser_text(self, browser, html):
-        """写入 HTML 并固化字体/排版（对文本块与滚动块一致）。"""
+        """写入 HTML 并固化字体/排版（对文本块与滚动块一致）。
+
+        写入走 :func:`_write_browser_html`：内容没变就不重建文档。字体固化与
+        逐块排版仍然每次都问一次——它们各自有"未变化则跳过"的内部判断，
+        不会因为内容未变就漏掉主题 / 字距 / 行距的变更。
+        """
         self._ensure_document_font(browser)
-        browser.setText(html)
+        _write_browser_html(browser, html)
         self._apply_typography(browser)
 
     def _fill_block(self, block, html):
@@ -2768,7 +2826,7 @@ class ChatBubbleWidget(QWidget):
         trans_layout.setContentsMargins(0, 5, 0, 0)
         trans_layout.setSpacing(4)
 
-        self.btn_toggle_trans = QPushButton(" Show Translated Query")
+        self.btn_toggle_trans = QPushButton(" " + tr("Show Translated Query"))
         self.btn_toggle_trans.setIcon(tm.icon("language", "text_muted"))
         self.btn_toggle_trans.setCursor(Qt.PointingHandCursor)
 
@@ -2780,7 +2838,8 @@ class ChatBubbleWidget(QWidget):
         def toggle_trans():
             is_vis = self.lbl_trans.isVisible()
             self.lbl_trans.setVisible(not is_vis)
-            self.btn_toggle_trans.setText(" Hide Translated Query" if not is_vis else " Show Translated Query")
+            self.btn_toggle_trans.setText(" " + tr("Hide Translated Query") if not is_vis
+                                               else " " + tr("Show Translated Query"))
             self._apply_trans_theme()
 
         self.btn_toggle_trans.clicked.connect(toggle_trans)
@@ -2956,8 +3015,9 @@ class ChatBubbleWidget(QWidget):
         * 思考链（``<think>`` 及各 provider 变体）与 Provenance 追溯日志不复制；
         * 参考文献从页脚回收后按目标格式重排版（Markdown 给可点击链接，
           纯文本给裸地址），不再像旧实现那样"MD 直接丢弃 / TXT 混成裸文本"；
-        * Mermaid 图表从哈希缓存里还原成 ```mermaid 源码（否则只能复制到
-          一句"点击查看"的 UI 提示）。
+        * 代码一律带准确语言标注：Mermaid 图表还原成 ```mermaid 源码（否则只有
+          一句"点击查看"的 UI 提示），R 图卡补上图形引用与 ```r 绘图源码；
+        * R 源码只进 Markdown（纯文本复制是给人读的正文，塞整段脚本只会更难读）。
         """
         text = self.original_text
         target = "markdown" if is_markdown else "plain"
@@ -2991,50 +3051,9 @@ class ChatBubbleWidget(QWidget):
         if self.is_loading:
             text = re.sub(r'^Thinking\.{0,3}', '', text)
 
-        # 2. Mermaid 源码强行回填：全局搜索哈希缓存池
-        def restore_mermaid_full(match):
-            code_hash = match.group(1)
-            code = None
-
-            # 第一层级：顺着父组件树往上爬寻找
-            curr = self
-            while curr:
-                cache = getattr(curr, 'mermaid_cache', getattr(curr, 'mermaid_codes', None))
-                if cache is not None and code_hash in cache:
-                    code = cache[code_hash]
-                    break
-                curr = curr.parentWidget()
-
-            # 第二层级：若父树断裂，直接在全局应用程序内搜索所有的顶层组件及其子组件
-            if not code:
-                from PySide6.QtWidgets import QApplication, QWidget
-                for top_widget in QApplication.topLevelWidgets():
-                    cache = getattr(top_widget, 'mermaid_cache', getattr(top_widget, 'mermaid_codes', None))
-                    if cache is not None and code_hash in cache:
-                        code = cache[code_hash]
-                        break
-                    for child in top_widget.findChildren(QWidget):
-                        cache = getattr(child, 'mermaid_cache', getattr(child, 'mermaid_codes', None))
-                        if cache is not None and code_hash in cache:
-                            code = cache[code_hash]
-                            break
-                    if code: break
-
-            if code:
-                return f"\n```mermaid\n{code}\n```\n"
-            return ""
-
-        # 彻底匹配 TextFormatter 注入的整块 UI HTML（提取哈希并替换为真源码）
-        pattern_ui = r"<br>\s*<div[^>]*>\s*<div[^>]*>\s*<b>Mermaid Diagram Generated</b>\s*</div>\s*<a href=['\"]mermaid://view\?hash=([a-f0-9]+)['\"][^>]*>.*?</a>\s*</div>\s*<br>"
-        text = re.sub(pattern_ui, restore_mermaid_full, text, flags=re.DOTALL | re.IGNORECASE)
-        # 兼容匹配遗漏的 Markdown/纯文本形式链接
-        text = re.sub(r'\[[^\]]*\]\(mermaid://view\?hash=([a-f0-9]+)\)', restore_mermaid_full, text,
-                      flags=re.IGNORECASE)
-        text = re.sub(r"mermaid://view\?hash=([a-f0-9]+)", restore_mermaid_full, text, flags=re.IGNORECASE)
-
-        # 扫尾：清除没匹配到的残留 UI 提示文字
-        text = re.sub(r"Mermaid Diagram Generated.*?Click here to view / edit interactive diagram", "", text,
-                      flags=re.DOTALL | re.IGNORECASE)
+        # 2. Mermaid 源码回填：卡片还原成 ```mermaid 围栏（实现见 TextFormatter，
+        #    与"卡片 → Markdown"的其余规则共处一处）。
+        text = TextFormatter.restore_mermaid_cards(text, self._mermaid_code_by_hash)
 
         # 3. 内部协议链接统一还原为纯文本：cite:// 保留 [n] 编号，mermaid:// / think://
         #    一并清理，避免把只在应用内可点击的路由链接复制进 .md/.txt。
@@ -3074,12 +3093,59 @@ class ChatBubbleWidget(QWidget):
         cleaned = '\n'.join(lines)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
+        # R 图卡的图形与绘图源码：卡片标记渲染后即从正文删除，这里按建卡顺序补回，
+        # 且必须晚于 html_to_markdown——R 代码里的 `<`、`>`（如 `<-`、比较运算）
+        # 会被 HTML 解析器当成标签吞掉。
+        plot_blocks = self._plot_cards_markdown() if is_markdown else []
+        if plot_blocks:
+            cleaned = "\n\n".join([cleaned] + plot_blocks) if cleaned else "\n\n".join(plot_blocks)
+
         # 参考文献按目标格式补回（页脚里的其它内容已经在第 1 步丢弃）
         references = render_footer_references(footer_refs, target)
         if references:
             cleaned = f"{cleaned}\n\n{references}" if cleaned else references
 
         return cleaned
+
+    def _plot_cards_markdown(self) -> list:
+        """本气泡内 R 图卡的 Markdown 片段（图形引用 + ```r 绘图源码）。
+
+        图卡只显示图形，源码不在正文里，因此复制 Markdown 时从建卡载荷读取；
+        顺序与卡片出现顺序一致。
+        """
+        blocks = []
+        for data in getattr(self, '_plot_card_payloads', ()):
+            markdown = card_to_markdown('rplot_card', data)
+            if markdown:
+                blocks.append(markdown)
+        return blocks
+
+    def _mermaid_code_by_hash(self, code_hash: str) -> str:
+        """按哈希取 Mermaid 源码（复制时把卡片还原成源码围栏）。
+
+        两层查找：先沿父链找到渲染管线写入的 ``mermaid_codes`` 缓存；父链在
+        历史恢复 / 控件重建后可能断裂，再退到全局顶层控件里找。
+        """
+        if not code_hash:
+            return ""
+
+        curr = self
+        while curr:
+            cache = getattr(curr, 'mermaid_cache', getattr(curr, 'mermaid_codes', None))
+            if cache is not None and code_hash in cache:
+                return cache[code_hash]
+            curr = curr.parentWidget()
+
+        from PySide6.QtWidgets import QApplication, QWidget
+        for top_widget in QApplication.topLevelWidgets():
+            cache = getattr(top_widget, 'mermaid_cache', getattr(top_widget, 'mermaid_codes', None))
+            if cache is not None and code_hash in cache:
+                return cache[code_hash]
+            for child in top_widget.findChildren(QWidget):
+                cache = getattr(child, 'mermaid_cache', getattr(child, 'mermaid_codes', None))
+                if cache is not None and code_hash in cache:
+                    return cache[code_hash]
+        return ""
 
     def _plain_copy_text(self) -> str:
         """CopyButton 的纯文本来源（会话被打断时不复制）。"""

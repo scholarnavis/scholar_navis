@@ -265,6 +265,10 @@ class ChatBubblesMixin:
         其阅读位置——此前多处收尾动作无条件 ``setValue(maximum)``，会把正在上翻
         查看历史的用户强行拽回底部。
         """
+        # 自动滚动的收尾动作都先问这里（scroll_to_bottom / 各处 50ms 迟到回调），
+        # 所以闸门设在这一处就够：关闭标签页后控件已删除，一律当作"不在底部"。
+        if self._closed:
+            return False
         sb = self.scroll_area.verticalScrollBar()
         return (sb.maximum() - sb.value()) <= threshold
 
@@ -275,6 +279,9 @@ class ChatBubblesMixin:
         供 AI 输出结束、报错、取消、追问建议等**非用户主动**的收尾动作使用；用户
         自己发送消息、点击"到底部"按钮等主动行为仍用 ``force=True``。
         """
+        # 关闭后任何路径都不得再碰滚动条（force=True 绕过了 is_at_bottom 的闸门）。
+        if self._closed:
+            return
         if not force and not self.is_at_bottom():
             return
 
@@ -295,6 +302,9 @@ class ChatBubblesMixin:
 
         供长回答导航按钮使用：点击后回到当前阅读的 AI 回答开头。
         """
+        # 气泡与滚动条都已随标签页释放时不得再取几何（见 _closed）。
+        if self._closed:
+            return
         target_y = max(0, bubble_widget.y() - 10)
         sb = self.scroll_area.verticalScrollBar()
 

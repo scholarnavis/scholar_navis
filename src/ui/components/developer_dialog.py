@@ -1809,7 +1809,7 @@ class DeveloperDialog(BaseDialog):
 
             viewer = MermaidViewer()
             viewer.setAttribute(Qt.WA_DontShowOnScreen, True)
-            page = viewer._build_page_html("default")
+            page = viewer._build_page_html()
             if "user-select: none" in page:
                 fails.append("mermaid page still disables text selection")
             if "user-select: text" not in page:
@@ -2535,24 +2535,30 @@ class DeveloperDialog(BaseDialog):
             self._log(f"R engine test failed: {e}", "FAIL")
 
     def _check_r_packages(self, engine):
-        """核心绘图包自检：解释器可用 ≠ 能出图。
+        """绘图包自检：解释器可用 ≠ 能出图。
 
         NixOS / 精简发行版上的 R 常常只装了基础解释器（ggplot2 等需另装），
         仅报 "R found" 会给开发者一个假绿灯——真实绘图会在 R 侧 stop() 退出，
         前端只看到 plot_chart 返回 error，表现为"AI 不会画图"。
+
+        检查范围取 :data:`src.core.plot_engine.ALLOWED_R_PACKAGES`：按图型按需
+        加载的扩展包（箱线图要 ggpubr、相关图要 ggcorrplot）同样会 stop()
+        退出，只查核心包无法解释"部分图型画不出来"。
         """
-        from src.core.plot_engine import CORE_R_PACKAGES
+        from src.core import r_env
+        from src.core.plot_engine import ALLOWED_R_PACKAGES
         from src.core.r_engine import package_install_guidance
 
+        self._log(f"Private R library: {r_env.library_dir()}", "INFO")
         try:
-            status = engine.check_packages(CORE_R_PACKAGES)
+            status = engine.check_packages(ALLOWED_R_PACKAGES)
         except Exception as e:
             self._log(f"R package check failed: {e}", "FAIL")
             return
 
-        missing = [p for p in CORE_R_PACKAGES if not status.get(p)]
+        missing = [p for p in ALLOWED_R_PACKAGES if not status.get(p)]
         if not missing:
-            self._log(f"R packages OK: {', '.join(CORE_R_PACKAGES)}", "OK")
+            self._log(f"R packages OK: {', '.join(ALLOWED_R_PACKAGES)}", "OK")
             return
 
         self._log(f"R packages missing: {', '.join(missing)} "

@@ -16,14 +16,16 @@ The plotting pipeline is deliberately separated from the LLM:
 Security model (sandbox):
     * A prelude script neutralizes dangerous R builtins (system/shell/file/
       source/download.file/writeLines/...).
-    * The process runs in an isolated temp working directory with a hard
-      timeout, output-size cap, and no window on Windows.
+    * The process runs with ``--vanilla`` in a private HOME/TMPDIR, under a hard
+      wall-clock timeout plus process resource limits (CPU / address space /
+      single-file size), with an output-size cap and no window on Windows. The
+      limits themselves live in :mod:`src.core.r_sandbox` (single source).
 
 Design principles:
     * High cohesion: data marshalling + R execution + output collection live
       here; the LLM-facing skill is a thin wrapper in ``academic_agent``.
-    * Low coupling: only depends on ``r_engine``, ``plot_styles`` and
-      stdlib + subprocess.
+    * Low coupling: only depends on ``r_engine``, ``plot_styles``, ``r_env``,
+      ``r_sandbox`` and stdlib + subprocess.
     * Single source of truth for looks: themes, journal palettes, per-chart-type
       defaults and canvas sizes come from :mod:`src.core.plot_styles` (distilled
       from a reference SCI-figure library), so the LLM-facing descriptions and
@@ -46,7 +48,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # 默认样式（主题 / 配色 / 画布尺寸 / 各图型风格契约）集中在本模块之外的单一样式
 # 注册表里，本引擎只负责把它翻译成安全的 ggplot2 代码，避免样式知识散落多处。
-from src.core import plot_styles
+from src.core import plot_styles, r_env, r_sandbox
 from src.core.platform_env import no_window_flags
 
 logger = logging.getLogger("Core.PlotEngine")
@@ -190,6 +192,10 @@ class PlotResult:
     # Path to the pure plotting R code (no sandbox prelude / output directives).
     # Used to re-render modified versions of the chart in later turns.
     code_path: str = ""
+    #: Path to the recorded ``sessionInfo()`` (R version, package versions,
+    #: locale): the only artifact that proves which environment produced the
+    #: figure, kept next to the outputs for reproducibility checks.
+    session_path: str = ""
     stdout: str = ""
     stderr: str = ""
     error_message: str = ""
@@ -421,9 +427,14 @@ class PlotEngine:
         # 画布尺寸：显式传入优先（例如修改图时沿用原图尺寸），否则用图型默认值。
         canvas = tuple(figure_size) if figure_size else plot_styles.DEFAULT_CANVAS
 
+        # 环境存证：R 版本 / 包版本 / locale 落在产物旁边，复算时能证明"图是这套
+        # 环境出的"，也是唯一能对齐审稿追问的依据。
+        session_path = base + ".session.txt"
+
         script = self._compose_script(
             r_code, plot_data, svg_path, png_path, pdf_path,
-            extra_packages=extra_packages, figure_size=canvas)
+            extra_packages=extra_packages, figure_size=canvas,
+            session_path=session_path)
 
         # Write script to the isolated dir.
         script_path = base + ".R"
@@ -446,17 +457,24 @@ class PlotEngine:
         logger.info(
             f"[plot {job_id}] Executing R script: {script_path} | "
             f"executable={info.get('executable')} | data={plot_data.data_path} | "
-            f"canvas={PlotEngine._inch(canvas[0])}x{PlotEngine._inch(canvas[1])} in"
+            f"lib={r_env.library_dir()} | "
+            f"canvas={PlotEngine._inch(canvas[0])}x{PlotEngine._inch(canvas[1])} in | "
+            f"cpu_limit={r_sandbox.R_MAX_CPU_SECONDS}s"
         )
         try:
-            proc = subprocess.run(
-                [info["executable"], script_path, plot_data.data_path],
-                capture_output=True,
-                text=True,
-                timeout=R_TIMEOUT_SECONDS,
-                cwd=out_dir,
-                creationflags=no_window_flags(),
-            )
+            # 执行边界（--vanilla + 私有 TMPDIR + 资源上限）统一由 r_sandbox
+            # 给出：环境变量仍只在 r_env.child_env 里注入。
+            with r_sandbox.job_environment(job_id) as run_env:
+                proc = subprocess.run(
+                    r_sandbox.plot_argv(info["executable"], script_path,
+                                        plot_data.data_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=R_TIMEOUT_SECONDS,
+                    cwd=out_dir,
+                    env=run_env,
+                    creationflags=no_window_flags(),
+                )
         except subprocess.TimeoutExpired:
             logger.error(
                 f"[plot {job_id}] R plotting timed out (>{R_TIMEOUT_SECONDS}s). "
@@ -489,6 +507,9 @@ class PlotEngine:
                 logger.info(f"[plot {job_id}] R stdout:\n{stdout.rstrip()}")
             if stderr.strip():
                 logger.warning(f"[plot {job_id}] R warnings/stderr:\n{stderr.rstrip()}")
+            has_session = os.path.exists(session_path)
+            if has_session:
+                logger.info(f"[plot {job_id}] environment recorded: {session_path}")
             return PlotResult(
                 success=True,
                 svg_path=svg_path,
@@ -496,6 +517,7 @@ class PlotEngine:
                 pdf_path=pdf_path if os.path.exists(pdf_path) else "",
                 script_path=script_path if os.path.exists(script_path) else "",
                 code_path=code_path if code_path and os.path.exists(code_path) else "",
+                session_path=session_path if has_session else "",
                 stdout=stdout,
                 stderr=stderr,
                 duration_ms=duration_ms,
@@ -506,6 +528,11 @@ class PlotEngine:
         err = stderr.strip() or stdout.strip()
         if not err:
             err = f"R exited with code {proc.returncode} but produced no image."
+        # 撞到资源上限（CPU / 内存）时给出"该怎么办"，而不是把内核信号丢给模型
+        # 转述——那通常会被说成"未知错误"。
+        limit_hint = r_sandbox.describe_failure(proc.returncode, err)
+        if limit_hint:
+            err = f"{limit_hint}\n\n{err}"
         logger.error(
             f"[plot {job_id}] FAILED in {duration_ms} ms | rc={proc.returncode} | "
             f"script={script_path}\n"
@@ -1150,9 +1177,13 @@ class PlotEngine:
     def _compose_script(r_code: str, plot_data: PlotData, svg_path: str,
                         png_path: str, pdf_path: str,
                         extra_packages: Optional[List[str]] = None,
-                        figure_size: Optional[Tuple[float, float]] = None) -> str:
+                        figure_size: Optional[Tuple[float, float]] = None,
+                        session_path: str = "") -> str:
         """Wrap the LLM's plotting code with the sandbox prelude and output
-        directives for the three formats."""
+        directives for the three formats.
+
+        ``session_path`` 非空时在脚本末尾额外落盘一份 ``sessionInfo()``：哪套 R
+        与包版本、什么 locale 画出了这张图，只能由这份记录回答。"""
         blocked = ", ".join(f"'{f}'" for f in _BLOCKED_R_FUNCTIONS)
         prelude = _SANDBOX_PRELUDE.replace("%BLOCKED_LIST%", blocked)
         prelude = prelude.replace(
@@ -1201,7 +1232,17 @@ dev.off()
 pdf("{pdf_r}", width = {w}, height = {h})
 .sn_draw()
 dev.off()
-# --- end ---
+'''
+
+        # 环境存证：写文件失败不能把"图已画好"变成"绘图失败"，故整段包在 try 里。
+        # ``cat`` / ``capture.output`` 都不在沙箱屏蔽名单里，走命名空间更稳。
+        if session_path:
+            session_r = session_path.replace("\\", "/")
+            epilogue += f'''
+# --- environment record (reproducibility) ---
+try(cat(paste(utils::capture.output(sessionInfo()), collapse = "\\n"), "\\n",
+        sep = "", file = "{session_r}"), silent = TRUE)
+# --- environment record end ---
 '''
 
         # Order: sandbox prelude -> spec code (defines ``p``) -> devices.

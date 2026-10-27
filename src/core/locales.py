@@ -109,7 +109,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "可视化功能需要 R。<br>请从 <a href='{url}'>{url}</a> 下载并安装，然后在上方指定 Rscript 路径，或将其加入 PATH。",
         "R packages:": "R 包：",
         "all core packages available": "核心包齐全",
+        "all required packages available": "所需包齐全",
         "R packages missing:": "缺少 R 包：",
+        "packages": "个包",
+        "Private library:": "私有库：",
+        "Private runtime:": "私有运行时：",
+        "Install missing packages": "安装缺失的包",
+        "Download private R runtime": "下载私有 R 运行时",
+        "Install the missing packages into the private library": "把缺失的包装进私有库",
+        "Download a self-contained R runtime": "下载独立的 R 运行时",
+        "No usable R runtime was found": "没有可用的 R 运行时",
 
         # ================= 设置页：获取全文 =================
         "Full-Text Retrieval": "获取全文",
@@ -921,5 +930,86 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Waiting dismissed. You can chat normally now.": "等待已解除，现在可以正常对话。",
         "The AI generation has been stopped by the user.": "AI 生成已被用户停止。",
         "Generation failed due to an error.": "生成因错误而失败。",
+
+        # ================= 深度研究计划卡（deep_plan） =================
+        # 卡片与等待文案都是界面说明，跟随界面语言；计划正文（子调查）本身是
+        # 任务分解的产物，不在此翻译。
+        "Proposed Deep-Research Plan": "深度研究计划（待确认）",
+        "Review or edit the sub-investigations below, then confirm to run them in parallel; or answer directly without decomposition.":
+            "可在下方查看或修改子调查，确认后并行执行；也可以跳过拆解、直接作答。",
+        "Estimated on confirm: {agents} parallel agents + 1 synthesis ({runs} model runs).":
+            "确认后预估：{agents} 路并行子调查 + 1 次综合（共 {runs} 次模型调用）。",
+        "Query: {query}": "原始问题：{query}",
+        "Restore": "还原",
+        "Answer Directly": "直接作答",
+        "Confirm & Execute": "确认并执行",
+        "Executing...": "执行中…",
+        "Answering directly...": "直接作答中…",
+        "Resolved": "已处理",
+        "1. sub-investigation A\n2. sub-investigation B": "1. 子调查 A\n2. 子调查 B",
+        "The plan is empty; restore or edit it first.": "计划为空，请先还原或编辑。",
+        "Original query missing; please restate your question.": "原始问题丢失，请重新描述你的问题。",
+        "I have drafted a deep-research plan with several parallel sub-investigations (see the plan card above). Review or edit the sub-questions, then click 'Confirm & Execute' to start; or click 'Answer Directly' to get a direct answer without decomposition.":
+            "我已把你的问题拆解为多个并行子调查（见下方计划卡）：可在卡片里查看或修改子调查，"
+            "然后点“确认并执行”开始深度研究；也可以点“直接作答”跳过拆解、直接回答。",
+
+        # ================= 绘图方案卡（plot_plan） =================
+        "Proposed Plotting Plan": "绘图方案（待确认）",
+        "Click the suggestion below to copy. You may edit the plan freely; if it contains non-English text it will be translated to English automatically.":
+            "点击下方方案即可复制。你可以自由修改；若含非英文内容，发送前会自动译为英文。",
+        "(no suggestion)": "（暂无建议）",
+        "Click to copy the suggestion": "点击复制方案",
+        "Edit the plotting requirements here...": "在此修改绘图需求…",
+        "Plotting plan copied to clipboard.": "绘图方案已复制到剪贴板。",
+        "Translate to English": "译为英文",
+        "Confirm & Draw": "确认并绘图",
+        "Nothing to copy.": "没有可复制的内容。",
+        "Translating to English...": "正在译为英文…",
+        "Nothing to translate.": "没有可翻译的内容。",
+        "No translator model selected. Enable one in the ribbon first.":
+            "未选择翻译模型，请先在功能区启用。",
+        "Translated to English. Review and confirm to draw.": "已译为英文，请确认后绘图。",
+        "Plan translated to English.": "方案已译为英文。",
+        "Translation failed. Check the translator model and try again.":
+            "翻译失败，请检查翻译模型后重试。",
+        "Translation failed. Check the translator model.": "翻译失败，请检查翻译模型。",
+        "The plan is empty. Please enter or edit your requirement.":
+            "方案为空，请输入或修改绘图需求。",
+        "Translation in progress. Please wait.": "正在翻译，请稍候。",
+        "Plan contains non-English text. Translating before sending...":
+            "方案含非英文内容，发送前正在翻译…",
+        "The plan contains non-English text but no translator is selected. Select a translator model and click 'Translate to English' first.":
+            "方案含非英文内容，但未选择翻译模型；请先选择翻译模型并点“译为英文”。",
+
+        # ================= 澄清卡（ask_user） =================
+        "Question: {question}": "问题：{question}",
+        "My own answer (type below)": "我的答案（在下方输入）",
+        "Type your own answer...": "在此输入你自己的答案…",
+        "Submit Answer": "提交答案",
+        "Select an option, or choose “My own answer” to type a reply, then submit.":
+            "选择一个选项，或选“我的答案”后输入回答，然后提交。",
+        "Answer submitted; waiting for the agent to continue.": "已提交答案，正在等待 agent 继续。",
+        "Select an option or type your own answer first.": "请先选择一个选项或填写你自己的答案。",
+
+        # ================= 气泡与复制按钮 =================
+        "Copy": "复制",
+        "Copied": "已复制",
+        "Copy MD": "复制 MD",
+        "Copy Suggestion": "复制方案",
+        "Copy citation": "复制引文",
+        "Copy link": "复制链接",
+        "Edit": "编辑",
+        "Cancel": "取消",
+        "Confirm": "确认",
+        "Copy Plain Text": "复制纯文本",
+        "Copy Markdown": "复制 Markdown",
+        "Plain text successfully copied to clipboard.": "纯文本已复制到剪贴板。",
+        "Markdown successfully copied to clipboard.": "Markdown 已复制到剪贴板。",
+        "Show Translated Query": "显示译后问题",
+        "Hide Translated Query": "隐藏译后问题",
+        "Search conversation...": "搜索对话…",
+        "Failed to load existing skill: {err}": "加载已有技能失败：{err}",
+        "Scholar Navis Conversation (*.schat *.sqlite3 *.db *.json)":
+            "Scholar Navis 会话 (*.schat *.sqlite3 *.db *.json)",
     },
 }

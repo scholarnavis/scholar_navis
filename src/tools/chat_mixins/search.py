@@ -214,12 +214,17 @@ class ChatSearchMixin:
 
     def _schedule_chat_search_refresh(self):
         """布局可能变化（新气泡/流式增长）后节流重扫，保持命中表新鲜。"""
+        # 关闭标签页后不再排重扫：命中表是在气泡控件上找的（见 _closed）。
+        if self._closed:
+            return
         if not hasattr(self, "search_bar"):
             return
         if self.search_bar.isVisible() and self.search_bar.text():
             self._chat_search_refresh.start(self._CHAT_SEARCH_REFRESH_MS)
 
     def _rerun_chat_search(self):
+        if self._closed:
+            return
         if self.search_bar.isVisible() and self.search_bar.text():
             self._run_chat_search(self.search_bar.text(), keep_index=True)
 

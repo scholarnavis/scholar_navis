@@ -82,6 +82,23 @@ def _source_dedupe_key(meta):
         return f"{title}|{year}"
     return None
 
+def _resolve_user_message_text(message: dict) -> Tuple[str, str]:
+    """把一条用户消息拆成 ``(展示文本, 协议文本)``。
+
+    协议哨兵只存在于 ``content``：``display_text`` 是"给用户看的那一份"，deep-plan
+    确认轮尤其如此（content = ``[DEEP_PLAN_CONFIRMED]\\n计划``，display_text = 纯
+    计划）。只读 display_text 会永远判不中哨兵，于是又走回"分解 → 出计划卡"，表现
+    就是无限重复出卡；只读 content 又会让界面与历史里冒出协议前缀。故两者分开取：
+    展示/检索用前者，协议判定用后者（非协议消息时为空串）。
+    """
+    message = message or {}
+    content = str(message.get("content") or "")
+    display = str(message.get("display_text") or content)
+    protocol = (content if content.startswith((_DEEP_PLAN_CONFIRMED_TAG,
+                                              _DEEP_PLAN_SKIPPED_TAG)) else "")
+    return display, protocol
+
+
 def _has_visible_answer(text: str) -> bool:
     """正文里是否真有"回答"（去掉思考块、过程块、控制标记与纯 HTML 后仍非空）。
 
@@ -690,15 +707,17 @@ class ChatGenerationTask(BackgroundTask):
                 }))
                 return
 
-        original_user_query = self.messages[-1].get('display_text', self.messages[-1].get('content', ''))
+        # 展示文本与协议文本分开取（见 _resolve_user_message_text）：哨兵只在
+        # content 里，display_text 是给用户看的那一份。
+        original_user_query, protocol_text = _resolve_user_message_text(
+            self.messages[-1] if self.messages else {})
 
         try:
             from src.core.lang_detect import detect_primary_language
-            # 语言探测不能用协议哨兵文本（deep-plan 确认轮的消息是英文子任务
-            # 列表，会把回复语言误判为英文）：回溯最近一条自然用户消息。
-            lang_probe = original_user_query
-            if lang_probe.startswith(_DEEP_PLAN_CONFIRMED_TAG) or lang_probe.startswith(_DEEP_PLAN_SKIPPED_TAG):
-                lang_probe = self._find_last_natural_user_text() or lang_probe
+            # 语言探测不能用协议轮的消息文本（确认轮的内容是英文子任务清单，会把
+            # 回复语言误判为英文）：回溯最近一条自然用户消息。
+            lang_probe = (self._find_last_natural_user_text() or original_user_query) \
+                if protocol_text else original_user_query
             primary_lang = detect_primary_language(lang_probe)
             is_english = primary_lang == 'en'
             # 记录用户原始语言：翻译只把 query 转成英文用于检索/工具，
@@ -774,7 +793,6 @@ class ChatGenerationTask(BackgroundTask):
                 except Exception as e:
                     self.logger.warning(f"Failed to reset LLM cancel state: {e}")
 
-        original_user_query = self.messages[-1].get('display_text', self.messages[-1].get('content', ''))
         retrieval_query = original_user_query
         search_query = original_user_query
         domain = "General Academic"
@@ -790,15 +808,15 @@ class ChatGenerationTask(BackgroundTask):
 
         # ---- Human-in-the-loop 协议轮：deep plan 确认 / 跳过哨兵解析 ----
         deep_plan_confirmed = None
-        if original_user_query.startswith(_DEEP_PLAN_CONFIRMED_TAG):
-            deep_plan_confirmed = self._parse_confirmed_deep_plan(original_user_query)
+        if protocol_text.startswith(_DEEP_PLAN_CONFIRMED_TAG):
+            deep_plan_confirmed = self._parse_confirmed_deep_plan(protocol_text)
             if deep_plan_confirmed:
                 # KB 检索查询改用确认后的子任务合集（原文哨兵文本不可直接检索）
                 search_query = " ".join(t.query for t in deep_plan_confirmed)
             self.send_log("INFO",
                           f"Deep plan confirmed by user with {len(deep_plan_confirmed or [])} sub-task(s).")
-        elif original_user_query.startswith(_DEEP_PLAN_SKIPPED_TAG):
-            original_user_query = original_user_query[len(_DEEP_PLAN_SKIPPED_TAG):].strip()
+        elif protocol_text.startswith(_DEEP_PLAN_SKIPPED_TAG):
+            original_user_query = protocol_text[len(_DEEP_PLAN_SKIPPED_TAG):].strip()
             search_query = original_user_query
             self.deep_mode = False
             self.send_log("INFO", "Deep plan skipped by user; single-agent path for this turn.")
@@ -1680,7 +1698,7 @@ class ChatGenerationTask(BackgroundTask):
             # [DEEP_PLAN_CONFIRMED] 哨兵重进管线；避免方向跑偏时白烧
             # N 路并行子 Agent 的 token。
             self._emit_token("[CLEAR_SEARCH]")
-            self._propose_deep_plan(search_query, decomp)
+            marker = self._propose_deep_plan(search_query, decomp)
             waiting = self._deep_plan_waiting_text()
             self._emit_token(waiting)
             # 结构化事件：通知 UI 进入"等待用户确认计划"状态（锁定通用发送）。
@@ -1689,7 +1707,9 @@ class ChatGenerationTask(BackgroundTask):
                 payload={"event": "await_user", "source": "deep_plan"})
             self.send_log("INFO",
                           f"Deep plan proposed ({len(decomp.sub_tasks)} sub-tasks); waiting for user confirmation.")
-            return waiting
+            # 标记必须随正文一起返回：本分支在毫秒内结束，UI 的渲染节拍（60ms）
+            # 都来不及触发，收口时整段替换正文就会把只上过屏的标记冲掉。
+            return marker + waiting
 
         self.send_log("INFO", f"Deep mode: launching {len(sub_tasks)} parallel sub-investigation(s).")
         self._emit_token(
@@ -1869,8 +1889,13 @@ class ChatGenerationTask(BackgroundTask):
         self._emit_token(final_text)
         return final_text
 
-    def _propose_deep_plan(self, search_query, decomp):
-        """流出深度研究计划确认卡标记（base64 JSON，UI 解码后渲染交互卡）。"""
+    def _propose_deep_plan(self, search_query, decomp) -> str:
+        """流出深度研究计划确认卡标记（base64 JSON，UI 解码后渲染交互卡）。
+
+        :return: 标记文本。**调用方必须把它并入本轮正文**：收尾的 ``answer_final``
+            会用最终正文整段替换流式内容，标记只上屏、不并入正文，就会在收口那
+            一刻被覆盖掉——卡片从未渲染出来，只剩"见上方计划卡"这句等待文案。
+        """
         import base64
         payload = {
             "query": search_query,
@@ -1882,23 +1907,23 @@ class ChatGenerationTask(BackgroundTask):
         encoded = base64.b64encode(
             json.dumps(payload, ensure_ascii=False).encode("utf-8")
         ).decode("ascii")
-        self._emit_token(f'<deep_plan data="{encoded}"></deep_plan>\n')
+        marker = f'<deep_plan data="{encoded}"></deep_plan>\n'
+        self._emit_token(marker)
+        return marker
 
     def _deep_plan_waiting_text(self) -> str:
-        """计划确认等待文案（按用户回复语言本地化）。"""
-        lang = getattr(self, "reply_lang", "English") or "English"
-        if "Chinese" in lang:
-            return (
-                "我已将你的问题拆解为多个并行子调查（见上方计划卡）。请查看或修改子问题后"
-                "点击“Confirm & Execute”开始深度研究；也可点击“Answer Directly”跳过拆解、"
-                "直接作答。"
-            )
-        return (
-            "I have drafted a deep-research plan with several parallel sub-investigations "
-            "(see the plan card above). Review or edit the sub-questions, then click "
-            "'Confirm & Execute' to start; or click 'Answer Directly' to get a direct "
-            "answer without decomposition."
-        )
+        """计划确认等待文案（跟随**界面语言**）。
+
+        这段是操作指引而不是模型产出：写成 ``reply_lang`` 驱动，用户用英文提问时
+        中文界面里就会冒出一整段英文操作说明。按钮名与卡片标题同样是界面文案，
+        两者必须同源，故统一走 :func:`src.core.i18n.tr`。
+        """
+        from src.core.i18n import tr
+
+        return tr("I have drafted a deep-research plan with several parallel "
+                  "sub-investigations (see the plan card above). Review or edit the "
+                  "sub-questions, then click 'Confirm & Execute' to start; or click "
+                  "'Answer Directly' to get a direct answer without decomposition.")
 
     def _parse_confirmed_deep_plan(self, text):
         """解析 [DEEP_PLAN_CONFIRMED] 哨兵消息为 SubTask 列表。

@@ -29,10 +29,28 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QPushButton
 
+from src.core.i18n import tr
+
 logger = logging.getLogger("UI.CopyButton")
 
 #: 复制成功反馈的默认停留时长（ms）。
 COPIED_FLASH_MS = 1200
+
+
+def _localized_label(text: str) -> str:
+    """按界面语言翻译按钮文案，同时保留原有的首尾空格（图标与文字之间的间距）。
+
+    调用点一律继续写英文原串（它同时是译表键），翻译只在 :class:`CopyButton`
+    内部做一次：九个复制按钮不必各写一遍 ``tr()``，也不会出现"有的翻了、有的
+    没翻"的半中半英。
+    """
+    raw = str(text or "")
+    core = raw.strip()
+    if not core:
+        return raw
+    left = " " if raw[:1].isspace() else ""
+    right = " " if raw[-1:].isspace() else ""
+    return f"{left}{tr(core)}{right}"
 
 
 class CopyButton(QPushButton):
@@ -43,9 +61,10 @@ class CopyButton(QPushButton):
                  toast: Optional[str] = None,
                  restore_ms: int = COPIED_FLASH_MS,
                  parent=None):
-        super().__init__(text, parent)
-        self._idle_text = text
-        self._copied_text = copied_text
+        label = _localized_label(text)
+        super().__init__(label, parent)
+        self._idle_text = label
+        self._copied_text = _localized_label(copied_text)
         self._provider = provider
         self._toast = toast
         self._restore_ms = max(200, int(restore_ms))
@@ -66,9 +85,9 @@ class CopyButton(QPushButton):
 
     def set_idle_text(self, text: str) -> None:
         """更新静止态文案（反馈闪现期间不打断当前显示）。"""
-        self._idle_text = text
+        self._idle_text = _localized_label(text)
         if not self._restore_timer.isActive():
-            self.setText(text)
+            self.setText(self._idle_text)
 
     # ------------------------------------------------------------------ #
     #  动作
