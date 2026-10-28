@@ -485,6 +485,57 @@ def is_nixos() -> bool:
     return is_linux() and os.path.isdir("/nix/store")
 
 
+# --------------------------------------------------------------------------- #
+#  输入法前端: 由"我们加载的是哪份 Qt"决定，不看发行版默认值
+# --------------------------------------------------------------------------- #
+#: Qt 用来选输入法前端的变量。
+_IME_MODULE_ENV = "QT_IM_MODULE"
+
+#: 想强制别的值时用（例如老 XIM 场景），非空就完全按它来。
+_IME_OVERRIDE_ENV = "SCHOLAR_NAVIS_QT_IM_MODULE"
+
+#: Wayland 会话语义值: 走合成器的 text-input 通道，不依赖任何 Qt 输入法插件。
+_IME_WAYLAND = "wayland"
+
+
+def configure_ime_frontend(env: dict | None = None) -> list:
+    """Linux + Wayland 会话下把 Qt 输入法前端切到 text-input。幂等。
+
+    为什么不沿用发行版常用的 ``QT_IM_MODULE=fcitx``: 本程序加载的是 **wheel 自带**
+    那份 Qt，而系统里的 fcitx Qt 插件是发行版用它自己那份 Qt 编译的。两者版本对不上
+    时 Qt 会拒绝加载插件，而且**被拒之后不会退回 text-input** —— 结果是一个输入法
+    都没有: Ctrl+Space / Shift 毫无反应，字母直接落进输入框。
+
+    改走 ``wayland`` 后按键交给合成器（KWin / Mutter 等）转给输入法进程，与 Qt 版本
+    无关，也不需要装任何插件。
+
+    :param env: 要修改的环境字典，默认改 ``os.environ``
+    :return: 实际生效的调整项，形如 ``["QT_IM_MODULE=wayland"]``，供日志使用
+    """
+    target = os.environ if env is None else env
+    if not is_linux() or not target.get("WAYLAND_DISPLAY"):
+        return []  # X11 / XWayland 没有 text-input，保留调用方设置
+    wanted = (target.get(_IME_OVERRIDE_ENV) or "").strip() or _IME_WAYLAND
+    if target.get(_IME_MODULE_ENV) == wanted:
+        return []
+    target[_IME_MODULE_ENV] = wanted
+    return [f"{_IME_MODULE_ENV}={wanted}"]
+
+
+def _ime_exec_prefix(env: dict) -> list:
+    """把 :func:`configure_ime_frontend` 的决定转成 ``env K=V`` 参数前缀。
+
+    用在 ``os.execve`` 的 argv 里 —— 目的不是"改环境"（那已经由上面的调用完成），
+    而是让这些赋值排在 FHS profile **之后**执行: steam-run 与 Steam 共用同一份
+    ``/etc/profile``，里面有 ``QT_IM_MODULE=fcitx`` 之类无条件赋值。
+    """
+    prefix = []
+    for change in configure_ime_frontend(env):
+        key, _, value = change.partition("=")
+        prefix += [key, value]
+    return ["env", *prefix] if prefix else []
+
+
 def maybe_relaunch_in_fhs(exc: BaseException) -> bool:
     """NixOS 上 PySide6 找不到系统库时，用 ``steam-run`` 重新拉起本进程。
 
@@ -555,8 +606,13 @@ def _relaunch_under_fhs(notice: str) -> bool:
     # steam-run 会保留外部传入的 LD_LIBRARY_PATH，因此在其外层追加即可
     env["LD_LIBRARY_PATH"] = ":".join(lib_dirs + ([existing] if existing else []))
 
+    # 输入法前端要排在 FHS profile 之后: 那份 profile 里常有无条件的
+    # QT_IM_MODULE=fcitx（发行版或用户装 Steam 时写入），会把上面的决定顶回去。
+    # 只改 env 字典没用，必须用 `env K=V` 前缀把它排到 profile 后面。
+    ime_prefix = _ime_exec_prefix(env)
+
     try:
-        os.execve(steam_run, [steam_run, sys.executable, *sys.argv], env)
+        os.execve(steam_run, [steam_run, *ime_prefix, sys.executable, *sys.argv], env)
     except OSError as e:
         logger.warning(f"Failed to relaunch under steam-run: {e}")
         return False
@@ -966,6 +1022,12 @@ def configure_qt_environment() -> list:
         applied += new_theme
         logger.info(f"Enabled native file dialogs via platform theme: {new_theme}")
 
+    # wheel 自带 Qt 与系统输入法插件版本不匹配时，只有 text-input 一条路
+    ime = configure_ime_frontend()
+    if ime:
+        applied += ime
+        logger.info(f"IME frontend for bundled Qt: {ime}")
+
     if _truthy_env("SCHOLAR_NAVIS_FORCE_SANDBOX"):
         # 显式要求保留沙箱：仅处理共享内存
         if shm_too_small():
@@ -1016,6 +1078,9 @@ def summarize_environment() -> dict:
             "userns_disabled": user_namespaces_disabled(),
             "shm_ok": not shm_too_small(),
             "platform_theme": os.environ.get("QT_QPA_PLATFORMTHEME", "") or "default",
+            # 输入法前端: wayland 表示走 text-input，fcitx/dbus 表示走 im module。
+            # 排查"打不了中文"时这一项就是第一条判据。
+            "ime": os.environ.get(_IME_MODULE_ENV, "") or "default",
         })
     else:
         # 图形会话由系统保证（Windows / macOS 不需要 DISPLAY 探测）
