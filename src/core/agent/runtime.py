@@ -1392,10 +1392,17 @@ class AgentRuntime:
         if name == "cite_references":
             return self._handle_cite_references(args)
 
-        # 2. Local Skills (academic + external) — zero latency.
+        # 2. Local Skills (academic + bioinformatics + external) — zero latency.
         if self.skill_manager.is_skill_available(name):
-            prefix = "[ACADEMIC]" if getattr(self.skill_manager, "academic_skills", None) and \
-                name in self.skill_manager.academic_skills else "[SKILL]"
+            # 日志前缀与证据链分类由同一处判定：分两处写会出现"日志说 academic、
+            # 证据链记 external"这类对同一次调用给出不同来源的情况。
+            if name in getattr(self.skill_manager, "bio_skill_names", ()):
+                prefix, pool = "[BIO]", "bioenv"
+            elif getattr(self.skill_manager, "academic_skills", None) and \
+                    name in self.skill_manager.academic_skills:
+                prefix, pool = "[ACADEMIC]", "academic"
+            else:
+                prefix, pool = "[SKILL]", "external"
             self.log_fn("INFO", f"{prefix} Executing skill: {name}")
             try:
                 # 取全文先看本地关联：用户交过一次的 PDF 不再联网重复获取。
@@ -1403,8 +1410,7 @@ class AgentRuntime:
                           if name == "fetch_paper_fulltext" else None)
                 result = (linked if linked is not None
                           else self.skill_manager.call_skill(name, args))
-                self._record_provenance(name, "academic" if prefix == "[ACADEMIC]" else "external",
-                                        args, "success", result)
+                self._record_provenance(name, pool, args, "success", result)
                 if name == "plot_chart":
                     return self._handle_plot_result(result, emit_token)
                 if isinstance(result, (dict, list)):
@@ -1424,8 +1430,7 @@ class AgentRuntime:
                 return result if isinstance(result, str) else str(result)
             except Exception as e:
                 logger.error(f"Local Skill '{name}' execution failed: {e}")
-                self._record_provenance(name, "academic" if prefix == "[ACADEMIC]" else "external",
-                                        args, "error", str(e))
+                self._record_provenance(name, pool, args, "error", str(e))
                 return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
         # 3. Remote MCP tools.

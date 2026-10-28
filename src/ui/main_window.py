@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         self.icon_map = {
             "Chat Assistant": "send",
             "Literature Tracker": "rss",
+            "Tool Environment": "package",
             "System Logs": "list",
             "Global Settings": "settings",
             "About": "info",
@@ -157,6 +158,7 @@ class MainWindow(QMainWindow):
         self.tool_classes = [
             ("Chat Assistant", "src.tools.chat_tool", "ChatTool"),
             ("Literature Tracker", "src.tools.rss_tool", "RSSTool"),
+            ("Tool Environment", "src.tools.toolenv_tool", "ToolEnvTool"),
             ("Global Settings", "src.tools.settings_tool", "SettingsTool"),
             ("System Logs", "src.tools.log_tool", "LogTool"),
             ("About", "src.tools.about_tool", "AboutTool")

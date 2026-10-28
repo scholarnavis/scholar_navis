@@ -642,12 +642,20 @@ class ConfigManager:
 
     def load_mcp_servers(self):
         py_path = sys.executable
+        # 生信工具的分类标签取自唯一事实源；该分类默认不勾选，避免把它们的 schema
+        # 每轮都塞进工具清单。惰性导入是为了不让配置模块在启动期依赖 bioenv。
+        try:
+            from src.core.bioenv.catalog import TOOL_FILTER_TAG
+        except ImportError:
+            TOOL_FILTER_TAG = "Bioinformatics"
+        default_off_tag = f"[ACADEMIC] {TOOL_FILTER_TAG}"
 
         default_mcp_servers = {
             "mcpServers": {},
             "external_skills": {},
-            "deselected_mcp_tags": [],
-            "deselected_external_tools": []
+            "deselected_mcp_tags": [default_off_tag],
+            "deselected_external_tools": [],
+            "tag_defaults_version": 1,
         }
 
         # 明文读取；env / headers 里名字像密钥的字段从 secrets.json 合回
@@ -683,6 +691,22 @@ class ConfigManager:
                 if key not in current_servers:
                     current_servers[key] = {} if key == "external_skills" else []
                     is_modified = True
+
+            # 一次性迁移：老配置里没有这个分类，"不在取消勾选名单中"等于默认开启。
+            # 版本号保证只做一次——用户之后手动勾选会把它移出名单，不会被重置回来。
+            try:
+                tag_version = int(current_servers.get("tag_defaults_version") or 0)
+            except (TypeError, ValueError):
+                tag_version = 0
+            if tag_version < 1:
+                deselected = current_servers.get("deselected_mcp_tags")
+                if not isinstance(deselected, list):
+                    deselected = []
+                if default_off_tag not in deselected:
+                    deselected.append(default_off_tag)
+                current_servers["deselected_mcp_tags"] = deselected
+                current_servers["tag_defaults_version"] = 1
+                is_modified = True
 
         self.mcp_servers = current_servers
         if is_modified:

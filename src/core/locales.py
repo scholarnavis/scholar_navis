@@ -827,19 +827,19 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Conversation Evidence": "本对话证据",
         " Evidence": " 证据",
         "Show literature evidence attached to this conversation": "查看本对话已入库的文献证据",
-        "Title": "标题", "Type": "类型", "Year": "年份", "Journal": "期刊",
+        "Title": "标题", "Year": "年份", "Journal": "期刊",
         "Journal article": "期刊论文", "Review": "综述",
         "Book": "书籍", "Book chapter": "书籍章节", "Monograph": "专著",
         "Conference paper": "会议论文", "Preprint": "预印本",
         "Dataset": "数据集", "Thesis": "学位论文", "Report": "报告",
         "Patent": "专利", "Web page": "网页",
-        "Source": "来源", "Status": "状态",
+        "Source": "来源",
         "Full text": "全文", "Abstract": "摘要",
         "Refresh": "刷新", "Get full text": "获取全文",
         "Get next missing": "获取下一篇缺失全文",
         "No abstract-only papers with DOI/URL remain.":
             "没有仍只有摘要且有 DOI/URL 的论文了。",
-        "Delete private": "删除私有证据", "Close": "关闭",
+        "Delete private": "删除私有证据",
         "This conversation has {n} evidence item(s), {p} private.":
             "本对话共有 {n} 条证据，其中 {p} 条私有。",
         "This conversation has {n} evidence item(s), {p} private, {f} full text, {a} abstract-only. Select an abstract-only row and click Get full text; log in once and cookies are reused.":
@@ -877,8 +877,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Context:": "上下文：", "Max Output:": "最大输出：",
         "Detect": "探测", "Detecting...": "探测中…",
         "Refresh models": "刷新模型表", "Refreshing...": "刷新中…",
-        "Download LiteLLM's official model_prices_and_context_window.json so new models (GPT-6, DeepSeek V4, Qwen3-Max, ...) resolve correctly.":
-            "下载 LiteLLM 官方 model_prices_and_context_window.json，让 GPT-6、DeepSeek V4、Qwen3-Max 等新模型正确解析。",
         "LiteLLM model metadata refreshed: {n} entries":
             "LiteLLM 模型表已刷新：{n} 条。",
         "Could not refresh LiteLLM model metadata; using the local backup.":
@@ -888,8 +886,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Detected context window: {n} tokens": "已探测到上下文窗口：{n} tokens",
         "Provider did not expose a context window; using static inference or the 1M fallback.":
             "Provider 未暴露上下文窗口；将使用静态推断或 1M 兜底。",
-        "Ask the provider's /models metadata for a context window. OpenAI official endpoints usually do not expose it.":
-            "向 provider 的 /models 元数据查询上下文窗口；OpenAI 官方接口通常不返回该字段。",
         "Updating LiteLLM model metadata...": "正在更新 LiteLLM 模型元数据…",
         "Model metadata is still updating in the background...":
             "模型元数据仍在后台更新…",
@@ -999,8 +995,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Copy citation": "复制引文",
         "Copy link": "复制链接",
         "Edit": "编辑",
-        "Cancel": "取消",
-        "Confirm": "确认",
         "Copy Plain Text": "复制纯文本",
         "Copy Markdown": "复制 Markdown",
         "Plain text successfully copied to clipboard.": "纯文本已复制到剪贴板。",
@@ -1020,5 +1014,49 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Failed to load existing skill: {err}": "加载已有技能失败：{err}",
         "Scholar Navis Conversation (*.schat *.sqlite3 *.db *.json)":
             "Scholar Navis 会话 (*.schat *.sqlite3 *.db *.json)",
+
+        # ================= 工具环境面板（R 运行时与生信工具） =================
+        "Tool Environment": "工具环境",
+        "External Tools (R and Bioinformatics)": "外置工具（R 与生信）",
+        "Detecting external tools...": "正在检测外置工具…",
+        "Tool": "工具",
+        "Version": "版本",
+        "Help": "帮助",
+        "Path": "路径",
+        "Available": "可用",
+        "available": "可用",
+        "Unavailable": "不可用",
+        "not detected": "未检测到",
+        "Platform:": "平台：",
+        "Tools:": "工具：",
+        "missing:": "缺失：",
+        "Re-detect": "重新检测",
+        "Open data folder": "打开数据目录",
+        "Copy install command": "复制安装命令",
+        "Detection failed:": "检测失败：",
+        "Failed to build this panel:": "构建本面板失败：",
+        "Cannot open:": "无法打开：",
+        "Install command copied:": "安装命令已复制：",
+        "Tools already installed on this machine are used in preference to the private prefix. A tool's help output is captured once before its first use, so option names always match the installed version.":
+            "本机已安装的工具优先于私有前缀使用。每个工具第一次被使用前会先抓取一次"
+            "帮助信息，因此参数名始终与已安装的版本一致。",
+
+        # ================= 其他界面提示（存量补全） =================
+        # 以下键里是**字面**的反斜杠加 n（不是换行符），因此源串与译文都写 \\n。
+        "{name}\\n{path}\\nClick to open": "{name}\\n{path}\\n点击打开",
+        "Category: {category}\\nSource: {name}\\nURL: {url}":
+            "分类：{category}\\n来源：{name}\\nURL：{url}",
+        "Failed to apply settings to UI:\\n{err}": "无法把设置应用到界面：\\n{err}",
+        "Configuration bundle has been securely saved to:\\n{path}":
+            "配置包已安全保存到：\\n{path}",
+        "Imported {n} message(s) from:\\n{name}": "已从以下来源导入 {n} 条消息：\\n{name}",
+        "Imported {tabs} conversation(s), {n} message(s) from:\\n{name}":
+            "已从以下来源导入 {tabs} 个会话、{n} 条消息：\\n{name}",
+        "Failed to render chat history:\\n{err}": "渲染对话历史失败：\\n{err}",
+        "1. sub-investigation A\\n2. sub-investigation B":
+            "1. 子调查 A\\n2. 子调查 B",
+        # Windows 路径示例；源串本身用了双反斜杠，译文保持一致以免视觉上不一致。
+        "Rscript path, e.g. C:\\\\Program Files\\\\R\\\\R-4.3.1\\\\bin\\\\Rscript.exe":
+            "Rscript 路径，例如 C:\\\\Program Files\\\\R\\\\R-4.3.1\\\\bin\\\\Rscript.exe",
     },
 }

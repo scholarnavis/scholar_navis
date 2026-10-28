@@ -22,7 +22,8 @@ from src.core.references import (CITE_LINK_RE, FOOTER_RULE_HTML,
 from src.core.evidence import EvidenceStore, is_usable_source_text
 from src.core.evidence_gate import apply_evidence_gate, gate_finder
 from src.core.prompt_rules import (CITATION_TOKEN_RULE,
-                                   LANGUAGE_AND_PUNCTUATION_RULE)
+                                   LANGUAGE_AND_PUNCTUATION_RULE,
+                                   TOOL_EXECUTION_FAILURE_RULE)
 from src.core import plot_styles
 from src.core.think_tags import strip as strip_think_blocks
 from src.core.token_estimator import (estimate_message_tokens, estimate_tokens,
@@ -1169,6 +1170,7 @@ class ChatGenerationTask(BackgroundTask):
             f"2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): For every source you cite that carries no 'citation_token' and no pre-assigned number, you MUST register it by calling cite_references ONCE, passing its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'); the tool returns a 'citation_token' for each entry — paste that token at the claim it supports. Sources that already carry a token or a number (knowledge-base '--- [Document n] ---' entries, tool results with '{AgentRuntime.TOOL_CITE_TOKEN_FIELD}') are already registered by the app — reuse THAT token/number and do NOT register them again. The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. Every number is assigned by the app: do NOT invent, shift or renumber one, and never fall back to an ASCII alias such as [lariguet2004].\n"
             "3. NEVER WRITE A REFERENCES SECTION YOURSELF: do NOT output a 'References' / 'Bibliography' heading or a manually numbered citation list in your answer text. The app generates that list from your cite_references call; writing one yourself duplicates it and can contradict it.\n\n"
             "4. ZERO HALLUCINATION (CRITICAL): You MUST NOT fabricate, extrapolate, or infer information that is not explicitly present in the provided Context or Tool Results. If the provided data is insufficient to address the query, you MUST explicitly state: 'The provided context does not contain sufficient information to address this inquiry.' Under no circumstances should internal training data be utilized to circumvent contextual gaps.\n\n"
+            f"{TOOL_EXECUTION_FAILURE_RULE}\n\n"
             f"{LANGUAGE_AND_PUNCTUATION_RULE}\n\n"
             "### FOLLOW-UP SUGGESTIONS (MANDATORY):\n"
             "At the very end of your response — after ALL other content — you MUST call the "

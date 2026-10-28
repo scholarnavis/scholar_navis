@@ -236,6 +236,8 @@ dist/
 # 私有 R 环境（library/cache/runtime/logs/bin）：随本机安装增长、含平台二进制，
 # 由 r_env / r_runtime / r_sandbox 在运行时创建，不入库。
 /r_env/
+# 私有生信工具环境（bin/cache/prefixes/logs/work）：同上，由 bioenv 运行时创建。
+/bioenv/
 .idea
 /models/
 /scholar_workspace/

@@ -9,6 +9,7 @@ from src.tools.settings_sections.llm_section import LlmSectionMixin
 from src.tools.settings_sections.llm_model_ops import LlmModelOpsMixin
 from src.tools.settings_sections.model_section import ModelSectionMixin
 from src.tools.settings_sections.save_flow import SaveFlowMixin
+from src.tools.settings_sections.toolenv_section import ToolEnvSectionMixin
 from src.tools.settings_sections.transfer import ConfigTransferMixin
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "LlmModelOpsMixin",
     "ModelSectionMixin",
     "SaveFlowMixin",
+    "ToolEnvSectionMixin",
     "ConfigTransferMixin",
 ]

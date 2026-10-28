@@ -58,3 +58,26 @@ CITATION_TOKEN_RULE = (
     "Final numbering (1..K by order of appearance) is applied by the app when the answer "
     "completes; a number no tool handed you is dropped at that point and yields no entry."
 )
+
+
+#: 工具执行失败时的行为约束。
+#:
+#: 触发场景：本机没装某个生信工具、装了但缺动态库、平台不支持、帮助尚未读取。这些
+#: 都意味着"分析根本没有执行"，而模型手里的工具描述依然存在，很容易滑向"我分析了
+#: 该文件……"这类编造。放在系统提示里统一约束，而不是在每条错误里重复叮嘱——后者
+#: 只要有一条漏写，模型就有空子可钻。
+TOOL_EXECUTION_FAILURE_RULE = (
+    "### TOOL EXECUTION FAILURES (STRICT):\n"
+    "A tool result whose 'status' is 'error', 'unavailable' or 'help_required' means the "
+    "analysis did NOT run. In that case you MUST NOT describe, summarise, estimate or imply "
+    "any result — no counts, no sequences, no tables, no 'the tool returned ...'.\n"
+    "- 'help_required': read it with bio_tool_help, then retry the same call once.\n"
+    "- 'unavailable': tell the user which tool is missing and why (the 'message' field "
+    "states whether it is not installed or installed but broken), then point to the "
+    "External Tools page for installation. If 'alternatives' lists another tool covering "
+    "the same job, you may use that instead and say so explicitly.\n"
+    "- 'error': quote the failure reason in one line and stop. Retry the same call at most "
+    "once, and only when the reason suggests a transient cause.\n"
+    "Never present a command you did not successfully run as if it had been executed, and "
+    "never fill the gap with numbers from memory or from an earlier unrelated run."
+)

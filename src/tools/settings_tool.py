@@ -160,13 +160,16 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         return self.widget
 
     def _build_sections(self):
-        """构建设置页的十个区块（延迟到窗口上屏之后执行，只做一次）。"""
+        """构建设置页的各区块（延迟到窗口上屏之后执行，只做一次）。
+
+        R 运行时与生信工具的检测已移到独立的 "External Tools" 页面：排查"为什么
+        某个分析跑不了"是高频动作，放在设置页里需要滚动查找。
+        """
         if getattr(self, "_sections_built", False) or not getattr(self, "_ui_ready", False):
             return
         self._sections_built = True
         try:
             self.init_hardware_section()
-            self.init_r_environment_section()
             self.init_fulltext_section()
             self.init_system_section()
             self.init_network_section()

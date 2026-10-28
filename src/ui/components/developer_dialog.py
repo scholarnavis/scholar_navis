@@ -555,6 +555,8 @@ class DeveloperDialog(BaseDialog):
 
         #: 联网自检的后台线程与它的回传通道（见 _test_literature_source_trust）
         self._littrust_thread: threading.Thread | None = None
+        #: 生信前缀安装线程（见 _test_bioenv_prefix）
+        self._bioenv_install_thread: threading.Thread | None = None
         self._dev_stream = _DevLogStream(self)
         self._dev_stream.sig_line.connect(self._log)
         self._dev_stream.sig_finished.connect(self._on_littrust_finished)
@@ -639,6 +641,11 @@ class DeveloperDialog(BaseDialog):
         # 分发的内置样例（见 src.core.fulltext_samples），因此分发后也能测。链路要人工
         # 去浏览器下载 PDF 并交回窗口，所以它独立成按钮、不进 Run All。
         self.btn_fulltext = self._make_btn("Full Text Fetch", self._test_fulltext_fetch)
+        # 生信工具层。离线自检进 Run All；安装前缀会联网下载数百 MB，独立成按钮
+        # 且在后台线程里跑，避免把对话框卡住数分钟。
+        self.btn_bioenv = self._make_btn("Bioinformatics", self._test_bioenv)
+        self.btn_bioenv_install = self._make_btn("Bioenv Install (network)",
+                                                 self._test_bioenv_prefix)
         self.content_layout.addLayout(self._button_grid(
             (self.btn_all, self.btn_r, self.btn_prov, self.btn_skill,
              self.btn_syntax, self.btn_lit, self.btn_img,
@@ -646,7 +653,8 @@ class DeveloperDialog(BaseDialog):
              self.btn_filetypes, self.btn_textviewer, self.btn_scrollbar,
              self.btn_attachwire, self.btn_typography, self.btn_refnum,
              self.btn_refint, self.btn_storage, self.btn_citeclick,
-             self.btn_littrust, self.btn_uiinter, self.btn_fulltext),
+             self.btn_littrust, self.btn_uiinter, self.btn_fulltext,
+             self.btn_bioenv, self.btn_bioenv_install),
             cols=4))
 
         # --- Output area（专属源码/日志输出控件：固定最大高度 + 独立滚动条、
@@ -2501,6 +2509,8 @@ class DeveloperDialog(BaseDialog):
         self._test_chat_typography(clear=False)
         self._test_skill_gate(clear=False)
         self._test_r_engine(clear=False)
+        # 生信工具层：清单/解析/分类/help 前置/端到端，离线可跑
+        self._test_bioenv(clear=False)
         self._test_provenance(clear=False)
         self._test_literature_merge(clear=False)
         self._test_reference_citations(clear=False)
@@ -2516,6 +2526,184 @@ class DeveloperDialog(BaseDialog):
         self._test_deep_plan_card(clear=False)
         self._test_hitl_pipeline(clear=False)
         self._log("=== All functional tests finished ===", "INFO")
+
+    def _test_bioenv(self, clear: bool = True):
+        """生信工具层自检：清单 → 解析 → 分类 → help 前置 → 端到端执行。
+
+        全部离线、只读用户数据；端到端用的是临时目录里的合成 FASTA，跑完即删。
+        私有前缀的创建会联网下载数百 MB，因此单独成按钮、不在默认自检里触发。
+        """
+        if clear:
+            self._clear()
+        self._log("--- Bioinformatics Tool Layer ---", "INFO")
+        try:
+            from src.core.bioenv import catalog, help as help_mod, prefix, resolver, tools, wsl
+            from src.core.toolchain import micromamba as mamba
+
+            cat = catalog.load()
+            platform = mamba.runtime_platform()
+            self._log(f"platform: {platform}", "INFO")
+
+            if cat.problems:
+                for problem in cat.problems:
+                    self._log(f"catalog: {problem}", "FAIL")
+            else:
+                self._log(f"catalog: {len(cat.tools)} tool(s), "
+                          f"{len(cat.prefix_names())} prefix(es), no problems", "OK")
+
+            reachable = cat.for_reachable(platform)
+            locations = resolver.resolve_all(cat, platform)
+            level = "OK" if locations else ("WARN" if reachable else "INFO")
+            self._log(f"resolution: {len(locations)}/{len(reachable)} reachable", level)
+            for entry in reachable:
+                location = locations.get(entry.name)
+                if location is not None:
+                    self._log(f"  {entry.name:<10} {location.source:<8} "
+                              f"{location.version or '?'}", "OK")
+                else:
+                    self._log(f"  {entry.name:<10} {'--':<8} "
+                              f"{resolver.unavailable_reason(entry, platform)}", "WARN")
+
+            status = wsl.detect()
+            level = "OK" if (status.usable or status.state == wsl.STATE_NOT_APPLICABLE) else "WARN"
+            self._log(f"wsl: {wsl.describe(status)}", level)
+
+            created = prefix.list_prefixes()
+            if created:
+                for name in created:
+                    ready = prefix.is_ready(name)
+                    self._log(f"prefix '{name}': {'ready' if ready else 'incomplete'}, "
+                              f"{prefix.size_bytes(name) / 1048576:.1f} MB",
+                              "OK" if ready else "WARN")
+            else:
+                self._log("prefixes: none created yet (system installs are preferred)", "INFO")
+
+            cached = help_mod.cached_tools()
+            if cached:
+                detail = ", ".join(f"{name}:{help_mod.total_lines(name)}" for name in cached)
+                self._log(f"help cache: {detail}", "OK")
+            else:
+                self._log("help cache: empty (captured on first use of each tool)", "INFO")
+
+            self._check_bioenv_skills()
+            self._bioenv_end_to_end(locations.get("seqkit"), tools)
+        except Exception as e:
+            self._log(f"bioenv test failed: {e}", "FAIL")
+
+    def _check_bioenv_skills(self):
+        """确认工具已注册为内置 skill，且带过滤分类标签、参数类型未退化。"""
+        from src.core.bioenv.catalog import TOOL_FILTER_TAG
+        from src.core.skill_manager import SkillManager
+
+        sm = SkillManager.get_instance()
+        names = sorted(getattr(sm, "bio_skill_names", ()))
+        if not names:
+            self._log("skills: no bioinformatics tool registered", "FAIL")
+            return
+        self._log(f"skills registered: {', '.join(names)}", "OK")
+
+        expected_prefix = f"[Tags: {TOOL_FILTER_TAG}]"
+        for name in names:
+            schema = sm.academic_schemas.get(name) or {}
+            description = str((schema.get("function") or {}).get("description") or "")
+            ok = description.startswith(expected_prefix)
+            self._log(f"  {name}: filter tag {'ok' if ok else 'MISSING'}",
+                      "OK" if ok else "FAIL")
+
+        params = (((sm.academic_schemas.get("bio_seqkit_stats") or {})
+                   .get("function") or {}).get("parameters") or {})
+        types = {key: (value or {}).get("type")
+                 for key, value in (params.get("properties") or {}).items()}
+        # 模块带 `from __future__ import annotations` 时注解会退化成字符串，
+        # max_rows 若显示 string 就说明 schema 生成又走回了按对象比较的老路。
+        ok = types.get("max_rows") == "integer"
+        self._log(f"schema types: {types}", "OK" if ok else "FAIL")
+
+    def _bioenv_end_to_end(self, location, tools):
+        """走一遍"help 前置 → 执行 → 结构化解析"，用合成 FASTA 验证真实链路。"""
+        if location is None:
+            self._log("end-to-end: skipped (seqkit is not available)", "WARN")
+            return
+
+        handle, fasta = tempfile.mkstemp(prefix="dev-bioenv-", suffix=".fa")
+        os.close(handle)
+        try:
+            with open(fasta, "w", encoding="utf-8") as fh:
+                fh.write(">s1\nACGTACGTACGT\n>s2\nTTTTAAAAGGCC\n")
+
+            first = json.loads(tools.bio_seqkit_stats(fasta))
+            if first.get("status") == "help_required":
+                self._log("end-to-end: help gate blocked the first call (expected)", "OK")
+                prompted = json.loads(tools.bio_tool_help("seqkit", 5))
+                self._log(f"end-to-end: bio_tool_help -> "
+                          f"observed={prompted.get('observed')}",
+                          "OK" if prompted.get("status") == "ok" else "WARN")
+                first = json.loads(tools.bio_seqkit_stats(fasta))
+
+            if first.get("status") != "ok":
+                self._log(f"end-to-end: seqkit stats failed: {first.get('message')}", "FAIL")
+                return
+
+            rows = first.get("rows") or []
+            count = rows[0].get("num_seqs") if rows else None
+            ok = count == "2"
+            self._log(f"end-to-end: seqkit stats -> num_seqs={count}", "OK" if ok else "FAIL")
+            if not ok:
+                self._log("end-to-end: expected 2 sequences in the synthetic FASTA", "FAIL")
+            self._log(f"end-to-end: run dir {first.get('run_dir')}", "INFO")
+        except Exception as e:
+            self._log(f"end-to-end crashed: {e}", "FAIL")
+        finally:
+            try:
+                os.remove(fasta)
+            except OSError:
+                pass
+
+    def _test_bioenv_prefix(self, clear: bool = True):
+        """创建私有前缀（联网）。后台线程执行，避免把对话框卡住数分钟。"""
+        if clear:
+            self._clear()
+        self._log("--- Bioinformatics Prefix Install (network) ---", "WARN")
+        self._log("This downloads micromamba and conda packages; it runs in the "
+                  "background and may take several minutes.", "WARN")
+
+        thread = getattr(self, "_bioenv_install_thread", None)
+        if thread is not None and thread.is_alive():
+            self._log("An install is already running.", "WARN")
+            return
+
+        def worker():
+            try:
+                from src.core.bioenv import catalog, prefix
+
+                cat = catalog.load()
+                for name in cat.prefix_names():
+                    self._emit_dev_log(f"[bioenv] creating prefix '{name}' "
+                                       f"({len(cat.prefix_packages(name))} package(s))", "INFO")
+                    outcome = prefix.create(
+                        name, cat.prefix_packages(name), channels=cat.channels,
+                        tools=cat.tools_of(name),
+                        log_cb=lambda line: self._emit_dev_log(f"[{name}] {line}", "INFO"))
+                    if outcome.get("cancelled"):
+                        self._emit_dev_log(f"[bioenv] prefix '{name}' cancelled", "WARN")
+                        continue
+                    if not outcome.get("success"):
+                        self._emit_dev_log(f"[bioenv] prefix '{name}' failed: "
+                                           f"{outcome.get('error')}", "FAIL")
+                        continue
+                    self._emit_dev_log(f"[bioenv] prefix '{name}' ready", "OK")
+                    for tool, info in prefix.verify(name, cat.tools_of(name)).items():
+                        available = info.get("available")
+                        self._emit_dev_log(
+                            f"[bioenv] {tool}: {info.get('version') or info.get('detail')}",
+                            "OK" if available else "WARN")
+            except Exception as e:
+                self._emit_dev_log(f"[bioenv] install crashed: {e}", "FAIL")
+            finally:
+                self._emit_dev_log("[bioenv] install finished", "INFO")
+
+        self._bioenv_install_thread = threading.Thread(target=worker, daemon=True)
+        self._bioenv_install_thread.start()
 
     def _test_r_engine(self, clear: bool = True):
         if clear:

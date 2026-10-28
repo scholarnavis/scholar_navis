@@ -1,7 +1,7 @@
 import inspect
 import json
 import logging
-from typing import Dict, Callable, get_origin, Literal, get_args
+from typing import Dict, Callable, get_origin, get_type_hints, Literal, get_args
 
 from src.core import BASE_DIR
 from src.core import plot_styles
@@ -29,6 +29,10 @@ class SkillManager:
         self.external_skills: Dict[str, Callable] = {}
         self.external_schemas: Dict[str, dict] = {}
 
+        # 生信工具封装的名字集合。它们与学术工具共用 academic_skills 这个池（同样是
+        # 内置、进程内、零 IPC），单独记一份名字是为了让日志与证据链能如实标注来源。
+        self.bio_skill_names: set = set()
+
         self._register_builtin_skills()
         self._load_external_skills_from_config()
 
@@ -37,6 +41,7 @@ class SkillManager:
         Register local native tools here.
         """
         self._register_academic_skills()
+        self._register_bioenv_skills()
 
         # System utility...
 
@@ -63,20 +68,31 @@ class SkillManager:
             }
         }
 
+        # 模块带 ``from __future__ import annotations`` 时，``inspect.signature`` 拿到
+        # 的注解是字符串而不是类型对象；直接比较会静默退化成 "string"，模型据此传来
+        # 的值类型就不对了。``get_type_hints`` 会按模块命名空间求值，连 Literal 也能
+        # 正确解析，因此统一以它为准，失败才回落到原始注解。
+        try:
+            hints = get_type_hints(func)
+        except Exception as e:
+            logger.debug(f"Cannot resolve type hints for '{func.__name__}': {e}")
+            hints = {}
+
         for param_name, param in sig.parameters.items():
             if param_name in ["self", "args", "kwargs"]: continue
 
             param_type = "string"
             enum_values = None
+            annotation = hints.get(param_name, param.annotation)
 
-            if get_origin(param.annotation) is Literal:
+            if get_origin(annotation) is Literal:
                 param_type = "string"
-                enum_values = list(get_args(param.annotation))
-            elif param.annotation is int:
+                enum_values = list(get_args(annotation))
+            elif annotation is int:
                 param_type = "integer"
-            elif param.annotation is float:
+            elif annotation is float:
                 param_type = "number"
-            elif param.annotation is bool:
+            elif annotation is bool:
                 param_type = "boolean"
 
             schema["function"]["parameters"]["properties"][param_name] = {"type": param_type}
@@ -155,6 +171,33 @@ class SkillManager:
         except ImportError as e:
             logger.error(f"Failed to load native academic skills modules. Reason: {e}")
 
+    def _register_bioenv_skills(self):
+        """注册生信工具封装。
+
+        与学术工具共用 ``academic_skills`` 池：两者都是内置、进程内执行、零 IPC，
+        在 ``_dispatch_tool`` 里走同一条分派路径。单独开第三个池会让 schema 聚合
+        的六处调用点都得跟着改，漏一处就等于工具没暴露给模型；名字统一带 ``bio_``
+        前缀即可避免与既有工具重名。
+        """
+        self.bio_skill_names.clear()
+        try:
+            from src.core.bioenv import tools as bio_tools
+            from src.core.bioenv.catalog import TOOL_FILTER_TAG
+        except ImportError as e:
+            logger.error(f"Failed to load bioinformatics tools. Reason: {e}")
+            return
+
+        for func in bio_tools.REGISTERED_TOOLS:
+            name = func.__name__
+            doc = inspect.getdoc(func) or name
+            # 分类标签由"工具过滤"菜单消费（见 chat_input_widgets.
+            # get_all_available_tags 对 [Tags: ...] 的解析）。缺了它，这些工具不归属
+            # 任何分类，用户的勾选/取消勾选对它们完全不生效。
+            description = f"[Tags: {TOOL_FILTER_TAG}] " + doc.split("\n\n")[0].strip()
+            self.academic_skills[name] = func
+            self.academic_schemas[name] = self._generate_schema_from_func(func, description)
+            self.bio_skill_names.add(name)
+        logger.info(f"Registered {len(self.bio_skill_names)} bioinformatics tool(s)")
 
     def _load_external_skills_from_config(self):
         from src.core.config_manager import ConfigManager
