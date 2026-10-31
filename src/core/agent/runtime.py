@@ -971,7 +971,12 @@ class AgentRuntime:
                 # 完整调用，保证结果正确；重复计费由异常场景兜底接受
                 logger.warning(f"Streamed LLM step failed; falling back to blocking chat: {e}")
         if response is None:
-            response = self._invoke_with_overflow_retry(kwargs, self.main_llm.chat)
+            # 展开成关键字参数：``chat(messages, ...)`` 的第一个位置参数是消息列表，
+            # 而这里的契约是"把整个 kwargs 交给被调方"。按位置传 dict 会让
+            # ``_process_messages`` 把 dict 的键当成消息去 ``m.copy()``，报
+            # "'str' object has no attribute 'copy'"——子 Agent 第一次调用就失败，
+            # 全文阅读于是退回"正文前 4000 字"的兜底，简报质量明显下降。
+            response = self._invoke_with_overflow_retry(kwargs, lambda kw: self.main_llm.chat(**kw))
             # 非流式回退路径：正文由主循环打字机回放（_stream_final_text），但思维链
             # 若不在此补齐，该路径下 Reasoning 面板会整段缺失——与真流式路径的展示
             # 口径不一致。此处一次性 emit 整块 reasoning（折叠格式与截断策略同流式）。

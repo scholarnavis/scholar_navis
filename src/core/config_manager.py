@@ -296,17 +296,15 @@ class ConfigManager:
 
     def load_settings(self):
         default_settings = {
-            "current_model_id": "embed_nano_fast",
-            "rerank_model_id": "rerank_lite",
-            "inference_device": "cpu",
             # system = 跟随操作系统 / 环境变量的代理设置（默认）；off = 强制直连；
             # custom = 使用下方 proxy_url。判定只在 network_worker.proxy_mode() 一处。
             "proxy_mode": "system",
             "proxy_url": "",
             "journal_use_proxy": False,
-            # 机构数据库直连（绕过代理）：TAIR 等资源按机构出口 IP 授权，默认直连。
-            # 主机列表留空表示使用 src/core/network_worker.DEFAULT_DIRECT_HOSTS。
-            "institutional_direct": True,
+            # 机构数据库代理开关：与界面同向（False = 直连）。
+            # TAIR 等资源按机构出口 IP 授权，默认直连；主机列表留空表示使用
+            # src/core/network_worker.DEFAULT_DIRECT_HOSTS。
+            "institutional_use_proxy": False,
             "institutional_hosts": [],
             "hf_mirror": "",
             "hf_token": "",
@@ -336,9 +334,6 @@ class ConfigManager:
             "agent_deep_mode": False,
             "chat_ribbon_state": "Pinned",
             # Rerank 精排参数：top_k 为精排后进入上下文的文档数；min_score 为分数阈值（0 关闭）
-            "rerank_top_k": 5,
-            "rerank_min_score": 0.25,
-            "rerank_auto_load": True,
             "api_server_host": "127.0.0.1",
             "api_server_port": 8000,
             "api_server_key": "",
@@ -402,6 +397,24 @@ class ConfigManager:
                 self.logger.info("Proxy mode migrated from 'off' to 'system' (new default).")
             current_settings["proxy_mode_migrated"] = True
             is_modified = True
+        # 本地推理与知识库下线后，这些键不再有任何读取方：旧配置里残留的副本在加载时
+        # 清掉，避免 user_settings 里长期躺着一批"改了也没用"的项。
+        # 注意不要把 institutional_direct 放进这个列表：它的值要用于下面的取反迁移，
+        # 在这里删掉就等于把用户的选择丢了。
+        for dead_key in ("inference_device", "current_model_id", "rerank_model_id",
+                         "rerank_top_k", "rerank_min_score", "rerank_auto_load"):
+            if dead_key in current_settings:
+                current_settings.pop(dead_key, None)
+                is_modified = True
+        # 机构数据库开关改成与界面同向（institutional_direct → institutional_use_proxy）。
+        # 旧键的语义是"直连"，新键是"使用代理"，因此取反迁移；旧键随即删除，避免两个
+        # 含义相反的键同时存在、后读到的那个说了算。
+        if "institutional_direct" in current_settings:
+            legacy_direct = bool(current_settings.pop("institutional_direct"))
+            current_settings.setdefault("institutional_use_proxy", not legacy_direct)
+            is_modified = True
+            self.logger.info("Migrated 'institutional_direct' -> 'institutional_use_proxy' "
+                             "(value %s).", current_settings.get("institutional_use_proxy"))
         if is_modified:
             self.save_settings()
         self.apply_env_vars()

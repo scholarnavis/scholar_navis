@@ -803,6 +803,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Failed to add the downloaded PDF to the evidence store.":
             "下载的 PDF 未能加入证据库。",
         "Use System Proxy": "使用系统代理",
+        "Use the global proxy": "使用全局代理",
+        "Off by default: some journals and institutional services auto-login by recognizing your institution's IP, and a proxy replaces that address.":
+            "默认关闭：部分期刊/机构服务通过识别机构 IP 自动登录，而代理会换掉这个地址。",
+        "Off by default: TAIR and similar resources grant subscription features by recognizing your institution's IP address, and a proxy replaces that address.":
+            "默认关闭：TAIR 等资源通过识别机构 IP 授予订阅级功能，而代理会换掉这个地址。",
+        "unknown error": "未知错误",
         "System proxy follows the operating system's proxy settings (on Windows the system proxy, elsewhere the HTTP(S)_PROXY environment variables).":
             "系统代理指操作系统层面的代理设置（Windows 读系统代理，其他平台读 "
             "HTTP(S)_PROXY 环境变量）。",

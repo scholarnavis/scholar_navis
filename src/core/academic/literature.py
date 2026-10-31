@@ -353,11 +353,19 @@ def _arxiv_records(query: str, max_results: int = 10):
     return records
 
 
+#: Crossref 与 Europe PMC 都没有硬性 rps 上限，但都明确要求"礼貌速率"。这里取保守
+#: 值并统一交给进程级 GlobalRateLimiter：多标签同时检索时它们排的是同一条队，
+#: 不会因为开了三个标签就三倍速打过去。
+_CROSSREF_RPS = 5.0
+_EUROPEPMC_RPS = 3.0
+
+
 def _preprint_records(query: str, max_results: int = 10):
     """Europe PMC 预印本检索（bioRxiv / medRxiv / 部分 arXiv）。"""
     url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
     params = {"query": f"({query}) AND (SRC:PPR)", "format": "json",
               "resultType": "core", "pageSize": max_results}
+    global_rate_limiter.acquire("europepmc", rps=_EUROPEPMC_RPS)
     res = mcp_request("GET", url, params=params, timeout=15)
     res.raise_for_status()
     records = []
@@ -589,6 +597,7 @@ def search_academic_literature(query: str, max_results: int = 30, offset: int = 
     def _parse_crossref():
         url = f"https://api.crossref.org/works?query={urllib.parse.quote(query)}&mailto={ncbi_email}&rows={max_results}&offset={offset}"
         parsed = []
+        global_rate_limiter.acquire("crossref", rps=_CROSSREF_RPS)
         payload = _get_json(url, "Crossref", timeout=15)
         msg_dict = payload.get("message") if isinstance(payload, dict) else None
         items = msg_dict.get("items", []) if isinstance(msg_dict, dict) else []
@@ -1013,6 +1022,7 @@ def europe_pmc_pmcids(dois, report: dict | None = None) -> dict:
         return {}
     clause = " OR ".join(f'DOI:"{d}"' for d in wanted.values())
     try:
+        global_rate_limiter.acquire("europepmc", rps=_EUROPEPMC_RPS)
         res = mcp_request(
             "GET", "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
             params={"query": clause, "format": "json", "resultType": "core",
@@ -1040,6 +1050,7 @@ def europe_pmc_pmcids(dois, report: dict | None = None) -> dict:
 def _europe_pmc_xml_text(pmcid: str) -> str:
     """按 PMCID 取全文 XML 的纯文本；失败返回空串。"""
     try:
+        global_rate_limiter.acquire("europepmc", rps=_EUROPEPMC_RPS)
         xml_res = mcp_request(
             "GET", f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML",
             timeout=20)

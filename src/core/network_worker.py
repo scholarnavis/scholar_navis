@@ -161,11 +161,13 @@ DEFAULT_DIRECT_HOSTS = ("arabidopsis.org",)
 def direct_hosts() -> Tuple[str, ...]:
     """需要直连（绕过代理）的主机后缀；开关关闭时返回空元组。
 
-    配置键：``institutional_direct``（默认开）与 ``institutional_hosts``（用户增删，
-    留空即用 :data:`DEFAULT_DIRECT_HOSTS`）。
+    配置键与界面同向：``institutional_use_proxy``（默认 **关** = 直连）与
+    ``institutional_hosts``（用户增删，留空即用 :data:`DEFAULT_DIRECT_HOSTS`）。
+    刻意不用"institutional_direct"这种反向命名：设置页两个代理开关都写成"使用代理"，
+    代码里若一个取反、一个不取反，改一处漏一处就是这类 bug 的来源。
     """
     cfg = ConfigManager().user_settings
-    if not bool(cfg.get("institutional_direct", True)):
+    if bool(cfg.get("institutional_use_proxy", False)):
         return ()
     raw = cfg.get("institutional_hosts")
     hosts = [str(item).strip().lower().lstrip(".") for item in raw] if isinstance(raw, list) else []
