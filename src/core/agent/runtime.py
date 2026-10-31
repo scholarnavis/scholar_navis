@@ -200,6 +200,49 @@ _MAX_REASONING_CHARS = 4000
 _REASONING_TRUNCATION_NOTE = "\n...[thinking truncated for display]\n"
 # 同一轮内并发执行的工具数量上限；避免一次性拉起过多线程挤占本地推理资源
 _MAX_PARALLEL_TOOLS = 6
+
+#: 需要英文化的**检索式参数**：``tool -> 参数名``，白名单，不是"所有中文都翻"。
+#:
+#: 收录标准只有一条：该参数会被下游按英文关键词做匹配（Crossref / OpenAlex /
+#: PubMed / Semantic Scholar / arXiv、EBI ChEMBL、PubChem/ChEBI、RCSB PDB、
+#: UniProt、KEGG、JASPAR、GBIF 都是如此）。把中文原句直接发过去不会报错，只会安静
+#: 地返回一堆无关结果，所以这几处必须有兜底（判定与缓存见
+#: :meth:`AgentRuntime._ensure_english_query`）。
+#:
+#: 刻意**不在**表里出现的参数，翻了就是错：
+#:
+#: * ``title`` / ``reason`` —— 论文标题与索要全文的理由是给用户看的正文，翻译会让
+#:   标题与出版社记录对不上（``fulltext_store`` 的标题匹配也会失准）；
+#: * ``doi`` / ``pmid`` / ``uniprot_id`` / ``gene_id`` / ``symbol`` / ``organism_code``
+#:   —— 标识符，本来就没有中文；
+#: * 附件正文、PDF 页面文本、对话历史 —— 从不参与任何翻译，见 ``attachment_parser``
+#:   与 :func:`src.core.llm_impl.get_cached_translation` 的唯一调用点（用户问题本身）。
+_ENGLISH_ONLY_QUERY_ARGS = {
+    # 文献 / 网页检索
+    "search_academic_literature": ("query",),
+    "search_preprints": ("query",),
+    "search_web": ("query",),
+    # 生信数据库的自由文本检索
+    "search_chembl_target": ("query",),
+    "query_metabolite_database": ("query",),
+    "query_pdb_structure": ("query",),
+    "query_uniprot_database": ("query",),
+    "query_kegg_database": ("query",),
+    "search_jaspar_motifs": ("query",),
+    # 物种名要拉丁名，中文俗名直接查 GBIF 匹配不上
+    "search_gbif_occurrences": ("scientific_name",),
+}
+
+#: 需要英文化的判据：CJK 统一表意文字与其扩展区。只判"有没有中文"，不做语言识别——
+#: 日文、韩文混排的查询同样该翻，但它们同样命中这些码位之外的假名/谚文，故再补两段。
+_CJK_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"      # 汉字（含扩展 A 与兼容区）
+    r"\u3040-\u30ff"                                   # 日文假名
+    r"\uac00-\ud7af]"                                  # 谚文
+)
+
+#: 检索式翻译的串行化锁：并行工具调用会同时走到翻译这一步。
+_QUERY_TRANSLATION_LOCK = threading.Lock()
 # ---- 上下文治理：单轮工具循环中的旧工具结果淘汰 ----
 # 多步迭代（最多 12 轮 x 6 并发工具）中，旧工具结果会随每步 LLM 请求
 # 线性重发。token 预算超限时从最旧未清理条目开始，就地替换为占位摘要。
@@ -548,6 +591,12 @@ class AgentRuntime:
         #: 论文需要用户下载 PDF 时调用；任务层在此挂起本线程并弹窗，拿到文件后唤醒
         #: （见 :mod:`src.core.fulltext_bridge`）。无界面调用（子 Agent）时为 None。
         self.fulltext_waiter = None
+        #: 开发者自检用：为真时取全文**不读也不写** DOI↔本地 PDF 关联。
+        #:
+        #: 自检要反复演练同一条链路，若把"这篇 = 这份文件"记进关联表，第二次点按钮
+        #: 就会直接命中本地副本、不再走"请用户交文件"，等于把要测的环节跳过去了。
+        #: 正常对话保持 False：关联是为了减少重复索取。
+        self.fulltext_link_exempt = False
         #: 本轮的用户问题（``run()`` 每次刷新）：抽取子代理据此判断该从全文里挑什么。
         self.current_query = ""
         # log_fn(level: str, msg: str) : optional logger hook (e.g. ChatTask.send_log)
@@ -620,6 +669,8 @@ class AgentRuntime:
         # 同一轮内重复的检索/阅读调用直接复用结果：真人不会把同一条检索
         # 原样重跑五遍；这也能避免模型陷入"搜索 -> 再搜索"的机器式循环。
         self._tool_result_cache: Dict[Tuple[str, str], str] = {}
+        #: 本轮内"非英文检索式 -> 英文"的翻译缓存（见 :meth:`_translate_query`）。
+        self._query_translation_cache: Dict[str, str] = {}
         full_response_cache: List[str] = []
         #: 工具调用步骤里"我先检索一下"式的自我叙述。它属于过程，不属于回答；
         #: 收尾时统一折进工具过程面板（见 :meth:`_compose_final_text`）。
@@ -1307,11 +1358,14 @@ class AgentRuntime:
             self._emit_tool_start(name, args, emit_token)
             try:
                 raw = self._dispatch_tool(name, args, emit_token)
-                # 截断前采集逐字原文：截断后的 head+tail 已不能保证 snippet 可校验。
+                # 原文先进证据库：压缩/截断后的文本已不能保证 snippet 可校验。
                 self._harvest_evidence(raw)
-                results[idx] = self._truncate(raw, self._tool_result_chars)
-                if cacheable and len(self._tool_result_cache) < 64:
-                    self._tool_result_cache[cache_key] = results[idx]
+                results[idx] = raw
+                # 缓存只收"本来就短"的结果：超长文本缓存的是一份原始大字符串，
+                # 既占内存又不是最终送进上下文的那份。
+                if cacheable and len(raw) <= self._tool_result_chars \
+                        and len(self._tool_result_cache) < 64:
+                    self._tool_result_cache[cache_key] = raw
             except Exception as e:
                 logger.error(f"Tool '{name}' raised unexpectedly: {e}")
                 results[idx] = f"[TOOL ERROR] Execution of '{name}' raised: {e}"
@@ -1327,6 +1381,15 @@ class AgentRuntime:
                 # 不主动 shutdown(wait=False) 中断，避免线程状态不一致。
                 for _ in as_completed(futures):
                     pass
+
+        # 超长结果先交给摘要子代理压缩，再由下面的回填循环做最终裁剪。
+        # 直接 head+tail 截断切掉的往往是中段的结论与数值，模型看不到就当作不存在；
+        # 摘要保留"要点 + 可引用原文 + 出处标识"，体积小得多且仍然可校验
+        # （原文在 _run_one 里已先进证据库）。
+        for i, p in enumerate(parsed):
+            raw = results[i]
+            if raw and len(raw) > self._tool_result_chars:
+                results[i] = self._compress_tool_result(p["name"], raw)
 
         # 顺序回填 tool 消息，保证与 assistant.tool_calls 对齐。
         # 同轮多个结果会累加进上下文：单条上限（窗口的 4%）乘上 6 并发仍可能
@@ -1350,7 +1413,192 @@ class AgentRuntime:
                 "content": content,
             })
 
+    #: 工具结果压缩子代理的指令。只约束**摘要的篇幅与保留项**，不限制模型输出长度。
+    _COMPRESS_SYSTEM = (
+        "You compress raw tool output for a research assistant. Keep every fact that "
+        "could answer the current question, and keep quotable sentences VERBATIM "
+        "(exact wording, 10-40 words) together with their source identifiers "
+        "(DOI, PMID, PMCID, URL, title, page or line numbers). Reproduce numbers, "
+        "gene/protein IDs, species names and strand orientation exactly as written. "
+        "Drop HTML, navigation menus, repeated boilerplate and empty fields. Output "
+        "plain text only. Never invent content that is not in the input."
+    )
+
+    #: 结构化结果里"长文本"字段：只有这些可以被截断，其余字段原样保留。
+    _RECORD_TEXT_FIELDS = ("abstract", "full_text", "summary", "description",
+                           "full_text_excerpt", "snippet")
+
+    def _shrink_structured_result(self, raw: str, budget: int) -> str:
+        """JSON 记录型结果的**确定性**压缩：只截长文本，标识符与计数一个字不动。
+
+        为什么不能交给摘要子代理：``search_academic_literature`` 返回的是 30 条记录
+        的列表，让模型"总结"它会**整条**丢论文，还可能把 DOI / 年份 / 引用数改写。
+        模型据此再调 ``fetch_paper_fulltext`` 就会拿一个不存在的 DOI 去查，而界面上
+        看不出是谁错了。结构化数据只做两件可控的事：截断长文本字段、必要时丢掉排在
+        最后的整条记录，并在结果里写清丢了几条。
+
+        只处理顶层带 ``results`` 列表的载荷；其他形状（网页正文、全文简报）返回空串，
+        由调用方退回摘要子代理。
+        """
+        text = str(raw or "").strip()
+        if not text.startswith("{") or '"results"' not in text:
+            return ""
+        try:
+            payload = json.loads(text)
+            records = payload.get("results")
+        except (ValueError, TypeError):
+            return ""
+        if not isinstance(payload, dict) or not isinstance(records, list) or not records:
+            return ""
+
+        def _capped(items, cap: int):
+            out = []
+            for record in items:
+                if not isinstance(record, dict):
+                    out.append(record)
+                    continue
+                copy_rec = dict(record)
+                for field in self._RECORD_TEXT_FIELDS:
+                    value = copy_rec.get(field)
+                    if isinstance(value, str) and len(value) > cap:
+                        copy_rec[field] = value[:cap].rstrip() + "…[truncated]"
+                out.append(copy_rec)
+            return out
+
+        def _render(items, cap: int, dropped: int) -> str:
+            body = dict(payload)
+            body["results"] = _capped(items, cap)
+            notes = [f"long text fields truncated to {cap} chars"]
+            if dropped:
+                notes.append(
+                    f"{dropped} lowest-ranked record(s) omitted to fit the context "
+                    f"budget; narrow the query (or paginate with offset) to see them")
+            if any(len(str(rec.get(f) or "")) > cap
+                   for rec in items if isinstance(rec, dict)
+                   for f in self._RECORD_TEXT_FIELDS):
+                body["context_note"] = "; ".join(notes)
+            elif dropped:
+                body["context_note"] = "; ".join(notes)
+            return json.dumps(body, ensure_ascii=False)
+
+        for cap in (700, 400, 250, 150, 90):
+            rendered = _render(records, cap, 0)
+            if len(rendered) <= budget:
+                return rendered
+        # 单条记录本身就放不下：从尾部整条丢弃，至少保留第一条（最相关的那条）。
+        keep = len(records)
+        while keep > 1:
+            keep -= 1
+            rendered = _render(records[:keep], 90, len(records) - keep)
+            if len(rendered) <= budget:
+                return rendered
+        return _render(records[:1], 90, len(records) - 1)
+
+    def _compress_tool_result(self, name: str, raw: str) -> str:
+        """把超长工具结果压成"够用且可引用"的摘要；任何失败都退回截断。
+
+        与 :meth:`_truncate` 的分工：截断是零成本兜底（可能丢掉中段结论），压缩是
+        需要一次模型调用的主路径。原文在压缩前已进证据库，因此摘要里保留的逐字引文
+        依然能被引用校验命中。
+        """
+        # 1) 记录型 JSON 优先走确定性压缩：不经过模型，标识符、计数、记录条数都可控。
+        structural = self._shrink_structured_result(raw, self._tool_result_chars)
+        if structural:
+            self.log_fn(
+                "INFO",
+                f"Structurally shrunk '{name}' output: {len(raw)} -> {len(structural)} "
+                f"chars (records, DOIs and counts kept verbatim).")
+            return structural
+        # 2) 散文型结果（网页正文、全文页块）才交给摘要子代理。
+        target = max(2000, int(self._tool_result_chars))
+        if self.main_llm is None or not hasattr(self.main_llm, "chat"):
+            return self._truncate(raw, self._tool_result_chars)
+        prompt = (
+            f"Tool: {name}\n"
+            f"Current question: {self.current_query or '(not specified)'}\n"
+            f"Target length: at most {target} characters.\n\n"
+            f"Raw output:\n{raw}"
+        )
+        try:
+            resp = self.main_llm.chat(messages=[
+                {"role": "system", "content": self._COMPRESS_SYSTEM},
+                {"role": "user", "content": prompt},
+            ])
+            text = str((resp or {}).get("content") or "").strip()
+        except Exception as e:
+            self.log_fn("WARNING", f"Tool-result compression failed for '{name}': {e}")
+            text = ""
+        if not text:
+            return self._truncate(raw, self._tool_result_chars)
+        self.log_fn("INFO", f"Compressed '{name}' output: {len(raw)} -> {len(text)} chars.")
+        return (self._truncate(text, self._tool_result_chars)
+                if len(text) > self._tool_result_chars else text)
+
+    def _ensure_english_query(self, name: str, args: dict) -> dict:
+        """把"只吃英文"的检索参数在**真正要调用时**翻成英文（惰性、按原文缓存）。
+
+        为什么不在每轮开头统一翻译：``chat_skip_translation_roundtrip`` 关掉那次固定
+        往返，就是为了省掉每轮一次串行模型调用。但把英文化完全交给模型自觉并不可靠：
+        它偶尔把中文原句直接塞进 ``query``，Crossref / OpenAlex / PubMed 拿这串字符做
+        关键词匹配，召回直接塌掉，而界面上看不出任何原因。
+
+        这里只做兜底：参数里真的出现中文才翻，同一句在本轮内只翻一次；翻译失败就原样
+        继续——宁可退回原来的行为，也不要因为一个辅助调用失败而阻断检索。
+        """
+        keys = _ENGLISH_ONLY_QUERY_ARGS.get(name)
+        if not keys or not isinstance(args, dict):
+            return args
+        for key in keys:
+            value = args.get(key)
+            if not isinstance(value, str) or not _CJK_RE.search(value):
+                continue
+            translated = self._translate_query(value)
+            if translated and translated != value:
+                patched = dict(args)
+                patched[key] = translated
+                args = patched
+                self.log_fn(
+                    "INFO",
+                    f"Tool '{name}': non-English '{key}' translated for retrieval "
+                    f"({value[:40]} -> {translated[:60]})")
+        return args
+
+    def _translate_query(self, text: str) -> str:
+        """把一个非英文检索意图翻成英文关键词；失败返回空串（调用方保留原文）。"""
+        cache = getattr(self, "_query_translation_cache", None)
+        if cache is None:
+            cache = self._query_translation_cache = {}
+        if text in cache:
+            return cache[text]
+        if self.main_llm is None or not hasattr(self.main_llm, "chat"):
+            return ""
+        prompt = (
+            "Translate the research search intent below into concise English keywords "
+            "for an academic literature database. Keep gene names, protein names, "
+            "species names, chemical names, DOIs and numbers exactly as written. "
+            "Output ONLY the query text: no quotes, no explanation, no extra lines.\n\n"
+            f"{text}"
+        )
+        # 并行工具调用会同时走到这里：加锁串行化，避免同一时刻打多路翻译请求，
+        # 也避免 main_llm 的并发使用问题。
+        with _QUERY_TRANSLATION_LOCK:
+            if text in cache:
+                return cache[text]
+            try:
+                resp = self.main_llm.chat(messages=[{"role": "user", "content": prompt}])
+                out = str((resp or {}).get("content") or "").strip()
+            except Exception as e:
+                logger.warning("Query translation for retrieval failed: %s", e)
+                return ""
+        out = out.strip().strip('"').strip("'").strip()
+        if not out:
+            return ""
+        cache[text] = out
+        return out
+
     def _dispatch_tool(self, name: str, args: dict, emit_token: Optional[Callable[[str], None]] = None) -> str:
+        # 0. 英文检索式兜底：模型偶尔会漏翻译，这里在调用前补齐（见 _ensure_english_query）。
+        args = self._ensure_english_query(name, args or {})
         # 1. Built-in image generator.
         if name == "generate_image":
             try:
@@ -2218,7 +2466,12 @@ class AgentRuntime:
         # 这个 DOI 已经有校验通过的本地 PDF：直接用，既不再联网也不再弹窗。
         from src.core import fulltext_store
 
-        linked = fulltext_store.resolve(doi, title) if doi else ""
+        linked = ""
+        if doi and self.fulltext_link_exempt:
+            self.log_fn("INFO", "Developer self-test: DOI link memory is disabled for this "
+                                "run; the PDF will not be remembered.")
+        elif doi:
+            linked = fulltext_store.resolve(doi, title)
         if linked:
             ok, brief_json = self._brief_from_pdf(linked, payload, doi)
             if ok:
@@ -2256,7 +2509,10 @@ class AgentRuntime:
             }, ensure_ascii=False)
 
         ok, brief_json = self._brief_from_pdf(path, payload, doi)
-        if ok and doi:
+        if ok and doi and self.fulltext_link_exempt:
+            self.log_fn("INFO", "Developer self-test: the delivered PDF is NOT linked to "
+                                f"{doi}; the next run has to ask again.")
+        elif ok and doi:
             # 记下"这篇 = 这份文件"：下次同一篇直接用，不必再让用户下载。
             # 登记用的标题优先取参考文献注册表里的**原题**：模型给的 title 可能是译名，
             # 而出版社 PDF 只有英文，标题词对不上时登记会失败——那样下一篇还得再问一次
@@ -2301,7 +2557,8 @@ class AgentRuntime:
         本地。返回 None 表示没有可用关联，调用方照常联网。
         """
         doi = str((args or {}).get("doi") or "").strip()
-        if not doi:
+        if not doi or self.fulltext_link_exempt:
+            # 自检模式不读关联：同一篇每次都要重新走"请用户交文件"，否则测不到那条路。
             return None
         from src.core import fulltext_store
 
