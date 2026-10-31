@@ -10,7 +10,8 @@
   因此开很多标签页不会拖慢启动；未被打开过的标签页，其历史只在导出 / 切换时按需读盘；
 * **持久化编排**：标签页清单（id / 名称 / 当前活动）落在
   :mod:`src.core.chat_session` 的 ``tabs.json``；每个标签页的会话由各自的
-  ``ChatConversation`` 在轮次边界落盘。关闭标签页 = 丢弃该标签页的快照；
+  ``ChatConversation`` 在轮次边界落盘。关闭标签页 = 丢弃该标签页的快照；关闭
+  **最后一个**标签页则退化为"清空该标签页"（见 :meth:`ChatTool._reset_last_tab`）；
 * **对外统一入口**：主窗口（"发送到对话"、开发者测试）只跟容器打交道，
   容器把调用转发给当前活动标签页，见下方 ``handle_external_send`` 等方法。
 
@@ -101,16 +102,19 @@ class ChatTool(BaseTool):
             return tr(DEFAULT_TAB_NAME)
         return name
 
-    def _unique_tab_name(self, desired) -> str:
+    def _unique_tab_name(self, desired, exclude_id: Optional[str] = None) -> str:
         """标签页名的**唯一化口径**：与现有名称重名时追加 `` (n)``（n 从 1 起）。
 
         新建、导入、改名、以及恢复清单都走这里，因此界面上永远不可能出现两个同名
         标签（导入两份同样叫"默认对话"的归档，得到的是"默认对话 (1)"、
         "默认对话 (2)"）。注意括号前有一个空格，与 ``TAB_NAME_MAX`` 的截断配合：
         先为后缀留出位置再截断，避免长名字被截回原名而重新撞名。
+
+        :param exclude_id: 不参与重名判定的标签页（复位自身名称时必须传，否则
+            它占着自己的旧名字，默认名会被判成重名而多出 `` (1)``）。
         """
         base = self._display_tab_name(desired)
-        taken = {tab["name"] for tab in self._tabs}
+        taken = {tab["name"] for tab in self._tabs if tab["id"] != exclude_id}
         if base not in taken:
             return base
 
@@ -222,14 +226,16 @@ class ChatTool(BaseTool):
     def close_tab(self, tab_id: str):
         """关闭标签页：终止其生成、释放控件、**丢弃**其磁盘快照。
 
-        始终保留至少一个标签页 —— "一个标签页都没有"的界面没有任何可用操作
-        （没有输入框、没有加号的落点语义），因此最后一个标签页不允许关闭。
+        最后一个标签页不真正移除 —— "一个标签页都没有"的界面没有任何可用操作
+        （没有输入框、没有加号的落点语义），用户此刻要的其实是"清空这一页"，
+        因此退化为 :meth:`_reset_last_tab`：聊天记录、对话标签与自定义名称一并
+        回到初始状态，标签页 id 保持不变。
         """
-        if len(self._tabs) <= 1:
-            ToastManager().show(tr("At least one tab must remain open."), "warning")
-            return
         tab = self._find(tab_id)
         if tab is None:
+            return
+        if len(self._tabs) <= 1:
+            self._reset_last_tab(tab)
             return
 
         index = self._tabs.index(tab)
@@ -257,6 +263,41 @@ class ChatTool(BaseTool):
             self.activate_tab(nxt["id"])
         self._save_manifest()
         logger.info("Closed chat tab %s (%d tab(s) remaining).", tab_id, len(self._tabs))
+
+    def _reset_last_tab(self, tab: Dict[str, Any]):
+        """关闭最后一个标签页时的等价动作：清空会话并把名称恢复为默认值。
+
+        清理**只走** ``ChatConversation.clear_chat_history``（与输入区"清空"按钮
+        同一条路径），不在这里另写一份：取消生成、清历史、删快照、清引用编号、
+        清书签与搜索命中、解锁输入框都由它负责。
+        """
+        tab_id = tab["id"]
+        logger.info("Closing the last chat tab %s: clearing it instead of removing it.",
+                    tab_id)
+        conv = tab.get("conv")
+        if conv is not None:
+            try:
+                conv.clear_chat_history()
+            except Exception as e:      # 清理失败也要把名称与标签复位，别停在半旧状态
+                logger.error("Failed to clear chat history of tab %s: %s", tab_id, e)
+        else:
+            # 从未激活过的标签页没有控件，内容只在内存清单与磁盘快照里
+            tab["messages"] = None
+            chat_session.clear_tab(tab_id)
+            ToastManager().show(tr("Chat history cleared."), "success")
+
+        # 对话标签随会话一起清掉：数据库侧的标签关系已由 clear_tab 删除，容器内存里
+        # 的这份若不跟着复位，"导出全部"会写出指向已不存在关系的旧标签。
+        tab["tags"] = []
+        # 复位时把自己排除在重名判定之外，否则它占着旧名字，默认名会被判成重名
+        tab["name"] = self._unique_tab_name(DEFAULT_TAB_NAME, exclude_id=tab_id)
+        if self._tab_bar is not None:
+            self._tab_bar.set_name(tab_id, tab["name"])
+        if self._active_id != tab_id:
+            # 只剩下这一个标签页，它必须是活动页；激活时按清理后的内容重建视图
+            self.activate_tab(tab_id)
+        self._save_manifest()
+        logger.info("Last chat tab %s reset to %r.", tab_id, tab["name"])
 
     def rename_tab(self, tab_id: str, name: str):
         """重命名标签页。
