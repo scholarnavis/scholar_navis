@@ -16,7 +16,6 @@ from src.core.config_manager import ConfigManager
 from src.core.model_capabilities import (KNOWN_REQUEST_PARAMS, cached_max_output_tokens,
                                          record_context_window, record_max_output_tokens,
                                          record_unsupported_param, unsupported_params)
-from src.core.network_worker import _get_explicit_proxy_kwargs
 from src.core.think_tags import (THINK_CLOSE_TAG, THINK_OPEN_TAG,
                                  ThinkStreamSplitter, strip as strip_think_blocks)
 
@@ -370,8 +369,9 @@ class OpenAICompatibleLLM:
         else:
             self.api_key = str(raw_api_key).strip()
 
-        # 配置代理环境供 LiteLLM 内部的 HTTP 请求使用
-        proxy_cfg = _get_explicit_proxy_kwargs()
+        # 代理由 LiteLLM 内部的 HTTP 客户端从进程环境变量读取；环境变量统一由
+        # network_worker.setup_global_network_env 按 system/off/custom 三态写入，
+        # 这里不再单独判断（旧代码取了 proxy_cfg 却没有使用，属于死赋值）。
         self.logger.info(f"Initialized Unified LLM Provider via LiteLLM: [{self.model_name}] @ {self.base_url}")
 
         applied_params = self._get_payload_kwargs()

@@ -140,7 +140,9 @@ def mcp_request(method: str, url: str, **kwargs):
         raise RuntimeError(
             f"Request skipped: '{url}' belongs to a source blocked by the "
             f"auth-rejection breaker for the current chat round.")
-    session = create_robust_session()
+    # 传 URL 而不是空参：机构数据库（TAIR 等）需要直连才能拿到机构 IP 的订阅权限，
+    # 判定与免代理会话的构造都在 create_robust_session 里，调用点不重复判断。
+    session = create_robust_session(url)
     custom_headers = kwargs.pop("headers", {})
     if "User-Agent" in custom_headers and custom_headers["User-Agent"] == "Mozilla/5.0":
         custom_headers.pop("User-Agent")

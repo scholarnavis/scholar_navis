@@ -265,7 +265,7 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
             self._get_btn_style(btn_type="success"))
 
         # Default styling for the rest
-        for btn_name in ['btn_help_params', 'btn_copy_params', 'btn_chat_typography']:
+        for btn_name in ['btn_copy_params', 'btn_chat_typography']:
             if hasattr(self, btn_name):
                 getattr(self, btn_name).setStyleSheet(self._get_btn_style())
 
@@ -344,7 +344,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         if hasattr(self, 'btn_add_provider_param'): self.btn_add_provider_param.setIcon(tm.icon("add", "success"))
         if hasattr(self, 'btn_add_model_param'): self.btn_add_model_param.setIcon(tm.icon("add", "success"))
 
-        if hasattr(self, 'btn_help_params'): self.btn_help_params.setIcon(tm.icon("help", "text_main"))
         if hasattr(self, 'btn_copy_params'): self.btn_copy_params.setIcon(tm.icon("copy", "text_main"))
         if hasattr(self, 'btn_chat_typography'): self.btn_chat_typography.setIcon(tm.icon("file-text", "text_main"))
 
@@ -376,12 +375,19 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.input_github_token.setText(self.config.user_settings.get("github_token", ""))
         self.input_s2_rate_limit.setText(str(self.config.user_settings.get("s2_rate_limit", 1.0)))
 
-        mode_map = {"system": 0, "off": 1, "custom": 2}
         self.combo_proxy_mode.setCurrentIndex(
-            {"off": 0, "custom": 1}.get(self.config.user_settings.get("proxy_mode", "off"), 0))
+            {"system": 0, "off": 1, "custom": 2}.get(
+                self.config.user_settings.get("proxy_mode", "system"), 0))
         self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
         self.chk_journal_proxy.setChecked(
             bool(self.config.user_settings.get("journal_use_proxy", False)))
+        self.chk_institutional_direct.setChecked(
+            bool(self.config.user_settings.get("institutional_direct", True)))
+        _direct_hosts = self.config.user_settings.get("institutional_hosts") or []
+        self.input_institutional_hosts.setText(
+            ", ".join(str(h) for h in _direct_hosts if str(h).strip()))
+        self.input_institutional_hosts.setEnabled(
+            self.chk_institutional_direct.isChecked())
         self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
 
         curr_embed = self.config.user_settings.get("current_model_id", "embed_auto")

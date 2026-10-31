@@ -6,6 +6,7 @@ Email 校验 -> 配置落盘 -> 环境变量同步 -> 模型校验任务 -> MCP 
 
 import logging
 import os
+import re
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication
@@ -174,8 +175,9 @@ class SaveFlowMixin:
 
         new_github_token = self.input_github_token.text().strip()
 
+        # 索引与取值一一对应（与 env_section 的 mode_map 同序）：system / off / custom。
         mode_idx = self.combo_proxy_mode.currentIndex()
-        new_proxy_mode = ["off", "custom"][mode_idx]
+        new_proxy_mode = ["system", "off", "custom"][mode_idx]
         new_proxy_url = self.input_proxy.text().strip()
 
         new_theme = self.combo_theme.currentText().lower()
@@ -199,6 +201,13 @@ class SaveFlowMixin:
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
             "journal_use_proxy": self.chk_journal_proxy.isChecked(),
+            # 机构数据库直连：开关 + 主机后缀（逗号/空白分隔，留空即用内置默认）。
+            "institutional_direct": self.chk_institutional_direct.isChecked(),
+            "institutional_hosts": [
+                host.strip().lower().lstrip(".")
+                for host in re.split(r"[,;\s]+", self.input_institutional_hosts.text())
+                if host.strip()
+            ],
             "hf_mirror": self.input_mirror.text().strip(),
             "inference_device": self.combo_device.currentData(),
             "current_model_id": self.combo_embed.currentData(),
@@ -256,15 +265,8 @@ class SaveFlowMixin:
         else:
             os.environ.pop("GITHUB_TOKEN", None)
 
-        if new_proxy_mode == "custom" and new_proxy_url:
-            os.environ["HTTP_PROXY"] = new_proxy_url
-            os.environ["HTTPS_PROXY"] = new_proxy_url
-            os.environ["http_proxy"] = new_proxy_url
-            os.environ["https_proxy"] = new_proxy_url
-        else:
-            for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
-                os.environ.pop(k, None)
-
+        # 代理环境变量只由 setup_global_network_env 按当前模式统一应用
+        # （system 模式**不能**先把变量 pop 掉：那正是它要用的系统代理）。
         setup_global_network_env()
 
         try:

@@ -28,7 +28,7 @@ from html import unescape
 
 from src.core.config_manager import ConfigManager
 from src.core.network_worker import (
-    create_robust_session, global_rate_limiter,
+    create_robust_session, global_rate_limiter, is_direct_host,
     is_auth_blocked, record_auth_rejection,
 )
 from src.task.s2_task import is_s2_enabled, s2_request
@@ -54,6 +54,9 @@ _LANDING_HTML_CHARS = 400_000
 class OAFetcher:
     def __init__(self):
         self.logger = logging.getLogger("OAFetcher")
+        #: 机构主机用的免代理会话（懒创建）。同一次取全文会命中多个主机，直接复用
+        #: 一个会话会沿用主会话的代理设置，所以这里单独持有。
+        self._direct_session = None
 
     def is_supplement(self, url: str) -> bool:
         if not url:
@@ -304,10 +307,20 @@ class OAFetcher:
                     raise RuntimeError(
                         f"Request skipped: '{url}' blocked by the "
                         f"auth-rejection breaker for the current chat round.")
-                req_headers = session.headers.copy()
+                # 机构主机（TAIR 等）按机构出口 IP 授权，必须直连：代理出口 IP 会
+                # 让订阅级权限消失。会话按主机选，头部沿用主会话那份浏览器伪装。
+                active = session
+                if is_direct_host(url):
+                    if self._direct_session is None:
+                        self._direct_session = create_robust_session(url)
+                        self._direct_session.headers.update(session.headers)
+                        self.logger.info("Institutional host detected; using a "
+                                         "proxy-bypassed session for it.")
+                    active = self._direct_session
+                req_headers = active.headers.copy()
                 if headers:
                     req_headers.update(headers)
-                res = session.get(url, headers=req_headers, timeout=timeout)
+                res = active.get(url, headers=req_headers, timeout=timeout)
                 # 401/403 计入全局鉴权熔断器（阈值 2，本轮内生效）。
                 # 注：若调用方传入自定义 request_func（如 mcp_request），
                 # 计数由该底层实现负责，此处不重复计数。

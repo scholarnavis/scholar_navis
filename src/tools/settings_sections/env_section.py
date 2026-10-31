@@ -362,12 +362,19 @@ class EnvSectionMixin:
 
         self.combo_proxy_mode = BaseComboBox()
 
-        # 代理模式按**索引**取值（mode_map: off=0 / custom=1），
-        # 与显示文本无关，因此可以安全地本地化选项文本。
-        self.combo_proxy_mode.addItems([tr("Disable Proxy (Direct)"), tr("Enable Proxy (Custom)")])
+        # 代理模式按**索引**取值（system=0 / off=1 / custom=2），与显示文本无关，
+        # 因此可以安全地本地化选项文本。默认第一项即默认行为（跟随系统代理）。
+        self.combo_proxy_mode.addItems([
+            tr("Use System Proxy"),
+            tr("Disable Proxy (Direct)"),
+            tr("Enable Proxy (Custom)"),
+        ])
+        self.combo_proxy_mode.setToolTip(tr(
+            "System proxy follows the operating system's proxy settings (on Windows the "
+            "system proxy, elsewhere the HTTP(S)_PROXY environment variables)."))
 
-        current_mode = self.config.user_settings.get("proxy_mode", "off")
-        mode_map = {"off": 0, "custom": 1}
+        current_mode = self.config.user_settings.get("proxy_mode", "system")
+        mode_map = {"system": 0, "off": 1, "custom": 2}
         self.combo_proxy_mode.setCurrentIndex(mode_map.get(current_mode, 0))
 
         self.input_proxy = QLineEdit()
@@ -389,15 +396,42 @@ class EnvSectionMixin:
         self.chk_journal_proxy.setChecked(
             bool(self.config.user_settings.get("journal_use_proxy", False)))
 
+        # 机构数据库直连（绕过代理）。与上面的 Journal Browser 是两件事：
+        # 那条管内置浏览器，这条管应用自己的 HTTP 请求（TAIR 等按机构出口 IP 授权）。
+        self.chk_institutional_direct = QCheckBox(
+            tr("Direct (no proxy) for institutional databases"))
+        self.chk_institutional_direct.setToolTip(tr(
+            "On by default. TAIR and similar resources grant subscription features by "
+            "recognizing your institution's IP address; going through a proxy replaces "
+            "that address and the extra access is lost."))
+        self.chk_institutional_direct.setChecked(
+            bool(self.config.user_settings.get("institutional_direct", True)))
+
+        self.input_institutional_hosts = QLineEdit()
+        self.input_institutional_hosts.setPlaceholderText(
+            tr("Extra host suffix(es), comma separated, e.g. arabidopsis.org"))
+        hosts = self.config.user_settings.get("institutional_hosts") or []
+        self.input_institutional_hosts.setText(
+            ", ".join(str(h) for h in hosts if str(h).strip()))
+        self.input_institutional_hosts.setToolTip(tr(
+            "Leave empty to use the built-in list. Suffixes match the host and its "
+            "subdomains."))
+        self.input_institutional_hosts.setEnabled(self.chk_institutional_direct.isChecked())
+        self.chk_institutional_direct.toggled.connect(
+            self.input_institutional_hosts.setEnabled)
+
         layout.addRow(tr("Proxy Mode:"), self.combo_proxy_mode)
         layout.addRow(tr("Proxy URL:"), self.input_proxy)
         layout.addRow(tr("Journal Browser:"), self.chk_journal_proxy)
+        layout.addRow(tr("Institutional DBs:"), self.chk_institutional_direct)
+        layout.addRow(tr("Direct Hosts:"), self.input_institutional_hosts)
         layout.addRow(tr("HF Mirror:"), self.input_mirror)
 
         self.layout.addWidget(group)
 
     def _on_proxy_mode_changed(self, index):
-        is_custom = (index == 1)
+        """只有自定义模式才需要填代理地址（system=0 / off=1 / custom=2）。"""
+        is_custom = (index == 2)
         self.input_proxy.setEnabled(is_custom)
 
     # ---------- System ----------

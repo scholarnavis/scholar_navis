@@ -299,9 +299,15 @@ class ConfigManager:
             "current_model_id": "embed_nano_fast",
             "rerank_model_id": "rerank_lite",
             "inference_device": "cpu",
-            "proxy_mode": "off",
+            # system = 跟随操作系统 / 环境变量的代理设置（默认）；off = 强制直连；
+            # custom = 使用下方 proxy_url。判定只在 network_worker.proxy_mode() 一处。
+            "proxy_mode": "system",
             "proxy_url": "",
             "journal_use_proxy": False,
+            # 机构数据库直连（绕过代理）：TAIR 等资源按机构出口 IP 授权，默认直连。
+            # 主机列表留空表示使用 src/core/network_worker.DEFAULT_DIRECT_HOSTS。
+            "institutional_direct": True,
+            "institutional_hosts": [],
             "hf_mirror": "",
             "hf_token": "",
             "theme": "auto",
@@ -387,6 +393,15 @@ class ConfigManager:
                     is_modified = True
 
         self.user_settings = current_settings
+        # 一次性迁移：旧版本的默认代理是"关闭（直连）"，现在默认"跟随系统代理"。
+        # 只有从未迁移过、且仍是旧默认值的配置才升级；升级后写入标记，用户此后
+        # 在设置页选的任何模式（含再次关闭）都不会再被改写。
+        if not current_settings.get("proxy_mode_migrated"):
+            if str(current_settings.get("proxy_mode") or "").strip().lower() in ("", "off"):
+                current_settings["proxy_mode"] = "system"
+                self.logger.info("Proxy mode migrated from 'off' to 'system' (new default).")
+            current_settings["proxy_mode_migrated"] = True
+            is_modified = True
         if is_modified:
             self.save_settings()
         self.apply_env_vars()
@@ -541,7 +556,6 @@ class ConfigManager:
         os.environ["HF_HOME"] = models_dir
         os.environ["SENTENCE_TRANSFORMERS_HOME"] = models_dir
 
-        proxy = self.user_settings.get("proxy_url", "").strip()
         mirror = self.user_settings.get("hf_mirror", "").strip()
         token = self.user_settings.get("hf_token", "").strip()
 
@@ -552,12 +566,17 @@ class ConfigManager:
         else:
             os.environ.pop("HF_TOKEN", None)
 
-        if proxy:
-            os.environ["HTTP_PROXY"] = proxy
-            os.environ["HTTPS_PROXY"] = proxy
+        # 代理环境变量只由 network_worker 按 system / off / custom 三态统一写入。
+        # 这里刻意不自己判断：配置加载发生在 network_worker 导入链上，延迟导入成功
+        # 才写；失败说明它还没就绪，启动链稍后的 setup_global_network_env 会补上。
+        try:
+            from src.core.network_worker import apply_proxy_env, proxy_env_overrides
+        except ImportError as e:
+            logger.debug(f"Proxy env deferred to setup_global_network_env: {e}")
         else:
-            os.environ.pop("HTTP_PROXY", None)
-            os.environ.pop("HTTPS_PROXY", None)
+            # 必须把 user_settings 传进去：此刻正处在 ConfigManager 初始化链上，
+            # 让对侧再构造一个 ConfigManager 会无限重入 __init__。
+            apply_proxy_env(os.environ, proxy_env_overrides(self.user_settings))
 
         os.environ["NCBI_API_EMAIL"] = self.user_settings.get("ncbi_email", "")
         os.environ["NCBI_API_KEY"] = self.user_settings.get("ncbi_api_key", "")

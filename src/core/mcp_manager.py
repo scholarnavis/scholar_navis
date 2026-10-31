@@ -90,22 +90,14 @@ class MCPManager:
     def bootstrap_servers(self, force_all=True):
         config_mgr = ConfigManager()
         servers = config_mgr.mcp_servers.get("mcpServers", {})
-        user_cfg = config_mgr.user_settings
 
         safe_base_env = os.environ.copy()
         safe_base_env["PYTHONIOENCODING"] = "utf-8"
 
-        if user_cfg.get("proxy_mode") == "custom" and user_cfg.get("proxy_url"):
-            proxy = user_cfg.get("proxy_url")
-            safe_base_env["HTTP_PROXY"] = proxy
-            safe_base_env["HTTPS_PROXY"] = proxy
-            safe_base_env["http_proxy"] = proxy
-            safe_base_env["https_proxy"] = proxy
-        else:
-            safe_base_env.pop("HTTP_PROXY", None)
-            safe_base_env.pop("HTTPS_PROXY", None)
-            safe_base_env.pop("http_proxy", None)
-            safe_base_env.pop("https_proxy", None)
+        # 子进程的代理环境与主进程同一套判定（system / off / custom 都在
+        # network_worker.proxy_env_overrides 里）：这里只在副本上应用，绝不改 os.environ。
+        from src.core.network_worker import apply_proxy_env, proxy_env_overrides
+        apply_proxy_env(safe_base_env, proxy_env_overrides())
 
         if hasattr(self, 'log_port'):
             safe_base_env["MCP_LOG_PORT"] = str(self.log_port)

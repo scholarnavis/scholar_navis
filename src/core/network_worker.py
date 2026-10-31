@@ -4,13 +4,15 @@ import random
 import re
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from urllib.parse import urlsplit
 
 import requests
 import httpx
 from PySide6.QtCore import QObject, Signal
 
 from src.core.config_manager import ConfigManager
+from src.core.platform_env import is_windows
 
 if TYPE_CHECKING:  # 仅用于类型注解：运行期不导入 chromadb（启动链上约 0.4 s）
     from chromadb import Documents, Embeddings
@@ -147,15 +149,65 @@ def cffi_disabled() -> bool:
         return bool(_cffi_broken_reason)
 
 
-def create_robust_session():
+#: 默认直连（绕过代理）的机构数据库域名后缀。
+#:
+#: TAIR（``arabidopsis.org``）这类资源按**机构出口 IP** 授权：机构网内的机器不登录
+#: 也能用订阅级功能，而一经代理就换成了代理出口 IP，权限反而消失。因此默认直连，
+#: 由设置页的开关与主机列表调整（见 :func:`direct_hosts`）。只放域名后缀，匹配时按
+#: 完整域名或子域判断，避免 ``evil-arabidopsis.org`` 这类仿冒后缀蹭到豁免。
+DEFAULT_DIRECT_HOSTS = ("arabidopsis.org",)
+
+
+def direct_hosts() -> Tuple[str, ...]:
+    """需要直连（绕过代理）的主机后缀；开关关闭时返回空元组。
+
+    配置键：``institutional_direct``（默认开）与 ``institutional_hosts``（用户增删，
+    留空即用 :data:`DEFAULT_DIRECT_HOSTS`）。
+    """
+    cfg = ConfigManager().user_settings
+    if not bool(cfg.get("institutional_direct", True)):
+        return ()
+    raw = cfg.get("institutional_hosts")
+    hosts = [str(item).strip().lower().lstrip(".") for item in raw] if isinstance(raw, list) else []
+    hosts = [item for item in hosts if item]
+    if not hosts:
+        hosts = [host.lower() for host in DEFAULT_DIRECT_HOSTS]
+    out: list = []
+    for host in hosts:
+        if host not in out:
+            out.append(host)
+    return tuple(out)
+
+
+def is_direct_host(url: str) -> bool:
+    """该 URL 是否属于"按机构 IP 授权、必须直连"的主机。"""
+    try:
+        host = (urlsplit(str(url or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    for suffix in direct_hosts():
+        if host == suffix or host.endswith("." + suffix):
+            return True
+    return False
+
+
+def create_robust_session(url: str = ""):
     """
     创建一个真正强壮的 Session，
     自动挂载全局代理配置，并使用底层 TLS 指纹 + 严格匹配的 Header 伪装真实浏览器。
+
+    :param url: 即将请求的地址；属于机构数据库主机（见 :func:`is_direct_host`）时
+        返回**免代理**会话。这类主机按机构出口 IP 授权，走代理会失去订阅级权限。
 
     当 curl_cffi 在本机不可用（未安装 / TLS 库加载失败，见 :func:`cffi_disabled`）时，
     退化为标准 ``requests.Session`` + 随机浏览器 Header，行为与"未安装 curl_cffi"
     的既有分支完全一致。
     """
+    direct = bool(url) and is_direct_host(url)
+    if direct:
+        logger.debug(f"Direct (proxy-bypassed) session for institutional host: {url[:120]}")
     if HAS_CFFI and not cffi_disabled():
         targets = ["chrome110", "chrome116", "chrome120"]
         target = random.choice(targets)
@@ -189,12 +241,10 @@ def create_robust_session():
         session = requests.Session()
         session.headers.update(get_random_browser_headers())
 
-    proxy_cfg = _get_explicit_proxy_kwargs()
-    if "trust_env" in proxy_cfg:
-        session.trust_env = False
-    elif "proxy" in proxy_cfg:
-        session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
-
+    # 代理挂载只有一处实现（含"机构数据库直连"的豁免）：调用点不重复判断模式。
+    # 注意不能只靠 NO_PROXY 环境变量：代理一旦写在 session.proxies 上，requests 就
+    # 不再查环境变量，NO_PROXY 对这类会话完全无效。
+    apply_proxy_to_session(session, url)
     return session
 
 
@@ -246,48 +296,218 @@ def _ensure_ca_bundle() -> None:
         logger.info(f"System CA store unavailable; pinned HTTPS CA bundle to certifi: {bundle}")
 
 
+#: 代理模式的合法取值（默认 ``system``：跟随操作系统 / 环境变量的代理设置）。
+PROXY_MODES = ("system", "off", "custom")
+
+#: 需要被代理设置接管的变量：大小写两份都写，requests / httpx / curl 各读各的。
+_PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                   "http_proxy", "https_proxy", "all_proxy")
+_NO_PROXY_KEYS = ("NO_PROXY", "no_proxy")
+
+
+def _settings(settings: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    """取配置字典。
+
+    允许调用方直接传入 ``user_settings``：``ConfigManager`` 的初始化链里会调用
+    :func:`proxy_env_overrides`，而 ``ConfigManager()`` 在初始化完成前会重新进入
+    ``__init__``——那时再去构造新实例就是无限递归。传字典即可完全避开。
+    """
+    return settings if settings is not None else ConfigManager().user_settings
+
+
+def proxy_mode(settings: Optional[Dict[str, object]] = None) -> str:
+    """当前代理模式；非法值（含旧配置缺失）一律按 ``system`` 处理。"""
+    raw = str(_settings(settings).get("proxy_mode", "system") or "").strip().lower()
+    return raw if raw in PROXY_MODES else "system"
+
+
+def _custom_proxy_url(settings: Optional[Dict[str, object]] = None) -> str:
+    """用户在 ``custom`` 模式下填写的代理地址。"""
+    return str(_settings(settings).get("proxy_url", "") or "").strip()
+
+
+def _windows_system_proxy() -> str:
+    """Windows 的 WinINET 代理（系统设置 → 代理）。
+
+    Windows 的系统代理不体现在环境变量里，只在注册表：
+    ``HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings`` 的
+    ``ProxyEnable`` 与 ``ProxyServer``。不读它，“使用系统代理”在 Windows 上等于没说。
+    """
+    try:
+        import winreg
+    except ImportError:      # 非 Windows 上不该走到这里
+        return ""
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            if not int(enabled):
+                return ""
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+    except (OSError, ValueError) as e:
+        logger.debug(f"Cannot read the Windows proxy settings: {e}")
+        return ""
+
+    text = str(server or "").strip()
+    if not text:
+        return ""
+    # 形如 "host:8080" 或 "http=host:1;https=host:2"（按协议分别指定）。
+    if "=" in text:
+        scheme_map = {}
+        for item in text.split(";"):
+            name, _, value = item.partition("=")
+            if name.strip() and value.strip():
+                scheme_map[name.strip().lower()] = value.strip()
+        text = scheme_map.get("https") or scheme_map.get("http") or ""
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    return text
+
+
+def system_proxy_url() -> str:
+    """操作系统侧的代理地址（取不到返回空串）。
+
+    Windows 读注册表，其余平台读进程环境变量——命令行程序所说的“系统代理”就是这些
+    变量。这里只做发现，不做写入；写入见 :func:`proxy_env_overrides`。
+    """
+    if is_windows():
+        found = _windows_system_proxy()
+        if found:
+            return found
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                "ALL_PROXY", "all_proxy"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def proxy_env_overrides(settings: Optional[Dict[str, object]] = None) -> Dict[str, str]:
+    """按当前代理模式给出**要写入的环境变量**；值为空串表示应删除该变量。
+
+    ``system`` 只补 Windows 注册表里发现的代理：其他平台的系统代理本来就是环境变量，
+    再“写一遍”会把用户继承来的设置覆盖成自己的，反而丢信息。
+
+    :param settings: 已知的 ``user_settings``；配置初始化过程中必须传，否则会重入
+        构造 ``ConfigManager``。
+    """
+    mode = proxy_mode(settings)
+    if mode == "system":
+        found = _windows_system_proxy() if is_windows() else ""
+        if not found:
+            return {}
+        return {key: found for key in _PROXY_ENV_KEYS}
+    if mode == "custom":
+        # 这里也必须带 settings：否则又回到构造 ConfigManager 的老路（见 docstring）。
+        url = _custom_proxy_url(settings)
+        if not url:
+            return {key: "" for key in _PROXY_ENV_KEYS + _NO_PROXY_KEYS}
+        overrides = {key: url for key in _PROXY_ENV_KEYS}
+        overrides.update({key: "" for key in _NO_PROXY_KEYS})
+        return overrides
+    # off：连环境变量里的代理也不认，显式声明"全部直连"。
+    overrides = {key: "" for key in _PROXY_ENV_KEYS}
+    overrides.update({key: "*" for key in _NO_PROXY_KEYS})
+    return overrides
+
+
+def apply_proxy_env(target: Dict[str, str], overrides: Dict[str, str]) -> None:
+    """把 :func:`proxy_env_overrides` 的结果应用到任意环境字典（本进程或子进程副本）。"""
+    for key, value in overrides.items():
+        if value:
+            target[key] = value
+        else:
+            target.pop(key, None)
+
+
+def apply_proxy_to_session(session, url: str = "") -> None:
+    """把代理设置落到 requests / curl_cffi 会话上（唯一实现）。
+
+    :param url: 即将请求的地址；机构数据库主机（TAIR 等）按机构出口 IP 授权，
+        必须直连，见 :func:`is_direct_host`。
+
+    ``system`` 模式优先**显式**挂载发现到的代理，而不是指望底层库读环境变量：
+    curl_cffi 各版本对 env 代理的支持并不一致，显式设置才可预期。
+    """
+    if url and is_direct_host(url):
+        session.trust_env = False
+        session.proxies = {}
+        logger.debug(f"Direct (proxy-bypassed) session for institutional host: {url[:120]}")
+        return
+
+    mode = proxy_mode()
+    if mode == "custom":
+        url = _custom_proxy_url()
+        session.trust_env = False
+        session.proxies = {"http": url, "https": url} if url else {}
+        return
+    if mode == "off":
+        session.trust_env = False
+        session.proxies = {}
+        return
+
+    discovered = system_proxy_url()
+    if discovered:
+        session.trust_env = False
+        session.proxies = {"http": discovered, "https": discovered}
+    else:
+        session.trust_env = True
+        session.proxies = {}
+
+
+def httpx_proxy_kwargs() -> Dict[str, object]:
+    """httpx 客户端的代理参数（任务层不再各自判断 ``proxy_mode``）。"""
+    return dict(_get_explicit_proxy_kwargs())
+
+
+def requests_proxy_arg() -> Dict[str, str]:
+    """``requests`` 单次调用要用的 ``proxies`` 映射。
+
+    用于不便持有会话的零散调用（embedding / rerank）。空串表示"别用代理"，
+    ``{}`` 表示"交给 requests 按环境变量决定"——与 :func:`apply_proxy_to_session`
+    的三态口径一致。
+    """
+    mode = proxy_mode()
+    if mode == "custom":
+        url = _custom_proxy_url()
+        return {"http": url, "https": url} if url else {"http": "", "https": ""}
+    if mode == "off":
+        return {"http": "", "https": ""}
+    discovered = system_proxy_url()
+    return {"http": discovered, "https": discovered} if discovered else {}
+
+
 def setup_global_network_env():
     _ensure_ca_bundle()
-    cfg = ConfigManager().user_settings
-    proxy_mode = cfg.get("proxy_mode", "off")
-    proxy_url = cfg.get("proxy_url", "").strip()
-    hf_mirror = cfg.get("hf_mirror", "").strip()
-
+    hf_mirror = ConfigManager().user_settings.get("hf_mirror", "").strip()
     if hf_mirror:
         os.environ["HF_ENDPOINT"] = hf_mirror
         logger.debug(f"HF_ENDPOINT set to: {hf_mirror}")
     else:
         os.environ.pop("HF_ENDPOINT", None)
 
-    if hf_mirror:
-        os.environ["HF_ENDPOINT"] = hf_mirror
-        logger.debug(f"HF_ENDPOINT set to: {hf_mirror}")
-    else:
-        os.environ.pop("HF_ENDPOINT", None)
-
-    if proxy_mode == "custom" and proxy_url:
-        os.environ["HTTP_PROXY"] = proxy_url
-        os.environ["HTTPS_PROXY"] = proxy_url
-        os.environ["ALL_PROXY"] = proxy_url
-        os.environ.pop("NO_PROXY", None)
-        logger.debug(f"Global custom proxy set to: {proxy_url}")
-    else:
-        os.environ.pop("HTTP_PROXY", None)
-        os.environ.pop("HTTPS_PROXY", None)
-        os.environ.pop("ALL_PROXY", None)
-        os.environ["NO_PROXY"] = "*"
-        logger.debug("Global proxy disabled.")
+    overrides = proxy_env_overrides()
+    apply_proxy_env(os.environ, overrides)
+    logger.debug("Global proxy mode '%s' applied (%d env var(s) touched).",
+                 proxy_mode(), len(overrides))
 
 
 def _get_explicit_proxy_kwargs():
-    """Reads configuration to generate explicit proxy arguments for request libraries."""
-    cfg = ConfigManager().user_settings
-    proxy_mode = cfg.get("proxy_mode", "off")
-    proxy_url = cfg.get("proxy_url", "").strip()
+    """按代理模式给出请求库的参数（唯一判定点，调用方不自己看 proxy_mode）。
 
-    if proxy_mode == "custom" and proxy_url:
-        return {"proxy": proxy_url}
-    return {"trust_env": False}
+    * ``custom`` —— ``{"proxy": url}``；没填地址等同于直连；
+    * ``off``    —— ``{"trust_env": False}``：连环境变量都不读；
+    * ``system`` —— ``{"trust_env": True}``：交给库去读环境/系统代理。
+    """
+    mode = proxy_mode()
+    if mode == "custom":
+        url = _custom_proxy_url()
+        return {"proxy": url} if url else {"trust_env": False}
+    if mode == "off":
+        return {"trust_env": False}
+    return {"trust_env": True}
 
 
 class LightNetworkWorker(QObject):
@@ -318,12 +538,7 @@ class LightNetworkWorker(QObject):
     def fetch_models(self, base_url, api_key):
         self._is_cancelled = False
         self._req_session = requests.Session()
-
-        proxy_cfg = _get_explicit_proxy_kwargs()
-        if "trust_env" in proxy_cfg:
-            self._req_session.trust_env = False
-        elif "proxy" in proxy_cfg:
-            self._req_session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
+        apply_proxy_to_session(self._req_session)
 
         url = f"{base_url.rstrip('/')}/models"
         logger.info(f"Fetching models from: {url}")
@@ -358,14 +573,7 @@ class LightNetworkWorker(QObject):
         self._is_cancelled = False
         custom_params = custom_params or {}
 
-        httpx_kwargs = {"timeout": 15.0}
-        proxy_cfg = _get_explicit_proxy_kwargs()
-
-        if "proxy" in proxy_cfg:
-            httpx_kwargs["proxy"] = proxy_cfg["proxy"]
-        elif "trust_env" in proxy_cfg:
-            httpx_kwargs["trust_env"] = proxy_cfg["trust_env"]
-
+        httpx_kwargs = {"timeout": 15.0, **httpx_proxy_kwargs()}
         self._httpx_client = httpx.Client(**httpx_kwargs)
         url = f"{base_url.rstrip('/')}/chat/completions"
         logger.info(f"Testing API endpoint: {url} with model: {model_name}")
@@ -444,12 +652,7 @@ class LightNetworkWorker(QObject):
                 "Skipped: image host blocked by auth-rejection breaker (current chat round).")
             return
         self._req_session = requests.Session()
-
-        proxy_cfg = _get_explicit_proxy_kwargs()
-        if "trust_env" in proxy_cfg:
-            self._req_session.trust_env = False
-        elif "proxy" in proxy_cfg:
-            self._req_session.proxies = {"http": proxy_cfg["proxy"], "https": proxy_cfg["proxy"]}
+        apply_proxy_to_session(self._req_session, url)
 
         logger.info(f"Downloading image from: {url}")
 
@@ -495,7 +698,6 @@ class NetworkEmbeddingFunction:
         self.api_url = api_url.rstrip('/')
         self.api_key = api_key
         self.model_name = model_name
-        self.proxy_kwargs = _get_explicit_proxy_kwargs()
 
     def __call__(self, input: "Documents") -> "Embeddings":
         headers = {
@@ -504,9 +706,8 @@ class NetworkEmbeddingFunction:
         }
         payload = {"input": input, "model": self.model_name}
 
-        proxies = {}
-        if "proxy" in self.proxy_kwargs:
-            proxies = {"http": self.proxy_kwargs["proxy"], "https": self.proxy_kwargs["proxy"]}
+        # 代理在调用时才算：构造时缓存会让"保存设置后改模式"对已有实例失效。
+        proxies = requests_proxy_arg()
 
         logger.debug(f"Requesting embeddings for {len(input)} documents using {self.model_name}")
 
@@ -544,7 +745,6 @@ class NetworkRerankerFunction:
         self.api_url = api_url.rstrip('/')
         self.api_key = api_key
         self.model_name = model_name
-        self.proxy_kwargs = _get_explicit_proxy_kwargs()
 
     def rerank(self, query: str, docs: list) -> list:
         headers = {
@@ -557,9 +757,8 @@ class NetworkRerankerFunction:
             "documents": docs
         }
 
-        proxies = {}
-        if "proxy" in self.proxy_kwargs:
-            proxies = {"http": self.proxy_kwargs["proxy"], "https": self.proxy_kwargs["proxy"]}
+        # 同 embedding：代理在调用时按当前模式取，不在构造时缓存。
+        proxies = requests_proxy_arg()
 
         logger.debug(f"Requesting rerank for {len(docs)} documents using {self.model_name}")
 
