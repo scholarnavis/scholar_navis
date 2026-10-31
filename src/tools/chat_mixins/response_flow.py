@@ -35,8 +35,6 @@ class ChatResponseFlowMixin:
             self.model_selector.setEnabled(enabled)
         if hasattr(self, 'trans_selector'):
             self.trans_selector.setEnabled(enabled)
-        if hasattr(self, 'combo_kb'):
-            self.combo_kb.setEnabled(enabled)
 
         if hasattr(self, 'input_container'):
             if hasattr(self.input_container, 'chk_external_tools'):
