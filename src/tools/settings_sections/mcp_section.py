@@ -19,6 +19,7 @@ from src.core.i18n import tr
 from src.core.mcp_manager import MCPManager
 from src.core.skill_manager import SkillManager
 from src.core.theme_manager import ThemeManager, strong_weight_css
+from src.ui.components.dialog import StandardDialog
 from src.ui.components.file_dialogs import open_file_name
 from src.ui.components.toast import ToastManager
 

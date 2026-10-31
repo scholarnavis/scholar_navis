@@ -585,7 +585,7 @@ class ConfigManager:
         try:
             from src.core.network_worker import apply_proxy_env, proxy_env_overrides
         except ImportError as e:
-            logger.debug(f"Proxy env deferred to setup_global_network_env: {e}")
+            self.logger.debug(f"Proxy env deferred to setup_global_network_env: {e}")
         else:
             # 必须把 user_settings 传进去：此刻正处在 ConfigManager 初始化链上，
             # 让对侧再构造一个 ConfigManager 会无限重入 __init__。

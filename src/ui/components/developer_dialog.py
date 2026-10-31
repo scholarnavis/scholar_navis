@@ -2964,6 +2964,7 @@ class DeveloperDialog(BaseDialog):
         # 1) 分类与 MIME 推断
         try:
             from src.core.image_utils import (guess_mime, is_image_file, is_svg_file,
+                                              encode_data_url,
                                               IMAGE_EXTENSIONS, MAX_IMAGE_BYTES)
             cases = [("a.png", "image/png", True, False),
                      ("b.JPG", "image/jpeg", True, False),

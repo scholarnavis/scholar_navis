@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ from src.core.theme_manager import (ThemeManager, hex_to_rgba, overlay_scrollbar
                                     strong_weight_css)
 from src.task.chat_tasks import DownloadImageTask
 from src.ui.components.text_formatter import (TextFormatter, qt_font_family_css,
+                                              pick_cjk_font_family,
                                               resolve_qt_font_families,
                                               naturalize_table_html,
                                               card_to_markdown)
