@@ -10,12 +10,9 @@ from typing import List, Tuple
 from src.core import attachment_parser, safe_io
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask, TaskState
-from src.core.device_manager import DeviceManager
 from src.core.image_utils import IMAGE_EXTENSIONS, encode_data_url
-from src.core.kb_manager import KBManager, DatabaseManager
 from src.core.llm_errors import friendly_payload, strip_markers
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import get_model_conf, resolve_auto_model
 from src.core.references import (CITE_LINK_RE, FOOTER_RULE_HTML,
                                  PROVENANCE_HEADER_HTML, ReferenceItem,
                                  ReferenceRegistry, citation_href, split_footer)
@@ -311,135 +308,6 @@ def _trim_history_for_budget(history, token_budget):
         f"messages (~{total} -> ~{used} tokens).")
     return flat
 
-def _kb_retrieval_core(kb_id, search_query, main_model_name, history_context="",
-                       main_base_url="", declared_window=None):
-    """本地 KB 检索唯一权威实现：embedding 加载 -> 三变体向量检索 -> 交叉编码器
-    重排 -> 按主模型上下文预算裁剪 -> 生成 context_str 与 sources_map(整型 id)。
-
-    可在 GUI 进程内联执行，也可被 _kb_retrieval_worker 在独立子进程中调用（隔离
-    本地 ONNX 推理）。返回 (context_str, sources_map, domain)。KB 为空或检索为空
-    时 context_str/sources_map 均为空，由调用方决定默认文案。
-    """
-    from src.task.kb_tasks import _worker_load_model
-    from src.core.kb_manager import KBManager, DatabaseManager
-    from src.core.config_manager import ConfigManager
-    from src.core.token_estimator import estimate_tokens, resolve_context_window, derive_context_budgets
-    from src.core.rerank_engine import RerankEngine
-
-    cfg = ConfigManager()
-    kb_mgr = KBManager()
-    db = DatabaseManager()
-
-    kb_info = kb_mgr.get_kb_by_id(kb_id)
-    if not kb_info or kb_info.get('doc_count', 0) == 0:
-        return "", {}, "General Academic"
-
-    domain = kb_info.get('domain', 'General Academic')
-    embed_fn = _worker_load_model(kb_id, cfg)
-    if not db.switch_kb(kb_id, embedding_function=embed_fn):
-        raise RuntimeError(f"Failed to switch to Knowledge Base: {kb_id}")
-
-    # 三变体查询（严格零召回损失）：变体 3（domain 前缀）不可省略——单次查询无论
-    # 召回量多大都无法覆盖不同查询文本的召回集；DatabaseManager.query 内部
-    # _db_lock 串行化（含嵌入计算），并行查询无收益，故维持顺序执行。
-    expanded_queries = [
-        search_query,
-        f"{search_query}{history_context}",
-        f"{domain} context: {search_query} research details"
-    ]
-
-    candidate_docs = []
-    seen_contents = set()
-    for eq in expanded_queries:
-        raw_results = db.query(eq, n_results=20)
-        if raw_results and raw_results.get('documents') and raw_results['documents'][0]:
-            docs = raw_results['documents'][0]
-            metas = raw_results['metadatas'][0]
-            distances = raw_results.get('distances', [[0] * len(docs)])[0]
-            for i, doc_text in enumerate(docs):
-                clean_text = doc_text.strip()
-                if clean_text not in seen_contents and len(clean_text) > 20:
-                    seen_contents.add(clean_text)
-                    candidate_docs.append({
-                        "content": clean_text, "metadata": metas[i], "v_dist": distances[i]})
-    if not candidate_docs:
-        return "", {}, domain
-
-    candidate_docs = sorted(candidate_docs, key=lambda x: x.get('v_dist', 0))[:40]
-    try:
-        engine = RerankEngine()
-        ranked = engine.rerank(search_query, candidate_docs, domain=domain, top_k=len(candidate_docs))
-        final_docs = ranked or candidate_docs[:10]
-    except Exception:
-        final_docs = candidate_docs[:10]
-
-    _kb_limits = derive_context_budgets(
-        resolve_context_window(main_model_name, main_base_url, declared_window))
-    _kb_budget = _kb_limits["kb_token_budget"]
-    _kb_chunk_chars = _kb_limits["kb_chunk_chars"]
-    context_str = ""
-    sources_map = {}
-    current_ref_id = 1
-    kb_tokens = 0
-    for doc in final_docs:
-        sources_map[current_ref_id] = {
-            "path": doc['metadata'].get('file_path', ''),
-            "page": doc['metadata'].get('page', 1),
-            "name": doc['metadata'].get('source', 'Local DB'),
-            # 完整 chunk 原文（不再截断）：引用条目的 snippet 必须是来源逐字内容。
-            "search_text": doc['content'],
-        }
-        chunk = doc['content']
-        if len(chunk) > _kb_chunk_chars:
-            chunk = chunk[:_kb_chunk_chars] + "...[chunk truncated]"
-        chunk_tokens = estimate_tokens(chunk)
-        if kb_tokens + chunk_tokens > _kb_budget:
-            context_str += (
-                f"--- [Document {current_ref_id}] ---\n"
-                f"Source: {doc['metadata'].get('source', 'Local')}\n"
-                f"Content: [Omitted: KB context token budget exceeded; "
-                f"the citation entry still links to the source.]\n\n"
-            )
-        else:
-            kb_tokens += chunk_tokens
-            context_str += (
-                f"--- [Document {current_ref_id}] ---\n"
-                f"Source: {doc['metadata'].get('source', 'Local')}\n"
-                f"Content: {chunk}\n\n"
-            )
-        current_ref_id += 1
-    return context_str, sources_map, domain
-
-def _kb_retrieval_worker(kb_id, search_query, main_model_name, out_path, history_context="",
-                         main_base_url="", declared_window=None):
-    """独立子进程入口：隔离本地 ONNX 推理。执行权威检索逻辑并把结果写 out_path。
-    JSON 的 key 只能是字符串，写入前把整型 sources_map 键转字符串，父进程读回时复原。
-
-    ``main_base_url`` / ``declared_window`` 与父进程同口径传入：KB 注入预算按主模型
-    窗口推导，而窗口解析需要 (base_url, 声明值) 才能命中能力表的实测/声明记录。
-    """
-    import json
-    import logging
-    _log = logging.getLogger("KB.SubProc")
-    try:
-        from src.task.kb_tasks import _setup_worker_env
-        _setup_worker_env()
-        context_str, sources_map, _domain = _kb_retrieval_core(
-            kb_id, search_query, main_model_name, history_context,
-            main_base_url, declared_window)
-        payload = {
-            "context_str": context_str,
-            "sources_map": {str(k): v for k, v in sources_map.items()},
-        }
-    except Exception as e:
-        _log.error(f"KB subprocess retrieval failed: {e}", exc_info=True)
-        payload = {"context_str": "", "sources_map": {}, "error": str(e)}
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-    except Exception:
-        pass
-
 #: detect_primary_language 返回的语言码 -> prompt 中可读的语言名。
 #: 用于告诉主模型"用户原始语言是 X，请用 X 回复"（翻译仅用于英文检索）。
 _LANG_EN_NAMES = {
@@ -655,16 +523,6 @@ class ChatGenerationTask(BackgroundTask):
             self.external_context = attachment_parser.trim_total(self.external_context)
             self._emit_token("[CLEAR_SEARCH]")
 
-        if self.kb_id:
-            from src.core.models_registry import ModelManager
-            ready, missing_label, missing_id, m_type = ModelManager().verify_chat_models(self.kb_id)
-            if not ready:
-                self._emit_error(json.dumps({
-                    "title": "Model Missing - Action Blocked",
-                    "body": f"Required offline model is not installed:\n• {missing_label}\n\nPlease go to [Global Settings] and click 'Save' to download required models."
-                }))
-                return
-
         # 展示文本与协议文本分开取（见 _resolve_user_message_text）：哨兵只在
         # content 里，display_text 是给用户看的那一份。
         original_user_query, protocol_text = _resolve_user_message_text(
@@ -713,8 +571,6 @@ class ChatGenerationTask(BackgroundTask):
         if self.deep_mode is None:
             self.deep_mode = bool(self.config.user_settings.get("agent_deep_mode", False))
 
-        self.db = DatabaseManager()
-        self.kb_manager = KBManager()
         self.full_response_cache = ""
 
         # 新一轮开始：清空"上一轮问过哪些 DOI"。同一篇论文在新一轮里允许再问一次
@@ -734,21 +590,28 @@ class ChatGenerationTask(BackgroundTask):
         except Exception as e:
             self.logger.warning(f"Failed to clear provenance collector: {e}")
 
-        # Reranker 仅在真正需要时才后台预加载：跨编码器加载要导入庞大的
-        # transformers/optimum 栈，纯 LLM 对话（无 KB、无附件文档）根本用不到它，
-        # 盲目预载会让每次对话前白等数十秒。需要时 _process_rerank 仍会按需惰性加载。
-        if self.config.user_settings.get("rerank_auto_load", True) and self._rerank_needed_this_turn():
-            try:
-                import threading as _t
-                _t.Thread(target=self._preload_reranker, daemon=True).start()
-            except Exception as e:
-                self.logger.warning(f"Failed to spawn reranker preload thread: {e}")
-
         self.main_llm = None
         self.trans_llm = None
         self.vision_llm = None
 
         self._init_llms()
+        # 没有主模型就没有任何东西会产出正文：这条必须**显式失败**。
+        # 否则 agent.run 会在空模型上静默返回空串，任务以 SUCCESS 结束，界面只剩
+        # 一个空气泡（曾经表现为"重新生成后立刻 No response"），把真正的原因
+        # （没选模型 / provider 配置为空）藏起来。
+        if self.main_llm is None:
+            self.logger.error("No main LLM configured for this turn (main_config=%s).",
+                              bool(self.main_config))
+            self._emit_error(json.dumps(friendly_payload(
+                "No Model Configured",
+                ("This turn cannot start because no main model is available.\n\n"
+                 "How to fix:\n"
+                 "1. Open Global Settings and pick a provider with a valid API key;\n"
+                 "2. Make sure the selected provider has a model name;\n"
+                 "3. Save, then send the question again."),
+                details=f"main_config={'set' if self.main_config else 'empty'}",
+            ), ensure_ascii=False))
+            return
         # 新一轮生成开始：复位各 LLM 实例的取消标志（若实例复用）。
         # 放在任务入口而非 AgentRuntime.run 内，避免 deep 模式多子 Agent 共享
         # 同一 LLM 时，并发 reset 与用户取消产生竞态。
@@ -810,7 +673,9 @@ class ChatGenerationTask(BackgroundTask):
             self.send_log(
                 "INFO",
                 f"Non-English query detected; separate translation round-trip disabled. "
-                "Main agent will handle query and translate internally for English-only tools.",
+                "The main agent handles the query itself; if it passes non-English "
+                "keywords to an English-only search tool, the runtime translates that "
+                "argument on demand and caches it for this turn.",
             )
 
         # Phase 1.5: 工具池构建。Planner 只负责"暴露全部工具"，工具的取舍完全
@@ -854,28 +719,10 @@ class ChatGenerationTask(BackgroundTask):
             self.logger.info(
                 "Follow-up-only query detected; relying on conversation history "
                 "instead of running a new literature search.")
-        # 本地 KB：只有用户显式挂了一个库时才走。本地 embedding/rerank 属重量级
-        # ONNX/torch 推理，统一交给子进程隔离。
-        if self.kb_id and not followup_only:
-            self.send_log("INFO", "Initiating local Vector RAG retrieval...")
-            self._emit_token("[CLEAR_SEARCH]")
-            self._emit_token(
-                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Searching local knowledge base and reranking documents...</div>\n\n")
-            time.sleep(0.05)
-
-            kb_info = self.kb_manager.get_kb_by_id(self.kb_id)
-            if kb_info and kb_info.get('doc_count', 0) == 0:
-                self.logger.warning(f"Knowledge Base '{kb_info.get('name')}' is empty. Skipping vector retrieval.")
-            elif kb_info:
-                domain = kb_info.get('domain', 'General Academic')
-                self._emit_token(
-                    "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Loading local vector model and retrieving literature...</div>\n\n")
-                context_str, sources_map, domain = self._run_kb_retrieval(search_query, domain)
-                # KB 文档编号（1..N）统一进注册表：与 cite_references 的编号空间合并。
-                _seed_registry_from_sources(reference_registry, sources_map, evidence_store)
-
+        # 知识库已下线：这里刻意不留回退分支。所有检索证据都来自学术工具，
+        # 上下文里只应该有工具返回的来源与用户附件。
         if not context_str.strip():
-            context_str = "No local database documents provided."
+            context_str = ""
 
         external_chunks = self.external_context or []
         images = [c for c in external_chunks if c.get("type") == "image" or str(c.get("path", "")).lower().endswith(
@@ -890,26 +737,22 @@ class ChatGenerationTask(BackgroundTask):
 
         llm_content = []
 
-        # Phase 3: External Attachments Integration(文件打分环节)
+        # Phase 3: 附件文本块挑选（词面重合度，无模型推理）
         if docs:
-            self.send_log("INFO", f"Detected {len(docs)} uploaded document chunks. Starting Reranker scoring...")
+            self.send_log("INFO", f"Detected {len(docs)} uploaded document chunks. "
+                                  f"Selecting by keyword overlap...")
             self._emit_token(
-                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Filtering and reranking attached documents...</div>\n\n")
+                "<div class='status-msg' style='color:#05B8CC; margin-bottom:4px;'>Selecting the most relevant attached segments...</div>\n\n")
             cand_docs = [{"content": d.get("content", ""),
                           "metadata": {"name": d.get("name", "Unknown"), "page": d.get("page", 1)}} for d in docs]
 
             if len(cand_docs) > 5:
-                reranked_docs = self._process_rerank(search_query, cand_docs, "General")
-                if reranked_docs is not None:
-                    self.send_log("INFO",
-                                  f"Reranker finished: Reduced {len(cand_docs)} chunks to top {len(reranked_docs)} most relevant segments.")
-                    cand_docs = reranked_docs
-                else:
-                    self.send_log("WARNING", "Reranker failed for files, falling back to top-k selection.")
-                    cand_docs = cand_docs[:8]
+                cand_docs = self._select_chunks_by_overlap(search_query, cand_docs, limit=8)
+                self.send_log("INFO",
+                              f"Selected {len(cand_docs)} of {len(docs)} chunks by keyword overlap.")
             else:
                 self.send_log("INFO",
-                              f"Small attachment size ({len(cand_docs)} chunks), skipping rerank and using all content.")
+                              f"Small attachment size ({len(cand_docs)} chunks), using all content.")
 
             for doc in cand_docs:
                 f_name = doc["metadata"]["name"]
@@ -2004,155 +1847,24 @@ class ChatGenerationTask(BackgroundTask):
             text, tags=("ask_user", "deep_plan"))
         return text.strip()
 
-    def _rerank_needed_this_turn(self):
-        """判断本轮是否需要交叉编码器重排。
+    def _select_chunks_by_overlap(query, chunks, limit: int = 8):
+        """按与问题的词面重合度挑选附件文本块（确定性、零模型开销）。
 
-        重排只在两种情形被调用（见主流程 Phase 2/Phase 3）：
-        - 命中了非空知识库的候选文档；
-        - 用户附带 >5 个文本块需要打分。
-        其余纯 LLM 对话（例如只跑学术 Agent、无 KB 无附件）不需要重排，
-        提前预载只会白付 transformers/optimum 的庞大导入开销。
+        打分为命中词的加权计数（≥4 字的词记 2 分，其余 1 分），同分时保留附件原
+        顺序——用户刚贴进来的文档，靠前的块上下文通常更完整。取不到任何词时直接
+        取前 ``limit`` 块，行为可预测。
         """
-        try:
-            if self.kb_id:
-                kb = self.kb_manager.get_kb_by_id(self.kb_id)
-                # 与 Phase 2 空库跳过逻辑保持一致；取不到元信息时保守按需预载
-                if kb and kb.get('doc_count', 0) > 0:
-                    return True
-            text_docs = [
-                c for c in getattr(self, 'external_context', [])
-                if c.get("type") != "image" and (c.get("content") or "").strip()
-            ]
-            if len(text_docs) > 5:
-                return True
-        except Exception as e:
-            self.logger.debug(f"Reranker need-check failed, defaulting to eager preload: {e}")
-            return True
-        return False
+        terms = {w.lower() for w in re.findall(r"[A-Za-z]{3,}|\d{2,}", str(query or ""))}
+        if not terms:
+            return list(chunks)[:limit]
+        scored = []
+        for order, chunk in enumerate(chunks):
+            text = str(chunk.get("content") or "").lower()
+            score = sum(2 if len(term) >= 4 else 1 for term in terms if term in text)
+            scored.append((-score, order, chunk))
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return [chunk for _neg, _order, chunk in scored[:limit]]
 
-    def _preload_reranker(self):
-        """后台线程预加载交叉编码器重排模型。"""
-        try:
-            from src.core.rerank_engine import RerankEngine
-            RerankEngine().preload()
-        except Exception as e:
-            self.logger.warning(f"Reranker preload failed: {e}")
-
-    def _run_kb_retrieval(self, search_query, domain):
-        """在 GUI 进程内执行 Phase 2 的本地 KB 检索与重排。
-
-        聊天任务现运行在 GUI 进程的 QThread 中，本地 embedding/rerank 属于
-        ONNX/torch 重量级且易崩溃（GPU OOM / 驱动问题）的推理。为保留崩溃隔离
-        与资源释放，优先把它们放进一个独立短命子进程（_kb_retrieval_worker）
-        执行并回传结果；子进程不可用或超时则回退为进程内联执行（_kb_retrieval_core），
-        保证 KB 检索永不因隔离失败而中断。
-
-        返回 (context_str, sources_map, effective_domain)。调用方负责在 context_str
-        为空时写默认文案。
-        """
-        model_name, base_url, declared_window = self._main_model_facts()
-        history_context = ""
-        if len(self.messages) >= 3:
-            prev_assistant = self.messages[-2].get('content', '')[:100]
-            if isinstance(prev_assistant, str):
-                history_context = f" (Context: {prev_assistant})"
-
-        # 优先走独立子进程隔离本地推理
-        try:
-            import multiprocessing as mp
-            import tempfile
-
-            fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="kb_ret_")
-            os.close(fd)
-
-            proc = mp.Process(
-                target=_kb_retrieval_worker,
-                args=(self.kb_id, search_query, model_name, tmp_path, history_context,
-                      base_url, declared_window),
-                daemon=True,
-            )
-            proc.start()
-            deadline = time.time() + 120.0  # 硬上限兜底，避免无限等待
-            while proc.is_alive():
-                if self.is_cancelled():
-                    proc.terminate()
-                    break
-                if time.time() > deadline:
-                    self.logger.warning("KB retrieval subprocess timed out; killing it.")
-                    proc.terminate()
-                    break
-                time.sleep(0.1)
-            proc.join(timeout=2.0)
-
-            if os.path.exists(tmp_path):
-                with open(tmp_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                # JSON key 只能是字符串，这里把引用 id 还原为整型（下游 UI 匹配用）
-                sources_map = {int(k): v for k, v in (data.get("sources_map") or {}).items()}
-                return data.get("context_str", ""), sources_map, domain
-        except Exception as e:
-            self.logger.warning(f"KB retrieval subprocess unavailable, falling back inline: {e}")
-
-        # 兜底：进程内联执行（共享同一权威实现，保证行为一致）
-        return _kb_retrieval_core(self.kb_id, search_query, model_name, history_context,
-                                  base_url, declared_window)[:2] + (domain,)
-
-    def _process_rerank(self, query, docs, domain, top_k=None, emit_warning=True):
-        """两阶段精排：交叉编码器重排 + 分数阈值过滤。
-
-        - top_k: 返回文档数上限；None 时取配置 rerank_top_k（默认 5）。
-        - 低于 rerank_min_score 的文档会被丢弃（全低于阈值时保底保留前 3 个，
-          避免上下文为空）。
-        - 首次失败弹一次警告，之后静默降级为原始顺序。
-        """
-        if not docs:
-            return []
-
-        cfg = self.config.user_settings
-        if top_k is None:
-            top_k = int(cfg.get("rerank_top_k", 5))
-        min_score = float(cfg.get("rerank_min_score", 0.0))
-
-        try:
-            from src.core.rerank_engine import RerankEngine
-            engine = RerankEngine()
-
-            ranked_docs = engine.rerank(query, docs, domain=domain, top_k=top_k)
-            if not ranked_docs:
-                return docs[:top_k]
-
-            # 分数阈值过滤：cross-encoder 概率分数，bge-reranker 类模型通常在 0.1~0.99
-            if min_score > 0:
-                kept = [d for d in ranked_docs if d.get("score", 1.0) >= min_score]
-                if not kept:
-                    kept = ranked_docs[:3]
-                elif len(kept) < len(ranked_docs):
-                    self.send_log("INFO",
-                                  f"Rerank threshold ({min_score}) dropped "
-                                  f"{len(ranked_docs) - len(kept)} low-relevance chunks.")
-                return kept
-
-            return ranked_docs
-
-        except Exception as e:
-            self.logger.error(f"Direct Rerank Engine execution failed: {e}")
-
-            if emit_warning and not self._rerank_warned:
-                self._rerank_warned = True
-                warning_html = (
-                    f"<br><div style='color:#e6a23c; font-size:13px; margin-bottom:5px; padding:10px; border:1px solid #e6a23c; border-radius:6px; background-color: rgba(230, 162, 60, 0.05);'>"
-                    f"⚠️ <b>Reranker Processing Failed</b><br><br>"
-                    f"Failed to rerank documents: <i>{str(e)}</i>.<br>"
-                    f"If the model is missing, please go to <b>[Global Settings] -> [Models]</b> to manually download it.<br><br>"
-                    f"<i>* Continuing analysis with default document ordering.</i>"
-                    f"</div><br>"
-                )
-                self._emit_token(warning_html)
-            else:
-                self.send_log("WARNING", "Reranker unavailable, using default document ordering.")
-
-            # 降级方案：返回未重新排序的前 top_k 个文档
-            return docs[:top_k]
 
 class ExportChatTask(BackgroundTask):
     """后台任务：把一段或全部对话写入 ``.schat`` 归档。
@@ -2292,14 +2004,11 @@ class DownloadImageTask(BackgroundTask):
             return {"success": False, "url": url, "path": save_path, "msg": "Invalid parameters"}
 
         try:
-            from src.core.config_manager import ConfigManager
-            proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
+            from src.core.network_worker import httpx_proxy_kwargs
 
-            httpx_kwargs = {"timeout": 30.0, "follow_redirects": True}
-            if proxy_url:
-                httpx_kwargs["proxy"] = proxy_url
-            else:
-                httpx_kwargs["trust_env"] = False
+            # 代理模式（system / off / custom）只在 network_worker 判定一次。
+            httpx_kwargs = {"timeout": 30.0, "follow_redirects": True,
+                            **httpx_proxy_kwargs()}
 
             if self.is_cancelled():
                 raise InterruptedError("Image download safely terminated by user.")
@@ -2318,25 +2027,3 @@ class DownloadImageTask(BackgroundTask):
             self.send_log("ERROR", f"Image download failed for {url}: {str(e)}")
             return {"success": False, "url": url, "path": save_path, "msg": str(e)}
 
-class FetchHardwareStatusTask(BackgroundTask):
-    """
-    异步获取硬件状态，避免阻塞主 UI 线程
-    """
-
-    def _execute(self):
-        from src.core.device_manager import DeviceManager
-        from src.core.config_manager import ConfigManager
-
-        dev_mgr = DeviceManager()
-        config = ConfigManager()
-
-        curr_id = config.user_settings.get("inference_device", "auto")
-        parsed_id = dev_mgr.parse_device_string(curr_id)
-
-        dev_name = parsed_id
-        for d in dev_mgr.get_available_devices():
-            if d['id'] == parsed_id:
-                dev_name = d['name']
-                break
-
-        return {"dev_name": dev_name}
