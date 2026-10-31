@@ -276,29 +276,121 @@ class ChatResponseFlowMixin:
             # deep-plan 等待确认：同样进入等待状态锁定通用发送。
             self._awaiting_user_input = True
         elif isinstance(payload, dict) and payload.get("event") == "fulltext_request":
-            # 取全文：任务线程正挂起等这份 PDF（本轮尚未结束），弹窗让用户下载并交回。
+            # 取全文：任务线程正挂起等这份 PDF（本轮尚未结束）。
             self._open_fulltext_dialog(dict(payload.get("data") or {}))
 
-    def _open_fulltext_dialog(self, data: dict):
-        """打开取全文窗口；用户交回 PDF 即唤醒挂起的本轮生成。
+    # ------------------------------------------------------------------ 取全文
 
-        ``exec()`` 进入嵌套事件循环：主线程仍能响应界面（用户要切到浏览器下载），而任务
-        线程已经等在 :mod:`src.core.fulltext_bridge` 上；用户交回文件后本轮从原处继续，
-        已检索到的来源、计划与引用注册表都不丢。
+    def _open_fulltext_dialog(self, data: dict):
+        """准备取全文窗口并发系统通知；**不抢焦点、不切换当前窗口**。
+
+        任务线程已经等在 :mod:`src.core.fulltext_bridge` 上，用户交回 PDF 后本轮从
+        原处继续，已检索到的来源、计划与引用注册表都不丢。窗口以
+        ``WA_ShowWithoutActivating`` 在后台打开（用户在任务栏能看到它），同时发一条
+        带应用名与图标的系统通知；只有用户点通知时，才由
+        :meth:`_on_fulltext_notification_clicked` 把它拉到前台。
         """
         conversation_id = str(self._tab_id() or "")
         if not conversation_id:
             logger.warning("fulltext_request event carries no conversation id; picker skipped.")
             return
+        from PySide6.QtCore import Qt
+
         from src.ui.components.fulltext_request import FullTextRequestDialog
 
-        logger.info("Opening the full-text picker (conversation=%s).", conversation_id)
+        self._close_fulltext_dialog()
+        logger.info("Preparing the full-text picker in the background (conversation=%s).",
+                    conversation_id)
         # 本类（ChatConversation）是 QObject（BaseTool），不能当 QDialog 的父窗口；
         # 与其它对话内弹窗一致，父窗口取对话页面控件（事件到达时界面早已建好）。
-        FullTextRequestDialog(getattr(self, "widget", None), data=data,
-                              conversation_id=conversation_id).exec()
+        dialog = FullTextRequestDialog(getattr(self, "widget", None), data=data,
+                                       conversation_id=conversation_id)
+        dialog.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        dialog.finished.connect(
+            lambda *_, d=dialog: self._on_fulltext_dialog_finished(d))
+        self._fulltext_dialog = dialog
+        self._fulltext_conversation_id = conversation_id
+        dialog.show()
+        self._notify_fulltext_request(data, conversation_id)
+
+    def _notify_fulltext_request(self, data: dict, conversation_id: str):
+        """发一条"需要全文"的系统通知（文案全部走 i18n，见 locales.py）。"""
+        from src.core.version import __app_name__
+        from src.ui.components.system_notify import system_notifier
+
+        notifier = system_notifier()
+        if not getattr(self, "_fulltext_notify_hooked", False):
+            notifier.activated.connect(self._on_fulltext_notification_clicked)
+            self._fulltext_notify_hooked = True
+
+        title = str(data.get("title") or "").strip()
+        doi = str(data.get("doi") or "").strip()
+        url = str(data.get("url") or "").strip()
+        reason = str(data.get("reason") or "").strip()
+
+        lines = [tr("Paper: {paper}").format(
+            paper=title or doi or url or tr("(no title provided)"))]
+        if doi:
+            lines.append(f"DOI: {doi}")
+        # 与窗口同一口径：模型写的 reason 优先，其次是自动升级带来的 note
+        # （如"自动下载没有成功（出版社 403）"）。
+        detail = (tr("Needed for: {reason}").format(reason=reason) if reason else
+                  str(data.get("note") or "").strip())
+        if detail:
+            lines.append(detail)
+        lines.append(tr("Download the PDF, then hand it over in the Scholar Navis window."))
+        body = "\n".join(lines)
+
+        notified = notifier.notify(f"{__app_name__} · {tr('Full text needed')}", body,
+                                   notification_id=conversation_id, timeout_ms=20000)
+        if not notified:
+            # 没有系统通知通道时至少给一条应用内提示：否则窗口静静等在后台，
+            # 用户既没看到通知、也不知道这一轮正卡在等他选文件。
+            logger.info("No system notification channel; the picker waits in the background.")
+            ToastManager().show(tr("The full-text picker is waiting for your PDF."), "info")
+        logger.debug("Full-text notification for conversation %s delivered=%s.",
+                     conversation_id, notified)
+
+    def _on_fulltext_notification_clicked(self, notification_id: str):
+        """用户点了系统通知：这时才把取全文窗口拉到前台（焦点由用户主动触发）。"""
+        dialog = getattr(self, "_fulltext_dialog", None)
+        if dialog is None:
+            return
+        current = str(getattr(self, "_fulltext_conversation_id", "") or "")
+        if notification_id and current and notification_id != current:
+            logger.debug("Notification click ignored: belongs to another conversation.")
+            return
+        logger.info("Bringing the full-text picker to the front on user request.")
+        dialog.showNormal()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_fulltext_dialog_finished(self, dialog):
+        """``finished`` 回调：只清掉"这一个"窗口（旧窗口迟到不应误关新窗口）。"""
+        if getattr(self, "_fulltext_dialog", None) is dialog:
+            self._close_fulltext_dialog()
+
+    def _close_fulltext_dialog(self):
+        """窗口已交付/取消：清掉引用与通知状态，避免再次被拉到前台。"""
+        dialog = getattr(self, "_fulltext_dialog", None)
+        self._fulltext_dialog = None
+        self._fulltext_conversation_id = ""
+        if dialog is not None:
+            try:
+                dialog.deleteLater()
+            except Exception:      # 窗口可能已随父控件销毁
+                pass
+        try:
+            from src.ui.components.system_notify import system_notifier
+
+            system_notifier().dismiss()
+        except Exception as e:
+            logger.debug("Notification dismiss skipped: %s", e)
 
     def on_chat_finished(self, is_cancelled=False):
+        # 本轮已结束：取全文窗口不再有等待方，留着只会让用户选完才发现没人接。
+        if getattr(self, "_fulltext_dialog", None) is not None:
+            self._close_fulltext_dialog()
         if hasattr(self, '_render_timer'):
             self._render_timer.stop()
         self.set_controls_enabled(True)

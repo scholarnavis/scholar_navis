@@ -40,6 +40,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from src.core import plot_styles
 from src.core.evidence import EvidenceStore, is_usable_source_text
+from src.core.i18n import tr
 from src.core.prompt_rules import CITATION_TOKEN_RULE
 from src.core.references import citation_token
 from src.core.think_tags import THINK_CLOSE_TAG, THINK_OPEN_TAG, strip as strip_think
@@ -382,16 +383,18 @@ _ALWAYS_TOOLS = {
             "name": "request_fulltext",
             "description": (
                 "Ask the user to download ONE paywalled paper as a PDF and hand it to the app, then "
-                "wait for it IN THIS SAME TURN. Calling it opens a picker window on the user's screen — "
-                "the user downloads the PDF there and drops it in — and this call BLOCKS until the file "
+                "wait for it IN THIS SAME TURN. Calling it raises a system notification on the user's "
+                "desktop (the picker stays in the background, it does NOT steal focus) — the user "
+                "downloads the PDF and picks it there — and this call BLOCKS until the file "
                 "arrives; it then returns a reading brief (key points + verbatim quotes + page numbers) "
                 "that a reading sub-agent extracted from that PDF. Quote those passages verbatim in "
                 "cite_references. Never call another tool while it is pending, call it at most ONCE per "
                 "paper per turn, and if it returns status 'unavailable' continue with the abstract and "
                 "say plainly that the full text could not be obtained. The app already does this "
-                "automatically when fetch_paper_fulltext comes back empty, so you only need this call "
-                "when you know the body is required BEFORE any fetch attempt — do not use it to repeat "
-                "a request the app has already made for the same paper."
+                "automatically whenever a body fetch comes back empty (no open-access copy, a blocked "
+                "download, or a network error), so you only need this call when you know the body is "
+                "required BEFORE any fetch attempt — do not use it to repeat a request the app has "
+                "already made for the same paper."
             ),
             "parameters": {
                 "type": "object",
@@ -1418,7 +1421,11 @@ class AgentRuntime:
                 # 自动取全文失败时把球交给用户：同一轮内弹窗并等待，拿到 PDF 就换成
                 # 阅读简报。不能指望模型"记得"再调一次 request_fulltext——它只会照
                 # 工具原话写成"本次未能取回全文"，用户看到的就是一句干巴巴的失败。
-                if name == "fetch_paper_fulltext" and isinstance(result, str):
+                # 两个工具都接：``fetch_paper_fulltext`` 是"取正文"，而
+                # ``fetch_open_access_pdf`` 是"查有没有 OA 副本"——后者判为付费墙时
+                # 同样是"正文拿不到"，用户该被问一次而不是被一句结论打发。
+                if name in ("fetch_paper_fulltext", "fetch_open_access_pdf") \
+                        and isinstance(result, str):
                     result = self._escalate_fulltext(args, result)
                 # 本地技能（如 search_academic_literature）返回的文献列表同样要注入
                 # 编号与引用 token：否则模型手里只有"标题+URL"，只能自拟
@@ -1431,7 +1438,15 @@ class AgentRuntime:
             except Exception as e:
                 logger.error(f"Local Skill '{name}' execution failed: {e}")
                 self._record_provenance(name, pool, args, "error", str(e))
-                return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+                failure = {"status": "error", "message": str(e)}
+                # 取全文时"抛异常"通常就是网络被拦/超时：同样算"没拿到正文"，
+                # 一样要问用户一次，否则这条链路在最常见的失败形态上反而没有兜底。
+                if name == "fetch_paper_fulltext":
+                    failure["conclusion"] = "incomplete_sources_failed"
+                    failure["doi"] = str((args or {}).get("doi") or "")
+                    return self._escalate_fulltext(
+                        args, json.dumps(failure, ensure_ascii=False))
+                return json.dumps(failure, ensure_ascii=False)
 
         # 3. Remote MCP tools.
         if self.mcp_manager and self.mcp_manager.is_tool_available(name):
@@ -2173,10 +2188,11 @@ class AgentRuntime:
         """Ask the user for one paper's PDF, wait in-turn, return a reading brief.
 
         The paywall escape hatch: retrieval already reports whether an open-access body
-        exists (see :mod:`src.core.academic.literature`). When it does not, this call opens
-        a picker window on the user's screen, blocks the task thread on
-        :mod:`src.core.fulltext_bridge` until the file arrives, then hands it to a one-shot
-        reading sub-agent. The model gets key points + verbatim quotes + page numbers
+        exists (see :mod:`src.core.academic.literature`). When it does not, this call raises
+        a system notification (the picker itself opens without stealing focus), blocks the
+        task thread on :mod:`src.core.fulltext_bridge` until the user picks a file, then
+        hands it to a one-shot reading sub-agent. The model gets key points + verbatim
+        quotes + page numbers
         instead of a 50k-character body, so the main context and the citation registry stay
         intact.
         """
@@ -2194,7 +2210,10 @@ class AgentRuntime:
             }, ensure_ascii=False)
 
         payload = {"doi": doi, "title": title, "url": url,
-                   "reason": str(args.get("reason") or "").strip()}
+                   "reason": str(args.get("reason") or "").strip(),
+                   # note：自动升级（见 _escalate_fulltext）带过来的"为什么没拿到"，
+                   # 与模型自己写的 reason 分开，窗口据此显示准确的原因。
+                   "note": str(args.get("note") or "").strip()}
 
         # 这个 DOI 已经有校验通过的本地 PDF：直接用，既不再联网也不再弹窗。
         from src.core import fulltext_store
@@ -2239,7 +2258,12 @@ class AgentRuntime:
         ok, brief_json = self._brief_from_pdf(path, payload, doi)
         if ok and doi:
             # 记下"这篇 = 这份文件"：下次同一篇直接用，不必再让用户下载。
-            fulltext_store.link(doi, path, title)
+            # 登记用的标题优先取参考文献注册表里的**原题**：模型给的 title 可能是译名，
+            # 而出版社 PDF 只有英文，标题词对不上时登记会失败——那样下一篇还得再问一次
+            # 同一份文件（正文本身已经读过，只是"记住"没成）。
+            registered = self._title_for_doi(doi)
+            if not fulltext_store.link(doi, path, registered or title) and registered:
+                fulltext_store.link(doi, path, title)
         return brief_json
 
     def _brief_from_pdf(self, path: str, payload: dict, doi: str = "") -> tuple:
@@ -2328,10 +2352,15 @@ class AgentRuntime:
     def _escalate_fulltext(self, args: dict, raw: str) -> str:
         """自动取全文失败时，立刻把球交给用户（同一轮内等待），而不是让模型解释"取不到"。
 
+        "失败"覆盖**所有**拿不到正文的形态，不只"这篇没有 OA 版本"：
+
+        * ``no_open_access_copy``：确实没有免费副本；
+        * ``incomplete_sources_failed``：来源被拦/超时/返回的不是 PDF（出版社 WAF 最常见）；
+        * 工具调用直接抛异常（网络层故障，见调用点的 except 分支）。
+
         触发条件（缺一不可）：
 
-        * 结果是"没拿到正文"——带 ``conclusion``（``incomplete_sources_failed`` /
-          ``no_open_access_copy``），参数错误之类的失败不打扰用户；
+        * 结果是"没拿到正文"——带 ``conclusion``（取值见上），参数错误之类的失败不打扰用户；
         * 本次运行挂着 waiter（主流程有界面；子 Agent 没有，保持工具原话）；
         * 这个 DOI 本轮还没问过（用户放弃后不再反复弹窗）。
 
@@ -2361,11 +2390,18 @@ class AgentRuntime:
                 "INFO",
                 "Open-access full text unavailable for "
                 f"{doi or 'this paper'}; asking the user to hand over the PDF.")
+            # 给用户看的原因要区分"没有免费副本"与"自动下载被拦"：前者是论文性质，
+            # 后者多半是出版社 WAF 挡了机器请求——把技术细节括在句子里，便于用户
+            # 判断该不该自己再试一次下载。
+            note = (tr("The automatic download did not succeed ({detail}).").format(
+                        detail="; ".join(failed[:2]))
+                    if failed else
+                    tr("No open-access copy was found for this paper."))
             answer_raw = self._handle_request_fulltext({
                 "doi": doi,
                 "title": self._title_for_doi(doi),
                 "url": "",
-                "reason": ("; ".join(failed) if failed else "no open-access copy found"),
+                "note": note,
             })
 
         try:
@@ -2376,6 +2412,9 @@ class AgentRuntime:
             merged = dict(data)
             merged.pop("conclusion", None)
             merged.pop("sources_failed", None)
+            if "is_oa" in merged:
+                # 用户交回的文件就是可读正文：这条结论不该继续挂着 False。
+                merged["is_oa"] = True
             merged.update({
                 "source": str(answer.get("source") or "user-provided PDF"),
                 "full_text": str(answer.get("content") or ""),

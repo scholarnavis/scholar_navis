@@ -11,7 +11,6 @@ from cryptography.fernet import InvalidToken
 
 from src.core import BASE_DIR, safe_io, secrets_store
 from src.core.encryption_service import SystemEncryptionService
-from src.core.fulltext_dirs import default_watch_dirs
 
 # 当前配置导出版本号，用于未来兼容性检查
 CONFIG_VERSION = "1.0"
@@ -339,9 +338,6 @@ class ConfigManager:
             "api_server_key": "",
             # R runtime path used by the visualization engine (empty = auto-detect)
             "r_path": "",
-            # 付费墙取全文窗口额外监听的目录（内置收件目录始终监听，见
-            # src/core/fulltext_dirs.py）。默认给系统下载目录：浏览器下载完即被认领。
-            "fulltext_watch_dirs": default_watch_dirs(),
             # Internal tools disabled by default in the academic agent
             # (edit this list to re-enable any of them).
             "deselected_academic_skills": [
@@ -618,18 +614,6 @@ class ConfigManager:
         """Persist the user-specified R runtime path."""
         self.user_settings["r_path"] = (path or "").strip()
         self.save_settings()
-
-
-    def get_fulltext_watch_dirs(self) -> list:
-        """Return the extra directories the full-text picker should watch.
-
-        只做类型防御并保留用户原样输入；展开 ``~``、按目录身份去重、上限截断都在
-        :mod:`src.core.fulltext_dirs` 一处完成，避免两处口径分叉。
-        """
-        raw = self.user_settings.get("fulltext_watch_dirs", [])
-        if not isinstance(raw, list):
-            return []
-        return [str(p) for p in raw if str(p or "").strip()]
 
 
     def save_external_models(self, data):

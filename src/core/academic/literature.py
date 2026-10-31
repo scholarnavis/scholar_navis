@@ -38,6 +38,14 @@ _FULLTEXT_ATTACH_LIMIT = 2
 _FULLTEXT_ATTACH_CHARS = 20000
 #: 检索时扫描的候选条数：其中可能只有少数进了 PMC，所以窗口要大于附带条数。
 _FULLTEXT_SCAN_LIMIT = 8
+#: PMC 没补满时，额外用 OA 解析器补全的条数上限（每条最多试 _FULLTEXT_OA_URLS 个直链）。
+#: 设为 0 即退回"检索阶段只走 Europe PMC"的旧行为——非 PMC 期刊（MDPI / Frontiers /
+#: Elsevier OA / Springer OA …）的正文就只能等模型显式调用 fetch_paper_fulltext。
+_FULLTEXT_OA_FALLBACK = 1
+#: 检索阶段每条记录最多试几个候选直链：这里要给检索让路，不做穷举。
+_FULLTEXT_OA_URLS = 2
+#: 显式取全文时每条记录最多试几个候选直链（含出版社落地页直链，可放宽）。
+_FULLTEXT_PDF_CANDIDATES = 4
 
 
 
@@ -415,13 +423,14 @@ def _attach_fulltext(records, limit: int = _FULLTEXT_ATTACH_LIMIT,
     pool.sort(key=lambda r: (-_cite_count(r),
                              str(r.get("type") or "article") != "article"))
     window = pool[:max(0, int(scan))]
-    # 检索阶段只走 Europe PMC（一次批量解析 PMCID + 少量 XML 请求，快且无反爬）；
+    # 检索阶段先用 Europe PMC（一次批量解析 PMCID + 少量 XML 请求，快且无反爬）；
     # 高引论文多数是付费墙经典文献，没有 PMC 副本，所以扫描窗口要比附带条数大，
-    # 否则每次都白跑。PDF 下载与解析留给显式的 fetch_paper_fulltext 调用。
+    # 否则每次都白跑。
     pmcids = europe_pmc_pmcids([r.get("doi") for r in window])
+    want = max(0, int(limit))
     filled = 0
     for record in window:
-        if filled >= max(0, int(limit)):
+        if filled >= want:
             break
         pmcid = pmcids.get(_normalize_doi(record.get("doi")))
         if not pmcid:
@@ -429,13 +438,57 @@ def _attach_fulltext(records, limit: int = _FULLTEXT_ATTACH_LIMIT,
         text = _europe_pmc_xml_text(pmcid)
         if len(text) < _MIN_FULLTEXT_CHARS:
             continue
-        record["full_text"] = text[:chars]
-        record["full_text_source"] = "Europe PMC"
-        record["full_text_truncated"] = len(text) > chars
+        _set_record_fulltext(record, text, chars, "Europe PMC")
         filled += 1
         logger.info(f"Full text attached for {record.get('doi')} via {pmcid} "
                     f"({len(text)} chars)")
+    # PMC 没补满时，用 OA 解析器给非 PMC 期刊（MDPI / Frontiers / Elsevier OA /
+    # Springer OA …）补一条：只补 1 条、每条最多 2 个候选，检索延迟可控。否则这些
+    # 期刊在检索结果里永远只有摘要，用户看到的"有正文"就只剩 PNAS / 牛津系。
+    if filled < want and _FULLTEXT_OA_FALLBACK > 0:
+        filled += _attach_oa_fulltext(window, pmcids, min(_FULLTEXT_OA_FALLBACK,
+                                                          want - filled), chars)
     logger.info(f"Full text attached to {filled} record(s); scanned {len(window)}")
+    return filled
+
+
+def _set_record_fulltext(record, text: str, chars: int, source: str):
+    """把正文写进检索记录（字段名与截断标记的唯一写法）。"""
+    record["full_text"] = text[:chars]
+    record["full_text_source"] = source
+    record["full_text_truncated"] = len(text) > chars
+
+
+def _attach_oa_fulltext(window, pmcids, want: int, chars: int) -> int:
+    """给"不在 PMC 里"的高价值记录补 OA PDF 正文；返回补到的条数。
+
+    成本上限写死在常量里（条数 + 每条候选数），因为它跑在检索主路径上：宁可少补
+    一条，也不该让一次文献检索多花十几秒。
+    """
+    if want <= 0:
+        return 0
+    filled = 0
+    for record in window:
+        if filled >= want:
+            break
+        doi = _normalize_doi(record.get("doi"))
+        if not doi or pmcids.get(doi):
+            continue      # PMC 已有副本：上面那一轮已经处理过（或已尝试过）
+        try:
+            found = OAFetcher().fetch_best_oa_pdf(doi, ncbi_email,
+                                                  ncbi_api_key=ncbi_api_key)
+        except Exception as e:
+            logger.debug(f"Search-time OA lookup failed for {doi}: {e}")
+            continue
+        urls = _oa_candidate_urls(found)[:_FULLTEXT_OA_URLS]
+        for url in urls:
+            text = _pdf_url_to_text(url, label="Search OA PDF")
+            if len(text) < _MIN_FULLTEXT_CHARS:
+                continue
+            _set_record_fulltext(record, text, chars, "Open access PDF")
+            filled += 1
+            logger.info(f"Search-time OA full text attached for {doi} ({len(text)} chars)")
+            break
     return filled
 
 
@@ -1029,17 +1082,24 @@ def _pdf_url_to_text(url: str, report: dict | None = None, label: str = "OA PDF"
     失败一律记 failures —— 那是故障，不能据此断言该文没有正文。
     """
     tmp = ""
+    host = urllib.parse.urlsplit(str(url or "")).netloc
     try:
         from src.core.pdf_text import extract_pdf
         resp = mcp_request("GET", url, timeout=30)
         if resp.status_code != 200:
             if report is not None:
-                report["failures"].append(f"{label} download (HTTP {resp.status_code})")
+                # 带上主机：403/503 是"某出版社拦了自动下载"还是"整站挂了"，
+                # 模型与用户看这一句就能分清（也便于判断是否该转为手工交 PDF）。
+                report["failures"].append(
+                    f"{label} download ({host or 'host unknown'}: HTTP {resp.status_code})")
             return ""
         content = resp.content or b""
-        if len(content) > _FULLTEXT_MAX_BYTES or not content.startswith(b"%PDF"):
+        # PDF 头允许出现在开头 1KB 内：部分出版社/网关会在文件前加 BOM 或空行，
+        # 旧实现的严格 startswith 会把这类可读文件判成"不是 PDF"。
+        if len(content) > _FULLTEXT_MAX_BYTES or b"%PDF" not in content[:1024]:
             if report is not None:
-                report["failures"].append(f"{label} download (response is not a PDF)")
+                report["failures"].append(
+                    f"{label} download ({host or 'host unknown'}: response is not a PDF)")
             return ""
         fd, tmp = tempfile.mkstemp(prefix="fulltext_", suffix=".pdf")
         os.close(fd)
@@ -1060,8 +1120,22 @@ def _pdf_url_to_text(url: str, report: dict | None = None, label: str = "OA PDF"
                 pass
 
 
+def _oa_candidate_urls(found: dict):
+    """从 OAFetcher 的结果里取候选直链（新契约 ``pdf_urls``，旧契约 ``pdf_url`` 兜底）。"""
+    urls = [str(u) for u in (found.get("pdf_urls") or []) if u]
+    first = str(found.get("pdf_url") or "")
+    if first and first not in urls:
+        urls.insert(0, first)
+    return urls
+
+
 def _oa_pdf_fulltext(doi: str, report: dict | None = None) -> str:
-    """DOI -> 合法 OA PDF -> 正文文本；没有 OA 副本或下载失败时返回空串。
+    """DOI -> 合法 OA PDF -> 正文文本；没有 OA 副本或全部候选都不可用时返回空串。
+
+    逐个试候选直链而不是只赌第一个：同一篇论文的 OA 副本常分散在出版社站点、机构库
+    与 PMC 镜像上，其中任意一个被反爬拦下都不该让整次取全文失败（这正是原先"只有
+    PNAS / 牛津系期刊取得到"的原因之一——它们的正文在 Europe PMC 里有 XML，绕开了
+    下载环节）。
 
     ``report`` 给出时汇总 OAFetcher 各来源的结论（谁明确回答过、谁失败了）；下载环节
     的失败由 :func:`_pdf_url_to_text` 一并记入。
@@ -1074,9 +1148,20 @@ def _oa_pdf_fulltext(doi: str, report: dict | None = None) -> str:
         if report is not None:
             report["checked"].extend(found.get("checked") or [])
             report["failures"].extend(found.get("failures") or [])
-        if not found.get("is_oa") or not found.get("pdf_url"):
+        urls = _oa_candidate_urls(found)
+        if not found.get("is_oa") or not urls:
             return ""
-        return _pdf_url_to_text(found["pdf_url"], report=report, label="OA PDF")
+        for index, url in enumerate(urls[:_FULLTEXT_PDF_CANDIDATES], 1):
+            text = _pdf_url_to_text(url, report=report, label=f"OA PDF #{index}")
+            if len(text) >= _MIN_FULLTEXT_CHARS:
+                if index > 1:
+                    logger.info(f"OA PDF candidate #{index} worked for {clean} "
+                                f"(previous candidate(s) unusable).")
+                return text
+            logger.debug(f"OA PDF candidate #{index} unusable for {clean}: {url[:120]}")
+        # 每个候选的失败已由 _pdf_url_to_text 记进 report，这里不再重复记一条：
+        # 有了失败记录，调用方给模型的说法就是"本次没拿到"，而不是"该文没有 OA"。
+        return ""
     except Exception as e:
         if report is not None:
             report["failures"].append(f"OA resolver ({e})")
@@ -1122,7 +1207,8 @@ def fulltext_text(doi: str, report: dict | None = None):
     """取一篇论文的合法全文，返回 ``(正文, 来源标签)``；都拿不到时返回 ``("", "")``。
 
     顺序：Europe PMC XML（最稳） -> 预印本官方 PDF（DOI 即预印本时） -> OA PDF
-    （Unpaywall / OpenAlex 解析出的链接）。三者都是合法来源；出版社付费墙不在其中——
+    （OpenAlex / Unpaywall / PMC / Semantic Scholar 的候选，以及出版社落地页
+    ``citation_pdf_url`` 兜底，逐个尝试）。这些都是合法来源；出版社付费墙不在其中——
     需要付费墙正文时由 ``request_fulltext`` 请用户交回自己订阅得到的 PDF。
 
     拿不到全文**不等于**工具失败：调用方应退回摘要，并如实说明"仅有摘要"。
@@ -1199,13 +1285,30 @@ def fetch_open_access_pdf(doi: str, source: Literal["auto", "openalex", "unpaywa
     fetcher = OAFetcher()
     result = fetcher.fetch_best_oa_pdf(doi, ncbi_email, ncbi_api_key=ncbi_api_key, source=source)
     if result.get("is_oa"):
-        return json.dumps({"status": "success", "is_oa": True, "pdf_url": result["pdf_url"],
-                           "landing_page_url": result["landing_page_url"], "source": result["source"]})
-    else:
-        clean_doi = doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip()
-        landing_url = result.get("landing_page_url", f"https://doi.org/{clean_doi}")
-        return json.dumps({"status": "success", "is_oa": False, "landing_page_url": landing_url,
-                           "message": "Paywalled. No OA PDF found."})
+        return json.dumps({
+            "status": "success", "is_oa": True, "pdf_url": result["pdf_url"],
+            "pdf_urls": result.get("pdf_urls") or [result["pdf_url"]],
+            "landing_page_url": result["landing_page_url"], "source": result["source"],
+            "message": ("An open-access PDF exists. Call fetch_paper_fulltext to read its "
+                        "text; this tool only reports the location."),
+        }, ensure_ascii=False)
+
+    clean_doi = doi.replace("https://doi.org/", "").replace("http://dx.doi.org/", "").strip()
+    landing_url = result.get("landing_page_url", f"https://doi.org/{clean_doi}")
+    failed = [str(x) for x in (result.get("failures") or []) if str(x).strip()]
+    payload = {
+        "status": "success", "is_oa": False, "doi": clean_doi,
+        "landing_page_url": landing_url,
+        # conclusion 与 fetch_paper_fulltext 共用同一套取值：运行时据此把"没拿到正文"
+        # 转成交给用户的取全文窗口（见 AgentRuntime._escalate_fulltext）。
+        "conclusion": ("incomplete_sources_failed" if failed
+                       else "no_open_access_copy"),
+        "sources_failed": list(dict.fromkeys(failed)),
+        "message": ("No open-access PDF link could be resolved, so the body is not "
+                    "readable from here. Do NOT state that the paper has no full text: "
+                    "the user may have it through their own subscription."),
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @simple_retry(max_attempts=2, delay=1)

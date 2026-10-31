@@ -288,28 +288,9 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
                         chk.setStyleSheet(
                             f"color: {tm.color('text_main')}; background: transparent; margin-left: 10px;")
 
-        # Full-text watch dirs
-        if hasattr(self, 'btn_add_fulltext_dir'):
-            self.btn_add_fulltext_dir.setStyleSheet(self._get_btn_style(btn_type="success"))
-        if hasattr(self, 'btn_del_fulltext_dir'):
-            self.btn_del_fulltext_dir.setStyleSheet(self._get_btn_style(btn_type="danger"))
-        if hasattr(self, 'list_fulltext_dirs'):
-            self.list_fulltext_dirs.setStyleSheet(
-                f"QListWidget {{ color: {tm.color('text_main')};"
-                f" background: {tm.color('bg_main')};"
-                f" border: 1px solid {tm.color('border')};"
-                f" border-radius: 4px; padding: 4px; }}"
-                f"QListWidget::item {{ padding: 3px 4px; }}")
-        for lbl_name in ('lbl_fulltext_hint', 'lbl_fulltext_inbox', 'lbl_fulltext_perf',
-                         'lbl_fulltext_count'):
-            if not hasattr(self, lbl_name):
-                continue
-            style = f"color: {tm.color('text_muted')}; font-size: 11px;"
-            if lbl_name == 'lbl_fulltext_inbox':
-                # 内置收件目录的路径是可点的链接；QLabel 的 color 管不到富文本链接，
-                # 链接色单独给（默认的纯蓝在深色主题上不协调）。
-                style += f" a {{ color: {tm.color('accent')}; }}"
-            getattr(self, lbl_name).setStyleSheet(style)
+        # Full-text links (DOI -> local PDF)
+        if hasattr(self, '_apply_fulltext_theme'):
+            self._apply_fulltext_theme()
 
     def _mark_unsaved(self, *args, **kwargs):
         if getattr(self, '_is_loading', False): return
@@ -436,7 +417,9 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         if hasattr(self, '_load_mcp_servers_to_ui'):
             self._load_mcp_servers_to_ui()
 
-        self._set_fulltext_dirs(self.config.get_fulltext_watch_dirs())
+        # 关联表可能被别处（取全文交付）改写，重新载入时刷一次
+        if hasattr(self, '_refresh_fulltext_links'):
+            self._refresh_fulltext_links()
 
         self._clear_unsaved()
         self._is_loading = False

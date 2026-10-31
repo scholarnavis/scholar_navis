@@ -108,7 +108,6 @@ tests/               空目录
 | `pdf_index.py` | PDF 本体索引（SQLite/WAL），按 paper_id、doi、sha256 查重与定位，与向量库解耦 | 模块级 lookup/register |
 | `pdf_text.py` | PDF 正文抽取唯一实现，markdown 失败降级按页纯文本 | `extract_pdf`、`probe_pdf` |
 | `fulltext_store.py` | DOI 与本地 PDF 关联表，指纹与内容双级校验，校验失败即解除关联 | `resolve`、`link`、`unlink` |
-| `fulltext_dirs.py` | 收件目录与额外监听目录定义 | `inbox_dir`、`dir_identity` |
 | `fulltext_bridge.py` | 「同轮等待」通道：Agent 请求全文后挂起，UI 入库后回填，模型带全文续跑同一轮 | `begin`、`wait`、`signal` |
 | `fulltext_samples.py` | 开发者模式取全文自检的样例来源 | `resolve_samples` |
 | `attachment_parser.py` | 聊天附件解析的唯一实现：PDF / DOCX / 文本，含体积页数上限、编码探测、内容指纹缓存与过期清扫 | `extract`、`trim_total`、`cache_root` |
@@ -222,7 +221,7 @@ tests/               空目录
 
 `chat_mixins/`：`send_flow.py` 派发查询并启动后台任务，`response_flow.py` 流式渲染与收尾，`bubbles.py` 气泡与滚动，`search.py` 会话内搜索，`bookmarks.py` 书签，`attachments.py` 附件与导出，`session.py` 自动保存与恢复。
 
-`settings_sections/`：`env_section.py` 环境与凭据，`llm_section.py` 与 `llm_model_ops.py` 模型配置，`model_section.py` 模型下载队列，`mcp_section.py` MCP 与技能管理，`fulltext_section.py` 全文监听目录，`save_flow.py` 保存流程，`transfer.py` 配置导入导出。
+`settings_sections/`：`env_section.py` 环境与凭据，`llm_section.py` 与 `llm_model_ops.py` 模型配置，`model_section.py` 模型下载队列，`mcp_section.py` MCP 与技能管理，`fulltext_section.py` 已关联论文 PDF（DOI ↔ 本地文件），`save_flow.py` 保存流程，`transfer.py` 配置导入导出。
 
 新增面板：写一个继承 `BaseTool` 的类并实现 `get_ui_widget()`，然后在 `src/ui/main_window.py` 的 `tool_classes` 中加入三元组，并在 `icon_map` 补齐图标。
 
@@ -244,7 +243,7 @@ tests/               空目录
 - 对话框：`dialog.py` 兼容层、`dialogs/` 子包（`base.py` 基类、`common.py` 通用框、`about_dialogs.py`、`feed_dialogs.py`、`kb_project_dialogs.py`、`mcp_skill_dialogs.py`、`r_env_dialogs.py`、`chat_typography_dialog.py`）。`dialogs/__init__.py` 用 PEP 562 惰性再导出，避免启动期拉起重依赖
 - 文档查看：`pdf_viewer.py`、`text_viewer.py`、`document_search.py`、`mermaid_viewer.py`、`source_code_viewer.py`、`fulltext_request.py`、`image_viewer.py`、`file_dialogs.py`
 - 可视化与卡片：`plot_plan_card.py`、`r_plot_card.py`、`deep_plan_card.py`、`ask_user_card.py`
-- 通用：`toast.py`、`RotatingSpinner.py`、`bookmark_ui.py`、`developer_dialog.py`、`citation_popup.py`
+- 通用：`toast.py`、`RotatingSpinner.py`、`bookmark_ui.py`、`developer_dialog.py`、`citation_popup.py`、`system_notify.py`（系统通知唯一入口，不抢焦点）
 
 三个高风险大文件的边界：
 

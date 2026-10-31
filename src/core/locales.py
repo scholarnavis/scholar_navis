@@ -122,31 +122,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # ================= 设置页：获取全文 =================
         "Full-Text Retrieval": "获取全文",
-        "The paywalled full-text picker watches the directories below. Drop the "
-        "downloaded PDF into any of them and it is claimed automatically as long "
-        "as the file name matches the requested paper. Double-click a watched "
-        "directory to open it in the file manager.":
-            "付费墙取全文窗口会监听下面的目录：把下载好的 PDF 放进任一目录即自动认领，"
-            "前提是文件名能匹配所请求的论文。双击任一目录即可在文件管理器中打开。",
-        "Built-in inbox (always watched):": "内置收件目录（始终监听）：",
-        "Open this directory in the file manager.": "在文件管理器中打开该目录。",
-        "This directory does not exist (yet).": "该目录还不存在。",
-        "Could not open the directory with the system file manager.":
-            "无法用系统文件管理器打开该目录。",
-        "Extra watch directories": "额外监听目录",
-        "Add Directory...": "添加目录…",
-        "Remove Selected": "移除所选",
-        "Select a directory to watch": "选择要监听的目录",
-        "(missing)": "（不存在）",
-        "This directory is already in the list.": "该目录已在列表中。",
-        "Select the directories to remove first.": "请先选中要移除的目录。",
-        "Up to {n} extra directories can be watched.": "最多只能额外监听 {n} 个目录。",
-        "Each watched directory is listed on a timer while the picker is open, so "
-        "more directories cost more disk scanning; the picker backs off "
-        "automatically when a directory is large or quiet. Missing directories are "
-        "skipped.":
-            "窗口打开期间会定时列出每个监听目录，目录越多磁盘扫描开销越大；目录很大或"
-            "长期没有新文件时窗口会自动降频。不存在的目录会被跳过。",
+        "A paper you hand over once is remembered by DOI and reused "
+        "automatically, so the app never asks for the same file twice. When the "
+        "answer needs a body that is not available yet, a system notification "
+        "asks you to pick the PDF yourself — nothing is scanned behind your back.":
+            "交过一次的论文会按 DOI 记住并自动复用，同一篇不会再要第二次。当回答需要"
+            "正文而本地还没有时，应用会发一条系统通知，由你自己选择 PDF——不会在后台"
+            "扫描任何目录。",
+        "Linked PDFs ({n})": "已关联 {n} 篇 PDF",
+        "No linked PDF yet. The first paper you hand over shows up here.":
+            "还没有已关联的 PDF。你交过的第一篇论文会出现在这里。",
+        "Open File": "打开文件",
+        "Select a link to open first.": "请先选中一条关联。",
 
         # ================= 设置页：网络代理 =================
         "Network Proxy": "网络代理",
@@ -860,7 +847,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Sign-in cancelled. You can keep typing.": "已取消登录，可以继续输入。",
         "This answer relies on an abstract only. Sign in to fetch the full text of {t}.":
             "本次回答依据的是摘要。登录后可获取《{t}》全文。",
-        "Full text needed": "需要获取全文",
+        "Full text needed": "需要论文全文",
         # ---- 全文下载进度 ----
         "Downloading…": "正在下载…",
         "elapsed": "已用",
@@ -1003,13 +990,44 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Hide Translated Query": "隐藏译后问题",
         "Remove Selected Link": "移除所选关联",
         "Clear All Links": "清除全部关联",
-        "Linked PDFs ({n}): a paper you handed over once is reused automatically, so it is never downloaded twice. A link is dropped automatically when the file is gone or its content no longer matches the DOI. Double-click to open the file.":
-            "已关联 {n} 篇 PDF：交过一次的论文会被自动复用，不会再让你下载第二次；"
-            "文件丢失或内容与 DOI 对不上时，关联会被自动解除。双击可打开该文件。",
         "This PDF is no longer there.": "这份 PDF 已经不在了。",
         "Could not open the file with the system viewer.": "无法用系统查看器打开该文件。",
         "Select the links to remove first.": "请先选中要移除的关联。",
         "{n} link(s) removed.": "已移除 {n} 条关联。",
+
+        # ================= 取全文：系统通知与选择窗口 =================
+        "Paper: {paper}": "论文：{paper}",
+        "Needed for: {reason}": "用途：{reason}",
+        "Download the PDF, then hand it over in the Scholar Navis window.":
+            "请下载该论文的 PDF，然后在 Scholar Navis 窗口中交给它。",
+        "The full-text picker is waiting for your PDF.":
+            "取全文窗口正在等待你选择 PDF。",
+        "(no title provided)": "（未提供标题）",
+        "(no DOI or link provided)": "（未提供 DOI 或链接）",
+        "The answer needs the full text of this paper. Download the PDF in "
+        "your browser, then hand it over here.":
+            "这条回答需要这篇论文的正文。请在浏览器里下载 PDF，然后交给这个窗口。",
+        "The automatic download did not succeed ({detail}).":
+            "自动下载没有成功（{detail}）。",
+        "No open-access copy was found for this paper.":
+            "未找到这篇论文的开放获取副本。",
+        "Drop the downloaded PDF here\nor pick it from disk":
+            "把下载好的 PDF 拖到这里\n或从磁盘选择",
+        "Open Page": "打开页面",
+        "Choose PDF": "选择 PDF",
+        "Choose the paper's PDF": "选择论文 PDF",
+        "That is not a readable PDF file: {name}": "这不是可读取的 PDF 文件：{name}",
+        "This file is not a complete PDF yet: {name} "
+        "(the download may still be running)":
+            "这个文件还不是完整的 PDF：{name}（下载可能尚未完成）",
+        "This PDF has no text layer (it looks like a scan), so its text "
+        "cannot be read. Please download the publisher's text PDF instead.":
+            "这份 PDF 没有文字层（看起来是扫描件），无法读取其中的文字。"
+            "请下载出版社的文字版 PDF。",
+        "This run is no longer waiting for the full text (it may have been "
+        "stopped or timed out). Send the PDF as an attachment instead.":
+            "本轮已不再等待全文（可能已被终止或已超时）。请把该 PDF 作为附件直接发送。",
+
         "Search conversation...": "搜索对话…",
         "Failed to load existing skill: {err}": "加载已有技能失败：{err}",
         "Scholar Navis Conversation (*.schat *.sqlite3 *.db *.json)":

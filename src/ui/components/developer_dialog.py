@@ -223,8 +223,9 @@ AI_TESTS = {
             "in the real Chat panel. The prompt names a subscription article (the first "
             "paywalled hit of the local RSS cache, otherwise a bundled sample shipped "
             "with the app). Expected: fetch_paper_fulltext reports no open-access body "
-            "-> request_fulltext -> the picker window opens -> after you download the "
-            "PDF and hand it over, the SAME turn continues with a reading brief "
+            "-> request_fulltext -> a system notification appears (the picker waits in "
+            "the background) -> after you pick the PDF, the SAME turn continues with a "
+            "reading brief "
             "(bullets + verbatim quotes + [pN] page numbers). Wanting exact quotes is "
             "deliberate: it forces the full-text route instead of paraphrasing the "
             "abstract."
@@ -2306,7 +2307,7 @@ class DeveloperDialog(BaseDialog):
             "reason": "开发者自检：付费墙取全文链路",
         }
         self._log("A picker window opens next: download the PDF in your browser, then drop "
-                  "it on that window (or click 选择 PDF). Closing it aborts the check.",
+                  "it on that window or click 'Choose PDF'. Closing it aborts the check.",
                   "INFO")
 
         from src.core.agent.runtime import AgentRuntime
@@ -2386,7 +2387,7 @@ class DeveloperDialog(BaseDialog):
             return False, "", "no wait handle"
 
         self._log("Picker opened — download the PDF in your browser, then drop it on the "
-                  "window (or click 选择 PDF / use the inbox folder).", "INFO")
+                  "window or click 'Choose PDF'.", "INFO")
         dialog = FullTextRequestDialog(self, data=payload, conversation_id=conversation_id)
         dialog.exec()
         # 交付 / 取消 / 关窗都会通知等待方，因此这里的等待几乎是即时的。

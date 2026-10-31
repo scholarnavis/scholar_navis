@@ -1,19 +1,26 @@
-"""取全文窗口：付费墙论文请用户下载 PDF 并交回（任务线程同轮等待）。
+"""取全文窗口：付费墙论文请用户手动选择 PDF 并交回（任务线程同轮等待）。
 
-通道见 :mod:`src.core.fulltext_bridge`：任务线程在 ``request_fulltext`` 工具里挂起，
-本窗口拿到文件后唤醒它，本轮从原处继续——已检索到的来源、计划与引用注册表都不丢。
+为什么不再监听目录
+------------------
+旧实现会在"收件目录 + 用户配置的额外目录"里定时扫描 PDF，并按 DOI / 标题词自动
+认领。目录一旦混进同领域的旧论文，认错文件的代价是模型读了另一篇、结论整段错位，
+而用户完全看不出问题出在"自动认领"。现在只保留一件事：**用户自己选文件**，交回的
+是哪份就是哪份（见 :mod:`src.core.fulltext_bridge` 的同轮会合通道）。
+
+窗口不抢焦点
+------------
+触发方式由上层决定：本窗口由调用方以非激活方式 ``show()``，同时发一条系统通知
+（见 :mod:`src.ui.components.system_notify`）。用户点击通知时才把它拉到前台。
 """
+
 import logging
 import os
-import re
-import time
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QStandardPaths, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QFrame, QLabel, QVBoxLayout
 
-from src.core.fulltext_dirs import (dir_identity, downloads_dir, inbox_dir,
-                                    watch_dirs)
+from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.ui.components.dialogs.base import BaseDialog
 
@@ -21,45 +28,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["FullTextRequestDialog"]
 
-#: 起始扫描间隔（毫秒）：文件在下载完成的瞬间出现，扫太密只是白烧 CPU。
-_SCAN_INTERVAL_MS = 1500
-#: 空闲退避上限（毫秒）：开窗后一直没动静就逐步降频，别让它长时间空跑。
-_SCAN_INTERVAL_MAX_MS = 6000
-#: 间隔至少是本轮扫描耗时的这么多倍：目录越庞大扫得越稀疏，避免持续占满主线程。
-_SCAN_COST_FACTOR = 8
-#: 目录可用性复查间隔（秒）：移动盘/网络盘会中途消失，但每轮都 stat 不划算。
-_DIR_RECHECK_SEC = 15.0
-#: 单轮扫描超过这个耗时（毫秒）就在日志里点名：通常是设置里加了超大目录。
-_SCAN_SLOW_MS = 300.0
-#: 候选列表最多显示几个，避免误匹配时把窗口撑爆。
-_MAX_CANDIDATES = 3
-#: 同一个文件"看起来像但要等等"的最多复查次数：下载未完成时下一轮再看，超过就放弃。
-_SCAN_RETRY_LIMIT = 6
 
-
-def _norm(text: str) -> str:
-    """归一化用于文件名匹配：只留字母数字，消掉分隔符与大小写差异。"""
-    return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
-
-
-def _match_level(filename: str, data: dict) -> int:
-    """文件名与本次请求的匹配强度：``2`` = DOI 命中，``1`` = 标题词过半，``0`` = 不像。
-
-    下载器生成的文件名千奇百怪（网页标题、DOI 后缀、加序号……），所以按强度分级：
-    DOI 片段是硬证据，标题词命中只是弱证据——**开窗之前就已经存在的文件**只按强证据
-    认领，否则用户 Downloads 里同领域的旧论文会被误认成这一篇（模型会读错论文）。
-    """
-    stem = _norm(os.path.splitext(os.path.basename(filename))[0])
-    if not stem:
-        return 0
-    # DOI 常被切掉前缀（10.1038/）后当文件名，因此按片段匹配而非整串包含。
-    parts = [p for p in re.split(r"[/:]", str(data.get("doi") or "")) if len(p) >= 6]
-    if any(_norm(p) in stem for p in parts):
-        return 2
-    tokens = [t for t in re.findall(r"[A-Za-z]{4,}", str(data.get("title") or "").lower())]
-    if tokens and sum(1 for t in tokens if t in stem) * 2 >= len(tokens):
-        return 1
-    return 0
+def _downloads_dir() -> str:
+    """系统下载目录：文件选择框的起始位置（取不到时回退用户主目录）。"""
+    return (QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.DownloadLocation)
+        or os.path.expanduser("~"))
 
 
 def _looks_like_pdf(path: str) -> bool:
@@ -69,6 +43,23 @@ def _looks_like_pdf(path: str) -> bool:
             return b"%PDF" in f.read(1024)
     except OSError:
         return False
+
+
+def _has_text_layer(path: str) -> bool:
+    """这份 PDF 是否带可抽取的文本层（纯扫描件没有）。
+
+    窗口只交付"能读"的文件：整篇是扫描图时，任务线程解析为空、这一轮照样白等，
+    而窗口在交付瞬间就关闭，用户连重选的入口都没有。只读前几页，几十毫秒。
+    解析器不可用时返回 ``True``——判断不了就不要拦。
+    """
+    try:
+        from src.core.pdf_text import probe_pdf
+
+        _doi, head = probe_pdf(path)
+        return bool(str(head or "").strip())
+    except Exception as e:
+        logger.debug("Text-layer probe unavailable for %s: %s", path, e)
+        return True
 
 
 class _DropZone(QFrame):
@@ -85,84 +76,55 @@ class _DropZone(QFrame):
 
 
 class FullTextRequestDialog(BaseDialog):
-    """一次取全文一个窗口：选择/拖拽为主，"监听目录里出现新 PDF"兜底。
-
-    监听目录 = 内置收件目录 + 用户在"设置 → 获取全文"里配置的额外目录，来源见
-    :mod:`src.core.fulltext_dirs`（本窗口不自己拼路径）。
-    """
+    """一次取一份全文：用户选择或拖入 PDF，交回后唤醒挂起的本轮生成。"""
 
     def __init__(self, parent=None, data=None, conversation_id=""):
-        super().__init__(parent, title="需要这篇论文的全文", width=560)
+        super().__init__(parent, title=tr("Full text needed"), width=560)
         self._data = dict(data or {})
         self._conversation_id = str(conversation_id or "")
-        #: 已交付（或已确认没有等待方）后不再发信号，避免关窗时重复通知等待方。
+        #: 已交付（或已确认没有等待方）后不再重复通知等待方。
         self._settled = False
-        self._candidates = []
-        self._inbox = inbox_dir()
-        self._inbox_key = dir_identity(self._inbox)
-        self._ensure_inbox()
-        #: 本次开窗要扫描的目录（已展开 ~、按目录身份去重、按上限截断）。
-        self._dirs = watch_dirs()
-        #: 目录 -> (上次复查时刻, 是否可用)：目录可能中途消失，但不必每轮都去看。
-        self._dir_state = {}
-        self._interval = _SCAN_INTERVAL_MS
-        #: 已经"看过"的文件：每个路径只判定一次，避免重复认领/重复列候选。
-        self._seen = set()
-        #: 开窗那一刻就已经存在的 PDF。它们在第一次扫描里参与判定，但只按**强证据**
-        #: （DOI 命中）认领——用户往往先下载、后点开窗口，把这些文件一律当"旧的"忽略
-        #: 就是"放进指定目录没反应"的根因。
-        self._pre_existing = set()
-        #: 路径 -> 已复查次数（见 _consume：下载未完成的文件下一轮再看，超过就放弃）。
-        self._retries = {}
-        #: 上一次提示过的"认领不了"文件名：同样的话只提示一次，别每轮都闪。
-        self._last_unclaimed = ""
         self._build_ui()
-        self._remember_existing()
         self.setAcceptDrops(True)
-
-        self._scan_timer = QTimer(self)
-        self._scan_timer.timeout.connect(self._scan_watch_dirs)
-        self._scan_timer.start(self._interval)
-        # 立刻扫一遍：先下载再开窗是最常见的顺序，等 1.5 秒只会让人以为没生效。
-        QTimer.singleShot(0, self._scan_watch_dirs)
         self._apply_theme()
 
     # ------------------------------------------------------------------ 构建
-
-    def _ensure_inbox(self):
-        """建好收件目录；建不出来只记日志，其它监听目录照常工作。"""
-        try:
-            os.makedirs(self._inbox, exist_ok=True)
-        except OSError as e:
-            logger.warning("Cannot create the full-text inbox %s: %s", self._inbox, e)
 
     def _build_ui(self):
         title = str(self._data.get("title") or "").strip()
         doi = str(self._data.get("doi") or "").strip()
         url = str(self._data.get("url") or "").strip()
 
-        head = QLabel("这篇论文的正文在付费墙后面，AI 需要它来支撑结论。"
-                      "请在浏览器里下载 PDF，然后交给这个窗口。")
+        # 不要说"付费墙"：自动下载失败可能是出版社 WAF 拦截，与是否付费无关。
+        # 具体原因由下方 note/reason 另行说明。
+        head = QLabel(tr(
+            "The answer needs the full text of this paper. Download the PDF in "
+            "your browser, then hand it over here."))
         head.setWordWrap(True)
         head.setObjectName("FulltextMeta")
         self.content_layout.addWidget(head)
 
-        paper = QLabel(title or doi or url or "(未提供标题)")
+        paper = QLabel(title or doi or url or tr("(no title provided)"))
         paper.setWordWrap(True)
         paper.setObjectName("FulltextPaper")
         paper.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.content_layout.addWidget(paper)
 
         meta_text = " · ".join(p for p in (f"DOI: {doi}" if doi else "", url) if p)
-        self.lbl_meta = QLabel(meta_text or "（未提供 DOI / 链接）")
+        self.lbl_meta = QLabel(meta_text or tr("(no DOI or link provided)"))
         self.lbl_meta.setWordWrap(True)
         self.lbl_meta.setObjectName("FulltextMeta")
         self.lbl_meta.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.content_layout.addWidget(self.lbl_meta)
 
+        # reason = 模型自己写的"为什么需要它"；note = 自动升级带来的"为什么没拿到"
+        # （已是完整句子，不再套 "Needed for:"）。两者只显示一条，优先 reason。
         reason = str(self._data.get("reason") or "").strip()
-        if reason:
-            self.lbl_reason = QLabel(f"需要它的原因：{reason}")
+        note = str(self._data.get("note") or "").strip()
+        detail = (tr("Needed for: {reason}").format(reason=reason) if reason
+                  else note)
+        if detail:
+            self.lbl_reason = QLabel(detail)
             self.lbl_reason.setWordWrap(True)
             self.lbl_reason.setObjectName("FulltextMeta")
             self.lbl_reason.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -174,22 +136,13 @@ class FullTextRequestDialog(BaseDialog):
         self.drop_zone.setMinimumHeight(84)
         zone_layout = QVBoxLayout(self.drop_zone)
         zone_layout.setContentsMargins(12, 12, 12, 12)
-        self.lbl_drop = QLabel("把下载好的 PDF 拖到这里\n或点下面的「选择 PDF」")
+        self.lbl_drop = QLabel(tr("Drop the downloaded PDF here\n"
+                                  "or pick it from disk"))
         self.lbl_drop.setWordWrap(True)
         self.lbl_drop.setAlignment(Qt.AlignCenter)
         self.lbl_drop.setObjectName("FulltextDropHint")
         zone_layout.addWidget(self.lbl_drop)
         self.content_layout.addWidget(self.drop_zone)
-
-        if self._dirs:
-            self.lbl_inbox = QLabel(
-                "也可以把 PDF 放进下面任一目录，窗口会自动认领：\n"
-                + "\n".join(self._dirs)
-                + "\n（监听目录可在「设置 → 获取全文」里增删）")
-            self.lbl_inbox.setWordWrap(True)
-            self.lbl_inbox.setObjectName("FulltextDropHint")
-            self.lbl_inbox.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            self.content_layout.addWidget(self.lbl_inbox)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -197,21 +150,13 @@ class FullTextRequestDialog(BaseDialog):
         self.status_label.setVisible(False)
         self.content_layout.addWidget(self.status_label)
 
-        self.candidates_box = QWidget()
-        self.candidates_box.setObjectName("FulltextCandidates")
-        self.candidates_layout = QVBoxLayout(self.candidates_box)
-        self.candidates_layout.setContentsMargins(0, 0, 0, 0)
-        self.candidates_layout.setSpacing(6)
-        self.candidates_box.setVisible(False)
-        self.content_layout.addWidget(self.candidates_box)
-
-        btn_cancel = self.add_button("取消", self._on_cancel)
+        btn_cancel = self.add_button(tr("Cancel"), self._on_cancel)
         btn_cancel.setFixedWidth(90)
         if url or doi:
-            btn_open = self.add_button("打开页面", self._open_page)
+            btn_open = self.add_button(tr("Open Page"), self._open_page)
             btn_open.setFixedWidth(100)
-        btn_pick = self.add_button("选择 PDF", self._pick_file, is_primary=True)
-        btn_pick.setFixedWidth(104)
+        btn_pick = self.add_button(tr("Choose PDF"), self._pick_file, is_primary=True)
+        btn_pick.setFixedWidth(112)
 
     def _apply_theme(self):
         super()._apply_theme()
@@ -221,7 +166,7 @@ class FullTextRequestDialog(BaseDialog):
             QFrame#FulltextDropZone {{
                 background-color: {tm.color('bg_input')};
                 border: 1px dashed {tm.color('border')};
-                border-radius: 6px;
+                border-radius: 8px;
             }}
             QFrame#FulltextDropZone:hover {{ border: 1px dashed {tm.color('accent')}; }}
             QLabel#FulltextPaper {{
@@ -232,13 +177,6 @@ class FullTextRequestDialog(BaseDialog):
                 color: {tm.color('text_muted')}; font-size: 12px;
                 border: none; background: transparent;
             }}
-            QWidget#FulltextCandidates QPushButton {{
-                background-color: {tm.color('btn_hover')};
-                color: {tm.color('text_main')};
-                border: 1px solid {tm.color('border')};
-                border-radius: 4px; padding: 6px 8px; text-align: left;
-            }}
-            QWidget#FulltextCandidates QPushButton:hover {{ border: 1px solid {tm.color('accent')}; }}
         """)
 
     # ------------------------------------------------------------------ 交付
@@ -256,13 +194,24 @@ class FullTextRequestDialog(BaseDialog):
             return
         path = os.path.abspath(str(path or ""))
         if not path.lower().endswith(".pdf") or not os.path.isfile(path):
-            self._set_status(f"不是可读取的 PDF 文件：{os.path.basename(path or '(空)')}", error=True)
+            self._set_status(
+                tr("That is not a readable PDF file: {name}").format(
+                    name=os.path.basename(path or "-")), error=True)
             return
         # 0 字节 / 还在写入的文件先挡住：交给任务只会换来一次"PDF 无法解析"，
         # 而那时窗口已经关了，用户连重选的入口都没有。
         if not _looks_like_pdf(path):
             self._set_status(
-                f"这个文件还不是完整的 PDF：{os.path.basename(path)}（下载可能尚未完成）",
+                tr("This file is not a complete PDF yet: {name} "
+                   "(the download may still be running)").format(
+                    name=os.path.basename(path)), error=True)
+            return
+        # 纯扫描件没有文字层，交回只会让这一轮白等：当场说明并留在窗口里让用户重选。
+        if not _has_text_layer(path):
+            logger.info("Provided PDF has no text layer: %s", os.path.basename(path))
+            self._set_status(
+                tr("This PDF has no text layer (it looks like a scan), so its text "
+                   "cannot be read. Please download the publisher's text PDF instead."),
                 error=True)
             return
 
@@ -272,26 +221,20 @@ class FullTextRequestDialog(BaseDialog):
             # 等待点已经不在了（多为用户中途终止了本次生成）：如实说明，别把文件默默吞掉。
             logger.info("Full-text PDF not accepted (no waiter) for conversation %s.",
                         self._conversation_id)
-            self._set_status("本轮已不再等待全文（可能已被终止或已超时）：请把该 PDF 作为附件直接发送。",
-                             error=True)
+            self._set_status(
+                tr("This run is no longer waiting for the full text (it may have "
+                   "been stopped or timed out). Send the PDF as an attachment instead."),
+                error=True)
             self._settled = True
             return
 
         logger.info("Full-text PDF handed over: %s (conversation=%s).",
                     os.path.basename(path), self._conversation_id)
         self._settled = True
-        self._stop_scanning()
         self.accept()
-
-    def _stop_scanning(self):
-        """交付/关窗后停掉扫描：模态窗口隐藏后定时器还活着就是白烧 CPU。"""
-        timer = getattr(self, "_scan_timer", None)
-        if timer is not None:
-            timer.stop()
 
     def _cancel_pending(self):
         """告知等待方"用户没给文件"，避免任务线程白等到超时。"""
-        self._stop_scanning()
         if self._settled or not self._conversation_id:
             return
         self._settled = True
@@ -312,7 +255,7 @@ class FullTextRequestDialog(BaseDialog):
 
     def _pick_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择论文 PDF", downloads_dir() or os.path.expanduser("~"), "PDF (*.pdf)")
+            self, tr("Choose the paper's PDF"), _downloads_dir(), "PDF (*.pdf)")
         if path:
             self._deliver(path)
 
@@ -324,175 +267,6 @@ class FullTextRequestDialog(BaseDialog):
             return
         logger.info("Opening the paper page for the full-text request: %s", target[:120])
         QDesktopServices.openUrl(QUrl(target))
-
-    @staticmethod
-    def _list_pdfs(directory: str):
-        """目录里的 PDF 路径：只按名字过滤，不逐文件 stat。
-
-        逐文件 stat 才是大目录上的真成本（几千个条目就是几千次系统调用），所以时间戳
-        只在确实需要排序的新文件上取，见 :meth:`_newest_first`。
-        """
-        try:
-            with os.scandir(directory) as entries:
-                return [os.path.join(directory, entry.name) for entry in entries
-                        if entry.name.lower().endswith(".pdf")]
-        except OSError as e:
-            logger.debug("Cannot list %s: %s", directory, e)
-            return []
-
-    def _dir_usable(self, directory: str) -> bool:
-        """目录当前是否可扫；结果带缓存，外接盘/网络盘中途消失时不必每轮都去 stat。"""
-        now = time.monotonic()
-        checked, ok = self._dir_state.get(directory, (0.0, True))
-        if checked and now - checked < _DIR_RECHECK_SEC:
-            return ok
-        try:
-            ok = os.path.isdir(directory) and os.access(directory, os.R_OK)
-        except OSError:
-            ok = False
-        if not ok:
-            logger.debug("Full-text watch dir skipped (missing or unreadable): %s", directory)
-        self._dir_state[directory] = (now, ok)
-        return ok
-
-    def _unseen_pdfs(self, directory: str):
-        """该轮要判定的 PDF：还没看过的路径；已知名字直接跳过。"""
-        fresh = []
-        for path in self._list_pdfs(directory):
-            if path in self._seen:
-                continue
-            if not os.path.isfile(path):  # 名字叫 xxx.pdf 的目录也算"新名字"，在这一步挡掉
-                continue
-            self._seen.add(path)
-            fresh.append(path)
-        return fresh
-
-    @staticmethod
-    def _newest_first(paths):
-        """同一轮出现多个新文件时按修改时间倒序：刚下载的那份最可能是用户要的。"""
-        if len(paths) < 2:
-            return paths
-
-        def stamp(path):
-            try:
-                return os.path.getmtime(path)
-            except OSError:
-                return 0.0
-
-        return sorted(paths, key=stamp, reverse=True)
-
-    def _remember_existing(self):
-        """记录开窗那一刻已存在的 PDF：它们照样参与判定，只是需要更强证据才认领。
-
-        旧实现把它们一次性塞进 ``_seen``（等于永久拉黑），于是"先下载、后开窗"——
-        用户最自然的顺序——永远不会有反应。
-        """
-        for directory in self._dirs:
-            self._pre_existing.update(self._list_pdfs(directory))
-        logger.debug("Full-text picker watching %d dir(s): %s (%d pre-existing PDF(s)).",
-                     len(self._dirs), self._dirs, len(self._pre_existing))
-
-    def _scan_watch_dirs(self):
-        """按目录语义认领 PDF，并按本轮成本调整下次扫描间隔。
-
-        内置收件目录表示"用户明确放进来了"，文件名对不上也列成候选；设置里的额外目录
-        （下载目录、文献库等）是杂物堆，只有能确定是这一篇时才自动认领，否则安静忽略。
-        开窗时已存在的文件同样参与判定（下载往往发生在开窗之前），只是需要更强证据。
-        每轮只做"列名 + 差集"，成本取决于目录条目数而非文件大小。
-        """
-        started = time.monotonic()
-        hit = False
-        unmatched = []
-        for directory in self._dirs:
-            if not self._dir_usable(directory):
-                continue
-            fresh = self._unseen_pdfs(directory)
-            if not fresh:
-                continue
-            logger.debug("Full-text watch dir %s: %d PDF(s) to check.", directory, len(fresh))
-            if self._consume(directory, self._newest_first(fresh), unmatched):
-                hit = True
-                break
-        if not hit and unmatched:
-            self._notify_unclaimed(unmatched[0])
-        self._adapt_interval((time.monotonic() - started) * 1000.0, hit)
-
-    def _notify_unclaimed(self, path: str):
-        """看得见、但认领不了的文件要说一声：否则用户只会觉得"放进去了没反应"。"""
-        name = os.path.basename(path)
-        if name == self._last_unclaimed:
-            return
-        self._last_unclaimed = name
-        self._set_status(
-            f"看到 PDF「{name}」，但文件名里没有这篇论文的 DOI，无法自动认领；"
-            f"点「选择 PDF」手动指定即可。")
-
-    def _consume(self, directory: str, fresh, unmatched=None) -> bool:
-        """处理一轮候选文件；返回是否已交付（真=窗口已关，不用再扫）。
-
-        认领门槛按"文件是不是开窗前就在"分两档：开窗后新出现的，DOI 或标题词过半
-        都可以；开窗前就有的，只认 DOI 这种硬证据——用户 Downloads 里同一领域的旧
-        论文可能恰好与标题词撞上，认错了模型就会读错论文。
-
-        :param unmatched: 收集"像 PDF 但对不上这篇"的路径，供 :meth:`_notify_unclaimed`
-            提示用户自己点选（收件目录里的这些文件另外进候选列表）。
-        """
-        in_inbox = dir_identity(directory) == self._inbox_key
-        for path in fresh:
-            level = _match_level(path, self._data)
-            if level == 2 or (level == 1 and path not in self._pre_existing):
-                self._deliver(path)
-                if self._settled:
-                    return True
-                # 文件还没写完 / 不是完整 PDF：撤掉"看过"的标记，下一轮再看一次
-                # （最多几次，避免把垃圾文件当成永远待判的对象）。
-                tries = self._retries.get(path, 0) + 1
-                self._retries[path] = tries
-                if tries <= _SCAN_RETRY_LIMIT:
-                    self._seen.discard(path)
-                continue
-            if in_inbox:
-                self._add_candidate(path)
-            elif unmatched is not None:
-                unmatched.append(path)
-        return False
-
-    def _adapt_interval(self, cost_ms: float, hit: bool):
-        """按本轮成本与命中情况决定下次扫描间隔。
-
-        没命中就翻倍退避（上限 :data:`_SCAN_INTERVAL_MAX_MS`），命中立刻回到起始间隔
-        ——交付靠及时性，命中说明目录是活跃的。另设一条成本下限：间隔至少是本轮耗时的
-        :data:`_SCAN_COST_FACTOR` 倍，几十万条目的目录不会把主线程占满。
-        """
-        base = _SCAN_INTERVAL_MS if hit else min(self._interval * 2, _SCAN_INTERVAL_MAX_MS)
-        target = max(base, int(cost_ms * _SCAN_COST_FACTOR))
-        if target != self._interval:
-            logger.debug("Full-text scan interval %d ms -> %d ms (cost=%.1f ms, hit=%s).",
-                         self._interval, target, cost_ms, hit)
-            self._interval = target
-            self._scan_timer.setInterval(target)
-        if cost_ms >= _SCAN_SLOW_MS:
-            logger.warning("Full-text watch scan took %.0f ms over %d dir(s); a very large "
-                           "directory in Settings -> Full-Text Retrieval slows the picker "
-                           "down.", cost_ms, len(self._dirs))
-
-    def _add_candidate(self, path: str):
-        if not path or path in self._candidates:
-            return
-        self._candidates.append(path)
-        logger.info("Full-text candidate discovered in the inbox: %s", os.path.basename(path))
-        btn = QPushButton(f"使用：{os.path.basename(path)}")
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setToolTip(path)
-        btn.clicked.connect(lambda *_, p=path: self._deliver(p))
-        self.candidates_layout.addWidget(btn)
-        self.candidates_box.setVisible(True)
-        if len(self._candidates) > _MAX_CANDIDATES:
-            oldest = self.candidates_layout.itemAt(0).widget()
-            if oldest is not None:
-                self.candidates_layout.removeWidget(oldest)
-                oldest.setParent(None)
-                oldest.deleteLater()
 
     # ------------------------------------------------------------------ 拖拽
 

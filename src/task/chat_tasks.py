@@ -1152,19 +1152,23 @@ class ChatGenerationTask(BackgroundTask):
             "PAYWALLED FULL TEXT below and offer the user the manual route. Copy supporting snippets from "
             "the body VERBATIM. NEVER invent body content.\n\n"
             "### PAYWALLED FULL TEXT (request_fulltext TOOL — MUST OFFER):\n"
-            "Open-access lookup only covers free copies. When fetch_paper_fulltext returns NO body (either "
+            "Open-access lookup only covers free copies. When a body fetch returns NO readable body (either "
             "conclusion) AND a claim you must support depends on the body (methods, sample sizes, statistics, "
             "thresholds, figure-level wording), you MUST call request_fulltext with that paper's DOI/title "
             "BEFORE falling back to the abstract — a paywalled paper is often readable through the user's own "
-            "subscription, and this tool is how they hand it over. A picker window opens on the user's screen: "
-            "they download the PDF and hand it over, and this call BLOCKS until then — it returns a reading "
-            "brief (key points + verbatim quotes + page numbers) that a reading sub-agent extracted from that "
-            "body. Quote those passages verbatim in your cite_references snippets. Rules: only after "
-            "fetch_paper_fulltext returned no body; at most ONCE per paper per turn; do not call any other tool "
-            "while it is pending; if it returns 'unavailable', keep the abstract-only conclusion and say "
-            "plainly that the full text could not be obtained in this run. Never explain a missing body as a "
-            "paywall unless the tool reported 'no_open_access_copy' — with 'incomplete_sources_failed' the "
-            "cause is unknown.\n\n"
+            "subscription, and this tool is how they hand it over. The app escalates the SAME way on its own "
+            "for every failed body fetch: no OA copy, a blocked download (HTTP 403 / not-a-PDF from a "
+            "publisher), or a network error all ask the user to hand over the PDF, so a tool result may "
+            "already carry that reading brief. When it does, use it and never claim the full text was "
+            "unavailable. A system notification appears on the user's desktop (the picker waits in the "
+            "background, it does not steal focus): they download the PDF and hand it over, and this call "
+            "BLOCKS until then — it returns a reading brief (key points + verbatim quotes + page numbers) "
+            "that a reading sub-agent extracted from that body. Quote those passages verbatim in your "
+            "cite_references snippets. Rules: only after a body fetch returned no body; at most ONCE per "
+            "paper per turn; do not call any other tool while it is pending; if it returns 'unavailable', "
+            "keep the abstract-only conclusion and say plainly that the full text could not be obtained in "
+            "this run. Never explain a missing body as a paywall unless the tool reported "
+            "'no_open_access_copy' — with 'incomplete_sources_failed' the cause is unknown.\n\n"
             "### RESPONSE GUIDELINES & CITATION PROTOCOL:\n"
             f"1. IN-TEXT CITATIONS (STRICT): {CITATION_TOKEN_RULE} Attach the token inline IMMEDIATELY after the claim it supports, and NEVER claim a fact without an inline citation.\n"
             f"2. FORMAL BIBLIOGRAPHY (MANDATORY — use the cite_references TOOL): For every source you cite that carries no 'citation_token' and no pre-assigned number, you MUST register it by calling cite_references ONCE, passing its bibliographic fields (title, authors, year, journal, doi, url, and the supporting 'snippet'); the tool returns a 'citation_token' for each entry — paste that token at the claim it supports. Sources that already carry a token or a number (knowledge-base '--- [Document n] ---' entries, tool results with '{AgentRuntime.TOOL_CITE_TOKEN_FIELD}') are already registered by the app — reuse THAT token/number and do NOT register them again. The 'snippet' MUST be a VERBATIM excerpt copied character-for-character from a tool result or from the provided Context (the paper's abstract or body text) — NEVER paraphrase, summarize, or write it from memory; the app verifies it against captured sources and replaces or drops non-verbatim passages. Every number is assigned by the app: do NOT invent, shift or renumber one, and never fall back to an ASCII alias such as [lariguet2004].\n"
@@ -1266,7 +1270,7 @@ class ChatGenerationTask(BackgroundTask):
                 reference_registry=reference_registry,
                 evidence_store=evidence_store,
             )
-            # 付费墙全文的同轮会合通道：弹窗 -> 用户下载/选择 PDF -> 唤醒本线程。
+            # 付费墙全文的同轮会合通道：通知 -> 用户下载并选择 PDF -> 唤醒本线程。
             agent.fulltext_waiter = self._wait_for_fulltext
             if self.deep_mode or deep_plan_confirmed is not None:
                 # 深度研究：分解为并行子任务 -> 用户确认计划 -> 独立 Agent 执行
@@ -1595,9 +1599,10 @@ class ChatGenerationTask(BackgroundTask):
     def _wait_for_fulltext(self, request: dict):
         """挂起本线程，等用户把 PDF 交进来；返回 ``(ok, path, note)``。
 
-        界面收到 ``fulltext_request`` 事件后弹窗（选择/拖拽为主，约定目录兜底），用户交回
-        文件即经 :mod:`src.core.fulltext_bridge` 唤醒这里。等待期间本轮**尚未结束**：计划、
-        已检索到的来源、引用注册表、思考过程全留在上下文里，不存在"新起一轮"的信息断层。
+        界面收到 ``fulltext_request`` 事件后发一条系统通知，并把取全文窗口以**不抢焦点**
+        的方式放到后台；用户自己选择/拖入 PDF 后即经 :mod:`src.core.fulltext_bridge`
+        唤醒这里。等待期间本轮**尚未结束**：计划、已检索到的来源、引用注册表、思考过程
+        全留在上下文里，不存在"新起一轮"的信息断层。
         """
         from src.core import fulltext_bridge
 
@@ -1748,8 +1753,8 @@ class ChatGenerationTask(BackgroundTask):
                 evidence_store=evidence_store,
             )
             # 子任务同样要能请用户交全文：付费墙论文在并行子调查里一样常见，不接这
-            # 条通道，子 Agent 只能写"本次未能取回全文"——而弹窗 + 同轮等待的能力
-            # 明明就在。弹窗在 runtime 侧串行化，不会同时弹两个。
+            # 条通道，子 Agent 只能写"本次未能取回全文"——而通知 + 同轮等待的能力
+            # 明明就在。请求在 runtime 侧串行化，不会同时冒出两个。
             sub_agent.fulltext_waiter = self._wait_for_fulltext
             buffer = []
             try:
