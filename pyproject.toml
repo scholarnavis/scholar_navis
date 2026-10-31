@@ -1,6 +1,6 @@
 [project]
 name = "scholar-navis"
-version = "2.1.0-dev-2"
+version = "2.1.0-dev-1"
 description = "Scholar Navis"
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
