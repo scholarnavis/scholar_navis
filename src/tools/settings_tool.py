@@ -95,7 +95,9 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self._sync_timer.setInterval(300)
         self._sync_timer.timeout.connect(self._sync_llm_data_execute)
 
-        GlobalSignals().request_model_download.connect(self.on_download_requested)
+        # 模型下载区块随本地推理栈一起下线：request_model_download 已无发出方，
+        # 其槽 on_download_requested 也随 ModelSectionMixin 删除。保留这行连接会让
+        # "打开设置页"直接抛 AttributeError（槽不存在）。
         ThemeManager().theme_changed.connect(self._apply_theme)
 
     def get_ui_widget(self):
@@ -173,7 +175,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
             self.init_llm_section()
             self.init_api_keys_section()
             self.init_agent_tool_section()
-            self.init_api_server_section()
         except Exception as e:
             logger.exception("Failed to build settings sections: %s", e)
         finally:
@@ -214,9 +215,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.combo_language.currentIndexChanged.connect(self._mark_unsaved)
 
         # API Server listeners
-        self.input_api_host.textChanged.connect(self._mark_unsaved)
-        self.input_api_port.textChanged.connect(self._mark_unsaved)
-        self.input_api_key.textChanged.connect(self._mark_unsaved)
 
         # LLM listeners
         self.input_llm_name.textChanged.connect(self._mark_unsaved)
@@ -315,7 +313,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
 
         if hasattr(self, '_update_hardware_html'): self._update_hardware_html()
         if hasattr(self, '_update_api_keys_html'): self._update_api_keys_html()
-        if hasattr(self, '_update_vram_html'): self._update_vram_html()
         if hasattr(self, '_refresh_mcp_status'): self._refresh_mcp_status()
 
         if hasattr(self, 'combo_proxy_mode'):
@@ -357,9 +354,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
             self.llm_configs = self._load_llm_config()
 
         # Load API Server settings into UI
-        self.input_api_host.setText(str(self.config.user_settings.get("api_server_host", "127.0.0.1")))
-        self.input_api_port.setText(str(self.config.user_settings.get("api_server_port", 8000)))
-        self.input_api_key.setText(self.config.user_settings.get("api_server_key", "navis-local-key"))
 
         self.input_ncbi_email.setText(self.config.user_settings.get("ncbi_email", ""))
         self.input_ncbi_api_key.setText(self.config.user_settings.get("ncbi_api_key", ""))

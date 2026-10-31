@@ -183,11 +183,6 @@ class SaveFlowMixin:
 
         ThemeManager().apply_application_theme(new_theme)
 
-        try:
-            api_port = int(self.input_api_port.text().strip())
-        except ValueError:
-            api_port = 8000
-
         new_theme = self.combo_theme.currentText()
 
         # 界面语言变更只在重启后生效：此处仅记录"是否变更"，
@@ -218,9 +213,6 @@ class SaveFlowMixin:
             "s2_api_key": new_s2_key,
             "s2_rate_limit": s2_rate_text,
             "github_token": new_github_token,
-            "api_server_host": self.input_api_host.text().strip(),
-            "api_server_port": api_port,
-            "api_server_key": self.input_api_key.text().strip(),
         })
 
         for old_key in ["external_mcp_enabled", "network_mcps", "network_mcp_enabled", "custom_network_models"]:

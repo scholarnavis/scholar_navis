@@ -528,28 +528,3 @@ class EnvSectionMixin:
             accent=tm.color('accent'), bold=strong_weight_css()))
 
     # ---------- API Server ----------
-    def init_api_server_section(self):
-        group = QGroupBox(tr("Local API Server (OpenAI Compatible)"))
-        layout = QFormLayout(group)
-        layout.setLabelAlignment(Qt.AlignRight)
-
-        self.input_api_host = QLineEdit()
-        self.input_api_host.setPlaceholderText(tr("e.g., 127.0.0.1 or 0.0.0.0"))
-
-        self.input_api_port = QLineEdit()
-        self.input_api_port.setPlaceholderText(tr("Default: 8000"))
-
-        self.input_api_key = HoverRevealLineEdit()
-        self.input_api_key.setPlaceholderText(tr("Set a custom API Key to secure your local endpoint (Optional)"))
-
-        layout.addRow(tr("Host Address:"), self.input_api_host)
-        layout.addRow(tr("Server Port:"), self.input_api_port)
-        layout.addRow(tr("Access Key:"), self.input_api_key)
-
-        hint = QLabel(tr(
-            "💡 <i>API Server runs in the background. It shares all active models, RAG, and MCP settings with the GUI. Restart the application to apply port/host changes.</i>"))
-        ThemeManager().apply_class(hint, "hint")
-        hint.setWordWrap(True)
-        layout.addRow("", hint)
-
-        self.layout.addWidget(group)
