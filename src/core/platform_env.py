@@ -318,13 +318,16 @@ _NIX_FHS_EXTRA_SONAMES = (
     "libXcomposite.so.1", "libXtst.so.6", "libxkbfile.so.1",
     "libxcb-cursor.so.0", "libxcb-icccm.so.4", "libxcb-image.so.0",
     "libxcb-render-util.so.0", "libxcb-util.so.1",
+    # QtWebEngine 的图形栈（见 _WEBENGINE_PROBE_SONAMES 的说明）。
+    "libgbm.so.1", "libdrm.so.2",
 )
 
 _NIX_LIB_CACHE_ENV = "SCHOLAR_NAVIS_NIX_LIB_CACHE"
 
-#: 缓存格式版本。架构过滤是 v2 才加入的：v1 缓存可能含 32 位库目录
-#: （症状为 "libsmime3.so: wrong ELF class: ELFCLASS32"），必须整体作废。
-_NIX_LIB_CACHE_VERSION = "2"
+#: 缓存格式版本。v2 加入架构过滤（v1 可能含 32 位目录，症状是
+#: "libsmime3.so: wrong ELF class: ELFCLASS32"）；v3 加入 GBM/DRM 两项
+#: （v2 的目录集合不含 mesa，复用它 libgbm 依旧找不到）。
+_NIX_LIB_CACHE_VERSION = "3"
 
 #: QtWebEngine（内置 PDF / Mermaid 查看器）**独有**的系统库 soname。
 #:
@@ -338,6 +341,10 @@ _WEBENGINE_PROBE_SONAMES = (
     # 表现为明明装了库却判定缺失。
     "libXcomposite.so.1", "libXdamage.so.1", "libXrandr.so.2",
     "libxshmfence.so.1",
+    # GBM / DRM：Chromium 的图形初始化（GBM 分配器、DRM 设备探测）必需。
+    # 漏掉这两项的后果是"应用能启动、一点 Mermaid/PDF 就报 libgbm.so.1 无法打开"——
+    # 探针没问、接管时也就不会补，症状看起来像 QtWebEngine 装坏了。
+    "libgbm.so.1", "libdrm.so.2",
 )
 
 

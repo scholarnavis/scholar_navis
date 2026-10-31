@@ -489,13 +489,9 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
 
     cmd.append(ENTRY_POINT)
 
-    print("[*] Executing PyInstaller (Packaging PySide6 & ONNXRuntime)...")
+    print("[*] Executing PyInstaller (packaging PySide6 & runtime deps)...")
     # check=False：失败由下面的 returncode 判定，以便区分"打包失败"与"异常退出"。
     result = subprocess.run(cmd, check=False)
-
-    # 无论打包成功失败，清理掉临时生成的 Hook 文件
-    if os.path.exists(hook_file):
-        os.remove(hook_file)
 
     if result.returncode != 0:
         # 必须非零退出。旧写法只 `return`，脚本仍以 0 结束，CI 会继续往下走，
