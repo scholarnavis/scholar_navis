@@ -168,24 +168,58 @@ def ensure_micromamba(*, log_cb: Optional[Callable[[str], None]] = None,
                           log_cb=log_cb, progress_cb=_scaled, cancel_cb=cancel_cb)
 
 
+def _installable(package: str, tools: Sequence[catalog_mod.ToolEntry],
+                 platform: str) -> bool:
+    """该包在给定平台上是否有 conda 构建。
+
+    以清单条目的 ``platforms`` 为准；找不到对应条目时返回 True——包名可能来自用户
+    自己加的前缀，判断不了就不拦。
+    """
+    owners = [entry for entry in tools if entry.conda_name == package]
+    if not owners:
+        return True
+    return any(entry.available_on(platform) for entry in owners)
+
+
 def create(prefix_name: str, packages: Sequence[str], *,
            channels: Sequence[str] = ("bioconda", "conda-forge"),
            tools: Sequence[catalog_mod.ToolEntry] = (),
+           platform: str = "",
            log_cb: Optional[Callable[[str], None]] = None,
            progress_cb: Optional[Callable[[int, str], None]] = None,
            cancel_cb: Optional[Callable[[], bool]] = None) -> dict:
     """创建（或增量补齐）一个私有前缀。
 
+    只请求**本平台真有包**的那些：Windows 上 bioconda 几乎不提供 win-64 产物，
+    照搬整份清单会让求解必然失败，而失败信息（"nothing provides …"）不会告诉用户
+    "这台机器上根本装不了，应该去 WSL 里装"。可装集合由
+    :meth:`src.core.bioenv.catalog.Catalog.installable_packages` 判定。
+
     :param packages: 需要安装的 conda 包名。
-    :param tools:    写入元数据的工具条目快照，供就绪判断与验证使用。
-    :return: ``{"success", "cancelled", "error", "skipped"}``
+    :param tools:    写入元数据的工具条目快照，供就绪判断、平台过滤与验证使用。
+    :param platform: 目标平台标识；省略时取当前运行平台。
+    :return: ``{"success", "cancelled", "error", "skipped", "unavailable"}``
     """
+    plat = platform or mamba.runtime_platform()
     result: Dict[str, object] = {"success": False, "cancelled": False,
-                                 "error": "", "skipped": []}
-    wanted = [str(p).strip() for p in packages if str(p).strip()]
+                                 "error": "", "skipped": [], "unavailable": []}
+    requested = [str(p).strip() for p in packages if str(p).strip()]
+    wanted = [p for p in requested if _installable(p, tools, plat)]
+    dropped = [p for p in requested if p not in wanted]
+    if dropped:
+        result["unavailable"] = dropped
+        message = (f"{len(dropped)} package(s) have no {plat} build and were skipped: "
+                   f"{', '.join(dropped)}")
+        logger.warning(message)
+        if log_cb:
+            log_cb(message)
     if not wanted:
-        result["error"] = "no package requested"
-        logger.error(f"Prefix '{prefix_name}' requested with no packages")
+        result["error"] = (
+            f"none of the requested packages has a build for {plat}. On Windows the "
+            f"toolchain has to live inside WSL2: install these packages in the "
+            f"distribution (conda or mamba, channel bioconda), then re-detect on the "
+            f"External Tools page")
+        logger.error(f"Prefix '{prefix_name}' cannot be created on {plat}: {result['error']}")
         return result
 
     got = ensure_micromamba(log_cb=log_cb, progress_cb=progress_cb, cancel_cb=cancel_cb)
@@ -272,10 +306,11 @@ def create(prefix_name: str, packages: Sequence[str], *,
         atomic_write_json(meta_path(prefix_name), {
             "schema_version": 1,
             "prefix": prefix_name,
-            "platform": mamba.runtime_platform(),
+            "platform": plat,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "packages": remaining,
-            "requested": wanted,
+            "requested": requested,
+            "unavailable": list(result["unavailable"]),
             "skipped": list(result["skipped"]),
             "channels": list(channels),
             "mamba_version": (mamba.verify(mamba_exe, paths.cache_dir()) or {}).get("version", ""),

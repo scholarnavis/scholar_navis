@@ -9,8 +9,15 @@
 平台可用性必须显式声明
 --------------------
 bioconda 只有 linux-64 与 osx-64/osx-arm64，win-64 几乎是空的。因此"某工具在
-Windows 上能不能用"不能靠猜测，只能靠清单里的 ``platforms`` 显式列出；缺失即
-视为不可用，调用方据此给出替代路径而不是发一个必然失败的命令。
+Windows 上能不能用"不能靠猜测，只能靠清单显式列出；缺失即视为不可用，调用方据此
+给出替代路径而不是发一个必然失败的命令。两个字段分工明确，不能互相顶替：
+
+* ``platforms`` —— **conda 通道**有该平台构建。只有列在这里的平台才可能装进私有
+  前缀（否则求解必然失败）。
+* ``native_platforms`` —— 上游项目自己发布该平台的预编译产物（seqkit 的
+  ``seqkit_windows_amd64.exe`` 就是典型）。这类产物可以探测与运行，但**装不了**
+  到私有前缀里，因此不能合并进 ``platforms``：那会让安装动作去请求一个不存在的
+  包，把"用户装过"与"我们能装"两件事混成一件。
 
 许可底线
 --------
@@ -81,6 +88,10 @@ class ToolEntry:
     license: str
     summary: str
     platforms: Tuple[str, ...]
+    #: 上游自行分发预编译产物的平台（不走 conda）；见模块 docstring 的字段分工。
+    native_platforms: Tuple[str, ...] = ()
+    #: 该条目有原生构建、但 conda 通道没有时，给用户的获取指引（清单里的唯一文案）。
+    native_hint: str = ""
     executables: Dict[str, str] = field(default_factory=dict)
     version_args: Tuple[str, ...] = ("--version",)
     #: 抓取帮助信息的参数。空元组表示该工具不提供（或不需要）帮助探测，此时不做
@@ -98,17 +109,30 @@ class ToolEntry:
     docs: str = ""
 
     def available_on(self, platform: str) -> bool:
-        """该工具在给定平台（micromamba 标识）上是否有**原生**构建。"""
+        """该工具在给定平台（micromamba 标识）上是否有 **conda 通道**构建。
+
+        只有为真的平台才值得尝试装进私有前缀；判定原生可执行文件能否运行请用
+        :meth:`host_runnable`。
+        """
         return platform in self.platforms
+
+    def native_on(self, platform: str) -> bool:
+        """上游是否自行分发该平台的预编译产物（conda 通道不给这些平台）。"""
+        return platform in self.native_platforms
+
+    def host_runnable(self, platform: str) -> bool:
+        """宿主能否直接运行：conda 构建与厂商预编译产物，任一条路都算。"""
+        return self.available_on(platform) or self.native_on(platform)
 
     def reachable_on(self, platform: str) -> bool:
         """该工具在给定平台上是否可达。
 
-        两种情形：有原生构建；或者当前是 Windows 而清单声明了 ``linux-64``——此时
-        唯一能拿到权威工具的路子是 WSL，所以"没有 win-64 构建"不等于"用不了"。
-        这个判定集中在这里，避免解析层与展示层各写一份。
+        三种情形：conda 通道有该平台构建；上游有该平台的预编译产物；或者当前是
+        Windows 而清单声明了 ``linux-64``——此时唯一能拿到权威工具的路子是 WSL，
+        所以"没有 win-64 构建"不等于"用不了"。判定集中在这里，避免解析层与展示层
+        各写一份。
         """
-        if self.available_on(platform):
+        if self.host_runnable(platform):
             return True
         return platform.startswith("win-") and self.available_on("linux-64")
 
@@ -135,11 +159,15 @@ class Catalog:
         return self.tools.get(name)
 
     def for_platform(self, platform: str) -> List[ToolEntry]:
-        """在给定平台上有原生构建的全部工具（保持清单顺序）。"""
+        """在给定平台上有 conda 构建的全部工具（保持清单顺序）。"""
         return [entry for entry in self.tools.values() if entry.available_on(platform)]
 
     def for_reachable(self, platform: str) -> List[ToolEntry]:
-        """在给定平台上可达的全部工具（含 Windows 经 WSL 借用 linux-64 的情形）。"""
+        """在给定平台上可达的全部工具。
+
+        包含三种来源：conda 构建、厂商预编译产物、以及 Windows 经 WSL 借用
+        linux-64 的情形。
+        """
         return [entry for entry in self.tools.values() if entry.reachable_on(platform)]
 
     def tools_of(self, prefix: str) -> List[ToolEntry]:
@@ -152,6 +180,23 @@ class Catalog:
         if declared:
             return _as_tuple(declared)
         return tuple(entry.conda_name for entry in self.tools_of(prefix))
+
+    def installable_packages(self, prefix: str, platform: str) -> Tuple[str, ...]:
+        """某个前缀在给定平台上**真能装**的包（conda 通道有该平台构建的那些）。
+
+        与 :meth:`prefix_packages` 的分工：后者回答"这个前缀要什么"，这里回答"在
+        这台机器上能装什么"。Windows 上 bioconda 几乎没有 win-64 产物，照搬整份
+        清单只会让求解必然失败，因此安装动作必须先过这一关。
+
+        无法与任何工具条目对应的包（用户清单里自己加的）原样保留：判断不了就不拦。
+        """
+        out: List[str] = []
+        for package in self.prefix_packages(prefix):
+            owners = [e for e in self.tools_of(prefix) if e.conda_name == package]
+            if owners and not any(e.available_on(platform) for e in owners):
+                continue
+            out.append(package)
+        return tuple(out)
 
     def prefix_names(self) -> List[str]:
         """清单中出现过的全部前缀名（含只在前缀表里声明的空前缀）。"""
@@ -224,6 +269,8 @@ def _parse_tool(name: str, raw: Dict[str, Any], problems: List[str]) -> Optional
         license=license_id,
         summary=str(raw.get("summary") or ""),
         platforms=platforms,
+        native_platforms=_as_tuple(raw.get("native_platforms")),
+        native_hint=str(raw.get("native_hint") or ""),
         executables=dict(executables) if isinstance(executables, dict) else {},
         # 显式写空数组表示"该工具没有版本参数"（bwa / seqtk）。与 help_args 同理，
         # 不能用 ``or`` 兜底：那会把"声明为空"静默改回 --version，随后探测必然失败，

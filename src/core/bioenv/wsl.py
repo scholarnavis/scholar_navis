@@ -21,6 +21,16 @@ WSL 里的 Linux 环境。这不是"锦上添花"的兼容选项，而是 Window
 ``--cd`` 是较新版本才有的选项，旧版会直接报未知参数。检测阶段会显式验证它可用，
 不可用时回落到 ``sh -c 'cd "$1" && shift && exec "$@"'``：那段 shell 片段是常量，
 目录与参数都作为位置参数传入，不拼接用户输入。
+
+两个容易漏掉的实际情形
+----------------------
+1. **工具不在默认 PATH 里**。WSL 用户几乎都把生信工具装在 conda 环境里，而发行版
+   非交互 shell 的 ``PATH`` 通常不含 ``~/miniconda3/bin``。只查 ``command -v``
+   会得到"用户明明装了却报没装"的结论，因此 :func:`which_in_distro` 还会按清单声明
+   的目录找一遍，并退到登录 shell（``conda init`` 的片段只在那里生效）。
+2. **"没有发行版"与"功能没启用"**。前者 ``wsl -l -q`` 返回 0 且表为空，后者返回
+   非零。两者都表现为"列不出发行版"，但处置完全不同（一个让你装发行版，一个让你
+   先启用 WSL），因此判定看返回码（:func:`list_distros_detailed`），不看文本。
 """
 
 from __future__ import annotations
@@ -59,8 +69,25 @@ STATUS_TTL = 6 * 60 * 60
 _TIMEOUT_LIST = 10.0
 _TIMEOUT_PROBE = 30.0
 
+#: 一次远端执行要额外拨给 ``wsl.exe`` 自身的启动预算（秒）。
+#:
+#: 发行版未运行时要冷启动，实测 3~15 秒；这段时间花在 ``wsl.exe`` 上，与工具本身
+#: 无关。把它算进工具的超时会让"120 秒的工具"在冷启动时被误判成超时，因此由
+#: :mod:`src.core.bioenv.runner` 单独加上，而不是调大所有工具的默认超时。
+STARTUP_ALLOWANCE = 15.0
+
 #: ``sh -c 'cd "$1" && shift && exec "$@"'`` 里的固定引导片段。
 _CD_SHIM = 'cd "$1" && shift && exec "$@"'
+
+#: 在发行版内定位可执行文件的固定片段：先按清单给的目录找，再退回 ``command -v``。
+#: 目录与工具名都作为位置参数传入（``$1`` 是工具名，其余是目录），不拼接任何用户输入。
+_WHICH_SHIM = ('n="$1"; shift; for d in "$@"; do '
+               # ``\~`` 必须转义：在 ``${d#...}`` 的模式位置，``~`` 会被 shell 先
+               # 做一次家目录展开，于是模式变成「<真实家目录>/」，永远匹配不上以
+               # ``~/`` 开头的值——目录明明存在却报找不到。
+               'case "$d" in "~/"*) d="$HOME/${d#\\~/}";; esac; '
+               'if [ -x "$d/$n" ]; then printf "%s\\n" "$d/$n"; exit 0; fi; done; '
+               'command -v "$n" 2>/dev/null')
 
 _STATUS: Optional["WslStatus"] = None
 _STATUS_AT = 0.0
@@ -112,8 +139,23 @@ def load_config() -> dict:
 #  底层执行
 # --------------------------------------------------------------------------- #
 def _wsl_exe() -> str:
-    """``wsl.exe`` 的绝对路径（不存在返回空串）。"""
-    return shutil.which("wsl") or ""
+    """``wsl.exe`` 的绝对路径（不存在返回空串）。
+
+    先查 ``PATH``；查不到再直接看 ``%SystemRoot%\\System32``——应用若从被裁剪过
+    ``PATH`` 的环境启动（某些启动器、便携发行包），``wsl.exe`` 明明在系统目录里
+    也会被误判成"未安装 WSL"。
+    """
+    found = shutil.which("wsl")
+    if found:
+        return found
+    if not is_windows():
+        return ""
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    candidate = os.path.join(system_root, "System32", "wsl.exe")
+    if os.path.isfile(candidate):
+        logger.info(f"wsl.exe resolved outside PATH: {candidate}")
+        return candidate
+    return ""
 
 
 def _build_command(exe: str, distro: str, argv: Sequence[str], cwd: str,
@@ -147,11 +189,15 @@ def _decode_console(data: bytes) -> str:
     return data.decode("utf-8", "replace")
 
 
-def _run_console(args: Sequence[str], timeout: float) -> Tuple[int, str]:
-    """执行 ``wsl.exe`` 自身的管理命令（如 ``-l -q``），返回 ``(返回码, 文本)``。"""
+def _run_console(args: Sequence[str], timeout: float) -> Tuple[int, str, str]:
+    """执行 ``wsl.exe`` 自身的管理命令（如 ``-l -q``）。
+
+    :return: ``(返回码, 标准输出, 标准错误)``。错误文本只用于诊断：中文 Windows 上
+        它是本地化的，判定一律看返回码（见模块 docstring）。
+    """
     exe = _wsl_exe()
     if not exe:
-        return -1, ""
+        return -1, "", "wsl.exe not found"
     try:
         proc = subprocess.run(
             [exe, *args], capture_output=True, timeout=timeout,
@@ -159,11 +205,13 @@ def _run_console(args: Sequence[str], timeout: float) -> Tuple[int, str]:
         )
     except subprocess.TimeoutExpired:
         logger.warning(f"wsl.exe {args} timed out after {timeout}s")
-        return -1, ""
+        return -1, "", f"timed out after {timeout}s"
     except (OSError, subprocess.SubprocessError) as e:
         logger.warning(f"Cannot run wsl.exe {args}: {e}")
-        return -1, ""
-    return proc.returncode, _decode_console(proc.stdout or b"")
+        return -1, "", str(e)
+    return (proc.returncode,
+            _decode_console(proc.stdout or b""),
+            _decode_console(proc.stderr or b""))
 
 
 def run_in_distro(distro: str, argv: Sequence[str], *, timeout: float = _TIMEOUT_PROBE,
@@ -201,21 +249,36 @@ def run_in_distro(distro: str, argv: Sequence[str], *, timeout: float = _TIMEOUT
 # --------------------------------------------------------------------------- #
 #  检测
 # --------------------------------------------------------------------------- #
-def list_distros() -> List[str]:
-    """列出已安装的发行版名（``-l -q`` 的输出是 UTF-16LE）。"""
-    if not is_windows():
-        return []
-    rc, text = _run_console(["-l", "-q"], _TIMEOUT_LIST)
-    if rc != 0:
-        # 无发行版时部分版本返回非零并输出帮助文本，这里不把它当成错误处理。
-        logger.info(f"wsl -l -q exited {rc}")
+def _parse_distro_names(text: str) -> List[str]:
+    """从 ``wsl -l -q`` 的输出里取出发行版名（跳过帮助与版权行）。"""
     names = []
     for line in text.replace("\x00", "").splitlines():
         name = line.strip().strip("\ufeff")
         if name and not name.lower().startswith(("windows subsystem", "copyright", "usage")):
             names.append(name)
-    logger.info(f"WSL distributions found: {names}")
     return names
+
+
+def list_distros_detailed() -> Tuple[int, List[str], str]:
+    """列出发行版，同时带回返回码与错误文本。
+
+    需要返回码是因为"没有发行版"与"WSL 功能未启用"在 ``wsl -l -q`` 上表现不同：
+    前者返回 0 并输出空表，后者返回非零。只看名字会把两种情况都说成"没装发行版"，
+    于是用户按提示去装发行版也修不好。
+    """
+    if not is_windows():
+        return 0, [], ""
+    rc, out, err = _run_console(["-l", "-q"], _TIMEOUT_LIST)
+    names = _parse_distro_names(out)
+    if rc != 0:
+        logger.info(f"wsl -l -q exited {rc}: {(err or out).strip()[:200]}")
+    logger.info(f"WSL distributions found: {names}")
+    return rc, names, err
+
+
+def list_distros() -> List[str]:
+    """列出已安装的发行版名（``-l -q`` 的输出是 UTF-16LE）。"""
+    return list_distros_detailed()[1]
 
 
 def _kernel_release(distro: str) -> Tuple[str, int]:
@@ -279,8 +342,14 @@ def _detect_once() -> WslStatus:
         return WslStatus(state=STATE_NO_WSL,
                          detail="wsl.exe not found; the Windows feature is not enabled")
 
-    distros = list_distros()
+    rc, distros, err = list_distros_detailed()
     if not distros:
+        if rc != 0:
+            # 功能未启用（或被策略拦）时 wsl.exe 会打印帮助或以非零退出：这与"装好了
+            # WSL 但没有发行版"是两种不同处置，不能都说成"没装发行版"。
+            return WslStatus(state=STATE_NO_WSL,
+                             detail=((err or "").strip()[:300]
+                                     or f"wsl.exe exited {rc} with no distribution listed"))
         return WslStatus(state=STATE_NO_DISTRO,
                          detail="no Linux distribution is installed")
 
@@ -368,16 +437,53 @@ def wrap_argv(argv: Sequence[str], *, distro: str, cwd: str = "",
     return _build_command(exe, distro, argv, cwd, supports_cd)
 
 
-def which_in_distro(name: str, distro: str = "") -> str:
-    """在发行版内定位可执行文件（``command -v``），找不到返回空串。"""
+def which_in_distro(name: str, distro: str = "", search_dirs: Sequence[str] = ()) -> str:
+    """在发行版内定位可执行文件，找不到返回空串。
+
+    三条线索，按可靠性排序：
+
+    1. **清单声明的目录**（``~/miniconda3/bin`` 这类）。WSL 里的工具多数装在 conda
+       环境里，而发行版默认 ``PATH`` 通常不含它们——只查 ``command -v`` 等于"用户
+       明明装了却报没装"；
+    2. **非交互 ``PATH``**（``command -v``），覆盖用户自己加进 ``/etc/environment``
+       或 profile 的情况；
+    3. **登录 shell**（``bash -lc``）。``conda init`` 写的初始化片段只在这种 shell 里
+       生效，因此它能找到 base 环境里的工具；刻意不加 ``-i``：交互 shell 会读用户的
+       交互配置，既慢又可能产生与本次探测无关的输出。
+
+    ``~/`` 由发行版内展开（宿主上的 ``os.path.expanduser`` 展开结果对发行版没有
+    意义），其余变量不展开——清单是静态数据，不做二次求值。
+    """
     status = detect()
     target = distro or status.distro
     if not target:
         return ""
-    res = run_in_distro(target, ["sh", "-c", 'command -v "$1"', "sh", name],
+    dirs = [str(d).strip() for d in search_dirs if str(d).strip()]
+    res = run_in_distro(target, ["sh", "-c", _WHICH_SHIM, "sh", name, *dirs],
                         timeout=_TIMEOUT_PROBE)
-    path = (res["stdout"] or "").strip().splitlines()
-    return path[0] if res["rc"] == 0 and path else ""
+    found = _first_line(res["stdout"])
+    if found:
+        logger.info(f"'{name}' resolved in WSL '{target}' at {found}")
+        return found
+
+    res = run_in_distro(target, ["bash", "-lc", 'command -v "$1"', "bash", name],
+                        timeout=_TIMEOUT_PROBE)
+    found = _first_line(res["stdout"])
+    if found:
+        logger.info(f"'{name}' resolved via the login shell of '{target}': {found}")
+        return found
+    logger.info(f"'{name}' not found in WSL '{target}' "
+                f"(rc={res['rc']}, searched {len(dirs)} declared dir(s))")
+    return ""
+
+
+def _first_line(text: str) -> str:
+    """取输出的第一行非空内容（多行时取第一条命中的路径）。"""
+    for line in str(text or "").splitlines():
+        value = line.strip()
+        if value:
+            return value
+    return ""
 
 
 def probe_tool(name: str, version_args: Sequence[str], distro: str = "",
@@ -401,14 +507,18 @@ def probe_tool(name: str, version_args: Sequence[str], distro: str = "",
 
 
 def describe(status: Optional["WslStatus"] = None) -> str:
-    """给用户看的一句话结论。"""
+    """给用户看的一句话结论（含"下一步怎么做"，不只说"不可用"）。"""
     st = status or detect()
     messages = {
         STATE_NOT_APPLICABLE: "WSL is only relevant on Windows.",
-        STATE_NO_WSL: "WSL is not enabled on this system.",
-        STATE_NO_DISTRO: "WSL is enabled but no Linux distribution is installed.",
-        STATE_WSL1_ONLY: "Only a WSL1 distribution is available; WSL2 is required.",
-        STATE_UNRESPONSIVE: "The WSL distribution did not respond; it may still be starting.",
+        STATE_NO_WSL: ("WSL is not enabled on this system "
+                       "(run 'wsl --install' in an administrator terminal, then reboot)."),
+        STATE_NO_DISTRO: ("WSL is enabled but no Linux distribution is installed "
+                          "(install one with 'wsl --install -d Ubuntu')."),
+        STATE_WSL1_ONLY: ("Only a WSL1 distribution is available; WSL2 is required "
+                          "(convert it with 'wsl --set-version <distro> 2')."),
+        STATE_UNRESPONSIVE: ("The WSL distribution did not respond; it may still be "
+                             "starting. Retry in a few seconds."),
         STATE_BLOCKED: "WSL cannot be used: " + (st.detail or "blocked by policy"),
         STATE_READY: f"WSL is ready: {st.distro} (WSL{st.version or 2}).",
     }

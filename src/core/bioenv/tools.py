@@ -30,6 +30,8 @@ from src.core.bioenv import catalog as catalog_mod
 from src.core.bioenv import help as help_mod
 from src.core.bioenv import resolver
 from src.core.bioenv import runner
+from src.core.bioenv import wsl
+from src.core.platform_env import is_windows
 from src.core.toolchain import micromamba as mamba
 
 logger = logging.getLogger("BioEnv.Tools")
@@ -75,11 +77,17 @@ def _clip(value: Any, limit: int = _MAX_CELL) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def _safe_input(path: str) -> Tuple[str, str]:
-    """校验输入文件路径，返回 ``(绝对路径, 错误)``。
+def _safe_input(path: str, location: Optional[resolver.ToolLocation] = None
+                ) -> Tuple[str, str]:
+    """校验输入文件路径，返回 ``(工具能读的路径, 错误)``。
 
     以 ``-`` 开头的路径会被工具当成选项，必须挡在调用之前；这不是注入防护的替代
     （这里本来就不拼 shell），而是避免一次必然失败或行为异常的调用。
+
+    **WSL 落点必须换路径**：发行版里的工具看不到 ``C:\\Users\\...``，必须换成
+    ``/mnt/c/...`` 这类挂载路径。转换走 ``wslpath``（见
+    :func:`src.core.bioenv.wsl.to_wsl_path`），转换失败就如实报错——把一个宿主路径
+    原样交给发行版，得到的只会是"文件不存在"，而用户明明看到文件在那里。
     """
     text = str(path or "").strip()
     if not text:
@@ -89,6 +97,14 @@ def _safe_input(path: str) -> Tuple[str, str]:
     full = os.path.abspath(os.path.expanduser(text))
     if not os.path.isfile(full):
         return "", f"input file not found: {full}"
+    if location is not None and location.source == "wsl":
+        converted = wsl.to_wsl_path(full, location.distro or "")
+        if not converted:
+            return "", (f"cannot map {full} into the WSL distribution "
+                        f"(wslpath failed; keep the file on a mounted drive "
+                        f"such as C:)")
+        logger.info(f"Input path translated for WSL: {full} -> {converted}")
+        return converted, ""
     return full, ""
 
 
@@ -163,10 +179,11 @@ def _unavailable_payload(entry: catalog_mod.ToolEntry, cat: catalog_mod.Catalog,
         "status": "unavailable",
         "tool": entry.name,
         "reason_kind": kind,
-        "message": resolver.unavailable_reason(entry, platform),
+        "message": resolver.unavailable_conclusion(entry, platform),
         "next_step": _NEXT_STEP.get(kind, _NEXT_STEP["unknown"]),
-        "install_hint": (f"External Tools page -> Copy install command "
-                         f"(prefix '{entry.prefix}')"),
+        # 安装指引与设置页共用一处判定：Windows 上"装进私有前缀"对没有 win-64 构建
+        # 的工具是跑不通的，直接照抄这句话会让模型告诉用户去装一个不存在的包。
+        "install_hint": resolver.install_hint(entry, platform),
     }
     alternatives = _alternatives(entry, cat, platform)
     if alternatives:
@@ -220,8 +237,12 @@ def _require_ready(name: str) -> Tuple[Optional[resolver.ToolLocation], str]:
 
 def _base_payload(location: resolver.ToolLocation,
                   result: runner.RunResult) -> Dict[str, Any]:
-    """每次执行都要带上的溯源信息：命令、版本、来源、现场目录。"""
-    return {
+    """每次执行都要带上的溯源信息：命令、版本、来源、现场目录。
+
+    WSL 落点额外带上发行版名：同一台机器上"结果由哪个 Linux 环境产出"是复现的一
+    部分，而 ``command`` 里虽然包着 ``wsl.exe``，发行版名未必一眼可见。
+    """
+    payload = {
         "tool": location.name,
         "tool_version": location.version,
         "tool_source": location.source,
@@ -229,6 +250,9 @@ def _base_payload(location: resolver.ToolLocation,
         "elapsed_seconds": round(result.elapsed, 2),
         "run_dir": result.run_dir,
     }
+    if location.source == "wsl" and location.distro:
+        payload["wsl_distro"] = location.distro
+    return payload
 
 
 def _read_tsv(path: str, limit: int) -> Tuple[List[List[str]], bool]:
@@ -266,18 +290,22 @@ def bio_tool_status(tool: str = "") -> str:
                           known=sorted(cat.tools))
         if not entry.reachable_on(platform):
             return _ok({"tool": entry.name, "available": False,
-                        "reason": resolver.unavailable_reason(entry, platform),
-                        "declared_platforms": list(entry.platforms)})
+                        "reason": resolver.unavailable_conclusion(entry, platform),
+                        "install_hint": resolver.install_hint(entry, platform),
+                        "declared_platforms": list(entry.platforms),
+                        "declared_native_platforms": list(entry.native_platforms)})
         location = resolver.resolve(entry, cat, platform)
         if location is None:
             kind, _text = resolver.failure_reason(entry, platform)
             return _ok({"tool": entry.name, "available": False,
                         "reason_kind": kind,
-                        "reason": resolver.unavailable_reason(entry, platform),
+                        "reason": resolver.unavailable_conclusion(entry, platform),
                         "next_step": _NEXT_STEP.get(kind, _NEXT_STEP["unknown"]),
+                        "install_hint": resolver.install_hint(entry, platform),
                         "alternatives": _alternatives(entry, cat, platform)})
         return _ok({"tool": entry.name, "available": True, "path": location.path,
                     "source": location.source, "version": location.version,
+                    "wsl_distro": location.distro,
                     "run_mode": entry.run_mode,
                     "typical_seconds": entry.typical_seconds,
                     "license": entry.license})
@@ -299,13 +327,19 @@ def bio_tool_status(tool: str = "") -> str:
         }
         if location is None:
             # 不给原因的话，整张表对模型就只是十行 false：既不知道哪个能修，
-            # 也不知道该建议用户做什么。
+            # 也不知道该建议用户做什么。这里只给结论，逐行再带一份"该怎么办"会让
+            # 同一句话重复十遍；要细节时用 bio_tool_status(tool=...)。
             kind, _text = resolver.failure_reason(entry, platform)
             row["reason_kind"] = kind
-            row["reason"] = resolver.unavailable_reason(entry, platform)
+            row["reason"] = resolver.unavailable_conclusion(entry, platform)
         rows.append(row)
-    return _ok({"platform": platform, "tools": rows,
-                "catalog_problems": cat.problems[:10]})
+    payload: Dict[str, Any] = {"platform": platform, "tools": rows,
+                               "catalog_problems": cat.problems[:10]}
+    if is_windows():
+        # Windows 上"为什么这个工具不可用"几乎总要落到 WSL 状态上，把它放在顶层
+        # 一次，而不是逐行重复。
+        payload["wsl"] = wsl.describe()
+    return _ok(payload)
 
 
 def bio_tool_help(tool: str, max_lines: int = 60) -> str:
@@ -359,7 +393,7 @@ def bio_seqkit_stats(path: str, max_rows: int = 50) -> str:
     location, blocked = _require_ready("seqkit")
     if location is None:
         return blocked
-    target, problem = _safe_input(path)
+    target, problem = _safe_input(path, location)
     if target == "":
         return _error(problem)
 
@@ -389,7 +423,7 @@ def bio_bam_flagstat(bam: str, max_rows: int = 50) -> str:
     location, blocked = _require_ready("samtools")
     if location is None:
         return blocked
-    target, problem = _safe_input(bam)
+    target, problem = _safe_input(bam, location)
     if target == "":
         return _error(problem)
 

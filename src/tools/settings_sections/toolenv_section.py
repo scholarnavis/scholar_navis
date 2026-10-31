@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QGroupBox, QHBoxLayout, QLabel
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout)
 
+from src.core.core_task import TaskManager, TaskMode, TaskState
 from src.core.i18n import tr
 from src.core.theme_manager import ThemeManager
 
@@ -102,45 +103,72 @@ class ToolEnvSectionMixin:
         self._refresh_toolenv_status(refresh=True)
 
     def _refresh_toolenv_status(self, refresh: bool = False):
-        """Detect R, WSL and every catalogued tool, then redraw the block."""
+        """在后台线程里检测 R / WSL / 生信工具，完成后回主线程渲染。
+
+        检测必须离开界面线程：Windows 上没有本机构建的每个工具都要经 ``wsl.exe``
+        探测，发行版冷启动时单次可超过十秒。这里只负责发起任务与置灰按钮，结果由
+        :meth:`_render_toolenv` 处理（见 :class:`src.task.settings_tasks.ToolEnvDetectTask`）。
+        """
         if not hasattr(self, "table_toolenv"):
             return
 
-        from src.core.bioenv import catalog, paths
-        from src.core.bioenv import help as help_mod
-        from src.core.bioenv import resolver
-        from src.core.bioenv import wsl
-        from src.core.r_engine import get_r_engine
-        from src.core.toolchain import micromamba as mamba
+        from src.task.settings_tasks import ToolEnvDetectTask
 
-        tm = ThemeManager()
+        if getattr(self, "_toolenv_task_mgr", None) is None:
+            self._toolenv_task_mgr = TaskManager()
+            self._toolenv_task_mgr.sig_result.connect(self._on_toolenv_result)
+            self._toolenv_task_mgr.sig_state_changed.connect(self._on_toolenv_state)
+
+        self.btn_toolenv_refresh.setEnabled(False)
+        self.btn_toolenv_refresh.setText(tr("Detecting..."))
+        self.lbl_toolenv_status.setText(tr("Detecting external tools..."))
+        logger.info("External tool detection started (refresh=%s)", refresh)
+        self._toolenv_task_mgr.start_task(
+            ToolEnvDetectTask, task_id="toolenv_detect",
+            mode=TaskMode.THREAD, refresh=refresh)
+
+    def _on_toolenv_state(self, state: str, msg: str):
+        """任务终态：恢复按钮；失败时把原因写进状态行（表格保持上一次的结果）。"""
+        self.btn_toolenv_refresh.setEnabled(True)
+        self.btn_toolenv_refresh.setText(tr("Re-detect"))
+        if state != TaskState.SUCCESS.value:
+            tm = ThemeManager()
+            reason = str(msg or "").strip() or tr("unknown error")
+            logger.warning("External tool detection ended as %s: %s", state, reason)
+            self.lbl_toolenv_status.setText(
+                f"<span style='color:{tm.color('warning')}'>"
+                f"{tr('Detection failed:')} {reason}</span>")
+
+    def _on_toolenv_result(self, result):
+        """后台检测结果回主线程渲染（结构见 ToolEnvDetectTask._execute 的返回值）。"""
         try:
-            if refresh:
-                resolver.clear_cache()
-                wsl.invalidate()
-            cat = catalog.default(refresh=refresh)
-            platform = mamba.runtime_platform()
-            ws = wsl.detect(refresh=refresh)
-            locations = resolver.resolve_all(cat, platform, refresh=refresh)
-            r_info = get_r_engine().detect()
+            self._render_toolenv(result or {})
         except Exception as e:
-            # 检测失败不能让设置页整体炸掉：REST 之外的区块还要能用。
-            logger.exception("External tool detection failed: %s", e)
+            logger.exception("Rendering the external tool table failed: %s", e)
+            tm = ThemeManager()
             self.lbl_toolenv_status.setText(
                 f"<span style='color:{tm.color('warning')}'>"
                 f"{tr('Detection failed:')} {e}</span>")
-            return
 
-        reachable = cat.for_reachable(platform)
-        missing = [entry.name for entry in reachable if entry.name not in locations]
-        help_cached = set(help_mod.cached_tools())
+    def _render_toolenv(self, result):
+        """把一份检测结果画到状态行与表格上。"""
+        tm = ThemeManager()
+        platform = str(result.get("platform") or "")
+        rows = list(result.get("tools") or [])
+        total = int(result.get("total") or len(rows))
+        resolved = int(result.get("resolved") or 0)
+        missing = [row.get("name", "") for row in rows if not row.get("available")]
 
+        r_info = result.get("r") or {}
         r_ok = bool(r_info.get("available"))
         r_text = (tr("available") + f" {r_info.get('version', '')}"
                   if r_ok else tr("not detected"))
         r_color = tm.color("success") if r_ok else tm.color("warning")
 
-        wsl_color = tm.color("success") if ws.usable else tm.color("text_muted")
+        wsl_usable = bool(result.get("wsl_usable"))
+        wsl_color = (tm.color("success") if wsl_usable
+                     else (tm.color("text_muted") if not result.get("wsl_applicable")
+                           else tm.color("warning")))
         tools_color = tm.color("success") if not missing else tm.color("warning")
 
         self.lbl_toolenv_status.setText(
@@ -149,27 +177,30 @@ class ToolEnvSectionMixin:
             f"<b>R:</b> <span style='color:{r_color}'>{r_text}</span>"
             f" &nbsp;<span style='color:{tm.color('text_muted')}'>"
             f"{r_info.get('executable', '')}</span><br>"
-            f"<b>WSL:</b> <span style='color:{wsl_color}'>{wsl.describe(ws)}</span><br>"
+            f"<b>WSL:</b> <span style='color:{wsl_color}'>{result.get('wsl', '')}</span><br>"
             f"<b>{tr('Tools:')}</b> <span style='color:{tools_color}'>"
-            f"{len(locations)}/{len(reachable)}</span> {tr('available')}"
+            f"{resolved}/{total}</span> {tr('available')}"
             + (f" &nbsp;<span style='color:{tm.color('text_muted')}'>"
                f"{tr('missing:')} {', '.join(missing)}</span>" if missing else "")
             + "</div>")
 
-        self.table_toolenv.setRowCount(len(reachable))
-        for row, entry in enumerate(reachable):
-            location = locations.get(entry.name)
-            status_text = tr("Available") if location else tr("Unavailable")
-            status_color = tm.color("success") if location else tm.color("warning")
-            help_lines = help_mod.total_lines(entry.name) if entry.name in help_cached else 0
+        self.table_toolenv.setRowCount(len(rows))
+        for index, row in enumerate(rows):
+            available = bool(row.get("available"))
+            status_text = tr("Available") if available else tr("Unavailable")
+            status_color = tm.color("success") if available else tm.color("warning")
+            source = str(row.get("source") or "")
+            distro = str(row.get("distro") or "")
+            help_lines = int(row.get("help_lines") or 0)
             cells = [
-                entry.name,
+                row.get("name", ""),
                 status_text,
-                location.source if location else "-",
-                (location.version if location else "") or "-",
+                # 来源列：WSL 落点附上发行版名，否则"wsl"这一个词无法回答"用的是
+                # 哪个 Linux 环境"。
+                (f"{source} ({distro})" if distro else (source or "-")),
+                str(row.get("version") or "") or "-",
                 f"{help_lines} lines" if help_lines else "-",
-                (location.path if location else
-                 resolver.unavailable_reason(entry, platform)),
+                str(row.get("path") or "") or str(row.get("reason") or ""),
             ]
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(str(text))
@@ -177,7 +208,7 @@ class ToolEnvSectionMixin:
                     item.setForeground(self._toolenv_brush(status_color))
                 if column == 5:
                     item.setToolTip(str(text))
-                self.table_toolenv.setItem(row, column, item)
+                self.table_toolenv.setItem(index, column, item)
         self.table_toolenv.resizeColumnsToContents()
 
     @staticmethod
@@ -207,24 +238,49 @@ class ToolEnvSectionMixin:
 
         应用自己不执行下载：这一步会拉取数百 MB 并求解依赖，交给用户在自己的终端里
         跑，既能看清输出，也能中途取消。
+
+        两种平台走两条路，判定依据只有一处（
+        :meth:`src.core.bioenv.catalog.Catalog.installable_packages`）：
+
+        * 本平台有 conda 构建 → 复制模块入口命令。用 ``python -m`` 而不是
+          ``python -c "..."``：后者的引号转义在 cmd / PowerShell / bash 里各不相同，
+          复制出去经常跑不起来；
+        * 本平台没有（Windows 的常态）→ 复制在 WSL 发行版里装这几包的命令。让用户
+          去跑一条注定求解失败的命令，等于把失败留给下一次询问。
         """
         from PySide6.QtGui import QGuiApplication
 
-        from src.core.bioenv import catalog
+        from src.core.bioenv import catalog, wsl
+        from src.core.toolchain import micromamba as mamba
         from src.ui.components.toast import ToastManager
 
         cat = catalog.default()
         prefix_name = next(iter(cat.prefix_names()), "core")
-        packages = " ".join(cat.prefix_packages(prefix_name))
-        command = (
-            "python -c \"from src.core.bioenv import catalog, prefix; "
-            f"c=catalog.load(); p='{prefix_name}'; "
-            "print(prefix.create(p, c.prefix_packages(p), channels=c.channels, "
-            "tools=c.tools_of(p), log_cb=print))\""
-        )
+        platform = mamba.runtime_platform()
+        packages = cat.installable_packages(prefix_name, platform)
+
+        if packages:
+            command = f"python -m src.core.bioenv install {prefix_name}"
+            toast = (f"{tr('Install command copied:')} "
+                     f"{prefix_name} <- {' '.join(packages)}")
+            level = "info"
+        else:
+            declared = " ".join(cat.prefix_packages(prefix_name))
+            status = wsl.detect()
+            if status.usable:
+                command = (f"wsl -d {status.distro} -- bash -lc "
+                           f"\"conda install -y -c bioconda -c conda-forge {declared}\"")
+                toast = tr("No build for this platform; the command installs the "
+                           "packages inside WSL.")
+                level = "info"
+            else:
+                command = ""
+                toast = f"{tr('No build for this platform.')} {wsl.describe(status)}"
+                level = "warning"
+
         clipboard = QGuiApplication.clipboard()
-        if clipboard is not None:
+        if clipboard is not None and command:
             clipboard.setText(command)
-        ToastManager().show(
-            f"{tr('Install command copied:')} {prefix_name} <- {packages}", "info")
-        logger.info("Install command copied for prefix '%s'", prefix_name)
+        ToastManager().show(toast, level)
+        logger.info("Install command copied for prefix '%s' on %s (platform build: %s)",
+                    prefix_name, platform, bool(packages))

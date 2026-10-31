@@ -22,6 +22,10 @@
 ``communicate`` 会阻塞到进程结束，中途无法响应取消；``timeout`` 参数也只对整体
 生效，无法区分"用户取消"与"超时"。这里两个守护线程各自把管道泵到文件，主线程轮
 询退出状态，因此两种中断都能被区分并如实记录。
+
+远端（WSL）执行的取消与超时只能终止**宿主侧**的 ``wsl.exe``：发行版里的进程是否
+随之退出由 WSL 自己决定。因此这两种终止一律记为 cancelled / timed_out，而不是
+声称"工具已经被杀掉"。
 """
 
 from __future__ import annotations
@@ -207,6 +211,9 @@ def run(location: resolver.ToolLocation, argv: Sequence[str], *,
         logger.info(f"Dispatching '{location.name}' into WSL '{distro}'")
 
     env = resolver.env_for(location)
+    # 远端执行要给 wsl.exe 自身的启动留出预算：发行版未运行时冷启动可达十余秒，
+    # 那段时间与工具本身无关，算进工具的超时会让正常命令被误判成超时。
+    effective_timeout = max(1.0, float(timeout)) + (wsl.STARTUP_ALLOWANCE if remote else 0.0)
     tmpdir = ""
     if run_dir and not remote:
         tmpdir = os.path.join(run_dir, "tmp")
@@ -232,6 +239,7 @@ def run(location: resolver.ToolLocation, argv: Sequence[str], *,
                 "host_command": host_command,
                 "cwd": cwd or os.getcwd(),
                 "timeout": timeout,
+                "effective_timeout": round(effective_timeout, 1),
                 "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
         except OSError as e:
@@ -271,7 +279,7 @@ def run(location: resolver.ToolLocation, argv: Sequence[str], *,
             out_thread.start()
             err_thread.start()
 
-            deadline = started + max(1.0, float(timeout))
+            deadline = started + effective_timeout
             while proc.poll() is None:
                 if cancel_cb is not None and cancel_cb():
                     cancelled = True

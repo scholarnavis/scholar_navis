@@ -41,7 +41,11 @@ def probe(executable: str, version_args: Sequence[str], *,
     cmd = [executable, *[str(a) for a in version_args]]
     try:
         proc = subprocess.run(
+            # 编码必须显式给出：``text=True`` 走的是系统区域设置，中文 Windows 上是
+            # cp936，而这些工具的版本行多为 UTF-8——解码失败会抛
+            # UnicodeDecodeError，把一个能跑的工具判成"不可用"。
             cmd, capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
             env=env if env is not None else os.environ,
             creationflags=no_window_flags(),
         )

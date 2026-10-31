@@ -2309,6 +2309,8 @@ class DeveloperDialog(BaseDialog):
         self._log("A picker window opens next: download the PDF in your browser, then drop "
                   "it on that window or click 'Choose PDF'. Closing it aborts the check.",
                   "INFO")
+        self._log("This self-test does not remember the DOI↔PDF link, so the same paper "
+                  "can be tested again (a normal conversation does remember it).", "INFO")
 
         from src.core.agent.runtime import AgentRuntime
 
@@ -2355,6 +2357,9 @@ class DeveloperDialog(BaseDialog):
                                log_fn=self._runtime_log)
         runtime.fulltext_waiter = waiter
         runtime.current_query = query
+        # 自检不读写 DOI↔PDF 关联：同一篇论文要能反复演练"请用户交文件"这条路径，
+        # 也要能验证"关联记忆"确实没有被写进去。正常对话保持默认（开启关联）。
+        runtime.fulltext_link_exempt = True
         return runtime
 
     @staticmethod
@@ -2422,6 +2427,18 @@ class DeveloperDialog(BaseDialog):
         else:
             checks.append(("no DOI invented for a sample that has none",
                            not str(result.get("doi") or "").strip()))
+
+        # 自检豁免：这条链路刻意不写 DOI↔PDF 关联，否则第二次点按钮会直接命中本地
+        # 副本，"请用户交文件"这一步就再也测不到了。判据取"本次交回的这份文件没有被
+        # 记进关联表"，而不是"该 DOI 没有任何关联"——用户此前在正常对话里关联过同一篇
+        # 是合法状态，不该让自检误报失败。
+        from src.core import fulltext_store
+        remembered = (fulltext_store.resolve(payload.get("doi", ""),
+                                             payload.get("title", ""))
+                      if payload.get("doi") else "")
+        still_linked = bool(remembered) and os.path.normcase(remembered) == os.path.normcase(path)
+        checks.append(("the delivered PDF was NOT linked to its DOI "
+                       "(developer self-test exemption)", not still_linked))
 
         store = runtime.evidence_store
         checks.append(("body kept in the evidence store",
@@ -2565,6 +2582,12 @@ class DeveloperDialog(BaseDialog):
                     self._log(f"  {entry.name:<10} {'--':<8} "
                               f"{resolver.unavailable_reason(entry, platform)}", "WARN")
 
+            native = [e.name for e in reachable if e.native_on(platform)]
+            if native:
+                self._log(f"native vendor build available on {platform}: "
+                          f"{', '.join(native)} (detected from PATH, not installable "
+                          f"into the private prefix)", "INFO")
+
             status = wsl.detect()
             level = "OK" if (status.usable or status.state == wsl.STATE_NOT_APPLICABLE) else "WARN"
             self._log(f"wsl: {wsl.describe(status)}", level)
@@ -2631,6 +2654,13 @@ class DeveloperDialog(BaseDialog):
         try:
             with open(fasta, "w", encoding="utf-8") as fh:
                 fh.write(">s1\nACGTACGTACGT\n>s2\nTTTTAAAAGGCC\n")
+
+            if getattr(location, "source", "") == "wsl":
+                # WSL 落点的输入路径必须换成发行版内路径，否则工具只会报"文件不存在"。
+                from src.core.bioenv import wsl as wsl_mod
+                mapped = wsl_mod.to_wsl_path(fasta, getattr(location, "distro", "") or "")
+                self._log(f"end-to-end: WSL path mapping {fasta} -> {mapped or '(failed)'}",
+                          "OK" if mapped else "FAIL")
 
             first = json.loads(tools.bio_seqkit_stats(fasta))
             if first.get("status") == "help_required":

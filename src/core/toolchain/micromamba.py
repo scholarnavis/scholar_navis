@@ -120,8 +120,11 @@ def stream_command(
     try:
         logger.info(f"Streaming command: {cmd[0]} (args: {len(cmd) - 1})")
         proc = subprocess.Popen(
+            # 编码固定 UTF-8 + 替换非法字节：默认走系统区域设置（中文 Windows 是
+            # cp936），遇到解法器输出的非本地编码字符会直接解码失败。
             list(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, env=env or os.environ,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            env=env or os.environ,
             creationflags=no_window_flags(),
         )
         try:
@@ -324,6 +327,7 @@ def verify(binary: str, cache_dir: str, timeout: float = 30.0) -> dict:
     try:
         proc = subprocess.run(
             [binary, "--version"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=timeout, env=prefix_env(cache_dir),
             creationflags=no_window_flags(),
         )

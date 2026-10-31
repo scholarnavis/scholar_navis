@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated": "2026-10-28",
+  "updated": "2026-10-31",
   "channels": ["bioconda", "conda-forge"],
   "system_search": {
     "posix": [
@@ -21,7 +21,21 @@
       "%USERPROFILE%\\anaconda3",
       "%USERPROFILE%\\miniforge3\\Scripts",
       "%LOCALAPPDATA%\\miniforge3\\Scripts",
-      "%ProgramFiles%\\samtools"
+      "%ProgramFiles%\\samtools",
+      "%ProgramFiles%\\seqkit",
+      "%LOCALAPPDATA%\\Programs\\seqkit",
+      "%USERPROFILE%\\seqkit"
+    ],
+    "wsl": [
+      "~/.local/bin",
+      "~/micromamba/bin",
+      "~/miniconda3/bin",
+      "~/anaconda3/bin",
+      "~/miniforge3/bin",
+      "~/mambaforge/bin",
+      "/opt/conda/bin",
+      "/usr/local/bin",
+      "/usr/bin"
     ]
   },
   "prefixes": {
@@ -48,6 +62,8 @@
       "conda_name": "seqkit",
       "executables": { "default": "bin/seqkit" },
       "platforms": ["linux-64", "osx-64", "osx-arm64"],
+      "native_platforms": ["win-64"],
+      "native_hint": "Download seqkit_windows_amd64.exe from the release page (https://github.com/shenwei356/seqkit/releases), rename it to seqkit.exe if you like, put it on PATH, then re-detect on the External Tools page.",
       "version_args": ["version"],
       "help_args": ["--help"],
       "license": "MIT",
@@ -206,7 +222,8 @@
   },
   "notes": [
     "License identifiers must be verified against each upstream repository LICENSE before wiring a new tool in; the loader rejects AGPL and non-commercial entries.",
-    "Platforms use micromamba identifiers. bioconda has no win-64 builds for these tools, so Windows reaches them through WSL or a remote host.",
+    "Platforms use micromamba identifiers. bioconda has no win-64 builds for these tools, so on Windows the private prefix is not installable and the toolchain is reached through WSL, a remote host, or - where the upstream project ships one - a native Windows binary declared in native_platforms (seqkit does).",
+    "system_search has three scopes and they are not interchangeable: posix/windows are host directories (%VAR% and ~ expanded by the app), wsl are directories inside the distribution (~ expanded by its own shell, variables never re-evaluated by the app).",
     "run_mode drives routing: sync runs in-process, job submits and polls, external only produces a workflow definition for the user to execute.",
     "An existing system installation is always preferred over the private prefix; set min_version on an entry to force a fallback only when the system build is too old.",
     "conda_name and executable paths follow bioconda conventions and must be confirmed on the target machine; a wrong package name surfaces as a solver error in bioenv/logs rather than a silent failure.",

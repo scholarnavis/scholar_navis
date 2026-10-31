@@ -11,18 +11,13 @@ class FetchModelsTask(BackgroundTask):
         api_key = self.kwargs.get("api_key", "")
 
         self.update_progress(20, "Connecting to API endpoint...")
-        from src.core.config_manager import ConfigManager
-        proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
+        from src.core.network_worker import httpx_proxy_kwargs
 
         url = f"{base_url.rstrip('/')}/models"
         self.send_log("INFO", f"Fetching models from {url}")
 
-        httpx_kwargs = {"timeout": 10.0}
-
-        if proxy_url:
-            httpx_kwargs["proxy"] = proxy_url
-        else:
-            httpx_kwargs["trust_env"] = False
+        # 代理模式（system / off / custom）只在 network_worker 判定一次。
+        httpx_kwargs = {"timeout": 10.0, **httpx_proxy_kwargs()}
 
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
@@ -144,16 +139,10 @@ class TestApiTask(BackgroundTask):
 
         self.send_log("INFO", f"Testing connectivity for model: {model_name}")
         self.update_progress(30, f"Sending test prompt to {model_name}...")
-        from src.core.config_manager import ConfigManager
-        proxy_url = ConfigManager().user_settings.get("proxy_url", "").strip()
+        from src.core.network_worker import httpx_proxy_kwargs
 
         url = f"{base_url.rstrip('/')}/chat/completions"
-        httpx_kwargs = {"timeout": 15.0}
-
-        if proxy_url:
-            httpx_kwargs["proxy"] = proxy_url
-        else:
-            httpx_kwargs["trust_env"] = False
+        httpx_kwargs = {"timeout": 15.0, **httpx_proxy_kwargs()}
 
         headers = {
             "Authorization": f"Bearer {api_key or 'sk-test'}",
@@ -268,3 +257,77 @@ class TestMcpConnectionTask(BackgroundTask):
             status = mcp_mgr.get_server_status(server_name)
             mcp_mgr.disconnect_server(server_name)
             return {"success": False, "msg": f"Handshake failed: {status}"}
+class ToolEnvDetectTask(BackgroundTask):
+    """检测外置工具：R 运行时、WSL 状态与清单里每个生信工具的落点。
+
+    为什么必须离开界面线程
+    --------------------
+    Windows 上没有本机构建的工具都要经 ``wsl.exe`` 探测一次（``wsl -l`` + 发行版内
+    ``command -v`` + 版本探测），单次几百毫秒，发行版冷启动时可达十余秒；工具一多，
+    在界面线程里跑就是"设置页打开即卡死十几秒"。
+
+    返回的是一份可直接渲染的扁平结构（不含任何 Qt 对象），由
+    :mod:`src.tools.settings_sections.toolenv_section` 负责显示。
+    """
+
+    def _execute(self):
+        from src.core.bioenv import catalog, help as help_mod, resolver, wsl
+        from src.core.r_engine import get_r_engine
+        from src.core.toolchain import micromamba as mamba
+
+        refresh = bool(self.kwargs.get("refresh"))
+        self.update_progress(10, "Loading the bioinformatics catalog...")
+        if refresh:
+            resolver.clear_cache()
+            wsl.invalidate()
+
+        cat = catalog.default(refresh=refresh)
+        platform = mamba.runtime_platform()
+
+        self.update_progress(25, "Checking WSL...")
+        status = wsl.detect(refresh=refresh)
+        if self.is_cancelled():
+            raise InterruptedError("Tool detection cancelled by user.")
+
+        self.update_progress(45, f"Resolving tools on {platform}...")
+        locations = resolver.resolve_all(cat, platform, refresh=refresh)
+        if self.is_cancelled():
+            raise InterruptedError("Tool detection cancelled by user.")
+
+        self.update_progress(85, "Checking the R runtime...")
+        r_info = get_r_engine().detect()
+
+        reachable = cat.for_reachable(platform)
+        rows = []
+        for entry in reachable:
+            location = locations.get(entry.name)
+            rows.append({
+                "name": entry.name,
+                "available": location is not None,
+                "source": location.source if location else "",
+                "distro": location.distro if location else "",
+                "version": location.version if location else "",
+                "path": location.path if location else "",
+                "reason": ("" if location
+                           else resolver.unavailable_reason(entry, platform)),
+                "help_lines": help_mod.total_lines(entry.name),
+            })
+
+        self.update_progress(100, "Detection finished.")
+        self.send_log("INFO", f"External tools: {len(locations)}/{len(reachable)} "
+                              f"resolved on {platform}; {wsl.describe(status)}")
+        return {
+            "platform": platform,
+            "wsl": wsl.describe(status),
+            "wsl_usable": status.usable,
+            "wsl_applicable": status.state != wsl.STATE_NOT_APPLICABLE,
+            "r": {
+                "available": bool(r_info.get("available")),
+                "version": str(r_info.get("version") or ""),
+                "executable": str(r_info.get("executable") or ""),
+            },
+            "tools": rows,
+            "total": len(reachable),
+            "resolved": len(locations),
+            "problems": list(cat.problems[:10]),
+        }
