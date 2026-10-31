@@ -4,7 +4,7 @@ import logging
 import os
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QMainWindow, QToolBar, QCheckBox,
                                QComboBox, QSplitter)
@@ -81,7 +81,14 @@ function __navisDrawToCanvas(scale) {
     // 预览时脚本会给 SVG 写入内联 style（width/height 适配容器宽度），克隆体若
     // 带着这些样式，导出会按"预览尺寸"而不是矢量真实尺寸光栅化（画布尺寸与实际
     // 内容不匹配 → 被裁切或糊）。这里先清掉尺寸类内联样式，再按真实尺寸设置属性。
-    try { c.style.width = ''; c.style.height = ''; c.style.maxWidth = ''; } catch (e) {}
+    try {
+        c.style.width = '';
+        c.style.height = '';
+        c.style.maxWidth = '';
+        // 导出不带任何底色：即使主题把背景写成内联样式也一并清掉。
+        c.style.background = 'transparent';
+        c.style.backgroundColor = 'transparent';
+    } catch (e) {}
     var hasViewBox = false;
     try { hasViewBox = !!(c.viewBox && c.viewBox.baseVal && c.viewBox.baseVal.width); } catch (e) {}
     if (!hasViewBox) { c.setAttribute('viewBox', '0 0 ' + size.w + ' ' + size.h); }
@@ -182,10 +189,13 @@ class MermaidViewer(QMainWindow):
     #: 源码面板 : 预览面板 的默认宽度分配（源码展开时使用）。
     _SPLIT_SIZES = (300, 900)
 
-    #: 预览固定使用的 Mermaid 主题（**唯一风格**）。内置 neutral 的低饱和米灰
-    #: 配色最接近"自然"观感；Mermaid 并没有名为 natural 的主题，因此不再提供
-    #: 主题下拉框——需要换风格时只改这一处。
-    _MERMAID_THEME = 'neutral'
+    #: 预览使用的 Mermaid 主题：只随应用深浅色切换，不提供主题下拉框。
+    #:
+    #: 图形本身**不带任何背景**（见 :meth:`_build_page_html`）：画布透明，露出的
+    #: 就是应用自己的底色。因此配色必须与应用主题同向——浅色应用用 low-saturation
+    #: 的 neutral，深色应用用 dark，否则深色文字/深色连线落在深底上等于看不见。
+    _MERMAID_THEME_LIGHT = 'neutral'
+    _MERMAID_THEME_DARK = 'dark'
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -213,6 +223,9 @@ class MermaidViewer(QMainWindow):
 
         # 右侧：Web 引擎渲染器
         self.web_view = QWebEngineView()
+        # 页面底色必须显式设为全透明：QWebEngineView 默认铺一层不透明白底，只把
+        # CSS 的 background 写成 transparent 时白底仍在（这正是"图有白框"的来源）。
+        self.web_view.page().setBackgroundColor(QColor(0, 0, 0, 0))
         self.splitter.addWidget(self.web_view)
 
         self.splitter.setSizes(list(self._SPLIT_SIZES))
@@ -502,12 +515,18 @@ class MermaidViewer(QMainWindow):
             self._build_page_html(),
             QUrl.fromLocalFile(os.path.dirname(self._mermaid_js_path()) + "/"))
 
+    def _mermaid_theme(self) -> str:
+        """按应用深浅色选 Mermaid 主题（透明画布下配色必须与底色同向）。"""
+        return (self._MERMAID_THEME_DARK if ThemeManager().current_theme == 'dark'
+                else self._MERMAID_THEME_LIGHT)
+
     def _build_page_html(self) -> str:
         """生成预览页 HTML（**唯一事实来源**：预览与开发者模式自检读同一份）。
 
-        图形风格固定为 :attr:`_MERMAID_THEME`，只依赖 :attr:`mermaid_code` 与窗口
-        无关的状态，所以自检可以直接断言页面约束（图内文字可选中、平移不抢占
-        选中、Copy Text 取文字）。
+        页面与图形**没有任何背景**：html/body/svg 三层都透明，露出的就是应用底色。
+        因此文案配色随应用主题选（见 :meth:`_mermaid_theme`）。只依赖
+        :attr:`mermaid_code` 与主题状态，自检可以直接断言页面约束（图内文字可选中、
+        平移不抢占选中、Copy Text 取文字、导出为透明底）。
         """
         tm = ThemeManager()
         safe_code = json.dumps(self.mermaid_code)
@@ -525,13 +544,14 @@ class MermaidViewer(QMainWindow):
             <style>
                 html, body {{
                     margin: 0; padding: 0;
-                    background-color: {tm.color('bg_main')};
+                    background: transparent;
                 }}
                 body {{ overflow: auto; }}
                 #graphDiv {{
                     padding: 12px;
                     box-sizing: border-box;
                     cursor: grab;
+                    background: transparent;
                 }}
                 /* 拖动中整页维持抓手态，避免指针移出图形后变回箭头 */
                 body.navis-dragging, body.navis-dragging * {{ cursor: grabbing !important; }}
@@ -539,6 +559,9 @@ class MermaidViewer(QMainWindow):
                     display: block;
                     max-width: none;
                     height: auto;
+                    /* Mermaid 会把 themeVariables.background 写成内联底色，
+                       这里用 !important 盖掉，保证图形自身也不铺底。 */
+                    background: transparent !important;
                 }}
                 /* 图内文字必须可选中/可复制（Ctrl+C 走浏览器原生复制）。选中与平移
                    的冲突在下方 JS 里解决：左键落在文字上 = 选中，落在空白处或中键
@@ -557,9 +580,11 @@ class MermaidViewer(QMainWindow):
             <script>
                 mermaid.initialize({{
                     startOnLoad: false,
-                    theme: '{self._MERMAID_THEME}',
+                    theme: '{self._mermaid_theme()}',
                     securityLevel: 'loose',
                     useMaxWidth: false,
+                    // 主题自带底色一律置为透明：图形只画节点与连线，不铺任何背景。
+                    themeVariables: {{ background: 'transparent' }},
                     flowchart: {{ useMaxWidth: false, htmlLabels: true }},
                     sequence: {{ useMaxWidth: false }},
                     gantt: {{ useMaxWidth: false }},
@@ -569,14 +594,6 @@ class MermaidViewer(QMainWindow):
                     mindmap: {{ useMaxWidth: false }},
                     timeline: {{ useMaxWidth: false }}
                 }});
-                // 固定单一风格后，预览画布跟随该主题自己的底色：深色应用里沿用
-                // 暗底会让 neutral 的深色文字看不清，导出也按这个底色光栅化。
-                try {{
-                    const navisThemeVars = mermaid.mermaidAPI.getConfig().themeVariables || {{}};
-                    if (navisThemeVars.background) {{
-                        document.body.style.backgroundColor = navisThemeVars.background;
-                    }}
-                }} catch (e) {{ /* 取不到主题底色时沿用应用底色 */ }}
                 const code = {safe_code};
 
                 // ---- 缩放/平移参数，与 image_viewer 保持一致 ----
