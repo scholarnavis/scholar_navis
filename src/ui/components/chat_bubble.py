@@ -2624,6 +2624,16 @@ class ChatBubbleWidget(QWidget):
 
             self._ensure_document_font()
             self._render_blocks(html)
+            # 空回答兜底：分块渲染把内容切进多个控件（正文块 / 表格 / 代码 / 引用）。
+            # 只要切分或某个块控件出错，界面上就会出现"气泡很高、里面什么都没有"，
+            # 而日志仍然是"generation finished"——用户看到的就是一条空白回答。
+            # 这里按实际渲染出的可见字符数做校验，明显少于原文就退回纯文本重画。
+            visible = self._rendered_text_length()
+            if text.strip() and visible < max(8, len(text) // 20):
+                logger.warning(
+                    "Bubble rendered almost no text (source=%d chars, visible=%d); "
+                    "falling back to plain text rendering.", len(text), visible)
+                self._set_browser_text(self.lbl_text, text)
             # 正文/块已按最新内容重建：把书签下划线重新找回并画上。
             # 没有书签时该方法立刻返回，流式高频渲染下不产生额外开销。
             self._apply_bookmark_highlights()
@@ -2631,6 +2641,27 @@ class ChatBubbleWidget(QWidget):
         except Exception as e:
             logger.warning(f"Failed to render bubble content: {e}")
             self._set_browser_text(self.lbl_text, text)
+
+    def _rendered_text_length(self) -> int:
+        """已渲染块里可见纯文本的总字符数（空回答兜底的判据）。
+
+        ``lbl_text`` 与额外的滚动块都是 ``QTextBrowser``：一块内容被分错控件时，
+        它的 ``toPlainText()`` 就是空的，因此求和能反映"用户实际看得到多少字"。
+        """
+        total = 0
+        targets = [self.lbl_text]
+        for widget in getattr(self, "_extra_blocks", []) or []:
+            for attr in ("browser", "lbl_text"):
+                inner = getattr(widget, attr, None)
+                if inner is not None and hasattr(inner, "toPlainText"):
+                    targets.append(inner)
+                    break
+        for view in targets:
+            try:
+                total += len(view.toPlainText())
+            except Exception as e:      # 控件已销毁：只影响判据，不影响正常渲染
+                logger.debug("Cannot read rendered text length: %s", e)
+        return total
 
     # --- 5.1 分块渲染：正文 / 表格 / 引用 / 代码块 / 思考链 ---
     def _render_blocks(self, html):

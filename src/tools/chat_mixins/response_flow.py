@@ -332,6 +332,10 @@ class ChatResponseFlowMixin:
             paper=title or doi or url or tr("(no title provided)"))]
         if doi:
             lines.append(f"DOI: {doi}")
+        if url:
+            # 没有 DOI 的样例（部分 RSS 条目）只有落地页：把链接写进通知，用户才知道
+            # 该去哪儿下载它。
+            lines.append(tr("Link: {url}").format(url=url))
         # 与窗口同一口径：模型写的 reason 优先，其次是自动升级带来的 note
         # （如"自动下载没有成功（出版社 403）"）。
         detail = (tr("Needed for: {reason}").format(reason=reason) if reason else
@@ -459,6 +463,21 @@ class ChatResponseFlowMixin:
             self.input_container.btn_send.setVisible(True)
             self.input_container.set_send_locked(False)
 
+        if awaiting and not self.current_ai_text.strip():
+            # Human-in-the-loop 暂停：提问卡 / 深度计划卡由**结构化事件**直接写进
+            # 气泡，正文本身就是空的。这里若继续走下面的收尾，会把那张卡改写成
+            # "No response."——用户既看不到问题，也没有入口作答，表现为"点了重新
+            # 生成立刻变成 No response"（自动深度模式会走到这条路径）。
+            self.logger.info(
+                "Turn paused for user input with an empty text body; keeping the "
+                "rendered card untouched.")
+            if self.current_ai_bubble and self.current_ai_bubble.is_loading:
+                self.current_ai_bubble.set_loading(False)
+            self.current_ai_bubble = None
+            self._sync_regenerate_available()
+            self.scroll_to_bottom(force=False)
+            return
+
         if self.current_ai_bubble and self.current_ai_bubble.is_loading:
             self.current_ai_bubble.set_loading(False)
 
@@ -473,10 +492,24 @@ class ChatResponseFlowMixin:
         )
 
         idx = getattr(self.current_ai_bubble, 'index', -1)
-        final_html = (
-            self._format_response(self.current_ai_text, idx)
-            if self.current_ai_text else "No response."
-        )
+        if self.current_ai_text.strip():
+            final_html = self._format_response(self.current_ai_text, idx)
+            if not str(final_html or "").strip():
+                # 有原文却渲染出空 HTML（典型是整轮只产出被展示侧剥离的工具调用文本）：
+                # 退回纯文本，至少让用户看到这一轮到底输出了什么，而不是一个空气泡。
+                self.logger.warning(
+                    "Formatted answer is empty though %d chars of raw text exist "
+                    "(index=%s); rendering the raw text instead.",
+                    len(self.current_ai_text), idx)
+                from html import escape as _escape
+                final_html = f"<pre>{_escape(self.current_ai_text)}</pre>"
+        else:
+            # 空回答：这是程序侧的问题（模型没产出 / 被展示侧过滤干净），必须留日志
+            # 并给出可读提示，不能只画一个空白气泡。
+            self.logger.warning(
+                "Turn finished with an empty answer (history=%d turns, raw=0 chars).",
+                len(getattr(self, 'history', []) or []))
+            final_html = tr("No response.")
         self.current_ai_bubble.set_content(final_html)
         # 流式已结束：强制收敛气泡高度（中途态可能把高度写成偏大值且因幂等缓存不回落）
         if hasattr(self.current_ai_bubble, 'force_resync_height'):

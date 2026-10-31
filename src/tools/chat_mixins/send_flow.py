@@ -175,6 +175,14 @@ class ChatSendFlowMixin:
 
     def start_ai_response(self, kb_id, requires_translation=False):
         main_config = self.model_selector.get_current_config()
+        if not main_config:
+            # 先拦住，而不是先建一个注定空的白气泡：没有 provider 时任务必然
+            # 立刻以空正文结束，用户看到的就是"点了重新生成立刻 No response"。
+            self.logger.error("Refused to start a turn: no main model provider configured.")
+            ToastManager().show(
+                tr("No model provider is configured. Pick one in Global Settings first."),
+                "warning")
+            return
         trans_config = self._resolve_trans_config()
 
         use_academic_agent = self.input_container.chk_academic_agent.isChecked() if hasattr(self.input_container,
