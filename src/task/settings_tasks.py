@@ -42,92 +42,6 @@ class FetchModelsTask(BackgroundTask):
             return {"success": False, "models": [], "msg": str(e)}
 
 
-class TestDeviceTask(BackgroundTask):
-    #: 提供者 → 面向用户的加速器名称（日志与提示里不暴露 ORT 内部类名）
-    _PROVIDER_LABELS = {
-        "CPUExecutionProvider": "CPU",
-        "CUDAExecutionProvider": "CUDA",
-        "DmlExecutionProvider": "DirectML",
-        "ROCmExecutionProvider": "ROCm",
-        "CoreMLExecutionProvider": "CoreML",
-    }
-
-    def _execute(self):
-        device_id = self.kwargs.get("device_id")
-        self.send_log("INFO", f"Testing device: {device_id}")
-
-        try:
-            import onnxruntime as ort
-            import numpy as np
-            from src.core.onnx_provider import probe_model_bytes, resolve_provider
-
-            # 先做真实可用性解析：请求的加速设备不可用（如 Linux 缺 CUDA/cuDNN
-            # 运行库）时给出明确结论，而不是等 ORT 静默回退后再报一句含糊失败。
-            resolved = resolve_provider(device_id, probe=True)
-
-            if resolved.degraded:
-                self.send_log("WARNING", f"Device '{device_id}' unavailable: {resolved.reason}")
-                return {
-                    "success": False,
-                    "msg": (
-                        f"'{device_id}' cannot be used on this machine.\n\n"
-                        f"{resolved.reason}\n\n"
-                        "Indexing and search keep working on the CPU - only speed is affected. "
-                        "Select 'CPU' or 'Auto Detect' under Compute Device to make that "
-                        "explicit."
-                    )
-                }
-
-            provider = resolved.provider
-            label = self._PROVIDER_LABELS.get(provider, provider)
-            provider_options = resolved.provider_options
-
-            self.send_log("INFO", "Generating native dummy ONNX model in memory...")
-            # 复用 onnx_provider 的探针模型（IR 版本已在那里钉住，见 _PROBE_IR_VERSION）。
-            # 历史上这里自己造了一份，于是"onnx 包比 onnxruntime 新 -> 模型被 ORT 拒绝"
-            # 会在硬件测试里独立复现，表现为"测试说 CUDA 不可用"，而 CUDA 实际是好的。
-            model_bytes = probe_model_bytes()
-            if model_bytes is None:
-                return {
-                    "success": False,
-                    "msg": ("Cannot build the in-memory test model: the installed 'onnx' "
-                            "package is unusable. Reinstall onnx / onnxruntime and retry."),
-                }
-
-            self.send_log("INFO", f"Initializing ORT Session with provider: {provider}...")
-
-            if provider_options:
-                providers_arg = [(provider, provider_options)]
-            else:
-                providers_arg = [provider]
-
-            session = ort.InferenceSession(model_bytes, providers=providers_arg)
-
-            active_providers = session.get_providers()
-            if provider != "CPUExecutionProvider" and active_providers[0] == "CPUExecutionProvider":
-                return {
-                    "success": False,
-                    "msg": f"Hardware acceleration failed!\n\nRequested {label}, but ONNX Runtime silently fell back to CPU.\n\nPlease check your GPU drivers or ONNX environment."
-                }
-
-            self.send_log("INFO", "Running dummy inference tensor...")
-            test_input = np.random.randn(1, 3).astype(np.float32)
-            session.run(None, {"X": test_input})
-
-            return {
-                "success": True,
-                "msg": (f"Success!\n\nThe device '{device_id}' works with {label} "
-                        f"acceleration.")
-            }
-
-        except Exception as e:
-            import traceback
-            error_msg = str(e)
-            if "onnxruntime" not in error_msg.lower() and "onnx" not in error_msg.lower():
-                error_msg = f"Initialization failed: {error_msg}\n{traceback.format_exc()}"
-            return {"success": False, "msg": error_msg}
-
-
 class TestApiTask(BackgroundTask):
     """测试大模型 API 连通性 """
 
@@ -206,28 +120,6 @@ class EmailVerifyTask(BackgroundTask):
                 return {"success": True, "msg": ""}
         except Exception as e:
             return {"success": False, "msg": f"Email validation encountered a system error: {e}"}
-
-
-class HWDetectTask(BackgroundTask):
-    """Background task for safely probing system hardware and ORT providers."""
-
-    def _execute(self):
-        try:
-            from src.core.device_manager import DeviceManager
-            dev_mgr = DeviceManager()
-            info = dev_mgr.get_sys_info()
-            info['gpu_info'] = dev_mgr.get_gpu_info()
-            devs = dev_mgr.get_available_devices()
-
-            return {"success": True, "info": info, "devs": devs}
-        except Exception as e:
-            self.send_log("ERROR", f"Hardware detection failed: {e}")
-            return {
-                "success": False,
-                "info": {"os": "Unknown OS", "error": str(e)},
-                "devs": [{"name": "Auto Detect", "id": "auto"}],
-                "msg": str(e)
-            }
 
 
 class TestMcpConnectionTask(BackgroundTask):
@@ -331,3 +223,25 @@ class ToolEnvDetectTask(BackgroundTask):
             "resolved": len(locations),
             "problems": list(cat.problems[:10]),
         }
+
+
+class HWDetectTask(BackgroundTask):
+    """后台采集硬件信息（OS / CPU / 内存 / GPU）。
+
+    纯 stdlib + psutil + 系统命令（``nvidia-smi`` / ``lspci`` / WMI），不触碰
+    ``onnxruntime``：本地推理下线后，"ONNX Engine / Providers" 那部分探测没有任何
+    消费者，留在启动与设置页链路上只是让 import 与探针白白发生。
+    """
+
+    def _execute(self):
+        from src.core import hardware_info
+
+        try:
+            info = hardware_info.collect()
+            self.send_log("INFO", f"Hardware: {info.get('cpu', 'unknown CPU')} / "
+                                  f"{info.get('ram_total', 'unknown RAM')} / "
+                                  f"{len(info.get('gpu_info') or [])} GPU(s)")
+            return {"success": True, "info": info}
+        except Exception as e:
+            self.send_log("ERROR", f"Hardware detection failed: {e}")
+            return {"success": False, "info": {}, "msg": str(e)}

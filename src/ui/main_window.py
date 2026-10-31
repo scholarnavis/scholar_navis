@@ -21,7 +21,7 @@ from src.ui.components.toast import ToastManager
 def _load_tool_class(module_path: str, class_name: str):
     """按需导入工具面板类（惰性）。
 
-    各工具模块的导入链带 chromadb / onnxruntime / litellm / pygments 等重依赖，
+    各工具模块的导入链带 litellm / pygments 等重依赖，
     启动期全部导入会把主窗口推迟数秒；改为实例化对应面板时才导入（Python 模块
     缓存保证只真正导入一次）。
 

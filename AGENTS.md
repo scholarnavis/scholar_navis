@@ -93,20 +93,13 @@ tests/               空目录
 | `llm_errors.py` | 错误归一化为 `{title, body, details}` 并产出内联错误标记 | `friendly_payload`、`error_marker` |
 | `model_capabilities.py` | 上下文窗口、输出上限、不支持参数的唯一合成点，落盘 `config/model_capabilities.json`。调用方只查这里，不要自行推断 | `resolve_window`、`record_unsupported_param` |
 | `token_estimator.py` | token 估算与上下文预算推导，tiktoken 预热、CJK 启发式兜底 | `estimate_tokens`、`derive_context_budgets` |
-| `models_registry.py` | 本地与外部模型清单、ONNX 下载校验、自动选型。缺失模型抛错，禁止静默联网下载。刻意惰性 import `kb_manager` | `ModelManager`、`ensure_onnx_model` |
-| `device_manager.py` | 设备自检单例，GPU 探测与最优设备选择 | `DeviceManager` |
-| `onnx_provider.py` | ONNX provider 支持与生效探测，不可用时明确降级 CPU | `resolve_provider`、`probe_provider` |
-| `onnx_tokenizer.py` | 轻量 tokenizer，只依赖 `tokenizers` 与 numpy | `OnnxTokenizer` |
-| `rerank_engine.py` | 本地 ONNX 交叉编码器重排单例，四态加载状态机，重量级库延迟导入 | `RerankEngine` |
 
 ### 3.4 知识库、PDF 与全文
 
 | 文件 | 作用 | 关键入口 |
 |---|---|---|
-| `kb_manager.py` | `KBManager` 管工作区与元数据，`DatabaseManager` 持 chromadb 客户端与 collection。chromadb 只在真正建客户端时 import | `KBManager`、`DatabaseManager` |
-| `pdf_engine.py` | 单篇 PDF 入库流水线：转 Markdown、切块、写向量库 | `PDFEngine.process_pdf` |
-| `pdf_index.py` | PDF 本体索引（SQLite/WAL），按 paper_id、doi、sha256 查重与定位，与向量库解耦 | 模块级 lookup/register |
 | `pdf_text.py` | PDF 正文抽取唯一实现，markdown 失败降级按页纯文本 | `extract_pdf`、`probe_pdf` |
+| `hardware_info.py` | 纯硬件信息采集（OS / CPU / 内存 / GPU），不导入任何推理运行时；设置页硬件面板与 `HWDetectTask` 使用 | `collect`、`gpu_info` |
 | `fulltext_store.py` | DOI 与本地 PDF 关联表，指纹与内容双级校验，校验失败即解除关联 | `resolve`、`link`、`unlink` |
 | `fulltext_bridge.py` | 「同轮等待」通道：Agent 请求全文后挂起，UI 入库后回填，模型带全文续跑同一轮 | `begin`、`wait`、`signal` |
 | `fulltext_samples.py` | 开发者模式取全文自检的样例来源 | `resolve_samples` |
@@ -213,7 +206,6 @@ tests/               空目录
 | `chat_tool.py` | 对话助手页容器，管理多标签页 |
 | `chat_conversation.py` | 单个会话页，组合 7 个 chat mixin |
 | `chat_input_widgets.py` | 输入区控件：附件 chip、拖放、自适应文本框 |
-| `import_tool.py` | 知识库导入管理面板，已从主界面下线，代码保留 |
 | `rss_tool.py` | 文献订阅追踪 |
 | `settings_tool.py` | 全局设置外壳，组合 7 个 section mixin |
 | `log_tool.py` | 系统日志面板 |
@@ -221,7 +213,7 @@ tests/               空目录
 
 `chat_mixins/`：`send_flow.py` 派发查询并启动后台任务，`response_flow.py` 流式渲染与收尾，`bubbles.py` 气泡与滚动，`search.py` 会话内搜索，`bookmarks.py` 书签，`attachments.py` 附件与导出，`session.py` 自动保存与恢复。
 
-`settings_sections/`：`env_section.py` 环境与凭据，`llm_section.py` 与 `llm_model_ops.py` 模型配置，`model_section.py` 模型下载队列，`mcp_section.py` MCP 与技能管理，`fulltext_section.py` 已关联论文 PDF（DOI ↔ 本地文件），`save_flow.py` 保存流程，`transfer.py` 配置导入导出。
+`settings_sections/`：`env_section.py` 环境与凭据，`llm_section.py` 与 `llm_model_ops.py` 模型配置，`mcp_section.py` MCP 与技能管理，`fulltext_section.py` 已关联论文 PDF（DOI ↔ 本地文件），`save_flow.py` 保存流程，`transfer.py` 配置导入导出（含 RSS 订阅；不含 `fulltext_links.json` 这类本机路径数据）。
 
 新增面板：写一个继承 `BaseTool` 的类并实现 `get_ui_widget()`，然后在 `src/ui/main_window.py` 的 `tool_classes` 中加入三元组，并在 `icon_map` 补齐图标。
 
@@ -274,13 +266,10 @@ tests/               空目录
 | `chat_tasks.py` | 对话主管线 `ChatGenerationTask`，覆盖附件装载、翻译策略、知识库检索与重排、深度研究、流式输出、引用定稿、证据链落盘；另有导出导入会话、图片下载、硬件状态任务 |
 | `config_task.py` | 配置导入导出 |
 | `dialog_task.py` | MCP 连接测试与对话框任务薄壳 |
-| `hf_download_task.py` | 模型下载，桥接进度与测速 |
-| `kb_tasks.py` | 知识库全生命周期任务，每个 `_execute` 首行都要重建子进程环境 |
 | `r_env_task.py` | R 包与运行时安装 |
 | `rss_tasks.py` | RSS 抓取、检索、导入导出 |
 | `s2_task.py` | 不是任务类，是 Semantic Scholar 限流与熔断单例 |
 | `settings_tasks.py` | 设置页所有测试与探测动作 |
-| `startup_tasks.py` | 硬件探测预热 |
 
 ---
 

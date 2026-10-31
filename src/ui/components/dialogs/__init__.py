@@ -4,12 +4,11 @@
 --------------------
 本包是 ``src/ui/components/dialog.py`` 拆分后的落点，被主窗口与各工具面板的
 导入链引用。旧的 ``__init__`` 在导入期一次性拉起全部子模块，而其中
-``kb_project_dialogs``（→ ``core.models_registry`` → torch/chromadb）、
 ``mcp_skill_dialogs``（→ pygments）等重依赖会被顺带加载——只要有任何代码
 ``import`` 本包下的任一符号，主窗口就要多等 1.5 s 以上。
 
 现在改为按符号惰性导入：启动路径只加载真正用到的子模块，其余等首次访问
-（``from src.ui.components.dialogs import ProjectEditorDialog``）时才导入。
+（``from src.ui.components.dialogs import McpConfigDialog``）时才导入。
 """
 from importlib import import_module
 
@@ -25,8 +24,6 @@ _EXPORTS = {
     "AddModelDialog": ("common", "AddModelDialog"),
     "FeedEditorDialog": ("feed_dialogs", "FeedEditorDialog"),
     "FeedLibraryDialog": ("feed_dialogs", "FeedLibraryDialog"),
-    "SelectKBFileDialog": ("kb_project_dialogs", "SelectKBFileDialog"),
-    "ProjectEditorDialog": ("kb_project_dialogs", "ProjectEditorDialog"),
     "McpConfigDialog": ("mcp_skill_dialogs", "McpConfigDialog"),
     "SkillConfigDialog": ("mcp_skill_dialogs", "SkillConfigDialog"),
     "SkillSecurityAnalyzer": ("mcp_skill_dialogs", "SkillSecurityAnalyzer"),
@@ -49,8 +46,6 @@ __all__ = [
     "AddModelDialog",
     "FeedEditorDialog",
     "FeedLibraryDialog",
-    "SelectKBFileDialog",
-    "ProjectEditorDialog",
     "McpConfigDialog",
     "SkillConfigDialog",
     "SkillSecurityAnalyzer",

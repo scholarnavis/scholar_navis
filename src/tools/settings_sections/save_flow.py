@@ -21,7 +21,6 @@ from src.core.skill_manager import SkillManager
 from src.core.skill_store import delete_skill_source, write_skill_source
 from src.core.theme_manager import ThemeManager
 from src.task.settings_tasks import EmailVerifyTask
-from src.task.common_task import VerifyModelsTask
 from src.ui.components.dialog import (ProgressDialog, StandardDialog,
                                       UnsavedChangesDialog)
 
@@ -201,17 +200,14 @@ class SaveFlowMixin:
             "proxy_mode": new_proxy_mode,
             "proxy_url": new_proxy_url,
             "journal_use_proxy": self.chk_journal_proxy.isChecked(),
-            # 机构数据库直连：开关 + 主机后缀（逗号/空白分隔，留空即用内置默认）。
-            "institutional_direct": self.chk_institutional_direct.isChecked(),
+            # 机构数据库代理开关（与界面同向）+ 直连主机后缀（留空即用内置默认）。
+            "institutional_use_proxy": self.chk_institutional_proxy.isChecked(),
             "institutional_hosts": [
                 host.strip().lower().lstrip(".")
                 for host in re.split(r"[,;\s]+", self.input_institutional_hosts.text())
                 if host.strip()
             ],
             "hf_mirror": self.input_mirror.text().strip(),
-            "inference_device": self.combo_device.currentData(),
-            "current_model_id": self.combo_embed.currentData(),
-            "rerank_model_id": self.combo_rerank.currentData(),
             "active_llm_id": self._get_active_llm_id(),
             "theme": new_theme,
             "log_level": self.combo_log.currentText(),
@@ -281,35 +277,10 @@ class SaveFlowMixin:
 
         logging.getLogger().setLevel(getattr(logging, self.combo_log.currentText()))
 
-        self.save_pd.update_progress(-1, tr("Initializing background tasks..."))
-
-        if hasattr(self, 'save_task_mgr') and self.save_task_mgr:
-            self.save_task_mgr.cancel_task()
-
-        self.save_task_mgr = TaskManager()
-        self.save_task_mgr.sig_progress.connect(self.save_pd.update_progress)
-        self.save_task_mgr.sig_state_changed.connect(self._on_save_task_state_changed)
-        self.save_task_mgr.sig_result.connect(self._on_save_task_result)
-        self.save_pd.sig_canceled.connect(self.save_task_mgr.cancel_task)
-
-        embed_id = self.combo_embed.currentData()
-        rerank_id = self.combo_rerank.currentData()
-
-        self.save_task_mgr.start_task(
-            VerifyModelsTask,
-            task_id="verify_settings",
-            mode=TaskMode.THREAD,
-            embed_id=embed_id,
-            rerank_id=rerank_id,
-            mcp_config=getattr(self.config, 'mcp_servers', {})
-        )
-
-    def _on_save_task_state_changed(self, state, msg):
-        if state in [TaskState.FAILED.value, TaskState.TERMINATED.value]:
-            if hasattr(self, 'save_pd'):
-                self.save_pd.show_finish_state(
-                    False, tr("Process Halted"),
-                    tr("Save process ended: {msg}").format(msg=msg))
+        # 到这一步配置已全部落盘并生效（环境变量、LLM 配置、MCP 重载都在上面完成）。
+        # 原来这里还要起一个后台任务去校验本地 .onnx 模型文件——本地推理下线后它没有
+        # 任何可做的事，于是直接进入完成回调，不再为"检查模型是否下载"多起一个任务。
+        self._on_save_task_result({})
 
     def _on_save_task_result(self, result_dict):
         self._clear_unsaved()
@@ -331,10 +302,6 @@ class SaveFlowMixin:
         QTimer.singleShot(100, _bootstrap_mcp_async)
 
         msg = tr("Settings saved successfully.")
-        if result_dict and result_dict.get("to_download"):
-            msg += "\n\n" + tr(
-                "Note: Some selected models are missing locally. Please click 'Download' "
-                "next to the models to fetch and convert them.")
 
         if getattr(self, '_language_changed_on_save', False):
             # 界面语言在启动时一次性构建，无法热切换：明确告知需重启，
@@ -346,8 +313,6 @@ class SaveFlowMixin:
 
         if hasattr(self, 'save_pd'):
             self.save_pd.show_finish_state(True, tr("Settings Saved"), msg)
-
-        self.check_models_status()
 
         if hasattr(self, '_pending_route_callback') and self._pending_route_callback:
             cb = self._pending_route_callback

@@ -16,10 +16,7 @@ from pydantic import BaseModel, Field
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskState
-from src.core.device_manager import DeviceManager
-from src.core.kb_manager import KBManager
 from src.core.mcp_manager import MCPManager
-from src.core.models_registry import check_model_exists, get_model_conf, resolve_auto_model
 from src.core.think_tags import ThinkStreamSplitter
 from src.core.version import __github__, __version__, __website__
 from src.task.chat_tasks import ChatGenerationTask
@@ -283,9 +280,7 @@ class ModelListPayload(BaseModel):
 # ==========================================
 
 class SystemStateResponse(BaseModel):
-    active_device: str = Field(..., description="Currently configured inference device (e.g. 'cuda', 'cpu', 'auto').")
     mcp_tools: int = Field(..., description="Number of registered MCP tools.")
-    kbs: int = Field(..., description="Number of available knowledge bases.")
 
 
 class ProviderInfo(BaseModel):
@@ -324,17 +319,6 @@ class MCPFilterResponse(BaseModel):
     filtered_count: Optional[int] = Field(None, description="Tool count after filtering.")
     filtered_tools: List[Dict[str, Any]] = Field(..., description="The filtered tool schemas.")
     error: Optional[str] = Field(None, description="Error message if status is 'degraded_error'.")
-
-
-class KBInfo(BaseModel):
-    id: str = Field(..., description="Knowledge-base identifier.")
-    name: str = Field(..., description="Human-readable name.")
-    domain: str = Field(..., description="Domain or topic of the knowledge base.")
-    doc_count: int = Field(..., description="Number of indexed documents.")
-
-
-class KBListResponse(BaseModel):
-    knowledge_bases: List[KBInfo]
 
 
 # ==========================================
@@ -427,24 +411,9 @@ def _validate_prerequisites(request: ChatCompletionRequest, config: ConfigManage
     main_config = next((c for c in llm_configs if c.get("id") == provider_id), None)
     if not main_config:
         raise OpenAIException(f"Main Model Provider '{provider_id}' not found.", status_code=400, error_type="invalid_request_error")
-    if request.kb_id and request.kb_id != "none":
-        kb_info = KBManager().get_kb_by_id(request.kb_id)
-        if not kb_info:
-            raise OpenAIException(f"Knowledge Base '{request.kb_id}' not found or deleted.", status_code=404, error_type="invalid_request_error")
-        user_device = config.user_settings.get("inference_device", "Auto")
-        target_device = DeviceManager().parse_device_string(user_device)
-        model_id = kb_info.get('model_id', 'embed_auto')
-        conf = get_model_conf(model_id, "embedding")
-        if not conf or conf.get('is_auto'):
-            model_id = resolve_auto_model("embedding", target_device)
-        if not check_model_exists(model_id):
-            raise OpenAIException(f"Required Embedding model '{model_id}' for this KB is missing.", status_code=500, error_type="model_missing_error")
-        rerank_id = config.user_settings.get("rerank_model_id", "rerank_auto")
-        conf_rerank = get_model_conf(rerank_id, "reranking")
-        if not conf_rerank or conf_rerank.get('is_auto'):
-            rerank_id = resolve_auto_model("reranking", target_device)
-        if not check_model_exists(rerank_id):
-            raise OpenAIException(f"Required Reranker model '{rerank_id}' is missing.", status_code=500, error_type="model_missing_error")
+    # kb_id 字段保留以兼容老客户端，但知识库已下线：这里不再做任何模型/库校验，
+    # 也不会触发本地检索，所有证据都来自学术工具。
+
 
 
 # ==========================================
@@ -722,13 +691,11 @@ async def chat_completions(
     response_model=SystemStateResponse,
     tags=["System"],
     summary="Get system state",
-    description="Returns current device, MCP tool count, and knowledge-base count.",
+    description="Returns the registered MCP tool count.",
 )
 def get_system_state():
     return {
-        "active_device": ConfigManager().user_settings.get("inference_device", "auto"),
         "mcp_tools": len(MCPManager.get_instance().get_all_tools_schema()),
-        "kbs": len(KBManager().get_all_kbs()),
     }
 
 
@@ -919,42 +886,27 @@ def semantic_filter_agent_tools(payload: SemanticFilterRequest):
         logger.warning("=" * 50 + "\n")
         return {"filtered_tools": raw_tools, "status": "bypassed_insufficient_tools"}
 
-    candidate_docs = []
-    for tool in raw_tools:
-        func = tool.get("function", {})
-        content = f"Tool Name: {func.get('name', '')}. Description: {func.get('description', '')}"
-        candidate_docs.append({"content": content, "metadata": {"tool_schema": tool}})
+    # 工具筛选改为**词面重合打分**（本地推理下线后的替代）：
+    # 逐条比较"用户意图 + 历史上下文"里的词与工具名/描述的词面重合度，同分保持原有
+    # 顺序。它比交叉编码器弱，但这一层本来就只是把上百个工具裁到 top_k 给模型看，
+    # 真正的取舍由模型在第一轮函数调用里做——而交叉编码器要为此拉起本地 ONNX 模型，
+    # 成本与收益完全不成比例。
+    def _tokens(text: str) -> set:
+        return {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", str(text or ""))}
 
-    context_str = f" Previous Context: {payload.history_context}" if payload.history_context else ""
-    rerank_query = f"User Intent: {payload.query}.{context_str} Find the most appropriate API tools to fulfill this request."
+    query_tokens = _tokens(payload.query) | _tokens(payload.history_context)
+    scored = []
+    for order, tool in enumerate(raw_tools):
+        func = tool.get("function", {}) or {}
+        haystack = _tokens(f"{func.get('name', '')} {func.get('description', '')}")
+        overlap = len(query_tokens & haystack)
+        scored.append((-overlap, order, tool))
+    scored.sort(key=lambda item: (item[0], item[1]))
 
-    # [修改点开始]：彻底移除 RunnerProcess 和 mp.Queue()，直接调用单例引擎
-    from src.core.rerank_engine import RerankEngine
-
-    ranked = None
-    error_msg = None
-
-    try:
-        engine = RerankEngine()
-        # 直接在当前 FastAPI 的 worker 线程中同步执行打分
-        ranked = engine.rerank(rerank_query, candidate_docs, domain="Tool Selection", top_k=payload.top_k)
-
-        if not ranked:
-            ranked = candidate_docs[:payload.top_k]
-    except Exception as e:
-        error_msg = str(e)
-        ranked = candidate_docs[:payload.top_k]
-    # [修改点结束]
-
-    if error_msg:
-        logger.warning(f"❌ Reranker failed: {error_msg}. Falling back to full toolset.")
-        logger.warning("=" * 50 + "\n")
-        return {"filtered_tools": raw_tools, "status": "degraded_error", "error": error_msg}
-
-    best_tools = [doc["metadata"]["tool_schema"] for doc in ranked]
+    best_tools = [tool for _neg, _order, tool in scored[:payload.top_k]]
     best_names = [t.get("function", {}).get("name", "Unknown") for t in best_tools]
 
-    logger.warning(f"🏆 Reranker Success! Filtered down to Top {len(best_tools)}.")
+    logger.warning(f"🧮 Keyword tool selection: {len(raw_tools)} -> {len(best_tools)}.")
     logger.warning(f"-> Selected Names: {', '.join(best_names)}")
     logger.warning("=" * 50 + "\n")
 
@@ -964,28 +916,6 @@ def semantic_filter_agent_tools(payload: SemanticFilterRequest):
         "filtered_count": len(best_tools),
         "filtered_tools": best_tools,
     }
-
-
-@app.get(
-    "/api/kbs",
-    response_model=KBListResponse,
-    tags=["Knowledge Bases"],
-    summary="List knowledge bases",
-    description="Returns all indexed, ready-to-use knowledge bases for RAG.",
-)
-def list_knowledge_bases():
-    kb_manager = KBManager()
-    kbs = kb_manager.get_all_kbs()
-    result = []
-    for kb in kbs:
-        if kb.get('status') == 'ready':
-            result.append({
-                "id": kb.get("id"),
-                "name": kb.get("name"),
-                "domain": kb.get("domain", "General Academic"),
-                "doc_count": kb.get("doc_count", 0),
-            })
-    return {"knowledge_bases": result}
 
 
 @app.get(

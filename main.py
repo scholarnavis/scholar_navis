@@ -126,12 +126,10 @@ class StartupWorker(QThread):
     # 硬件预热任务必须由主线程发起：TaskManager 内部使用 QTimer，在工作线程里
     # start_task 会触发 "QObject::startTimer: Timers cannot be started from
     # another thread"，定时器不启动则任务结果无法回传。
-    sig_start_hw_warmup = Signal()
 
     def __init__(self, logger):
         super().__init__()
         self.logger = logger
-        self.hw_task_mgr = TaskManager()
 
     def run(self):
         # 分阶段耗时进日志：启动变慢时能一眼看出卡在哪一步（否则只能看到
@@ -150,10 +148,6 @@ class StartupWorker(QThread):
             time.sleep(0.1)
             phase_done("model registry import")
 
-            self.sig_progress.emit(6, tr("Loading model registry framework..."))
-            time.sleep(0.1)
-            from src.core.models_registry import resolve_auto_model, check_model_exists, get_model_conf, \
-                ensure_onnx_model
             phase_done("config/network import")
 
             self.sig_progress.emit(7, tr("Loading user settings..."))
@@ -169,10 +163,10 @@ class StartupWorker(QThread):
             setup_global_network_env()
             phase_done("hardware warmup dispatch")
 
-            self.sig_progress.emit(25, tr("Scanning local hardware & compute engines (Background)..."))
+            self.sig_progress.emit(25, tr("Preparing the workspace..."))
             time.sleep(0.1)
-            # 交给主线程发起（见 sig_start_hw_warmup 的说明）
-            self.sig_start_hw_warmup.emit()
+            # 硬件预热（原 HardwareInitTask）随本地 ONNX 推理一起下线：它唯一的作用是
+            # 启动时就跑一次执行提供者探针。设置页的硬件面板仍按需检测（HWDetectTask）。
             phase_done("theme assets")
 
             self.sig_progress.emit(40, tr("Mounting theme cache and UI assets..."))
@@ -332,16 +326,7 @@ class AppController(QObject):
         self.worker.sig_progress.connect(self.update_splash)
         self.worker.sig_finished.connect(self.on_startup_finished)
         self.worker.sig_error.connect(self.on_startup_error)  # 绑定错误信号
-        self.worker.sig_start_hw_warmup.connect(self.start_hw_warmup)
         self.worker.start()
-
-    @Slot()
-    def start_hw_warmup(self):
-        """在主线程发起硬件预热任务（TaskManager 的 QTimer 有线程亲和性要求）。"""
-        from src.task.startup_tasks import HardwareInitTask
-
-        self.worker.hw_task_mgr.start_task(
-            HardwareInitTask, task_id="hw_warmup", mode=TaskMode.THREAD)
 
     @Slot(int, str)
     def update_splash(self, val, msg):

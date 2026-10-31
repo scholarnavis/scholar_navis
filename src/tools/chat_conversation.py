@@ -37,8 +37,6 @@ from PySide6.QtWidgets import (QGraphicsOpacityEffect, QHBoxLayout, QLabel,
 
 from src.core import chat_session
 from src.core.i18n import tr
-from src.core.kb_manager import DatabaseManager, KBManager
-from src.core.models_registry import get_model_conf
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager, overlay_scrollbar_qss, strong_weight_css
 from src.tools.base_tool import BaseTool
@@ -68,8 +66,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
     model_selector: ModelSelectorWidget
     collapsed_placeholder: QLabel
     btn_ribbon_state: QPushButton
-    lbl_kb: QLabel
-    combo_kb: BaseComboBox
     ribbon_state: str
     scroll_area: QScrollArea
     chat_container: QWidget
@@ -129,7 +125,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self.tabs_container = tabs_container
         self.history = []
         self.widget = None
-        self.kb_manager = KBManager()
         self.current_ai_text = ""
         self.current_ai_bubble = None
         self.pdf_viewer = None
@@ -168,9 +163,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         # 对话区加载遮罩：惰性创建（见 _show_chat_loading），与悬浮按钮同为浮层子控件。
         self._chat_loading_overlay = None
 
-        GlobalSignals().kb_list_changed.connect(self.refresh_kb_list)
-        GlobalSignals().kb_switched.connect(self.on_global_kb_switched)
-        GlobalSignals().kb_modified.connect(self.on_kb_modified)
 
         if hasattr(GlobalSignals(), 'llm_config_changed'):
             GlobalSignals().llm_config_changed.connect(self.load_llm_configs)
@@ -217,19 +209,11 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         self.btn_ribbon_state.setFixedWidth(90)
         self._apply_ribbon_button_style()
 
-        # 顶栏两行：第 1 行 = 主模型（已含 Vision），第 2 行 = KB + 收起按钮。
-        # Compute Device 与 Translator 均按要求移除。
-        self.lbl_kb = QLabel(tr(" KB:"))
-        self.combo_kb = BaseComboBox(max_width=240)
-        self.refresh_kb_list()
-
+        # 顶栏第 2 行 = 状态按钮组（搜索 / 书签 / 收起）。知识库选择器已彻底下线：
+        # 检索证据只来自学术工具，界面上不再有"选库"这一层。
         row2_layout = QHBoxLayout()
         row2_layout.setSpacing(8)
         row2_layout.setContentsMargins(0, 0, 0, 0)
-        row2_layout.addWidget(self.lbl_kb)
-        row2_layout.addWidget(self.combo_kb, 1)
-        # KB 下拉隐藏（Collapsed/Hover）时由这个弹簧吸掉剩余宽度：否则行里只剩
-        # 按钮，QBoxLayout 会把按钮拉成横跨整行的巨型块。
         row2_layout.addStretch(1)
         row2_layout.addWidget(self.btn_ribbon_state)
 
@@ -247,13 +231,10 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
 
         def set_ribbon_visible(visible, show_row=True):
             # Collapsed：整行收起（不留空白带）；Hover：保留一行占位，鼠标进入
-            # 顶栏时再展开模型选择器。KB 选择器已下线：自动文献库常开，不再让
-            # 用户选库（旧库仍保留在后端，作为自动检索失败时的兜底）。
+            # 顶栏时再展开模型选择器。
             self.ribbon_row.setVisible(show_row)
             self.model_selector.setVisible(visible)
             self.collapsed_placeholder.setVisible(not visible and show_row)
-            self.lbl_kb.setVisible(False)
-            self.combo_kb.setVisible(False)
 
         def apply_ribbon_state(state):
             tm = ThemeManager()
@@ -435,11 +416,7 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         控件上做事。界面控件（气泡、输入区）之间由 Qt 在控件析构时自动断开。
         """
         signals = GlobalSignals()
-        pairs = [
-            (signals.kb_list_changed, self.refresh_kb_list),
-            (signals.kb_switched, self.on_global_kb_switched),
-            (signals.kb_modified, self.on_kb_modified),
-        ]
+        pairs = []
         if hasattr(signals, 'llm_config_changed'):
             pairs.append((signals.llm_config_changed, self.load_llm_configs))
         for signal, slot in pairs:
@@ -516,66 +493,6 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
     def load_llm_configs(self):
         if hasattr(self, 'model_selector'):
             self.model_selector.load_llm_configs()
-
-    def refresh_kb_list(self):
-        self.load_llm_configs()
-        if not hasattr(self, 'combo_kb'): return
-        curr_data = self.combo_kb.currentData()
-        curr_id = curr_data['id'] if isinstance(curr_data, dict) else curr_data
-
-        self.combo_kb.blockSignals(True)
-        self.combo_kb.clear()
-
-        self.combo_kb.addItem(tr("No Knowledge Base (Direct Chat)"), "none")
-
-        kbs = self.kb_manager.get_all_kbs()
-        target_idx = 0  # 默认选中 "none"
-
-        for i, kb in enumerate(kbs):
-            if kb.get('status') == 'ready':
-                m = get_model_conf(kb.get('model_id'), "embedding")
-                m_ui = m['ui_name'] if m else kb.get('model_id', '?')
-                display_text = tr("{name}   [Model: {model} | Docs: {docs}]").format(
-                    name=kb['name'], model=m_ui, docs=kb.get('doc_count', 0))
-                self.combo_kb.addItem(display_text, kb)
-                if kb['id'] == curr_id:
-                    target_idx = self.combo_kb.count() - 1
-
-        if self.combo_kb.count() > 0:
-            self.combo_kb.setCurrentIndex(target_idx)
-
-        self.combo_kb.blockSignals(False)
-
-    def on_global_kb_switched(self, kb_id):
-        if not hasattr(self, 'combo_kb') or not kb_id: return
-        for i in range(self.combo_kb.count()):
-            data = self.combo_kb.itemData(i)
-            if data and data.get('id') == kb_id:
-                self.combo_kb.blockSignals(True)
-                self.combo_kb.setCurrentIndex(i)
-                self.combo_kb.blockSignals(False)
-                self.kb_id = kb_id
-                if hasattr(self, 'db'): self.db.switch_kb(kb_id)
-                break
-
-    def on_kb_modified(self, kb_id):
-        """当当前关联的知识库在后台发生变更时触发，锁定对话防止上下文错乱"""
-
-        DatabaseManager().reload()
-
-        self.refresh_kb_list()
-
-        if not self.history:
-            return
-
-        curr_data = self.combo_kb.currentData()
-        curr_id = curr_data.get("id") if isinstance(curr_data, dict) else curr_data
-
-        if curr_id == kb_id:
-            self.is_locked = True
-            if hasattr(self, 'input_container'):
-                self.input_container.lock_input()
-            ToastManager().show(tr("The knowledge base was modified. Chat is currently locked."), "warning")
 
     def _show_chat_loading(self, text: str):
         """在对话区盖一层加载遮罩并显示 ``text``（惰性创建，可重复调用）。

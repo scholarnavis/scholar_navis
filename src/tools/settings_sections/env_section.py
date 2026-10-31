@@ -36,58 +36,18 @@ class EnvSectionMixin:
         self.layout.addWidget(self.group_hw)
 
     def _on_hw_detected_result(self, result):
-        info = result.get("info", {})
-        devs = result.get("devs", [{"name": "Auto Detect", "id": "auto"}])
+        """硬件检测完成：只渲染 OS / CPU / 内存 / GPU。
 
+        这里不再有"算力设备"下拉框：本地推理（ONNX 嵌入与重排）下线后，设备选择
+        没有消费者，留着只会让用户以为它还能影响什么。
+        """
+        info = (result or {}).get("info", {})
+        if not info:
+            logger.warning("Hardware detection returned no data: %s",
+                           (result or {}).get("msg", ""))
+            return
         self._cached_hw_info = info
         self._update_hardware_html()
-
-        curr_device = self.config.user_settings.get("inference_device", "auto")
-        self.combo_device.blockSignals(True)
-        self.combo_device.clear()
-        for dev in devs:
-            self.combo_device.addItem(dev["name"], dev["id"])
-            index = self.combo_device.count() - 1
-            hint = dev.get("hint", "")
-            if hint:
-                self.combo_device.setItemData(index, hint, Qt.ItemDataRole.ToolTipRole)
-            if not dev.get("selectable", True):
-                # 不可用设备（如显卡存在但缺 CUDA 运行库）只作说明展示：
-                # 禁止选中，避免保存成无效配置后再去"测试设备"得到无意义报错。
-                item = self.combo_device.model().item(index)
-                if item is not None:
-                    item.setEnabled(False)
-
-        idx_dev = self.combo_device.findData(curr_device)
-        saved_selectable = (
-            idx_dev >= 0
-            and self.combo_device.model().item(idx_dev) is not None
-            and self.combo_device.model().item(idx_dev).isEnabled()
-        )
-
-        if saved_selectable:
-            self.combo_device.setCurrentIndex(idx_dev)
-        else:
-            fallback = self.combo_device.findData("auto")
-            self.combo_device.setCurrentIndex(fallback if fallback >= 0 else 0)
-            if curr_device and curr_device != "auto":
-                logger.warning(
-                    f"Saved compute device '{curr_device}' is no longer available; "
-                    f"switched to Auto Detect.")
-                self._notify_device_fallback(curr_device)
-
-        self.combo_device.blockSignals(False)
-
-    def _notify_device_fallback(self, unavailable_device: str):
-        """告知用户"已保存的设备在当前机器上不可用，已回落到自动选择"。"""
-        try:
-            from src.ui.components.toast import ToastManager
-
-            ToastManager().show(
-                f"Saved compute device '{unavailable_device}' is not available on this "
-                f"machine. Switched to Auto Detect.", "warning")
-        except Exception as e:  # Toast 不可用不应影响设置页加载
-            logger.debug(f"Could not notify device fallback: {e}")
 
     def _update_hardware_html(self):
         if not hasattr(self, 'lbl_hw_info') or not getattr(self, '_cached_hw_info', None): return
@@ -102,17 +62,6 @@ class EnvSectionMixin:
         ])
         if not gpu_str: gpu_str = tr("None detected")
 
-        # 判定是否真的在加速：优先用"运行期真实可用"的探测结果；旧版本/异常时
-        # 回退到构建期列表（避免字段缺失导致显示异常）。
-        accel_providers = info.get('ort_providers_active') or info.get('ort_providers', [])
-        has_accel = any(p in accel_providers for p in
-                        ["CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider",
-                         "ROCmExecutionProvider"])
-
-        status_color = tm.color("success") if has_accel else tm.color("warning")
-        accel_status = tr("Hardware Accelerated") if has_accel else tr("CPU Fallback")
-
-        clean_providers = [p.replace("ExecutionProvider", "") for p in info.get('ort_providers', [])]
         unknown = tr("Unknown")
 
         html = f"""
@@ -120,9 +69,7 @@ class EnvSectionMixin:
             <b>{tr('OS:')}</b> {info.get('os', unknown)}<br>
             <b>{tr('CPU:')}</b> {info.get('cpu', unknown)} ({info.get('cpu_cores', unknown)})<br>
             <b>{tr('RAM:')}</b> {info.get('ram_available', unknown)} / {info.get('ram_total', unknown)}<br>
-            <b>{tr('GPU(s):')}</b><br>{gpu_str}<br>
-            <b>{tr('ONNX Engine:')}</b> v{info.get('ort_version', 'N/A')} <span style='color:{status_color}'>[{accel_status}]</span><br>
-            <b>{tr('Providers:')}</b> {", ".join(clean_providers)}
+            <b>{tr('GPU(s):')}</b><br>{gpu_str}
         </div>
         """
         self.lbl_hw_info.setText(html)
@@ -389,23 +336,25 @@ class EnvSectionMixin:
 
         # 期刊登录浏览器是否走全局代理。默认关闭：部分期刊/机构（含 Tair）
         # 通过校园/机构出口 IP 自动登录，走代理反而会落到非机构 IP。
-        self.chk_journal_proxy = QCheckBox(tr("Use global proxy for journal browser"))
+        self.chk_journal_proxy = QCheckBox(tr("Use the global proxy"))
         self.chk_journal_proxy.setToolTip(tr(
-            "Off by default. Some journals and institutional services auto-login by "
-            "recognizing your institution's IP; using a proxy can break that."))
+            "Off by default: some journals and institutional services auto-login by "
+            "recognizing your institution's IP, and a proxy replaces that address."))
         self.chk_journal_proxy.setChecked(
             bool(self.config.user_settings.get("journal_use_proxy", False)))
 
         # 机构数据库直连（绕过代理）。与上面的 Journal Browser 是两件事：
         # 那条管内置浏览器，这条管应用自己的 HTTP 请求（TAIR 等按机构出口 IP 授权）。
-        self.chk_institutional_direct = QCheckBox(
-            tr("Direct (no proxy) for institutional databases"))
-        self.chk_institutional_direct.setToolTip(tr(
-            "On by default. TAIR and similar resources grant subscription features by "
-            "recognizing your institution's IP address; going through a proxy replaces "
-            "that address and the extra access is lost."))
-        self.chk_institutional_direct.setChecked(
-            bool(self.config.user_settings.get("institutional_direct", True)))
+        # 与上面的期刊浏览器开关**同向**：都是"使用全局代理"，默认都不勾（直连）。
+        # 一个写"使用代理"、另一个写"直连"，用户每次都要在脑子里取反，也容易把默认值
+        # 记错——两个开关的语义、默认值与措辞在此保持一致。
+        self.chk_institutional_proxy = QCheckBox(tr("Use the global proxy"))
+        self.chk_institutional_proxy.setToolTip(tr(
+            "Off by default: TAIR and similar resources grant subscription features by "
+            "recognizing your institution's IP address, and a proxy replaces that "
+            "address."))
+        self.chk_institutional_proxy.setChecked(
+            bool(self.config.user_settings.get("institutional_use_proxy", False)))
 
         self.input_institutional_hosts = QLineEdit()
         self.input_institutional_hosts.setPlaceholderText(
@@ -416,14 +365,15 @@ class EnvSectionMixin:
         self.input_institutional_hosts.setToolTip(tr(
             "Leave empty to use the built-in list. Suffixes match the host and its "
             "subdomains."))
-        self.input_institutional_hosts.setEnabled(self.chk_institutional_direct.isChecked())
-        self.chk_institutional_direct.toggled.connect(
-            self.input_institutional_hosts.setEnabled)
+        # 主机列表只在"不走代理"时有意义：走代理就不存在直连豁免。
+        self.input_institutional_hosts.setEnabled(not self.chk_institutional_proxy.isChecked())
+        self.chk_institutional_proxy.toggled.connect(
+            lambda use_proxy: self.input_institutional_hosts.setEnabled(not use_proxy))
 
         layout.addRow(tr("Proxy Mode:"), self.combo_proxy_mode)
         layout.addRow(tr("Proxy URL:"), self.input_proxy)
         layout.addRow(tr("Journal Browser:"), self.chk_journal_proxy)
-        layout.addRow(tr("Institutional DBs:"), self.chk_institutional_direct)
+        layout.addRow(tr("Institutional DBs:"), self.chk_institutional_proxy)
         layout.addRow(tr("Direct Hosts:"), self.input_institutional_hosts)
         layout.addRow(tr("HF Mirror:"), self.input_mirror)
 

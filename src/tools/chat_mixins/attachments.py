@@ -52,15 +52,6 @@ class ChatAttachmentsMixin:
             return
         self.process_attached_files(paths)
 
-    def attach_from_kb(self):
-        from src.ui.components.dialog import SelectKBFileDialog
-        dlg = SelectKBFileDialog(self.widget)
-
-        if dlg.exec():
-            file_infos = dlg.get_selected_file_infos()
-            if file_infos:
-                self.process_attached_files(file_infos)
-
     def attach_from_clipboard(self):
         """从剪贴板取图并走统一附件校验链路（Ctrl+V 与 Attach 菜单共用）。
 

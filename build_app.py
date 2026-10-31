@@ -2,8 +2,8 @@
 
 产物形态按平台分派
 ------------------
-* **Linux**：**源码包**（不再使用 PyInstaller）。PyPI 上的 PySide6 / tokenizers /
-  onnxruntime 都是 manylinux wheel，冻结成可执行产物时必须把 Qt/X11 系统库分析并
+* **Linux**：**源码包**（不再使用 PyInstaller）。PyPI 上的 PySide6 等依赖都是
+  manylinux wheel，冻结成可执行产物时必须把 Qt/X11 系统库分析并
   复制进去，代价是构建被绑死在特定发行版镜像上、产物与宿主 glibc 强绑定（详见
   ``.github/workflows/build-release.yml`` 的历史注释），而且用户装不了自己发行版的
   Qt。源码包把这层依赖解析交还给用户机器的 Python 工具链：产物与 glibc 解耦，
@@ -76,20 +76,6 @@ def platform_tag() -> str:
     """产物命名用的平台标记（win / mac / linux）。"""
     return {"Windows": "win", "Darwin": "mac", "Linux": "linux"}.get(
         platform.system(), "unknown")
-
-
-#: onnxruntime 的**发行包名**随平台不同（与 pyproject.toml 的平台矩阵一致），
-#: 而 PyInstaller 的 ``--copy-metadata`` 是按 distribution 名查找的。
-_ONNXRUNTIME_DISTRIBUTION = {
-    "Windows": "onnxruntime-directml",
-    "Linux": "onnxruntime-gpu",
-    "Darwin": "onnxruntime",
-}
-
-
-def onnxruntime_distribution_name(sys_os: str) -> str:
-    """当前平台的 onnxruntime 发行包名（distribution 名，非 import 名）。"""
-    return _ONNXRUNTIME_DISTRIBUTION.get(sys_os, "onnxruntime")
 
 
 def sync_pyproject_version():
@@ -198,7 +184,7 @@ def _patch_lock_root_version(package_dir: str, dist: str, version: str) -> bool:
     """纯文本把 ``uv.lock`` 里根项目（``source = { virtual = "." }``）的版本号改成 ``version``。
 
     只改这一行，**不动任何依赖解析结果**，因此不需要包元数据、不需要联网。这正是
-    "冷缓存 CI 里 ``uv lock --offline`` 因缺少 onnxruntime 等元数据而失败"的解法：实测
+    "冷缓存 CI 里 ``uv lock --offline`` 因缺少依赖元数据而失败"的解法：实测
     只要版本号发生变化，uv 就会重跑解析去重建分平台的 fork 标记，冷缓存 + 离线必然失败。
 
     定位不到（lock 格式变化 / 名字不符）时返回 False，由调用方走 uv 兜底。
@@ -368,9 +354,9 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
         # 保留 stdout 便于从终端启动时直接观察启动期异常。
         cmd.append("--windowed")
 
-    packages_to_collect = [
-        "onnxruntime", "onnx", "tokenizers", "chromadb", "anyio"
-    ]
+    # 本地推理栈（onnxruntime / onnx / tokenizers / chromadb）已从依赖里移除，
+    # 这里继续 collect-all 只会在打包时报"找不到包"。
+    packages_to_collect = ["anyio"]
 
     data_to_collect = ["docx", "litellm"]
 
@@ -445,13 +431,8 @@ def build_frozen_bundle(app_name_safe: str, sys_os: str, build_dir: str) -> None
     cmd.extend(["--copy-metadata", "tqdm"])
     cmd.extend(["--copy-metadata", "regex"])
     cmd.extend(["--copy-metadata", "tiktoken"])
-    cmd.extend(["--copy-metadata", "tokenizers"])
-    cmd.extend(["--copy-metadata", "onnx"])
     # LiteLLM 运行时会读取自身包元数据/本地 model map；冻结产物必须带上。
     cmd.extend(["--copy-metadata", "litellm"])
-    # 按 distribution 名取：Windows 上只有 DirectML 包，写死 "onnxruntime" 会让
-    # PyInstaller 抛 PackageNotFoundError 直接构建失败（见该映射的说明）。
-    cmd.extend(["--copy-metadata", onnxruntime_distribution_name(sys_os)])
 
     # --add-data 的分隔符是平台相关的：Windows 为 ';'，POSIX 为 ':'。
     cmd.append(f"--add-data=Assets{os.pathsep}Assets")

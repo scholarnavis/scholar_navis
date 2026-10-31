@@ -1,52 +1,24 @@
 [project]
 name = "scholar-navis"
-version = "2.0.7-dev-1"
+version = "2.1.0-dev-1"
 description = "Scholar Navis"
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
 dependencies = [
-    "chromadb>=1.5.0",
-    "langchain-text-splitters>=1.1.2",
     "markdown>=3.10.2",
-    "networkx>=3.6.1",
     "pymupdf>=1.26.7",
     "pyqtdarktheme>=2.1.0",
     "pyside6>=6.10.2",
-    "scikit-learn>=1.8.0",
     "psutil>=7.2.2",
     "nvidia-ml-py>=13.590.48",
     "pymupdf4llm>=0.2.9",
     "langdetect>=1.0.9",
-    # 安全下限见文件末尾 [tool.uv] 的说明；1.2x 系列修复了 3 条 High 告警，
-    # 上限 <2 是为避免顺带跳进 mcp 2.x 这个与安全无关的大版本。
     "mcp[cli]>=1.28.1,<2",
     "biopython>=1.87",
     "curl-cffi>=0.15.0",
     "cryptography>=50.0.0",
     "keyring>=24.0.0",
     "chardet<6.0",
-    "hf-xet>=1.2.0",
-    # 只用于读取 tokenizer.json；不走 transformers，也不需要 torch。
-    "tokenizers>=0.23.3",
-    # ONNX Runtime 的 CPU / CUDA / DirectML 是三个独立发行包，却提供同一个
-    # ``onnxruntime`` 包目录：同时安装会让同名文件互相覆盖，加速提供者随之消失。
-    # 因此**每个平台 + 架构只声明一个发行包**，并由 [tool.uv] 的
-    # exclude-dependencies 掐掉 chromadb 带进来的那一个。
-    # 加速路径按平台划分：Windows x64 用 DirectML（唯一不要求额外运行库的方案，
-    # NVIDIA/AMD/Intel 全覆盖）、Linux x86_64 用 CUDA、macOS 用官方包内置的 CoreML EP
-    # （arm64 与 x86_64 两个包均已确认编译了该 EP）。
-    # 官方未发布加速包的架构（Windows ARM64、Linux aarch64）退回 CPU 包，功能不受影响。
-    # macOS x86_64 停在 1.23.2：官方 1.24 起停发 Intel wheel，1.23.2 仍带 CoreML EP。
-    # 非 ARM 分支写成 `!= '<ARM 架构名>'`：Windows x64 的 platform_machine 在 CPython
-    # 下是 ``AMD64``，而 uv 的部分代码路径按 ``x86_64`` 推导，写等值会在其中一侧落空
-    # （表现为该平台被解析成"没有 onnxruntime"）。`!=` 对两种取值都成立，且 ARM 分支
-    # 由紧随其后的等值判断精确接住。
-    "onnxruntime-directml==1.24.4 ; sys_platform == 'win32' and platform_machine != 'ARM64'",
-    "onnxruntime==1.24.4 ; sys_platform == 'win32' and platform_machine == 'ARM64'",
-    "onnxruntime-gpu==1.24.4 ; sys_platform == 'linux' and platform_machine != 'aarch64'",
-    "onnxruntime==1.24.4 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "onnxruntime==1.24.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "onnxruntime==1.23.2 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "python-docx>=1.2.0",
     "email-validator>=2.3.0",
     "disposable-email-domains>=0.0.167",
@@ -54,17 +26,6 @@ dependencies = [
     "litellm>=1.84.0",
     "fastapi>=0.135.1",
     "uvicorn>=0.41.0",
-    "langchain-core>=1.3.3",
-    # ONNX 的 IR 版本必须落在 onnxruntime 能解析的范围内，否则**内存里新造的
-    # 模型**（提供者探针、硬件测试）会被 ORT 直接拒绝，表现为"加速器不可用"而被
-    # 静默降级到 CPU（与加速器本身无关）。实测：onnx 1.22 -> IR 13、
-    # onnx 1.23 -> IR 14，而 onnxruntime 1.24.4 的上限是 IR 13。
-    # 这里按各平台在用 onnxruntime 中最旧的那个取（macOS Intel 固定在 1.23.2，
-    # 官方 1.24 起停发 Intel wheel，比 1.24.4 更旧）。运行时真实上限由
-    # onnx_provider.onnxruntime_max_ir_version() 动态问出并写进启动日志，与这里互为
-    # 校验；一旦脱节，探针会退回"信任构建期列表"而不是误杀可用加速器。
-    # 解除条件：各平台在用的 onnxruntime 都能解析 IR 14 时放宽此上限。
-    "onnx>=1.22.0,<1.23",
     "aiohttp>=3.14.3",
     "requests>=2.33.0",
     "pygments>=2.20.0",
@@ -94,28 +55,7 @@ dev = [
 # 运行整个项目并给出可读提示，而不是抛出难懂的 TOML / lockfile 解析错误。
 required-version = ">=0.13.0"
 
-# chromadb 无条件依赖 onnxruntime（CPU 版），而本项目在 Windows / Linux 上用的是
-# 加速发行包（onnxruntime-directml / onnxruntime-gpu）。三者提供**同一个**
-# ``onnxruntime`` 包目录，安装时按同名文件互相覆盖：实测 Windows 上 CPU 版的
-# ``capi/onnxruntime.dll``（16119840 B）会盖掉 DirectML 版的（21111832 B），
-# ``get_available_providers()`` 随之只剩 ``AzureExecutionProvider`` /
-# ``CPUExecutionProvider``——设备页把 RTX 5060 与 Radeon 610M 一律标成
-# "unavailable"，GPU 加速实际从未生效。
-exclude-dependencies = [
-    # 作用域限定在 chromadb 自己（作用域形式需要 uv >= 0.13）：于是每个平台 + 架构
-    # 都只保留 [project.dependencies] 里声明的那一个 onnxruntime 发行包。
-    { package = { name = "chromadb" }, dependencies = ["onnxruntime"] },
-]
 
-# 这里**不要**再用 override-dependencies 钉 onnxruntime：uv 对带平台标记的依赖在
-# override 生效时会无条件替换（marker 被忽略），`onnxruntime==... ; sys_platform ==
-# 'darwin'` 会被当成三平台都要装，Windows 上重新引入 CPU 版并与 DirectML 版互相覆盖。
-# 版本由 [project.dependencies] 的 `==` 直接钉死，无需 override。
-#
-# 迁移：环境里若残留过 CPU 版，uv 卸载它会连带删掉两个发行包共享的同名文件
-# （onnxruntime/capi/*.dll），补一次
-# `uv sync --reinstall-package onnxruntime-directml` 即可（或删除 .venv 重装）。
-# 全新环境不受影响。
 
 # ---- 安全下限（Dependabot 告警修复）----
 # 这些是传递依赖，没法在 [project.dependencies] 里写下限。用 constraint-dependencies
@@ -131,22 +71,13 @@ constraint-dependencies = [
     "oauthlib>=4.0.0",      # GHSA-xpv3-w29h-x7cv / GHSA-hj66-6f7g-4r5v
 ]
 
-# ---- 已确认暂时无法修复，勿盲目升级 ----
-# 现存的唯一告警是 9 条（2 Critical + 6 High + 1 Moderate），全部来自 chromadb 与
-# transformers；`uv.lock` 与 `requirements.txt` 表达同一份解析结果，Dependabot 按
-# manifest 分别记录，因此默认分支上的计数是 18（4 Critical / 12 High / 2 Moderate）。
-# 下列区间与 first_patched_version 取自 GitHub Advisory（2026-10 复核，与 PyPI 实际
-# 可安装版本一致）。以上 9 条**没有任何一条**能靠升级本仓库依赖消除。
-# 1) chromadb 4 条（2 Critical：GHSA-36p7-vc44-83pf、GHSA-f4j7-r4q5-qw2c；
-#    2 High：GHSA-2wm9-hf6c-p5cr、GHSA-xph7-9rjv-w5fr）：vulnerable_version_range
-#    上界一律为 `<= 1.5.9`，first_patched_version 为 null，而 PyPI 最新版就是 1.5.9
-#    —— 上游尚未发布修复版本，降级到区间外（< 0.4.17）不可行。
-#    缓解：两条 Critical 攻击的是 Chroma **服务端**的 HTTP API
-#    (/api/v2/tenants/{tenant}/databases/{db}/collections + trust_remote_code)；
-#    本项目只用进程内嵌的 PersistentClient（src/core/kb_manager.py），
-#    不对外暴露 Chroma 服务端，因此实际暴露面很低。
-# 2) 已移除 transformers/optimum/torch：tokenizer 改由 tokenizers 直接读取
-#    tokenizer.json，ONNX Runtime 负责推理。由 transformers 带入的 5 条告警
-#    不再适用本项目。
+# ---- 安全说明 ----
+# 本地推理栈（chromadb / onnxruntime / onnx / tokenizers / transformers）已整体移除：
+# 随它们带入的 9 条告警（2 Critical + 6 High + 1 Moderate，其中 4 条来自 chromadb、
+# 5 条来自 transformers）不再适用于本项目。`uv.lock` 与 `requirements.txt` 表达同一份
+# 解析结果，Dependabot 按 manifest 分别记录计数。
+# 若日后重新引入向量检索或本地推理，需重新复核这些告警的上界与 first_patched_version
+# （2026-10 复核时 chromadb 的 vulnerable 上界为 `<= 1.5.9` 且无修复版本）。
+
 
 

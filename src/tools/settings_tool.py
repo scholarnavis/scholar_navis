@@ -6,7 +6,6 @@ into the mixins under ``settings_sections/``:
 - EnvSectionMixin: hardware / R env / system / network / API keys / API server
 - McpSectionMixin: MCP servers & native skills management
 - LlmSectionMixin / LlmModelOpsMixin: LLM providers and model params
-- ModelSectionMixin: embedding / reranker models & download queue
 - ConfigTransferMixin: config import / export
 - SaveFlowMixin: save & verification flow
 
@@ -22,7 +21,6 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QScrollArea,
 
 from src.core.config_manager import ConfigManager
 from src.core.core_task import TaskManager, TaskMode
-from src.core.device_manager import DeviceManager
 from src.core.i18n import AUTO, tr
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager, strong_weight_css
@@ -31,7 +29,7 @@ from src.tools.base_tool import BaseTool
 from src.tools.settings_sections import (ConfigTransferMixin, EnvSectionMixin,
                                          FulltextSectionMixin, LlmModelOpsMixin,
                                          LlmSectionMixin, McpSectionMixin,
-                                         ModelSectionMixin, SaveFlowMixin)
+                                         SaveFlowMixin)
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -72,7 +70,7 @@ class FloatingOverlayFilter(QObject):
 
 
 class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
-                   LlmModelOpsMixin, ModelSectionMixin, ConfigTransferMixin,
+                   LlmModelOpsMixin, ConfigTransferMixin,
                    FulltextSectionMixin, SaveFlowMixin, BaseTool):
     # 由 UI 构建与硬件探测流程创建，仅作静态检查声明
     layout: QVBoxLayout
@@ -87,7 +85,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
     def __init__(self):
         super().__init__("Global Settings")
         self.config = ConfigManager()
-        self.dev_mgr = DeviceManager()
         self.widget = None
         self.llm_configs = []
         self._is_updating_model_ui = False
@@ -174,7 +171,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
             self.init_system_section()
             self.init_network_section()
             self.init_llm_section()
-            self.init_model_section()
             self.init_api_keys_section()
             self.init_agent_tool_section()
             self.init_api_server_section()
@@ -213,9 +209,6 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.input_proxy.textChanged.connect(self._mark_unsaved)
         self.chk_journal_proxy.toggled.connect(self._mark_unsaved)
         self.input_mirror.textChanged.connect(self._mark_unsaved)
-        self.combo_embed.currentIndexChanged.connect(self._mark_unsaved)
-        self.combo_rerank.currentIndexChanged.connect(self._mark_unsaved)
-        self.combo_device.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_theme.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_log.currentIndexChanged.connect(self._mark_unsaved)
         self.combo_language.currentIndexChanged.connect(self._mark_unsaved)
@@ -381,26 +374,15 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         self.input_proxy.setText(self.config.user_settings.get("proxy_url", ""))
         self.chk_journal_proxy.setChecked(
             bool(self.config.user_settings.get("journal_use_proxy", False)))
-        self.chk_institutional_direct.setChecked(
-            bool(self.config.user_settings.get("institutional_direct", True)))
+        self.chk_institutional_proxy.setChecked(
+            bool(self.config.user_settings.get("institutional_use_proxy", False)))
         _direct_hosts = self.config.user_settings.get("institutional_hosts") or []
         self.input_institutional_hosts.setText(
             ", ".join(str(h) for h in _direct_hosts if str(h).strip()))
         self.input_institutional_hosts.setEnabled(
-            self.chk_institutional_direct.isChecked())
+            not self.chk_institutional_proxy.isChecked())
         self.input_mirror.setText(self.config.user_settings.get("hf_mirror", ""))
 
-        curr_embed = self.config.user_settings.get("current_model_id", "embed_auto")
-        idx_embed = self.combo_embed.findData(curr_embed)
-        if idx_embed >= 0: self.combo_embed.setCurrentIndex(idx_embed)
-
-        curr_rerank = self.config.user_settings.get("rerank_model_id", "rerank_auto")
-        idx_rerank = self.combo_rerank.findData(curr_rerank)
-        if idx_rerank >= 0: self.combo_rerank.setCurrentIndex(idx_rerank)
-
-        curr_device = self.config.user_settings.get("inference_device", "auto")
-        idx_dev = self.combo_device.findData(curr_device)
-        if idx_dev >= 0: self.combo_device.setCurrentIndex(idx_dev)
 
         self.combo_llm_preset.blockSignals(True)
         self.combo_llm_preset.clear()

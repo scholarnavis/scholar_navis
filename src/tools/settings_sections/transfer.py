@@ -6,6 +6,7 @@
 
 import base64
 import json
+import logging
 import os
 import zlib
 
@@ -18,8 +19,23 @@ from src.ui.components.dialog import (ExportPasswordDialog, ImportPasswordDialog
                                       ProgressDialog, StandardDialog)
 from src.ui.components.file_dialogs import open_file_name, save_file_name
 
+logger = logging.getLogger(__name__)
+
 #: 单个技能源码解压后的字节上限。正常技能脚本远小于此值，上限只用来挡住压缩炸弹。
 _SKILL_CODE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _read_rss_feeds() -> list:
+    """当前 RSS 订阅清单（订阅是用户配置，应当随配置包迁移）。读不到就给空表。"""
+    from src.core.rss_paths import RSS_FEEDS_FILE
+
+    try:
+        with open(RSS_FEEDS_FILE, "r", encoding="utf-8") as fh:
+            feeds = json.load(fh)
+    except (OSError, ValueError) as e:
+        logger.debug("RSS feed list unavailable for export: %s", e)
+        return []
+    return feeds if isinstance(feeds, list) else []
 
 
 def _decompress_limited(data: bytes, max_bytes: int = _SKILL_CODE_MAX_BYTES) -> bytes:
@@ -81,11 +97,20 @@ class ConfigTransferMixin:
                 except Exception as e:
                     self.logger.warning(f"Failed to read and compress skill {name} for export: {e}")
 
+        # 配置包 = **可移植的用户配置**。三类东西刻意不进来：
+        #
+        # * ``config/fulltext_links.json``（DOI ↔ 本地 PDF 关联）：存的是本机绝对路径，
+        #   换一台机器那些文件几乎必然不存在，导过去只会让每条"已有关联"都指向空；
+        #   它本来就是独立文件，随应用目录迁移，不随配置包走。
+        # * ``config/model_capabilities.json``：本机对 provider 实测出来的能力缓存，
+        #   换机器/换 key 后结论可能不成立，重新探测即可。
+        # * ``config/external_models.json`` 与模型目录：本地推理已下线，没有消费者。
         bundle = {
             "settings": self.config.user_settings,
             "mcp_servers": self.config.mcp_servers,
             "llm_configs": self.llm_configs,
-            "skill_files_zlib_b64": exported_skills_data
+            "skill_files_zlib_b64": exported_skills_data,
+            "rss_feeds": _read_rss_feeds(),
         }
 
         self.btn_export.setEnabled(False)
@@ -215,22 +240,19 @@ class ConfigTransferMixin:
             if "settings" in final_data:
                 imported_settings = final_data.get("settings", {}).copy()
 
-                imported_device = imported_settings.get("inference_device", "auto")
-                imported_index = self.combo_device.findData(imported_device)
-                imported_item = (self.combo_device.model().item(imported_index)
-                                 if imported_index >= 0 else None)
-                # 被禁用（不可用）的条目等同于不存在：导入的配置可能来自另一台机器
-                if imported_item is None or not imported_item.isEnabled():
-                    fallback_dev = "cpu" if self.combo_device.findData("cpu") >= 0 else "auto"
-                    imported_settings["inference_device"] = fallback_dev
-                    from src.ui.components.toast import ToastManager
-                    ToastManager().show(
-                        tr("Imported device '{device}' is unavailable. Defaulting to {fallback}.")
-                        .format(device=imported_device, fallback=fallback_dev.upper()),
-                        "warning"
-                    )
-
+                # 算力设备随本地推理一起下线：导入时不再校验 inference_device，
+                # 旧配置包里残留的这个键原样保留也无害（没有消费者）。
                 self.config.user_settings = imported_settings
+
+            if "rss_feeds" in final_data:
+                imported_feeds = final_data.get("rss_feeds")
+                if isinstance(imported_feeds, list):
+                    from src.core.rss_paths import RSS_FEEDS_FILE
+                    rss_path = RSS_FEEDS_FILE
+                    os.makedirs(os.path.dirname(rss_path), exist_ok=True)
+                    safe_io.atomic_write_json(rss_path, imported_feeds, indent=2)
+                    self.logger.info("Imported %d RSS feed(s) into %s",
+                                     len(imported_feeds), rss_path)
 
             if "mcp_servers" in final_data:
                 self.config.mcp_servers = final_data.get("mcp_servers", {}).copy()
