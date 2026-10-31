@@ -58,7 +58,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         " Import Native Skill": " 导入原生技能",
         "Import Native Skill": "导入原生技能",
         " Refresh Status": " 刷新状态",
-        " Parameter Help": " 参数说明",
         " Add Provider Parameter": " 添加 Provider 参数",
         " Copy from Provider": " 从 Provider 复制",
         " Add Model Parameter": " 添加模型参数",
@@ -203,9 +202,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # ================= 设置页：LLM 生成 API =================
         "LLM Generation API": "LLM 生成 API",
         "Unnamed Provider": "未命名 Provider",
-        "Custom Parameter Guide": "自定义参数指南",
-        "You can specify request parameters (e.g., temperature, top_p, max_tokens) for the provider or specifically for a model.\n\n• Priority: Model Custom > Provider Inherit\n• If 'Closed' is selected for a model, no parameters are appended.\n• The model dropdown indicates your configuration with (⚙️ Custom) or (🚫 Closed).":
-            "你可以为 Provider 或某个具体模型指定请求参数（例如 temperature、top_p、max_tokens）。\n\n• 优先级：模型自定义 > Provider 继承\n• 若某模型选择 'Closed'，则不附加任何参数。\n• 模型下拉框用 (⚙️ Custom) 或 (🚫 Closed) 标示你的配置。",
         "Loading settings...": "正在加载设置…",
         "Service Provider:": "服务提供商：",
         "Provider Name:": "Provider 名称：",
@@ -765,7 +761,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "New Tab": "新建标签页",
         "Close Tab": "关闭标签页",
         "Rename Tab": "重命名标签页",
-        "At least one tab must remain open.": "至少需要保留一个标签页。",
         "Found {tabs} conversation(s) with {n} message(s).\n{note}\n\nThey will be opened as new conversations. Continue?":
             "找到 {tabs} 个对话、共 {n} 条消息。\n{note}\n\n将把它们作为新的对话打开。是否继续？",
         "Opening {tabs} conversation(s)...": "正在打开 {tabs} 个对话…",
@@ -807,10 +802,24 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "全文已加入本对话的证据库。",
         "Failed to add the downloaded PDF to the evidence store.":
             "下载的 PDF 未能加入证据库。",
+        "Use System Proxy": "使用系统代理",
+        "System proxy follows the operating system's proxy settings (on Windows the system proxy, elsewhere the HTTP(S)_PROXY environment variables).":
+            "系统代理指操作系统层面的代理设置（Windows 读系统代理，其他平台读 "
+            "HTTP(S)_PROXY 环境变量）。",
         "Use global proxy for journal browser": "期刊浏览器使用全局代理",
         "Off by default. Some journals and institutional services auto-login by recognizing your institution's IP; using a proxy can break that.":
             "默认关闭。部分期刊/机构服务会通过机构 IP 自动登录，使用代理可能反而失效。",
         "Journal Browser:": "期刊浏览器：",
+        "Direct (no proxy) for institutional databases": "机构数据库直连（不走代理）",
+        "On by default. TAIR and similar resources grant subscription features by recognizing your institution's IP address; going through a proxy replaces that address and the extra access is lost.":
+            "默认开启。TAIR 等资源通过识别机构 IP 授予订阅级功能；走代理会换成代理出口"
+            "地址，这部分权限随之消失。",
+        "Extra host suffix(es), comma separated, e.g. arabidopsis.org":
+            "额外主机后缀（逗号分隔），例如 arabidopsis.org",
+        "Leave empty to use the built-in list. Suffixes match the host and its subdomains.":
+            "留空则使用内置列表。后缀同时匹配该主机与其子域。",
+        "Institutional DBs:": "机构数据库：",
+        "Direct Hosts:": "直连主机：",
         "Conversation Evidence": "本对话证据",
         " Evidence": " 证据",
         "Show literature evidence attached to this conversation": "查看本对话已入库的文献证据",
@@ -998,6 +1007,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # ================= 取全文：系统通知与选择窗口 =================
         "Paper: {paper}": "论文：{paper}",
         "Needed for: {reason}": "用途：{reason}",
+        "Link: {url}": "链接：{url}",
+        "No response.": "本轮没有产生可显示的回答。",
+        "No model provider is configured. Pick one in Global Settings first.":
+            "尚未配置模型服务商，请先在全局设置里选择一个。",
         "Download the PDF, then hand it over in the Scholar Navis window.":
             "请下载该论文的 PDF，然后在 Scholar Navis 窗口中交给它。",
         "The full-text picker is waiting for your PDF.":
@@ -1055,6 +1068,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Failed to build this panel:": "构建本面板失败：",
         "Cannot open:": "无法打开：",
         "Install command copied:": "安装命令已复制：",
+        "No build for this platform; the command installs the packages inside WSL.":
+            "此平台没有可装的构建；已改为复制在 WSL 发行版内安装这些包的命令。",
+        "No build for this platform.": "此平台没有可装的构建。",
         "Tools already installed on this machine are used in preference to the private prefix. A tool's help output is captured once before its first use, so option names always match the installed version.":
             "本机已安装的工具优先于私有前缀使用。每个工具第一次被使用前会先抓取一次"
             "帮助信息，因此参数名始终与已安装的版本一致。",

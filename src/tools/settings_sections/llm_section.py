@@ -63,21 +63,9 @@ class LlmSectionMixin:
         self.btn_del_llm = QPushButton(tr(" Delete"))
         self.btn_del_llm.clicked.connect(self._del_llm_provider)
 
-        self.btn_help_params = QPushButton(tr(" Parameter Help"))
-        self.btn_help_params.clicked.connect(lambda: StandardDialog(
-            self.widget, tr("Custom Parameter Guide"),
-            tr("You can specify request parameters (e.g., temperature, top_p, max_tokens) "
-               "for the provider or specifically for a model.\n\n"
-               "• Priority: Model Custom > Provider Inherit\n"
-               "• If 'Closed' is selected for a model, no parameters are appended.\n"
-               "• The model dropdown indicates your configuration with (⚙️ Custom) or (🚫 Closed)."),
-            show_cancel=False
-        ).exec())
-
         header_layout.addWidget(self.combo_llm_preset, stretch=1)
         header_layout.addWidget(self.btn_add_llm)
         header_layout.addWidget(self.btn_del_llm)
-        header_layout.addWidget(self.btn_help_params)
 
         self.input_llm_name = QLineEdit()
         self.input_llm_url = QLineEdit()

@@ -36,8 +36,29 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["SystemNotifier", "system_notifier"]
 
-#: 通知图标（PNG，系统通知栏普遍不认 SVG）。
-_ICON_RELATIVE = ("Assets", "icon.png")
+#: 通知图标候选（按顺序取第一个存在的）。系统通知栏普遍不认 SVG；PNG 通用，
+#: ``.ico`` 只作为 Windows 侧 PNG 缺失时的兜底——通知里带应用 LOGO，用户才分得清
+#: 是谁在要文件。
+_ICON_CANDIDATES = (("Assets", "icon.png"), ("Assets", "icon.ico"))
+
+
+def _icon_file() -> str:
+    """第一个存在的应用图标文件路径（都缺失时返回空串）。"""
+    try:
+        from src.core.theme_manager import ThemeManager
+    except Exception as e:  # 资源系统不可用只影响图标，不影响通知本身
+        logger.debug("Theme manager unavailable for the notification icon: %s", e)
+        return ""
+    for relative in _ICON_CANDIDATES:
+        try:
+            path = ThemeManager.get_resource_path(*relative)
+        except Exception as e:
+            logger.debug("Cannot resolve %s: %s", "/".join(relative), e)
+            continue
+        if path and os.path.isfile(path):
+            return path
+    logger.debug("No notification icon found among %s", _ICON_CANDIDATES)
+    return ""
 
 
 def _app_icon():
@@ -45,11 +66,8 @@ def _app_icon():
     try:
         from PySide6.QtGui import QIcon
 
-        from src.core.theme_manager import ThemeManager
-
-        path = ThemeManager.get_resource_path(*_ICON_RELATIVE)
-        if not path or not os.path.isfile(path):
-            logger.debug("Notification icon not found: %s", path)
+        path = _icon_file()
+        if not path:
             return None
         icon = QIcon(path)
         return icon if not icon.isNull() else None
@@ -59,13 +77,7 @@ def _app_icon():
 
 
 def _icon_path() -> str:
-    try:
-        from src.core.theme_manager import ThemeManager
-
-        path = ThemeManager.get_resource_path(*_ICON_RELATIVE)
-        return path if path and os.path.isfile(path) else ""
-    except Exception:
-        return ""
+    return _icon_file()
 
 
 def _applescript_string(text: str) -> str:
