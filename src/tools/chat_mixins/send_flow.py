@@ -17,6 +17,7 @@ from src.core.mcp_manager import MCPManager
 from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager
 from src.task.chat_tasks import ChatGenerationTask
+from src.tools.chat_mixins.session import HISTORY_LOADING_TEXT
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -293,14 +294,12 @@ class ChatSendFlowMixin:
         self.input_container.hide_context_preview()
 
     def handle_regenerate_last_turn(self, index: int = -1):
-        """重新发起最后一次对话：删掉该轮已有内容，按"编辑后再发送"重跑一次。
+        """重新发起最后一次对话：撤销该轮已有回答，把同一问题再送一次。
 
-        与用户气泡上"编辑 → 确认"走**同一条**路径（:meth:`handle_edit_resend`）：
-        截断到该轮用户消息之前、重放此前的回答、再把同一个问题重新送入生成管线。
-        这里刻意不另写一套截断 / 重放：附件上下文的重建、引用编号空间的重置、重放
-        期间的滚动抑制都长在那条路径里，复制一份必然会分叉。
-
-        与"编辑"的唯一差别是文本不变——所以"重新发起"就是让模型把同一问题重答一次。
+        与"编辑 → 确认"的区别只在文本未变：前面的对话原封不动，因此**不重放历史**。
+        走 :meth:`_retract_turn_and_resend` 只删掉该轮回答与它的气泡；若复用
+        :meth:`handle_edit_resend`，用户会先看到"正在恢复上一次对话"的遮罩，整段
+        历史被清掉重渲染一遍——那是编辑截断才需要的动作。
 
         :param index: 点击的那条用户消息在 ``history`` 里的下标（=-1 表示不校验来源）。
             入口只在最新一条用户消息上出现（与"编辑"同一条判据），但点击与新一轮开始
@@ -348,7 +347,40 @@ class ChatSendFlowMixin:
 
         self.logger.info("Regenerate requested: re-sending question of message #%d.",
                          last_user_idx)
-        self.handle_edit_resend(last_user_idx, text)
+        self._retract_turn_and_resend(last_user_idx)
+
+    def _retract_turn_and_resend(self, last_user_idx: int) -> None:
+        """撤销 ``last_user_idx`` 之后的回答并重发该问题。
+
+        只动"最后一轮"：删掉该轮回答的历史条目与气泡，保留前面的对话与其引用缓存。
+        新回答会复用被撤销气泡的编号，因此必须先清掉该编号下的引用条目，否则新回答
+        的悬停卡会带上一轮已作废的来源。
+
+        :param last_user_idx: 最后一轮用户消息在 ``history`` 中的下标。
+        """
+        self.remove_old_follow_ups()
+        self.clear_follow_up_shelf()
+        self.remove_bubbles_after(last_user_idx)
+        dropped = len(self.history) - last_user_idx - 1
+        del self.history[last_user_idx + 1:]
+
+        from src.ui.components.citation_popup import CitationPopupController
+        CitationPopupController.instance().replace_references([], last_user_idx + 1)
+
+        self._structured_follow_ups = None
+        self.current_ai_bubble = None
+        # 附件仍属这一轮：任务侧按 external_files 取图，与"编辑后重发"共用同一口径。
+        old_files = list(self.history[last_user_idx].get('external_files') or [])
+        self.external_files = old_files
+        if old_files:
+            self._refresh_attachment_preview()
+
+        self._sync_regenerate_available()
+        # 先把"已回答到第几轮"落盘：本次撤销后若进程退出，快照不该还把旧回答带回来。
+        self._autosave_session()
+        self.logger.info("Regenerate: retracted %d message(s) after #%d.",
+                         dropped, last_user_idx)
+        self.start_ai_response("none")
 
     @staticmethod
     def _user_display_text(msg) -> str:
@@ -393,45 +425,11 @@ class ChatSendFlowMixin:
         old_msg = self.history[index]
         old_context_html = old_msg.get('context_html')
         old_files = old_msg.get('external_files', [])
-
-        self.history = self.history[:index]
-
-        # 重放期间抑制每个气泡各自的自动滚动（否则每加一条都会被拉走一次），
-        # 视图定位统一留到重放结束后交给"发送"路径处理，见下方 _is_editing 复位。
-        self._is_editing = True
-
-        self.clear_layout(self.chat_layout)
-        temp_history = list(self.history)
-        self.history = []
-
-        # 重放会重建气泡并重置编号空间：引用缓存跟随重建，历史条目携带的引用
-        # 按新气泡编号逐条回灌，保证被截断前那些回答的 [n] 仍可溯源。
-        from src.ui.components.citation_popup import CitationPopupController
-        CitationPopupController.instance().clear_store()
-
-        for msg in temp_history:
-            display_text = msg.get('display_text', msg['content'])
-            ctx_html = msg.get('context_html')
-            msg_images = [c for c in msg.get('external_files', []) if c.get("type") == "image"]
-            bubble = self.add_bubble(display_text, is_user=(msg['role'] == 'user'),
-                                     context_html=ctx_html, image_files=msg_images)
-            self._restore_message_references(bubble, msg)
-            self._restore_message_cards(bubble, msg)
-            self.history.append(msg)
+        temp_history = list(self.history[:index])
 
         # 编辑重发同样走自动文献库，不再读已下线的 KB 选择器。
         kb_id = "none"
-
-        # 重放完成、恢复常规滚动策略后再挂新气泡：新气泡走"用户发送"同一条路径
-        # （add_bubble 延迟定位到该气泡顶端），与普通发送行为一致。
-        #
-        # 不能再沿用"清空前快照 scrollBar.value()、重建后 setValue 还原"的旧做法：
-        # clear_layout 会把内容高度清零，重建后的气泡高度又由 _schedule_height_sync
-        # 延后一帧才收敛，此刻的 scrollBar.maximum 仍是未收敛的偏小值，还原值被夹取
-        # 到 0；待高度真正收敛后视图仍停在 0，于是表现为"编辑重发后总是跳到顶部"。
-        self._is_editing = False
         old_images = [c for c in old_files if c.get("type") == "image"]
-        self.add_bubble(new_text, is_user=True, context_html=old_context_html, image_files=old_images)
 
         llm_text = new_text
         if old_files:
@@ -444,19 +442,33 @@ class ChatSendFlowMixin:
             context_part = old_msg['content'].split("\n\nQuestion:\n")[0]
             llm_text = f"{context_part}\n\nQuestion:\n{new_text}"
 
-        self.history.append({
-            "role": "user",
-            "content": llm_text,
-            "display_text": new_text,
-            "context_html": old_context_html,
-            "external_files": old_files
-        })
+        def _resume_after_replay(_complete):
+            # 重放收尾（_finish_history_rebuild）已经复位 _is_editing 并贴底一次；
+            # 新气泡走"用户发送"同一条路径（add_bubble 延迟定位到该气泡顶端），
+            # 与普通发送行为一致。
+            self.add_bubble(new_text, is_user=True, context_html=old_context_html,
+                            image_files=old_images)
+            self.history.append({
+                "role": "user",
+                "content": llm_text,
+                "display_text": new_text,
+                "context_html": old_context_html,
+                "external_files": old_files,
+            })
+            self.external_files = old_files
+            # 附件保持挂载（供后续追问继续引用）：预览条由 attachments mixin 重建，
+            # 避免此处重复展示逻辑。
+            self._refresh_attachment_preview()
+            self.start_ai_response(kb_id)
 
-        self.external_files = old_files
-        # 附件保持挂载（供后续追问继续引用）：预览条（文本横幅 + 图片/文档芯片）
-        # 统一由 attachments mixin 重建，避免此处重复展示逻辑。
-        self._refresh_attachment_preview()
-        self.start_ai_response(kb_id)
+        # 重放改走分片回灌：同一条重放循环同步跑时，十几条气泡会连续冻结窗口约两秒
+        # （日志里是一长串 "Bubble font applied"），期间动画停住、窗口无法重绘。
+        # _apply_imported_history 用的正是"编辑重发同款"的重建步骤，只是按时间预算
+        # 在片与片之间让出事件循环。
+        self._apply_imported_history(
+            temp_history, announce=False,
+            progress_text=tr(HISTORY_LOADING_TEXT),
+            on_done=_resume_after_replay)
 
     def handle_plot_plan_confirm(self, final_requirement: str):
         """Re-send the user-confirmed (English) plotting requirement to the AI.

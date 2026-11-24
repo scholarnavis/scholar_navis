@@ -12,6 +12,7 @@ from PySide6.QtGui import QCursor
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QMenu
 
+from src.core.attachment_parser import prewarm
 from src.core.core_task import TaskManager, TaskMode
 from src.core.file_types import (ATTACHABLE_EXTS, DOCUMENT_EXTS, IMAGE_EXTS,
                                  TEXT_VIEWER_EXTS)
@@ -190,6 +191,11 @@ class ChatAttachmentsMixin:
 
         # 直接将文件路径保存，交由 Chat 进程去处理
         self.external_files.extend(file_infos)
+
+        # 解析预热：趁用户写 prompt 的空档先把 PDF / DOCX 解出来并写缓存，
+        # 点发送时聊天任务只读缓存，不再与 UI 线程争 GIL（图片不需要解析）。
+        prewarm([(info.get("path", ""), info.get("name", "")) for info in file_infos
+                 if info.get("type") != "image"])
 
         for info in file_infos:
             # 图片附件不生成文本链接（由气泡缩略图与输入区预览条呈现）
@@ -823,6 +829,10 @@ class ChatAttachmentsMixin:
         except Exception as e:
             logger.warning("Failed to show chat loading overlay: %s", e)
 
+        # 重建期间内容区不参与重绘：每加一个气泡都会触发整段布局与滚动条范围重算，
+        # 而遮罩盖在上面，用户看到的是遮罩而不是中间态。收尾时统一恢复一次绘制。
+        self._set_rebuild_painting(False)
+
         QTimer.singleShot(0, lambda s=state: self._rebuild_history_step(s))
 
     def _rebuild_history_step(self, state):
@@ -989,6 +999,21 @@ class ChatAttachmentsMixin:
         except Exception as e:
             logger.debug("Progress overlay update skipped: %s", e)
 
+    def _set_rebuild_painting(self, enabled: bool):
+        """重建期间关 / 开对话内容区的重绘。
+
+        气泡是一个个加进布局的，每加一个都会让整段历史重新测量高度、重算滚动条
+        范围，并触发一次绘制；而这些中间态全程被加载遮罩盖住，画了也没人看。
+        关掉重绘只影响"画"，不影响控件创建与排版本身，收尾时一次性恢复。
+        """
+        layout = getattr(self, "chat_layout", None)
+        host = layout.parentWidget() if layout is not None else None
+        if host is None:
+            return
+        host.setUpdatesEnabled(enabled)
+        if enabled:
+            host.update()
+
     def _finish_history_rebuild(self, state):
         """重建收尾：复位交互状态、收起遮罩、恢复输入与视图，最后回调调用方。
 
@@ -1010,6 +1035,8 @@ class ChatAttachmentsMixin:
 
         self._history_rebuild_state = None
         self._is_editing = False
+        # 先恢复绘制再收遮罩：遮罩退场时内容已经是最终排版，不会露一帧空白
+        self._set_rebuild_painting(True)
         self._hide_chat_loading()
         # 会话恢复/导入完成：整段历史都是"已结束"的轮次，最后一条问题该给出重新发起入口
         self._sync_regenerate_available()

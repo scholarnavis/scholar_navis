@@ -12,6 +12,11 @@
 
 缓存放在 ``<BASE_DIR>/cache/attachments`` 而不是系统临时目录：临时目录会被
 随系统清理，一旦清掉，每一轮对话都要把历史附件全部重新解析一遍。
+
+并发约定：同一路径的解析用"每文件一把锁 + 引用计数"串行化。聊天任务在
+``TaskMode.THREAD`` 下跑，PDF 解析这类纯 Python 布局工作是 GIL 竞争者；预热
+线程与发送链路若同时解析同一个文件，等于把同一份 CPU 开销付两遍。锁保证后者
+直接等前者的缓存，而不是重复解析。
 """
 
 from __future__ import annotations
@@ -20,8 +25,11 @@ import hashlib
 import json
 import logging
 import os
+import queue
+import threading
 import time
-from typing import Any, Dict, List
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List
 
 from src.core import BASE_DIR, safe_io
 
@@ -46,6 +54,15 @@ CACHE_MAX_AGE_DAYS = 7
 _CLEANUP_INTERVAL = 3600.0
 
 _last_cleanup = 0.0
+
+#: 每路径解析锁：``{绝对路径: [Lock, 引用计数]}``。解析结束后立即回收，不留常驻表。
+_parse_guards: Dict[str, List[Any]] = {}
+_parse_guards_lock = threading.Lock()
+
+#: 预热队列与工作线程（进程内单例，随应用退出而结束）
+_prewarm_queue: "queue.Queue[tuple]" = queue.Queue()
+_prewarm_thread = None
+_prewarm_thread_lock = threading.Lock()
 
 
 def cache_root() -> str:
@@ -110,6 +127,27 @@ def _write_cache(path: str, chunks: List[Dict[str, Any]]) -> None:
                                   indent=0)
     except (OSError, TypeError, ValueError) as e:
         logger.debug("Cannot write attachment cache for %s: %s", path, e)
+
+
+@contextmanager
+def _parse_guard(path: str) -> Iterator[None]:
+    """同一文件的解析互斥：先到者解析，后到者等它写完缓存后直接命中。"""
+    key = os.path.abspath(path)
+    with _parse_guards_lock:
+        entry = _parse_guards.get(key)
+        if entry is None:
+            entry = [threading.Lock(), 0]
+            _parse_guards[key] = entry
+        entry[1] += 1
+    entry[0].acquire()
+    try:
+        yield
+    finally:
+        entry[0].release()
+        with _parse_guards_lock:
+            entry[1] -= 1
+            if entry[1] <= 0:
+                _parse_guards.pop(key, None)
 
 
 def _maybe_cleanup() -> None:
@@ -284,20 +322,26 @@ def extract(path: str, name: str = "") -> List[Dict[str, Any]]:
     if cached is not None:
         return cached
 
-    _maybe_cleanup()
+    with _parse_guard(path):
+        # 等锁期间预热线程可能已经解析完，命中缓存就不再重复付解析开销
+        cached = _read_cache(path)
+        if cached is not None:
+            return cached
 
-    if lower.endswith(".pdf"):
-        chunks = _parse_pdf(path, display_name)
-    elif lower.endswith(".docx"):
-        chunks = _parse_docx(path, display_name)
-    elif lower.endswith(".doc"):
-        raise ValueError("旧版 .doc 格式不受支持，请另存为 .docx")
-    else:
-        chunks = _parse_text(path, display_name)
+        _maybe_cleanup()
 
-    chunks = _trim_chunks(chunks, MAX_CHARS_PER_FILE)
-    _write_cache(path, chunks)
-    return chunks
+        if lower.endswith(".pdf"):
+            chunks = _parse_pdf(path, display_name)
+        elif lower.endswith(".docx"):
+            chunks = _parse_docx(path, display_name)
+        elif lower.endswith(".doc"):
+            raise ValueError("旧版 .doc 格式不受支持，请另存为 .docx")
+        else:
+            chunks = _parse_text(path, display_name)
+
+        chunks = _trim_chunks(chunks, MAX_CHARS_PER_FILE)
+        _write_cache(path, chunks)
+        return chunks
 
 
 def _trim_chunks(chunks: List[Dict[str, Any]], budget: int) -> List[Dict[str, Any]]:
@@ -326,6 +370,50 @@ def trim_total(chunks: List[Dict[str, Any]],
     ``budget`` 可由调用方按主模型预算传入；不传时用 :data:`MAX_TOTAL_CHARS`。
     """
     return _trim_chunks(chunks, int(budget) if budget else MAX_TOTAL_CHARS)
+
+
+def prewarm(files) -> None:
+    """在后台线程提前解析附件，让"点发送"时直接命中缓存。
+
+    参数是 ``(路径, 显示名)`` 二元组序列；显示名与发送链路传给 :func:`extract`
+    的一致，否则缓存里的分块名会和附件名对不上。
+
+    用户选完文件到真正发送之间通常有几秒到几十秒（写 prompt、改参数），正好
+    覆盖一份 PDF 的解析耗时。这段时间界面是空闲的，把解析放进来不会与 UI 线程
+    抢 GIL；发送时的 :func:`extract` 只需读缓存即可。
+
+    队列＋单工作线程：一次性附加多个文件也不会瞬间拉起多个线程；同一路径重复
+    入队由 :func:`_parse_guard` 与缓存命中吸收，不做额外去重。
+    """
+    global _prewarm_thread
+
+    items = [(str(path), str(name or "")) for path, name in (files or [])
+             if str(path or "").strip()]
+    if not items:
+        return
+    for item in items:
+        _prewarm_queue.put(item)
+
+    with _prewarm_thread_lock:
+        if _prewarm_thread is not None and _prewarm_thread.is_alive():
+            return
+        _prewarm_thread = threading.Thread(target=_prewarm_worker,
+                                           name="AttachmentPrewarm", daemon=True)
+        _prewarm_thread.start()
+
+
+def _prewarm_worker() -> None:
+    while True:
+        path, name = _prewarm_queue.get()
+        try:
+            extract(path, name)
+        except (OSError, ValueError) as e:
+            # 与正式链路一致：不支持的格式、超限、已删除文件都是正常输入
+            logger.debug("Attachment prewarm skipped %s: %s", path, e)
+        except Exception as e:          # noqa: BLE001 - 预热失败不应拖垮后台线程
+            logger.warning("Attachment prewarm failed for %s: %s", path, e)
+        finally:
+            _prewarm_queue.task_done()
 
 
 def clear_cache() -> int:

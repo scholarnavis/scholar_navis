@@ -15,6 +15,10 @@ from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
 
+#: 历史恢复的遮罩文案（英文原串即 ``tr`` 的键）。读盘（容器侧）与回灌（本 mixin）
+#: 两段等待共用同一句话，免得同一段等待在界面上出现两种说法。
+HISTORY_LOADING_TEXT = "Restoring the last conversation..."
+
 
 class ChatSessionMixin:
     """把当前标签页的对话持续落盘（口径见 src/core/chat_session.py）。"""
@@ -161,6 +165,10 @@ class ChatSessionMixin:
         """
         messages = list(messages or [])
         if not messages or getattr(self, "history", None):
+            # 读盘返回空同样要收遮罩：容器在读盘阶段就盖了遮罩（见
+            # ChatTool._request_history），这里没有回灌流程可收尾。
+            if not getattr(self, "history", None):
+                self._hide_chat_loading()
             return
         try:
             # ask_user / deep-plan 的交互卡是 UI 组件，无法随消息恢复；若不复位这个
@@ -170,7 +178,7 @@ class ChatSessionMixin:
             # 就是"切过来就卡住"。
             self._apply_imported_history(
                 messages, announce=False,
-                progress_text=tr("Restoring the last conversation..."),
+                progress_text=tr(HISTORY_LOADING_TEXT),
                 on_done=lambda success: self._on_session_restored(messages, success))
         except Exception:
             logger.exception("Failed to restore chat session for tab %s.", self._tab_id())

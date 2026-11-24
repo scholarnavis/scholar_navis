@@ -2,6 +2,7 @@
 
 每个 Mixin 只负责一个功能域，运行时全部挂载到同一个 SettingsTool 实例上。
 """
+from src.tools.settings_sections.backup_section import BackupSectionMixin
 from src.tools.settings_sections.env_section import EnvSectionMixin
 from src.tools.settings_sections.fulltext_section import FulltextSectionMixin
 from src.tools.settings_sections.mcp_section import McpSectionMixin
@@ -12,6 +13,7 @@ from src.tools.settings_sections.toolenv_section import ToolEnvSectionMixin
 from src.tools.settings_sections.transfer import ConfigTransferMixin
 
 __all__ = [
+    "BackupSectionMixin",
     "EnvSectionMixin",
     "FulltextSectionMixin",
     "McpSectionMixin",

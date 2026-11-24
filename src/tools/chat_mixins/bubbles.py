@@ -297,6 +297,20 @@ class ChatBubblesMixin:
         else:
             sb.setValue(target)
 
+    def settle_scroll_after_layout(self, was_at_bottom: bool) -> None:
+        """正文被整体替换后，等布局收敛再贴底一次。
+
+        ``set_content`` 换掉正文时，气泡高度要到**下一轮事件循环**才定下来：此刻的
+        ``scrollBar.maximum()`` 仍按旧内容计算，直接滚会落在偏小的值上；等高度收敛，
+        视图就停在中间，看着像"渲染完成时往上跳了一下"（错误面板替换流式中间态时
+        最明显）。因此调用方在替换前记录 ``was_at_bottom``，替换后交给这个延迟贴底。
+
+        只在替换前处于底部时补滚：用户上翻阅读时不能被拽回底部。
+        """
+        if not was_at_bottom or self._closed:
+            return
+        QTimer.singleShot(0, lambda: self.scroll_to_bottom(force=True))
+
     def scroll_to_message_top(self, bubble_widget, smooth=True):
         """滚动到指定气泡的顶部，使其顶端完整可见（留 10px 呼吸间距）。
 
@@ -338,6 +352,31 @@ class ChatBubblesMixin:
             # 追问建议属于收尾动作：用户正在上翻时不强行拉到底部
             QTimer.singleShot(50, lambda: self.scroll_to_bottom(force=False))
 
+    def remove_bubbles_after(self, index: int) -> int:
+        """移除历史下标大于 ``index`` 的消息气泡（连同其上的卡片）。
+
+        只服务"撤销最后一轮"的场景（重新生成）：前面的对话原封不动，因此不必像
+        编辑重发那样整段重建。按气泡自带的编号从尾部逐个取下，遇到第一个不超过
+        ``index`` 的气泡就停手——布局里的气泡严格按编号追加，这一条足以界定边界。
+
+        :return: 实际移除的气泡数量。
+        """
+        removed = 0
+        for i in range(self.chat_layout.count() - 1, -1, -1):
+            item = self.chat_layout.itemAt(i)
+            widget = item.widget() if item is not None else None
+            bubble_index = getattr(widget, 'index', None)
+            if not isinstance(bubble_index, int):
+                continue
+            if bubble_index <= index:
+                break
+            self.chat_layout.takeAt(i)
+            if hasattr(widget, 'clean_up_images'):
+                widget.clean_up_images()
+            widget.deleteLater()
+            removed += 1
+        return removed
+
     def remove_old_follow_ups(self):
         """清理历史中的追问组件，避免重复堆叠"""
         for i in range(self.chat_layout.count()):
@@ -358,6 +397,11 @@ class ChatBubblesMixin:
         self.history.clear()
         # 清空即"不再恢复"：快照文件必须同步删除，否则下次启动会把刚清掉的对话找回来
         self._forget_autosaved_session()
+        # 读盘还挂在后台时同样要作废：迟到快照会把刚清掉的内容灌回来。
+        container = getattr(self, "tabs_container", None)
+        discard = getattr(container, "discard_history_read", None)
+        if callable(discard):
+            discard(self.tab_id)
         # 引用缓存与对话同生命周期：清空后编号空间重置，必须一并清掉，
         # 否则新会话尚未登记的 [n] 会命中上一会话残留的旧条目。
         from src.ui.components.citation_popup import CitationPopupController

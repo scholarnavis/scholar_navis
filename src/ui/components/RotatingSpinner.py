@@ -106,23 +106,33 @@ class LoadingOverlay(QWidget):
         self._reveal_timer.setSingleShot(True)
         self._reveal_timer.timeout.connect(self._reveal)
 
+        # 上一次实际生效的样式串：进度更新会高频调用 start()，而 setStyleSheet
+        # 每次都要重算整棵子树的样式（实测单次毫秒级），样式没变时必须跳过。
+        self._overlay_sheet = ""
+        self._label_sheet = ""
+
         self.hide()
         host.installEventFilter(self)
         self._apply_theme()
 
     # ---------------- 外观 ----------------
     def _apply_theme(self):
-        """按当前主题刷新底色与文案色。
+        """按当前主题刷新底色与文案色（仅在样式真的变化时下发）。
 
         每次 :meth:`start` 都重取一次，因此不订阅 ``theme_changed``——遮罩是短命
         浮层，为它挂一条常驻连接（还要处理析构）不划算。
         """
         tm = ThemeManager()
-        self.setStyleSheet(
-            f"QWidget#LoadingOverlay {{ background-color: "
-            f"{hex_to_rgba(tm.color('bg_main'), 0.82)}; }}")
-        self.label.setStyleSheet(
-            f"color: {tm.color('text_muted')}; font-size: 13px; background: transparent;")
+        overlay_sheet = (f"QWidget#LoadingOverlay {{ background-color: "
+                         f"{hex_to_rgba(tm.color('bg_main'), 0.82)}; }}")
+        label_sheet = (f"color: {tm.color('text_muted')}; font-size: 13px; "
+                       f"background: transparent;")
+        if overlay_sheet != self._overlay_sheet:
+            self._overlay_sheet = overlay_sheet
+            self.setStyleSheet(overlay_sheet)
+        if label_sheet != self._label_sheet:
+            self._label_sheet = label_sheet
+            self.label.setStyleSheet(label_sheet)
 
     # ---------------- 生命周期 ----------------
     def start(self, text: str = None):

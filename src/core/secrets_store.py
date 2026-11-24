@@ -11,9 +11,10 @@
 于是改为：**普通配置明文、密钥单独一个文件**。本模块是"哪些字段算密钥"的
 唯一事实来源，``ConfigManager`` 只负责调用它。
 
-内存结构约定：``user_settings`` / ``llm_configs`` / ``mcp_servers`` 在进程内
-**保持原样**（照旧含 ``ncbi_api_key``、``api_key``、``env`` 里的 token），
-拆分只发生在落盘与读取的边界上，因此所有既有读取方无需改动。
+内存结构约定：``user_settings`` / ``llm_configs`` / ``mcp_servers`` /
+``webdav_sources`` 在进程内**保持原样**（照旧含 ``ncbi_api_key``、``api_key``、
+``env`` 里的 token、WebDAV 密码），拆分只发生在落盘与读取的边界上，因此所有
+既有读取方无需改动。
 """
 
 from __future__ import annotations
@@ -47,13 +48,18 @@ SECRET_SETTING_KEYS = (
 #: LLM provider 配置中需要搬走的字段（按 provider ``id`` 归位）
 SECRET_LLM_FIELDS = ("api_key",)
 
+#: WebDAV 备份源中需要搬走的字段（按备份源 ``id`` 归位）
+SECRET_WEBDAV_FIELDS = ("password",)
+
 #: MCP / 技能条目里"字段名含这些词"的字符串值视为密钥（用于 ``env`` / ``headers``）
 SECRET_NAME_HINTS = (
     "key", "token", "secret", "password", "passwd", "credential", "auth",
 )
 
-#: ``secrets.json`` 的三个分区（与三份配置一一对应）
-_EMPTY_BUNDLE: Dict[str, Dict[str, Any]] = {"settings": {}, "llm": {}, "mcp": {}}
+#: ``secrets.json`` 的分区（与各份明文配置一一对应）
+_EMPTY_BUNDLE: Dict[str, Dict[str, Any]] = {
+    "settings": {}, "llm": {}, "mcp": {}, "webdav": {},
+}
 
 
 def secrets_path(config_dir: str) -> str:
@@ -114,27 +120,47 @@ def merge_settings(settings: Optional[dict], secret: Optional[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-#  llm_config.json
+#  llm_config.json / webdav_sources.json：按条目 id 归位的列表型配置
 # --------------------------------------------------------------------------- #
 def _provider_id(entry: dict) -> str:
     return str(entry.get("id") or entry.get("name") or "")
 
 
-def split_llm(configs: Optional[list]) -> Tuple[list, dict]:
-    """拆出各 provider 的 ``api_key``，返回 ``(公开列表, {provider_id: {...}})``。"""
+def _split_entries(entries: Optional[list], fields: Tuple[str, ...]) -> Tuple[list, dict]:
+    """按条目 ``id`` 拆出指定字段，返回 ``(公开列表, {id: {field: value}})``。"""
     public_list: List[dict] = []
     secret: Dict[str, Any] = {}
-    for raw in configs or []:
+    for raw in entries or []:
         entry = dict(raw or {})
-        pid = _provider_id(entry)
-        for field in SECRET_LLM_FIELDS:
+        key = _provider_id(entry)
+        for field in fields:
             if field not in entry:
                 continue
             value = entry.pop(field)
             if value not in (None, ""):
-                secret.setdefault(pid, {})[field] = value
+                secret.setdefault(key, {})[field] = value
         public_list.append(entry)
     return public_list, secret
+
+
+def _merge_entries(entries: Optional[list], secret: Optional[dict],
+                   fields: Tuple[str, ...]) -> list:
+    """把指定字段合回各条目（键位齐全，缺失即为空串）。"""
+    secret = secret or {}
+    merged: List[dict] = []
+    for raw in entries or []:
+        entry = dict(raw or {})
+        key = _provider_id(entry)
+        for field in fields:
+            value = (secret.get(key) or {}).get(field)
+            entry[field] = value if value not in (None, "") else ""
+        merged.append(entry)
+    return merged
+
+
+def split_llm(configs: Optional[list]) -> Tuple[list, dict]:
+    """拆出各 provider 的 ``api_key``，返回 ``(公开列表, {provider_id: {...}})``。"""
+    return _split_entries(configs, SECRET_LLM_FIELDS)
 
 
 def merge_llm(configs: Optional[list], secret: Optional[dict]) -> list:
@@ -142,16 +168,17 @@ def merge_llm(configs: Optional[list], secret: Optional[dict]) -> list:
 
     与 :func:`merge_settings` 同口径：密钥文件里没有就置空，不回退到明文残留。
     """
-    secret = secret or {}
-    merged: List[dict] = []
-    for raw in configs or []:
-        entry = dict(raw or {})
-        pid = _provider_id(entry)
-        for field in SECRET_LLM_FIELDS:
-            value = (secret.get(pid) or {}).get(field)
-            entry[field] = value if value not in (None, "") else ""
-        merged.append(entry)
-    return merged
+    return _merge_entries(configs, secret, SECRET_LLM_FIELDS)
+
+
+def split_webdav(sources: Optional[list]) -> Tuple[list, dict]:
+    """拆出各 WebDAV 备份源的 ``password``，返回 ``(公开列表, {source_id: {...}})``。"""
+    return _split_entries(sources, SECRET_WEBDAV_FIELDS)
+
+
+def merge_webdav(sources: Optional[list], secret: Optional[dict]) -> list:
+    """把 ``password`` 合回各备份源（与 :func:`merge_llm` 同口径）。"""
+    return _merge_entries(sources, secret, SECRET_WEBDAV_FIELDS)
 
 
 # --------------------------------------------------------------------------- #

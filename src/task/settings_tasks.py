@@ -1,6 +1,7 @@
 import httpx
 
 from src.core.core_task import BackgroundTask
+from src.core.http_diagnostics import classify_failure
 
 
 class FetchModelsTask(BackgroundTask):
@@ -39,7 +40,13 @@ class FetchModelsTask(BackgroundTask):
             self.send_log("INFO", f"API response successful. Found {len(models)} models.")
             return {"success": True, "models": models, "msg": f"Successfully fetched {len(models)} models."}
         except Exception as e:
-            return {"success": False, "models": [], "msg": str(e)}
+            # 归因随结果回传，UI 侧据此决定标题与建议；msg 保留原文作兜底，
+            # 认不出来的失败（DNS / TLS / 代理）仍然显示真实异常。
+            failure = classify_failure(e, endpoint=url)
+            self.send_log("ERROR", f"Model list request failed "
+                                   f"[{failure['kind']} HTTP {failure['status']}]: "
+                                   f"{failure['detail']}")
+            return {"success": False, "models": [], "msg": str(e), "failure": failure}
 
 
 class TestApiTask(BackgroundTask):
@@ -93,7 +100,11 @@ class TestApiTask(BackgroundTask):
             self.send_log("INFO", f"API test passed for {model_name}")
             return {"success": True, "msg": f"Connection excellent!\nModel replied: '{raw_content.strip()}'"}
         except Exception as e:
-            return {"success": False, "msg": str(e)}
+            failure = classify_failure(e, endpoint=url)
+            self.send_log("ERROR", f"Connectivity test failed "
+                                   f"[{failure['kind']} HTTP {failure['status']}]: "
+                                   f"{failure['detail']}")
+            return {"success": False, "msg": str(e), "failure": failure}
 
 
 class EmailVerifyTask(BackgroundTask):

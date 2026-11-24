@@ -1764,7 +1764,17 @@ class AgentRuntime:
 
         m = re.match(r"^\s*\[(.*?)\]\s*\n*(.*)", error_buffer, re.DOTALL)
         if m:
-            payload = friendly_payload(m.group(1).strip(), m.group(2).strip(),
+            # llm_impl 在错误 token 末尾用 "---" 附了结构化细节（状态码 / 端点 /
+            # 服务端响应体）：正文只留摘一句，细节全部进折叠栏。正文的职责是让用户
+            # 一眼看出哪一环失败，不是堆排障字段。
+            body = m.group(2).strip()
+            summary, sep, appendix = body.partition("\n---\n")
+            # 只有附录里确实含结构化字段时才按附录处理：错误正文自己带 Markdown
+            # 分隔线时（少数 provider 的 message 是多段文本）不能被截断。
+            if not (sep and any(k in appendix for k in
+                                ("status_code:", "url:", "body:", "response:"))):
+                summary = body
+            payload = friendly_payload(m.group(1).strip(), summary.strip(),
                                        details=error_buffer.strip())
         else:
             payload = friendly_payload("Provider Error", error_buffer.strip()[:400],

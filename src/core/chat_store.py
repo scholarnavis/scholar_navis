@@ -96,6 +96,11 @@ _REF_COLUMNS = ("kind", "title", "authors", "year", "journal", "doi", "url", "pa
 #: payload 超过该长度才压缩（短文本压了反而更大，还要多一次解压）。
 _PAYLOAD_COMPRESS_MIN = 2048
 
+#: 压缩级别。流式半成品按 10~16 Hz 落盘，这条路径是写盘热点，因此取最快的一级：
+#: 对 JSON 文本，级别 1 与 6 的体积差距只有一成量级，耗时却差数倍。解压与级别
+#: 无关，改动只影响新写入的行，旧行照旧可读。
+_PAYLOAD_COMPRESS_LEVEL = 1
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -406,7 +411,7 @@ def _encode_payload(payload: Dict[str, Any]) -> Tuple[Any, int]:
     raw = text.encode("utf-8")
     if len(raw) < _PAYLOAD_COMPRESS_MIN:
         return text, 0
-    packed = zlib.compress(raw, 6)
+    packed = zlib.compress(raw, _PAYLOAD_COMPRESS_LEVEL)
     if len(packed) >= len(raw):
         return text, 0
     return packed, 1

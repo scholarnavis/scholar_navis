@@ -424,10 +424,11 @@ register_card(
     cleanup=(r"<rplot_card[^>]*>",),
     key_of=lambda d: str(d.get("png_path") or d.get("svg_path")
                          or d.get("chart_title") or ""),
-    # R 图的成品文件都在本机临时目录：归档必须一起打包，否则组件过去了、图没了
+    # R 图的成品文件都在本机 output 目录：归档必须一起打包，否则组件过去了、图没了。
+    # ``code_path`` 是用户能直接复制走的纯绘图代码，同样属于成品，不能漏。
     artifacts_of=lambda d: (d.get("png_path", ""), d.get("svg_path", ""),
                             d.get("pdf_path", ""), d.get("data_path", ""),
-                            d.get("script_path", "")),
+                            d.get("script_path", ""), d.get("code_path", "")),
 )
 
 register_card(

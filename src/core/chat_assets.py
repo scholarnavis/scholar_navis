@@ -39,7 +39,7 @@ import urllib.parse
 import zipfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from src.core import BASE_DIR
+from src.core import BASE_DIR, workspace_refs
 from src.core.file_types import IMAGE_EXTS, file_extension
 from src.core.image_utils import MAX_IMAGE_BYTES
 
@@ -110,9 +110,18 @@ def _is_remote(path: str) -> bool:
 
 
 def _safe_ext(path: str) -> str:
-    """取安全的扩展名（小写、仅字母数字与点、限长）。"""
-    ext = os.path.splitext(str(path or ""))[1].lower()
-    if not ext or len(ext) > 10:
+    """取安全的扩展名（小写、仅字母数字与点、限长）。
+
+    同时接受完整路径与裸扩展名（``".fasta"``）。归档解包传进来的正是裸扩展名，
+    而 ``os.path.splitext(".fasta")`` 会把整串当成文件名主干、返回空扩展名——
+    不特判的话，导入后的资产一律没有扩展名，查看器就无法按类型打开。
+    """
+    text = str(path or "")
+    if text.startswith(".") and "." not in text[1:]:
+        ext = text.lower()
+    else:
+        ext = os.path.splitext(text)[1].lower()
+    if not ext or len(ext) > 10 or not any(ch.isalnum() for ch in ext):
         return ""
     return ext if all(ch.isalnum() or ch == "." for ch in ext) else ""
 
@@ -232,15 +241,19 @@ def _remember_store(original: str, stored: str) -> None:
 #  收集
 # --------------------------------------------------------------------------- #
 def collect_paths(messages: Iterable[Dict]) -> List[str]:
-    """按出现顺序收集消息引用的本地文件路径（去重，保持原样字符串）。
+    """按出现顺序收集消息引用的本地文件路径（去重，返回归一化后的路径）。
 
-    来源缺一不可：用户附件、引用条目原文、AI 回答的远程图片缓存、组件成品文件。
+    来源缺一不可：用户附件、引用条目原文、AI 回答的远程图片缓存、组件成品文件，
+    以及正文里裸写的工作区产物路径（工具返回的 ``local_path`` / ``run_dir``，
+    判定口径见 :mod:`src.core.workspace_refs`）。
     """
     seen: List[str] = []
     seen_set = set()
 
     def _add(raw):
-        text = str(raw or "").strip()
+        # ``file://`` 归一成本地路径：AI 生图落盘后正文里就是这种形式，
+        # 不归一会被 :func:`_is_remote` 当成远程资源跳过。
+        text = workspace_refs.normalize(raw)
         if text and text not in seen_set:
             seen_set.add(text)
             seen.append(text)
@@ -269,6 +282,11 @@ def collect_paths(messages: Iterable[Dict]) -> List[str]:
                     _add(urllib.parse.unquote(match.group(1)))
                 except (TypeError, ValueError):
                     continue
+        # 正文里裸写的绝对路径。工具把产物写到工作区后只把路径交给模型，模型
+        # 抄进回答时就只剩这段文本，没有结构化字段可循；判定"存在且落在工作区"
+        # 由 :mod:`src.core.workspace_refs` 统一负责。
+        for path in workspace_refs.artifacts_in_text(msg.get("content")):
+            _add(path)
 
     for path in _card_artifact_paths(messages):
         _add(path)

@@ -26,10 +26,10 @@ from src.core.signals import GlobalSignals
 from src.core.theme_manager import ThemeManager, strong_weight_css
 from src.task.settings_tasks import HWDetectTask
 from src.tools.base_tool import BaseTool
-from src.tools.settings_sections import (ConfigTransferMixin, EnvSectionMixin,
-                                         FulltextSectionMixin, LlmModelOpsMixin,
-                                         LlmSectionMixin, McpSectionMixin,
-                                         SaveFlowMixin)
+from src.tools.settings_sections import (BackupSectionMixin, ConfigTransferMixin,
+                                         EnvSectionMixin, FulltextSectionMixin,
+                                         LlmModelOpsMixin, LlmSectionMixin,
+                                         McpSectionMixin, SaveFlowMixin)
 from src.ui.components.toast import ToastManager
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class FloatingOverlayFilter(QObject):
 
 
 class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
-                   LlmModelOpsMixin, ConfigTransferMixin,
+                   LlmModelOpsMixin, ConfigTransferMixin, BackupSectionMixin,
                    FulltextSectionMixin, SaveFlowMixin, BaseTool):
     # 由 UI 构建与硬件探测流程创建，仅作静态检查声明
     layout: QVBoxLayout
@@ -175,6 +175,7 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
             self.init_llm_section()
             self.init_api_keys_section()
             self.init_agent_tool_section()
+            self.init_backup_section()
         except Exception as e:
             logger.exception("Failed to build settings sections: %s", e)
         finally:
@@ -283,6 +284,10 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         if hasattr(self, '_apply_fulltext_theme'):
             self._apply_fulltext_theme()
 
+        # WebDAV backup sources and remote backup list
+        if hasattr(self, '_apply_backup_theme'):
+            self._apply_backup_theme()
+
     def _mark_unsaved(self, *args, **kwargs):
         if getattr(self, '_is_loading', False): return
         if not self.btn_undo.isEnabled():
@@ -351,7 +356,10 @@ class SettingsTool(EnvSectionMixin, McpSectionMixin, LlmSectionMixin,
         if reload_from_disk:
             self.config.load_settings()
             self.config.load_mcp_servers()
+            self.config.load_webdav_sources()
             self.llm_configs = self._load_llm_config()
+            if hasattr(self, 'combo_backup_source'):
+                self._reload_backup_sources()
 
         # Load API Server settings into UI
 

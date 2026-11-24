@@ -46,6 +46,7 @@ from src.tools.chat_mixins import (ChatAttachmentsMixin, ChatBookmarksMixin,
                                    ChatBubblesMixin, ChatResponseFlowMixin,
                                    ChatSearchMixin, ChatSendFlowMixin,
                                    ChatSessionMixin)
+from src.tools.chat_mixins.session import HISTORY_LOADING_TEXT
 from src.ui.components.chat_bubble import ChatBubbleWidget
 from src.ui.components.combo import BaseComboBox
 from src.ui.components.model_selector import ModelSelectorWidget
@@ -511,6 +512,14 @@ class ChatConversation(ChatSearchMixin, ChatSendFlowMixin, ChatResponseFlowMixin
         overlay = self._chat_loading_overlay
         if overlay is not None:
             overlay.stop()
+
+    def show_history_loading(self):
+        """历史**读盘**阶段的遮罩（见 ``ChatTool._request_history``）。
+
+        与回灌阶段的遮罩共用同一句文案：读盘在工作线程进行，遮罩必须比数据更早出现，
+        否则用户先看到的是"点开标签页先僵一下"。
+        """
+        self._show_chat_loading(tr(HISTORY_LOADING_TEXT))
 
     def _make_overlay_button(self, icon_name: str):
         """创建悬浮导航圆按钮（40x40 圆形，透明度渐隐动画）。

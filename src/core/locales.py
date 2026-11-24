@@ -244,6 +244,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "API Connection Test": "API 连接测试",
         "Sending test prompt to '{model}'...": "正在向 '{model}' 发送测试提示…",
         "Fetch Failed": "获取失败",
+        "Authentication Failed": "认证失败",
+        "Access Denied": "无权访问",
+        "Provider Unavailable": "服务商不可用",
+        "Endpoint: {url}": "端点：{url}",
+        "Provider response: {text}": "服务端响应：{text}",
+        "The provider rejected the API key. Check that the key was copied in full, belongs to this provider, and has not been revoked or expired.":
+            "服务商拒绝了该 API Key。请确认 Key 复制完整、属于当前服务商，且未被撤销或过期。",
+        "The key is valid but not permitted to use this endpoint or model. Confirm the model is enabled for your account and that your region is supported.":
+            "Key 有效，但无权使用该端点或模型。请确认账号已开通对应模型，且所在地区受支持。",
+        "The provider's gateway could not reach the upstream service, or the proxy in front of it returned an error. Retry shortly; if a proxy is configured, verify that it can reach this endpoint.":
+            "服务商网关无法连接上游服务，或其前置代理返回了错误。请稍后重试；若配置了代理，请确认代理能访问该端点。",
 
         # ================= 设置页：AI Agent 与外部工具（MCP） =================
         "AI Agent & External Tools": "AI Agent 与外部工具",
@@ -331,6 +342,58 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Configuration imported to UI ({mode}). Please save to apply.":
             "配置已载入界面（{mode}）。请保存以生效。",
         "Failed to apply settings to UI:\n{err}": "将设置应用到界面失败：\n{err}",
+
+        # ================= 设置页：WebDAV 备份 =================
+        "WebDAV Backup": "WebDAV 备份",
+        "Upload the current configuration bundle to a WebDAV folder, and restore any backup from there. Restoring follows the same import flow as a local file, so an encrypted backup still asks for its password.":
+            "把当前配置包上传到 WebDAV 目录，也可以从那里恢复任意一份备份。"
+            "恢复走与本地文件导入相同的流程，因此加密备份仍会要求输入口令。",
+        "Backup source:": "备份源：",
+        "Add": "新增",
+        "Test Connection": "测试连接",
+        "Remote backups:": "远端备份：",
+        "Refresh List": "刷新列表",
+        "Upload Current Config": "上传当前配置",
+        "Restore Selected": "恢复选中项",
+        "No backup source yet. Click 'Add' to configure a WebDAV server.":
+            "还没有备份源。点击“新增”配置一个 WebDAV 服务器。",
+        "Folder on server: {url}": "服务器目录：{url}",
+        "Save Failed": "保存失败",
+        "Could not save the backup source: {err}": "无法保存备份源：{err}",
+        "Backup source saved.": "备份源已保存。",
+        "Delete Backup Source": "删除备份源",
+        "Delete the backup source '{name}'? Files already on the server are not touched.":
+            "删除备份源“{name}”？服务器上已有的文件不会被动到。",
+        "Delete Failed": "删除失败",
+        "Could not delete the backup source: {err}": "无法删除备份源：{err}",
+        "Connecting to the WebDAV server...": "正在连接 WebDAV 服务器…",
+        "Backup list unavailable.": "无法获取备份列表。",
+        "WebDAV Error": "WebDAV 错误",
+        "Connection OK. {count} backup(s) on the server.": "连接正常，服务器上有 {count} 份备份。",
+        "{count} backup(s) on the server.": "服务器上有 {count} 份备份。",
+        "Compressing and uploading the configuration bundle...": "正在压缩并上传配置包…",
+        "Select a backup in the list first.": "请先在列表中选中一份备份。",
+        "Restore Backup": "恢复备份",
+        "Downloading {name}...": "正在下载 {name}…",
+        "Operation Failed": "操作失败",
+        "Backup Uploaded": "备份已上传",
+        "Uploaded {name} to the WebDAV server.": "已把 {name} 上传到 WebDAV 服务器。",
+        "Add WebDAV Source": "新增 WebDAV 备份源",
+        "Edit WebDAV Source": "编辑 WebDAV 备份源",
+        "Display name, e.g. Home NAS": "显示名称，例如 家用 NAS",
+        "Folder on the server, created when missing": "服务器上的目录，不存在时自动创建",
+        "App password is recommended": "建议使用应用专用密码",
+        "Allow self-signed certificates": "接受自签名证书",
+        "Name:": "名称：",
+        "Server URL:": "服务器地址：",
+        "Remote folder:": "远端目录：",
+        "Username:": "用户名：",
+        "Password:": "密码：",
+        "The password is stored in config/secrets.json, never in the backup source file or in logs. An app password is safer than the account password.":
+            "密码保存在 config/secrets.json，不会写入备份源文件，也不会进入日志。"
+            "使用应用专用密码比直接用账号密码更安全。",
+        "Invalid Input": "输入无效",
+        "Please enter a name for this source.": "请为该备份源填写一个名称。",
 
         # ================= 设置页：保存流程 =================
         "Applying Settings": "正在应用设置",
@@ -455,6 +518,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Select a library...": "请选择一个知识库…",
         "Filename": "文件名",
         "Size": "大小",
+        "Modified": "修改时间",
 
         # 知识库状态（tr(status.upper()) 动态取键，三个状态都要登记）
         "READY": "就绪",

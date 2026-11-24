@@ -11,7 +11,7 @@ from src.core import attachment_parser, safe_io
 from src.core.config_manager import ConfigManager
 from src.core.core_task import BackgroundTask, TaskState
 from src.core.image_utils import IMAGE_EXTENSIONS, encode_data_url
-from src.core.llm_errors import friendly_payload, strip_markers
+from src.core.llm_errors import friendly_payload, has_error_panel, strip_markers
 from src.core.mcp_manager import MCPManager
 from src.core.references import (CITE_LINK_RE, FOOTER_RULE_HTML,
                                  PROVENANCE_HEADER_HTML, ReferenceItem,
@@ -1244,9 +1244,17 @@ class ChatGenerationTask(BackgroundTask):
         new_text, cited, unmatched = reference_registry.renumber_by_appearance(display_text)
         # 空回答兜底：整轮都在检索/思考、没有产出结论时明确告诉用户，而不是留一个
         # 只有页脚的空气泡（也没有"被引用的条目"可列）。
-        if not _has_visible_answer(new_text):
+        has_visible = _has_visible_answer(new_text)
+        # 正文只剩错误面板 = 本轮请求本身失败了（见 AgentRuntime._format_error），
+        # 与"模型光检索不回答"是两回事：用兜底文案盖掉错误面板，等于把上游 / 网络
+        # 故障说成模型自己的取舍，还抹掉了用户唯一能看到的故障原因与重试线索。
+        keep_error_panel = not has_visible and has_error_panel(new_text)
+        if not has_visible:
             self.send_log("WARNING", "No final answer text was produced this turn.")
-            if "Chinese" in str(getattr(self, "reply_lang", "")):
+            if keep_error_panel:
+                self.send_log(
+                    "WARNING", "Turn failed; keeping the error panel as the answer.")
+            elif "Chinese" in str(getattr(self, "reply_lang", "")):
                 new_text = ("**本轮没有产出最终回答**：模型一直在检索与思考，没有给出结论。"
                             "可以重新发送这个问题，或把它拆成一个更小的子问题再试。")
             else:
@@ -1263,9 +1271,12 @@ class ChatGenerationTask(BackgroundTask):
                 "Inline citation number(s) with no registered source (removed from the answer): "
                 + ", ".join(f"[{n}]" for n in unmatched[:20]))
         # 证据门禁：有来源时标出无引用的高风险段落；没有来源时明确标注未核实。
-        new_text = apply_evidence_gate(
-            new_text, bool(sources_map or cited),
-            research_context=_looks_research_query(search_query))
+        # 只剩错误面板时不进门禁：那不是"回答"，给它挂"未核实"页脚只会让失败信息
+        # 看起来像是内容结论的一部分。
+        if not keep_error_panel:
+            new_text = apply_evidence_gate(
+                new_text, bool(sources_map or cited),
+                research_context=_looks_research_query(search_query))
         self.full_response_cache = new_text
         if cited:
             self.full_response_cache = new_text + reference_registry.render_items(cited)

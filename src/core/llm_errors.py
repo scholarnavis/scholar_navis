@@ -162,3 +162,15 @@ def strip_markers(text: str) -> str:
     # 清理流式渲染中可能残留的不完整标记
     text = _OPEN_TAG_RE.sub("", text)
     return text
+
+
+def has_error_panel(text: str) -> bool:
+    """正文里是否含**完整的**错误面板标记。
+
+    调用方需要区分"模型什么都没说"与"请求失败、错误面板已经讲清原因"：前者该给
+    "重新发送/拆小问题"的建议，后者再套一层同样的建议就是在误导用户。只认完整标记
+    ——残缺的开标签渲染不出面板，不能当作已告知用户。
+    """
+    if not text or "<error_panel" not in text:
+        return False
+    return _MARKER_RE.search(text) is not None

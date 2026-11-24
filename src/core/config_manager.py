@@ -27,9 +27,10 @@ class ConfigCorruptError(RuntimeError):
 class ConfigManager:
     _instance = None
     _lock = threading.RLock()
-    # 由 load_settings/load_mcp_servers 填充，此处仅作类型声明
+    # 由 load_settings/load_mcp_servers/load_webdav_sources 填充，此处仅作类型声明
     user_settings: dict
     mcp_servers: dict
+    webdav_sources: list
 
     def __new__(cls):
         with cls._lock:
@@ -56,6 +57,7 @@ class ConfigManager:
         self.MCP_SERVERS_PATH = os.path.join(self.CONFIG_DIR, "mcp_servers.json")
         self.LLM_CONFIG_PATH = os.path.join(self.CONFIG_DIR, "llm_config.json")
         self.EXTERNAL_MODELS_PATH = os.path.join(self.CONFIG_DIR, "external_models.json")
+        self.WEBDAV_SOURCES_PATH = os.path.join(self.CONFIG_DIR, "webdav_sources.json")
 
         # 确保配置目录存在
         os.makedirs(self.CONFIG_DIR, exist_ok=True)
@@ -75,6 +77,7 @@ class ConfigManager:
         # 4. 加载核心配置
         self.load_settings()
         self.load_mcp_servers()
+        self.load_webdav_sources()
         # 5. LEGACY-CIPHERTEXT：外部技能源码 .enc 密文 → .py 明文
         self._migrate_legacy_skill_files()
 
@@ -94,7 +97,7 @@ class ConfigManager:
     def _replace_secret_section(self, section: str, values: dict):
         """用本次的完整密钥视图替换 ``secrets.json`` 中的对应分区。
 
-        三个调用方（settings / llm / mcp）传入的都是全量快照，因此必须替换而非
+        四个调用方（settings / llm / mcp / webdav）传入的都是全量快照，因此必须替换而非
         增量合并：旧实现跳过空值做增量合并，导致被清空的 ``api_key`` 永远删不掉，
         泄露的 token 无法吊销，界面显示为空但请求仍带着旧密钥。
 
@@ -560,6 +563,68 @@ class ConfigManager:
         public, secret = secrets_store.split_llm(configs)
         self.save_json(self.LLM_CONFIG_PATH, public)
         self._replace_secret_section("llm", secret)
+
+    # ------------------------------------------------------------------ #
+    #  WebDAV 备份源（明文配置 + secrets.json 托管密码）
+    # ------------------------------------------------------------------ #
+    def load_webdav_sources(self) -> list:
+        """读取 WebDAV 备份源列表；密码从 ``secrets.json`` 按 id 合回。"""
+        try:
+            data = self.load_json(self.WEBDAV_SOURCES_PATH, raise_on_corrupt=True)
+        except ConfigCorruptError:
+            # 原件已隔离保留；不写默认值，避免把用户配置过的备份源清空
+            self.logger.error(
+                "webdav_sources.json could not be parsed; original preserved, "
+                "starting with an empty source list")
+            self.webdav_sources = []
+            return self.webdav_sources
+
+        if data is None:
+            sources = []
+        elif isinstance(data, list):
+            sources = secrets_store.merge_webdav(data, self._secrets().get("webdav"))
+        else:
+            self.logger.warning(
+                "webdav_sources.json format unexpected, resetting to empty list.")
+            sources = []
+
+        self.webdav_sources = sources
+        return self.webdav_sources
+
+    def save_webdav_sources(self, sources: list):
+        """落盘备份源；密码只进 ``secrets.json``，明文文件里不留。"""
+        public, secret = secrets_store.split_webdav(sources)
+        self.save_json(self.WEBDAV_SOURCES_PATH, public)
+        self._replace_secret_section("webdav", secret)
+
+    def upsert_webdav_source(self, profile: dict) -> list:
+        """新增或按 id 覆盖一个备份源，返回最新列表（已落盘）。"""
+        entry = dict(profile or {})
+        source_id = str(entry.get("id") or "").strip()
+        if not source_id:
+            source_id = f"webdav_{int(time.time() * 1000):x}"
+            entry["id"] = source_id
+
+        sources = [dict(item) for item in (getattr(self, "webdav_sources", None) or [])]
+        for index, existing in enumerate(sources):
+            if str(existing.get("id") or "") == source_id:
+                sources[index] = entry
+                break
+        else:
+            sources.append(entry)
+
+        self.webdav_sources = sources
+        self.save_webdav_sources(sources)
+        return sources
+
+    def remove_webdav_source(self, source_id: str) -> list:
+        """删除一个备份源（连同其在 ``secrets.json`` 里的密码），返回最新列表。"""
+        target = str(source_id or "")
+        sources = [dict(item) for item in (getattr(self, "webdav_sources", None) or [])
+                   if str(item.get("id") or "") != target]
+        self.webdav_sources = sources
+        self.save_webdav_sources(sources)
+        return sources
 
 
     def apply_env_vars(self):

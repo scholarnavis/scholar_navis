@@ -17,6 +17,56 @@ MINIMAX_DEFAULT_MODELS = [
     "MiniMax-M2.1-lightning", "MiniMax-M2.5", "MiniMax-M2.5-lightning"
 ]
 
+#: 归因码（见 src/core/http_diagnostics）→ 弹窗标题。
+_FAILURE_TITLES = {
+    "unauthorized": "Authentication Failed",
+    "forbidden": "Access Denied",
+    "bad_gateway": "Provider Unavailable",
+}
+
+#: 归因码 → 用户能执行的下一步。只写"该去查什么"，不复述 HTTP 语义。
+_FAILURE_HINTS = {
+    "unauthorized": (
+        "The provider rejected the API key. Check that the key was copied in full, "
+        "belongs to this provider, and has not been revoked or expired."
+    ),
+    "forbidden": (
+        "The key is valid but not permitted to use this endpoint or model. Confirm the "
+        "model is enabled for your account and that your region is supported."
+    ),
+    "bad_gateway": (
+        "The provider's gateway could not reach the upstream service, or the proxy in "
+        "front of it returned an error. Retry shortly; if a proxy is configured, verify "
+        "that it can reach this endpoint."
+    ),
+}
+
+
+def _describe_probe_failure(result, default_title):
+    """把任务的失败归因翻成 ``(标题, 正文)``，Fetch 与 Test 共用这一份口径。
+
+    归因不出来时原样返回异常文本：连接层的失败（DNS、TLS、代理不可达）没有可给的
+    建议，编一条比原文更误导。
+    """
+    failure = result.get("failure") or {}
+    kind = str(failure.get("kind") or "unknown")
+    if kind not in _FAILURE_HINTS:
+        return tr(default_title), str(result.get("msg") or "")
+
+    status = int(failure.get("status") or 0)
+    title = tr(_FAILURE_TITLES[kind])
+    if status:
+        title = f"{title} (HTTP {status})"
+
+    parts = [tr(_FAILURE_HINTS[kind])]
+    endpoint = str(failure.get("endpoint") or "").strip()
+    if endpoint:
+        parts.append(tr("Endpoint: {url}").format(url=endpoint))
+    detail = str(failure.get("detail") or "").strip()
+    if detail:
+        parts.append(tr("Provider response: {text}").format(text=detail))
+    return title, "\n\n".join(parts)
+
 
 class LlmModelOpsMixin:
     """LLM 模型条目操作与远程任务（Fetch / Test）。"""
@@ -196,7 +246,8 @@ class LlmModelOpsMixin:
             self.net_pd.show_finish_state(True, tr("Success"), result["msg"])
         else:
             self.logger.warning(f"Failed to fetch models: {result['msg']}")
-            self.net_pd.show_finish_state(False, tr("Fetch Failed"), result['msg'])
+            title, message = _describe_probe_failure(result, "Fetch Failed")
+            self.net_pd.show_finish_state(False, title, message)
 
     def _start_test_task(self):
         self._sync_llm_data_execute()
@@ -252,4 +303,5 @@ class LlmModelOpsMixin:
         if result.get("success"):
             self.net_pd.show_finish_state(True, tr("Test Passed"), result["msg"])
         else:
-            self.net_pd.show_finish_state(False, tr("Test Failed"), result["msg"])
+            title, message = _describe_probe_failure(result, "Test Failed")
+            self.net_pd.show_finish_state(False, title, message)

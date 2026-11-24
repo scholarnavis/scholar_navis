@@ -538,10 +538,14 @@ def remap_attachment_paths(messages: Iterable[Dict], attachment_map: Dict[str, s
                     changed += 1
         content = msg.get("content")
         if isinstance(content, str) and content:
-            new_content, hits = _rewrite_card_paths(content, attachment_map)
-            if hits:
-                msg["content"] = new_content
-                changed += hits
+            content, hits = _rewrite_card_paths(content, attachment_map)
+            changed += hits
+            # 正文里裸写的路径（工作区产物、``file://`` 生图）：卡片改写只覆盖
+            # 标记内部，纯文本里的路径必须单独替换，否则导入后仍指向源机器。
+            content, hits = _rewrite_plain_paths(content, attachment_map)
+            changed += hits
+            if content != msg.get("content"):
+                msg["content"] = content
         ctx = msg.get("context_html")
         if isinstance(ctx, str) and ctx:
             for old, new in attachment_map.items():
@@ -564,3 +568,32 @@ def _rewrite_card_paths(text: str, attachment_map: Dict[str, str]):
     except Exception as e:  # pragma: no cover - 纯防御
         logger.debug("Card path rewrite skipped: %s", e)
         return text, 0
+
+
+def _rewrite_plain_paths(text: str, mapping: Dict[str, str]) -> Tuple[str, int]:
+    """改写正文里裸写的路径字面量，返回 ``(新文本, 改写处数)``。
+
+    三种形态都要覆盖：原样、``file://`` URI（AI 生图）、URL 编码（``cite://``
+    链接）。编码形态必须替换成编码后的新路径，否则链接会变成非法 URL。
+
+    按原文从长到短处理：短路径可能是长路径的前缀，先替换短的会切坏长的。
+    """
+    hits = 0
+    for old in sorted(mapping, key=len, reverse=True):
+        new = str(mapping.get(old) or "")
+        if not old or not new or old == new:
+            continue
+        pairs: List[Tuple[str, str]] = [(old, new)]
+        try:
+            import pathlib
+            pairs.append((pathlib.Path(old).as_uri(), new))
+        except (ValueError, OSError):
+            pass
+        quoted = urllib.parse.quote(old)
+        if quoted != old:
+            pairs.append((quoted, urllib.parse.quote(new)))
+        for variant, replacement in pairs:
+            if variant and variant in text:
+                hits += text.count(variant)
+                text = text.replace(variant, replacement)
+    return text, hits

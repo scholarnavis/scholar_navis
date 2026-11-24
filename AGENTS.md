@@ -69,6 +69,7 @@ tests/               空目录
 | `rss_paths.py` | RSS 订阅清单与文章缓存落盘路径 | `RSS_CACHE_FILE`、`RSS_FEEDS_FILE` |
 | `email_check.py` | 邮箱校验，满足 NCBI 邮箱要求 | `verify_email_robust` |
 | `safe_io.py` | 文件读写基础设施的唯一实现：原子写（临时文件 + fsync + 替换）、损坏文件隔离、不可信来源的安全落盘 | `atomic_write_json`、`quarantine_corrupt`、`ensure_within`、`safe_child_name` |
+| `workspace_gc.py` | `scholar_workspace` 过期内容的保留策略与清理：证据链 TTL、未引用资产（按 `asset_links` 判定）、迁移备份、旧快照、Chromium 缓存。启动后台执行并节流，删除失败只降级为日志 | `collect`、`run_in_background`、`policy` |
 
 ### 3.2 配置、密钥与开关
 
@@ -76,8 +77,10 @@ tests/               空目录
 
 | 文件 | 作用 | 关键入口 |
 |---|---|---|
-| `config_manager.py` | 全局配置单例，托管 settings / mcp_servers / llm_config / external_models 四份 JSON，负责内存含密钥、落盘拆明文的边界与环境变量注入 | `ConfigManager`、`apply_env_vars` |
-| `secrets_store.py` | 「哪些字段算密钥」的唯一事实来源，拆分与合并两侧都只在这里 | `split_settings`、`merge_settings` |
+| `config_manager.py` | 全局配置单例，托管 settings / mcp_servers / llm_config / external_models / webdav_sources 五份 JSON，负责内存含密钥、落盘拆明文的边界与环境变量注入 | `ConfigManager`、`apply_env_vars` |
+| `secrets_store.py` | 「哪些字段算密钥」的唯一事实来源，拆分与合并两侧都只在这里；四个分区 settings / llm / mcp / webdav | `split_settings`、`merge_settings`、`split_webdav`、`merge_webdav` |
+| `config_bundle.py` | 配置束的构造口径（本地导出与 WebDAV 上传共用），含技能压缩与有上限解压 | `build_bundle`、`decompress_limited` |
+| `webdav_backup.py` | WebDAV 协议客户端、远端备份命名与恢复暂存位置；密码只在内存使用 | `WebDAVClient`、`backup_file_name` |
 | `encryption_service.py` | 加解密，生产用途只剩口令型配置导入导出，其余为带删除条件的兼容层 | `SystemEncryptionService` |
 | `skill_store.py` | 外部技能源码读写口径，现行明文 `.py`，兼容只读 `.enc` | `read_skill_source` |
 | `security_analyzer.py` | AST 静态给技能脚本打分。注意：当前无任何 import 引用，实际生效的是 `ui/components/dialogs/mcp_skill_dialogs.py` 内的同名类，改动前先确认是否死代码 | `SkillSecurityAnalyzer` |
@@ -103,7 +106,7 @@ tests/               空目录
 | `fulltext_store.py` | DOI 与本地 PDF 关联表，指纹与内容双级校验，校验失败即解除关联 | `resolve`、`link`、`unlink` |
 | `fulltext_bridge.py` | 「同轮等待」通道：Agent 请求全文后挂起，UI 入库后回填，模型带全文续跑同一轮 | `begin`、`wait`、`signal` |
 | `fulltext_samples.py` | 开发者模式取全文自检的样例来源 | `resolve_samples` |
-| `attachment_parser.py` | 聊天附件解析的唯一实现：PDF / DOCX / 文本，含体积页数上限、编码探测、内容指纹缓存与过期清扫 | `extract`、`trim_total`、`cache_root` |
+| `attachment_parser.py` | 聊天附件解析的唯一实现：PDF / DOCX / 文本，含体积页数上限、编码探测、内容指纹缓存与过期清扫；同一文件按路径加锁去重，`prewarm` 在选完附件的空档提前解析 | `extract`、`prewarm`、`trim_total`、`cache_root` |
 
 ### 3.5 R 引擎与绘图
 
@@ -137,8 +140,9 @@ tests/               空目录
 |---|---|---|
 | `chat_store.py` | 对话与归档共用的 SQLite schema 与读写口径，超长正文 zlib 压缩，资产内容寻址 | `connect`、`put_tab`、`read_tab` |
 | `chat_session.py` | 多标签页自动快照，轮次边界整页覆盖、流式半成品节流落盘、flush 钩子 | `save_tab`、`save_inflight`、`flush_hooks` |
-| `chat_archive.py` | `.schat` 单文件归档读写，兼容旧 ZIP/JSON | `write_archive`、`read_archive` |
-| `chat_assets.py` | 对话资产内嵌策略与体积上限，超限只留占位符与原因码 | `plan_assets`、`store_blob` |
+| `chat_archive.py` | `.schat` 单文件归档读写，兼容旧 ZIP/JSON；导入时把消息里的旧路径（结构化字段、正文裸路径、`file://`、组件标记）全部改写到本机副本 | `write_archive`、`read_archive`、`remap_attachment_paths` |
+| `chat_assets.py` | 对话资产内嵌策略与体积上限，超限只留占位符与原因码；收集范围含正文里裸写的工作区产物 | `plan_assets`、`store_blob`、`collect_paths` |
+| `workspace_refs.py` | "哪些文件算本次对话用到的 workspace 产物"的唯一判定：目录清单、`file://` 归一、正文路径提取。导出收集与导入改写共用，不要另写前缀比较 | `artifact_roots`、`is_artifact`、`artifacts_in_text` |
 | `chat_typography.py` | 聊天气泡排版参数规格，配置键名唯一生成处，UI 与落盘共用 | `PARAM_BY_NAME`、`config_key`、`heading_metrics` |
 | `bookmarks.py` | 书签数据模型与锚点重定位，纯函数算滚动条标注 | `make_bookmark`、`find_anchor`、`layout_marks` |
 
@@ -207,13 +211,13 @@ tests/               空目录
 | `chat_conversation.py` | 单个会话页，组合 7 个 chat mixin |
 | `chat_input_widgets.py` | 输入区控件：附件 chip、拖放、自适应文本框 |
 | `rss_tool.py` | 文献订阅追踪 |
-| `settings_tool.py` | 全局设置外壳，组合 7 个 section mixin |
+| `settings_tool.py` | 全局设置外壳，组合 8 个 section mixin |
 | `log_tool.py` | 系统日志面板 |
 | `about_tool.py` | 关于与版本信息 |
 
 `chat_mixins/`：`send_flow.py` 派发查询并启动后台任务，`response_flow.py` 流式渲染与收尾，`bubbles.py` 气泡与滚动，`search.py` 会话内搜索，`bookmarks.py` 书签，`attachments.py` 附件与导出，`session.py` 自动保存与恢复。
 
-`settings_sections/`：`env_section.py` 环境与凭据，`llm_section.py` 与 `llm_model_ops.py` 模型配置，`mcp_section.py` MCP 与技能管理，`fulltext_section.py` 已关联论文 PDF（DOI ↔ 本地文件），`save_flow.py` 保存流程，`transfer.py` 配置导入导出（含 RSS 订阅；不含 `fulltext_links.json` 这类本机路径数据）。
+`settings_sections/`：`env_section.py` 环境与凭据，`llm_section.py` 与 `llm_model_ops.py` 模型配置，`mcp_section.py` MCP 与技能管理，`fulltext_section.py` 已关联论文 PDF（DOI ↔ 本地文件），`backup_section.py` WebDAV 备份源与远端备份的上传/恢复，`save_flow.py` 保存流程，`transfer.py` 配置导入导出（含 RSS 订阅；不含 `fulltext_links.json` 这类本机路径数据，也不含 `webdav_sources.json`）。
 
 新增面板：写一个继承 `BaseTool` 的类并实现 `get_ui_widget()`，然后在 `src/ui/main_window.py` 的 `tool_classes` 中加入三元组，并在 `icon_map` 补齐图标。
 
@@ -232,7 +236,7 @@ tests/               空目录
 
 - 聊天与消息渲染：`chat_bubble.py`（单条消息渲染与交互，含卡片标记抽取）、`text_formatter.py`（Markdown 到富文本的唯一渲染管线）、`chat_tabs.py`（对话标签栏，只发信号不认业务）、`card_registry.py`（卡片标记协议与快照恢复）、`pill_button.py`（追问建议）、`error_panel.py`（统一错误面板）
 - 输入与选择：`combo.py`、`kb_combo.py`、`model_selector.py`、`param_editor.py`、`HoverRevealLineEdit.py`、`copy_button.py`、`search.py`
-- 对话框：`dialog.py` 兼容层、`dialogs/` 子包（`base.py` 基类、`common.py` 通用框、`about_dialogs.py`、`feed_dialogs.py`、`kb_project_dialogs.py`、`mcp_skill_dialogs.py`、`r_env_dialogs.py`、`chat_typography_dialog.py`）。`dialogs/__init__.py` 用 PEP 562 惰性再导出，避免启动期拉起重依赖
+- 对话框：`dialog.py` 兼容层、`dialogs/` 子包（`base.py` 基类、`common.py` 通用框、`about_dialogs.py`、`backup_dialogs.py`、`feed_dialogs.py`、`kb_project_dialogs.py`、`mcp_skill_dialogs.py`、`r_env_dialogs.py`、`chat_typography_dialog.py`）。`dialogs/__init__.py` 用 PEP 562 惰性再导出，避免启动期拉起重依赖
 - 文档查看：`pdf_viewer.py`、`text_viewer.py`、`document_search.py`、`mermaid_viewer.py`、`source_code_viewer.py`、`fulltext_request.py`、`image_viewer.py`、`file_dialogs.py`
 - 可视化与卡片：`plot_plan_card.py`、`r_plot_card.py`、`deep_plan_card.py`、`ask_user_card.py`
 - 通用：`toast.py`、`RotatingSpinner.py`、`bookmark_ui.py`、`developer_dialog.py`、`citation_popup.py`、`system_notify.py`（系统通知唯一入口，不抢焦点）
@@ -264,7 +268,8 @@ tests/               空目录
 |---|---|
 | `common_task.py` | 版本检查与模型完整性校验 |
 | `chat_tasks.py` | 对话主管线 `ChatGenerationTask`，覆盖附件装载、翻译策略、知识库检索与重排、深度研究、流式输出、引用定稿、证据链落盘；另有导出导入会话、图片下载、硬件状态任务 |
-| `config_task.py` | 配置导入导出 |
+| `config_task.py` | 配置导入导出；`ExportConfigTask` 同时是 WebDAV 上传的序列化实现 |
+| `backup_tasks.py` | WebDAV 备份清单、上传、下载恢复；上传任务继承 `ExportConfigTask` 以复用同一序列化口径 |
 | `dialog_task.py` | MCP 连接测试与对话框任务薄壳 |
 | `r_env_task.py` | R 包与运行时安装 |
 | `rss_tasks.py` | RSS 抓取、检索、导入导出 |
@@ -299,7 +304,8 @@ tests/               空目录
 | 事实 | 唯一来源 | 同步要求 |
 |---|---|---|
 | 可写数据根目录 | `platform_env.app_root()` | 影响配置、日志、模型缓存、输出、工作区 |
-| 配置字段与密钥清单 | `config_manager` + `secrets_store` | 改字段名要同时改密钥键清单 |
+| 配置字段与密钥清单 | `config_manager` + `secrets_store` | 改字段名要同时改密钥键清单；新增密钥型配置必须同时在 `_EMPTY_BUNDLE` 加分区 |
+| 配置束的构成与序列化 | `config_bundle.build_bundle` | 本地导出与 WebDAV 上传共用；新增可迁移配置只能加在这里 |
 | 上下文窗口与参数支持 | `model_capabilities` | 业务侧一律只查，不自行推断 |
 | 扩展名分类 | `file_types.py` | 引用路由、附件校验、查看器三方共用 |
 | 提示词规则块 | `prompt_rules.py` | 其他提示词只能拼装常量 |
@@ -311,7 +317,9 @@ tests/               空目录
 | 依赖版本下限 | `pyproject.toml` | 验证过的安全下限，不要随手降低 |
 | 配置与索引的落盘方式 | `safe_io.py` | 不要在各模块里另写 mkstemp + replace |
 | 附件解析与缓存 | `attachment_parser.py` | 上限、编码探测、缓存键与清理都在这里 |
+| 工作区产物归属 | `workspace_refs.py` | 归档收集与导入改写共用同一套"存在且在根下"的判定 |
 | 会话库表结构版本 | `chat_store.SCHEMA_VERSION` | 改表结构必须同步 `_MIGRATIONS`，升级前自动备份为 `<库>.bak_v<旧版本>` |
+| 工作区保留期限与清理规则 | `workspace_gc.DEFAULT_POLICY` | 各类内容的 TTL / 引用判定只写一份；用户用 `settings.json` 的 `workspace_gc_<key>` 覆盖，不要在别处另写清理循环 |
 | 上下文预算 | `token_estimator.derive_context_budgets` | 工具结果、KB/附件、历史三项比例只能在这里改；合计约占窗口 21%（1M）到 51%（32K）。`kb_token_budget` 现为 4%，只服务附件正文，知识库份额已转给历史 |
 
 ---

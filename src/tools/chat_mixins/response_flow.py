@@ -508,10 +508,15 @@ class ChatResponseFlowMixin:
                 "Turn finished with an empty answer (history=%d turns, raw=0 chars).",
                 len(getattr(self, 'history', []) or []))
             final_html = tr("No response.")
+        # 替换正文会让高度在下一轮事件循环才收敛：先记下"替换前是否在底部"，收尾后
+        # 再补一次贴底（见 settle_scroll_after_layout），否则错误面板/最终排版一替换，
+        # 视图会停在中间，看起来像往上跳了一下。
+        was_at_bottom = self.is_at_bottom()
         self.current_ai_bubble.set_content(final_html)
         # 流式已结束：强制收敛气泡高度（中途态可能把高度写成偏大值且因幂等缓存不回落）
         if hasattr(self.current_ai_bubble, 'force_resync_height'):
             self.current_ai_bubble.force_resync_height()
+        self.settle_scroll_after_layout(was_at_bottom)
 
         # 追问建议：优先使用结构化产出（suggest_follow_ups 工具）；缺失时回退文本解析
         # （历史消息重渲染、非 Agent 模式等兼容路径）。
@@ -691,6 +696,7 @@ class ChatResponseFlowMixin:
             self.current_ai_text = error_marker
 
         # 渲染到气泡
+        was_at_bottom = self.is_at_bottom()
         if self.current_ai_bubble:
             idx = getattr(self.current_ai_bubble, 'index', -1)
             final_html = self._format_response(self.current_ai_text, idx)
@@ -714,5 +720,6 @@ class ChatResponseFlowMixin:
         # 完整原始错误（含 JSON payload 中的 details）写入日志
         self.logger.error("Chat task failed.\n%s", msg)
         ToastManager().show(tr("Generation failed due to an error."), "error")
-        # 报错同样不强制拉回底部（错误已在气泡内呈现）
-        self.scroll_to_bottom(force=False)
+        # 报错同样不强制拉回底部（错误已在气泡内呈现），但替换前就在底部时要等布局
+        # 收敛后补一次——见 settle_scroll_after_layout。
+        self.settle_scroll_after_layout(was_at_bottom)

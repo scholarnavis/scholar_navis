@@ -64,12 +64,34 @@ def get_cached_translation(text, direction="to_en", llm_instance=None, **kwargs)
     return res_text
 
 
-def _raw_error_text(e: Exception) -> str:
-    """提取异常的原始底层信息（provider 响应体、状态码、请求 URL）。
+def _trusted_request_url(e: Exception) -> str:
+    """异常携带的请求端点；不可信时返回空串。
+
+    litellm 的 ``InternalServerError`` 在构造异常时**伪造**一个 ``httpx.Request``
+    来满足 OpenAI SDK 对 ``response`` 的必填要求，其 URL 恒为
+    ``" https://cloud.google.com/vertex-ai/"``（前导空格编码后是 ``%20https://...``）。
+    它与本次请求没有任何关系，原样显示会把排障引向一个从未调用过的第三方服务。
+
+    真实请求的 URL 一定是绝对的 http(s) 地址，据此判定即可，不必按域名给特例。
+    """
+    request = getattr(e, 'request', None)
+    if request is None:
+        return ""
+    url = str(getattr(request, 'url', '') or '')
+    if not url.startswith(("http://", "https://")):
+        return ""
+    return url
+
+
+def _raw_error_text(e: Exception, endpoint: str = "") -> str:
+    """提取异常的原始底层信息（provider 响应体、状态码、请求端点）。
 
     litellm 异常的 ``message`` 常为摘要；``body`` / ``response`` 才包含
     provider 返回的原始 JSON。统一结构化输出供日志完整追溯；UI 错误
     面板的 details 与日志同源（协议见 src/core/llm_errors.py）。
+
+    :param endpoint: 本次实际调用的地址。异常自身没有可信 URL 时用它顶上——
+    500 这类由 litellm 合成的异常不带真实请求，而"打到哪个端点"正是排障要的。
     """
     parts = [f"{type(e).__name__}: {e}"]
     status = getattr(e, 'status_code', None)
@@ -86,12 +108,24 @@ def _raw_error_text(e: Exception) -> str:
         text = getattr(response, 'text', None)
         if text:
             parts.append(f"response: {str(text)[:2000]}")
-    request = getattr(e, 'request', None)
-    if request is not None:
-        url = getattr(request, 'url', '')
-        if url:
-            parts.append(f"url: {url}")
+    url = _trusted_request_url(e) or str(endpoint or '')
+    if url:
+        parts.append(f"url: {url}")
     return "\n".join(parts)
+
+
+def _error_appendix(e: Exception, endpoint: str = "") -> str:
+    """错误 token 的结构化附录：状态码 / 请求端点 / 服务端响应体。
+
+    正文只放一句摘要，附录随 token 一起回传，由 ``runtime._format_error`` 归入错误
+    面板的 Technical Details。没有附录时返回空字符串——不为"没有更多信息"造占位行，
+    那会让折叠栏看起来像真有内容。
+    """
+    raw = _raw_error_text(e, endpoint)
+    _, sep, detail = raw.partition("\n")
+    if not sep or not detail.strip():
+        return ""
+    return f"\n---\n{detail.strip()}\n"
 
 
 #: provider 承载"思考链"的字段名。litellm 对多数 provider 归一化为
@@ -892,14 +926,16 @@ class OpenAICompatibleLLM:
             text, label = self._stream_error_map(e)
             if text is not None:
                 # provider 原始响应体（含"不支持图片/不支持格式"等具体原因）完整入日志
-                self.logger.error(f"{label}\n{_raw_error_text(e)}")
-                yield text
+                self.logger.error(f"{label}\n{_raw_error_text(e, self.base_url)}")
+                yield text + _error_appendix(e, self.base_url)
             elif self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
                 yield "\n\n[⛔ Generation halted by user.]"
             else:
                 # 未知错误：完整 traceback + 原始信息入日志，摘要反馈给用户
-                self.logger.error(f"Unexpected system error.\n{_raw_error_text(e)}", exc_info=True)
-                yield f"\n\n[System Error: {type(e).__name__}: {e}]\n"
+                self.logger.error(f"Unexpected system error.\n{_raw_error_text(e, self.base_url)}",
+                                  exc_info=True)
+                yield (f"\n\n[System Error: {type(e).__name__}: {e}]"
+                       f"{_error_appendix(e, self.base_url)}\n")
 
     @staticmethod
     def _stream_error_map(e: Exception) -> Tuple[Optional[str], Optional[str]]:
@@ -943,6 +979,13 @@ class OpenAICompatibleLLM:
                     "API Connection Error.")
         if isinstance(e, APIError):
             return f"\n\n[API Request Error: HTTP {e.status_code}]\n{e.message}\n", f"API Error ({e.status_code})."
+        # 类层次不可靠：litellm 各版本里 InternalServerError 不一定落在上面任何一个
+        # isinstance 分支，但它一定带 HTTP 状态码。只认状态码，避免把 5xx 说成"未知
+        # 系统错误"——那正好丢掉了排障最需要的状态码与端点。
+        status = getattr(e, "status_code", None)
+        if isinstance(status, int) and status >= 400:
+            return (f"\n\n[API Request Error: HTTP {status}]\n"
+                    f"{getattr(e, 'message', str(e))}\n", f"API Error ({status}).")
         return None, None
 
     def stream_chat_events(self, messages: List[Dict], is_translation=False, **kwargs) -> Generator[Dict, None, None]:
@@ -1051,12 +1094,13 @@ class OpenAICompatibleLLM:
             text, label = self._stream_error_map(e)
             if text is not None:
                 self.logger.error(f"{label}\n{_raw_error_text(e)}")
-                content_parts.append(text)
+                content_parts.append(text + _error_appendix(e))
             elif self._is_cancelled or "closed" in str(e).lower() or "cancel" in str(e).lower():
                 content_parts.append("\n\n[⛔ Generation halted by user.]")
             else:
                 self.logger.error(f"Unexpected system error.\n{_raw_error_text(e)}", exc_info=True)
-                content_parts.append(f"\n\n[System Error: {type(e).__name__}: {e}]\n")
+                content_parts.append(
+                    f"\n\n[System Error: {type(e).__name__}: {e}]{_error_appendix(e)}\n")
 
         final = _build_final()
         timer.done(usage=final.get("_usage"),

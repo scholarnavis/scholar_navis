@@ -26,9 +26,11 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import QStackedWidget, QVBoxLayout, QWidget
 
 from src.core import chat_session
@@ -45,6 +47,19 @@ logger = logging.getLogger(__name__)
 class ChatTool(BaseTool):
     """对话标签页容器（"对话助手"面板的根对象）。"""
 
+    #: 某标签页的历史读盘完成：``(tab_id, messages)``。读盘在工作线程完成，
+    #: 信号跨线程排队回主线程后才回灌——主线程只负责建控件与排版。
+    _history_ready = Signal(str, object)
+
+    #: 启动后额外预读的标签页数量（不含当前激活页）。预读结果放进
+    #: ``tab["messages"]``，切过去时不必再等读盘。上限存在的理由是内存：每个
+    #: 标签页的历史正文在渲染前都要整段驻留，全量预读在大历史 + 多标签页时得不偿失。
+    _PREFETCH_TAB_LIMIT = 3
+
+    #: 同时进行的读盘线程上限。多个标签页读的是同一个 SQLite 文件，并发过高只会
+    #: 互相抢磁盘，反而拖慢首个标签页的可视时间。
+    _HISTORY_READ_CONCURRENCY = 2
+
     def __init__(self):
         super().__init__("Chat Assistant")
         self.widget: Optional[QWidget] = None
@@ -54,6 +69,11 @@ class ChatTool(BaseTool):
         self._tabs: List[Dict[str, Any]] = []
         self._active_id: Optional[str] = None
         self._restored = False
+        #: 正在读盘的标签页 id：激活与预读会撞同一页，这里去重（只在主线程读写）。
+        self._loading_tabs: set = set()
+        #: 读盘并行度闸门：工作线程各自持有，退出时线程为 daemon，不阻塞关闭。
+        self._history_read_slot = threading.Semaphore(self._HISTORY_READ_CONCURRENCY)
+        self._history_ready.connect(self._on_history_ready)
 
         # 退出 / 崩溃前把标签页清单刷一遍（各标签页的会话由它们各自的钩子负责）
         chat_session.register_flush_hook(self.flush_tabs_manifest)
@@ -146,6 +166,8 @@ class ChatTool(BaseTool):
             self.add_tab()
             return
         self.activate_tab(active or self._tabs[0]["id"])
+        # 其余标签页的历史并行预读：读盘与首批渲染解耦，切过去时直接可用。
+        self._prefetch_other_tabs(self._active_id)
 
     def _save_manifest(self):
         """把标签页清单（id / 名称 / 活动项）落盘。体积与标签页数相关，可频繁调用。"""
@@ -274,6 +296,9 @@ class ChatTool(BaseTool):
         tab_id = tab["id"]
         logger.info("Closing the last chat tab %s: clearing it instead of removing it.",
                     tab_id)
+        # 读盘尚未回来就作废：清空之后再把旧快照灌回来，用户会看到"清空了又回来了"。
+        # 置空列表表示"已读且为空"，后续激活不会再读盘。
+        tab["messages"] = []
         conv = tab.get("conv")
         if conv is not None:
             try:
@@ -282,7 +307,6 @@ class ChatTool(BaseTool):
                 logger.error("Failed to clear chat history of tab %s: %s", tab_id, e)
         else:
             # 从未激活过的标签页没有控件，内容只在内存清单与磁盘快照里
-            tab["messages"] = None
             chat_session.clear_tab(tab_id)
             ToastManager().show(tr("Chat history cleared."), "success")
 
@@ -340,11 +364,101 @@ class ChatTool(BaseTool):
 
         messages = tab.pop("messages", None)
         if messages is None:
-            messages = chat_session.load_tab(tab["id"])
+            # 读盘不在主线程做：SQLite 打开 + 逐行解压在大历史上是肉眼可见的卡顿，
+            # 而且发生在遮罩有机会出现之前——用户看到的是"点开先僵一下，再开始转"。
+            # 先盖遮罩再后台读，读完经信号回主线程分片回灌。
+            self._request_history(tab, conv)
+            return conv
         if messages:
             # 延后一拍：先让本标签页完成首帧，再回灌历史（纯渲染，不发任何请求）
             QTimer.singleShot(0, lambda c=conv, m=messages: c.load_messages(m))
         return conv
+
+    # ------------------------------------------------------------------ #
+    #  历史读盘：工作线程取数，主线程拼装
+    # ------------------------------------------------------------------ #
+    def _prefetch_other_tabs(self, active_id: Optional[str]) -> None:
+        """启动后预读其余标签页的历史（不建控件）。
+
+        切标签页时的等待几乎全在读盘；提前并发读回来放进 ``tab["messages"]``，
+        激活时直接进入分片回灌。只读最近若干个（见
+        :attr:`_PREFETCH_TAB_LIMIT`），其余标签页在首次激活时按需后台读。
+        """
+        pending = [t for t in self._tabs
+                   if t["id"] != active_id
+                   and t.get("conv") is None
+                   and t.get("messages") is None]
+        for tab in pending[:self._PREFETCH_TAB_LIMIT]:
+            self._request_history(tab)
+
+    def _request_history(self, tab: Dict[str, Any], conv=None) -> None:
+        """为一个标签页发起历史读盘。
+
+        :param conv: 已构建的会话对象；为 ``None`` 时是纯预读（无控件可盖遮罩）。
+        """
+        tab_id = tab["id"]
+        if tab_id in self._loading_tabs:
+            return
+        self._loading_tabs.add(tab_id)
+        if conv is not None:
+            # 遮罩必须先于数据出现：等待的是读盘，不是渲染。
+            try:
+                conv.show_history_loading()
+            except Exception as e:
+                logger.warning("Failed to show history loading for tab %s: %s", tab_id, e)
+        threading.Thread(target=self._read_history_worker, args=(tab_id,),
+                         name=f"chat-history-{tab_id[:8]}", daemon=True).start()
+
+    def discard_history_read(self, tab_id: str) -> None:
+        """作废某标签页正在进行的读盘（清空历史时调用）。
+
+        读盘发生在工作线程，结果回来时无从判断"用户是否已经清空过"；这里把该页
+        标记为"已读且为空"，迟到的快照会因 ``messages is not None`` 被丢弃，避免
+        "清空了又回来了"。
+        """
+        tab = self._find(tab_id)
+        if tab is None:
+            return
+        self._loading_tabs.discard(tab_id)
+        if tab.get("messages") is None:
+            tab["messages"] = []
+
+    def _read_history_worker(self, tab_id: str) -> None:
+        """工作线程：只读盘，不碰任何控件。
+
+        ``chat_session.load_tab`` 每次调用自带连接（用完即关），跨线程安全；
+        并发由 :attr:`_history_read_slot` 限制。
+        """
+        with self._history_read_slot:
+            started = time.perf_counter()
+            try:
+                messages = chat_session.load_tab(tab_id)
+            except Exception:
+                logger.exception("History read failed for tab %s.", tab_id)
+                messages = []
+            elapsed = (time.perf_counter() - started) * 1000.0
+        logger.info("History read for tab %s: %d message(s) in %.1f ms.",
+                    tab_id, len(messages), elapsed)
+        self._history_ready.emit(tab_id, messages)
+
+    def _on_history_ready(self, tab_id: str, messages) -> None:
+        """读盘结果回到主线程：交给对应标签页分片回灌。"""
+        self._loading_tabs.discard(tab_id)
+        tab = self._find(tab_id)
+        if tab is None:
+            logger.info("History for tab %s discarded: the tab is gone.", tab_id)
+            return
+        if tab.get("messages") is not None:
+            # 读盘期间该页被清空 / 已被别的路径填充：磁盘快照已不适用，丢弃本次结果。
+            logger.info("History for tab %s superseded; discarded.", tab_id)
+            return
+        conv = tab.get("conv")
+        if conv is None:
+            tab["messages"] = list(messages or [])
+            return
+        if getattr(conv, "_closed", False):
+            return
+        conv.load_messages(list(messages or []))
 
     # ------------------------------------------------------------------ #
     #  导出 / 导入：供标签页内的 mixin 回调

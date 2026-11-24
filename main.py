@@ -167,6 +167,10 @@ class StartupWorker(QThread):
             time.sleep(0.1)
             # 硬件预热（原 HardwareInitTask）随本地 ONNX 推理一起下线：它唯一的作用是
             # 启动时就跑一次执行提供者探针。设置页的硬件面板仍按需检测（HWDetectTask）。
+            # 过期内容清理：策略与实现见 src/core/workspace_gc.py；后台线程执行，
+            # 内部按间隔节流，不参与启动耗时。
+            from src.core.workspace_gc import run_in_background
+            run_in_background(self.logger)
             phase_done("theme assets")
 
             self.sig_progress.emit(40, tr("Mounting theme cache and UI assets..."))
@@ -477,6 +481,11 @@ if __name__ == "__main__":
 
         ConfigManager()
         setup_global_network_env()
+
+        # 过期内容清理与 GUI 模式共用同一份策略（见 src/core/workspace_gc.py），
+        # 否则"只用 API"的机器上工作区永远不收缩。后台线程，不阻塞监听。
+        from src.core.workspace_gc import run_in_background
+        run_in_background(global_logger)
 
         global_logger.info("Bootstrapping MCP Servers for API mode...")
         MCPManager.get_instance().bootstrap_servers(force_all=True)
